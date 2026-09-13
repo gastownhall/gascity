@@ -1,0 +1,237 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"log"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// SSE stream handlers for the session endpoint. resolveSessionStream picks
+// the right transcript format and source; streamSession drives the actual
+// per-request streaming loop.
+
+func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamInput) (*sessionStreamState, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
+	}
+
+	mgr := s.sessionManager(store.Store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+	handle, err := s.workerHandleForSession(store.Store, id)
+	if err != nil {
+		return nil, humaSessionManagerError(err)
+	}
+
+	historyReq := worker.HistoryRequest{}
+	if input.Format == "raw" && !info.Closed {
+		historyReq.TailCompactions = 1
+	}
+	history, historyErr := handle.History(worker.WithoutOperationEvents(ctx), historyReq)
+	hasHistory := historyErr == nil && history != nil
+	if historyErr != nil && !errors.Is(historyErr, worker.ErrHistoryUnavailable) {
+		if problem := transcriptCursorInvalidatedProblem(historyErr, "reading session history"); problem != nil {
+			return nil, problem
+		}
+		return nil, apierr.Internal.Msg("reading session history: " + historyErr.Error())
+	}
+
+	state, stateErr := handle.State(ctx)
+	if stateErr != nil {
+		return nil, humaSessionManagerError(stateErr)
+	}
+	running := workerPhaseHasLiveOutput(state.Phase)
+	if !hasHistory && !running && input.Format != "structured" {
+		return nil, apierr.SessionNotFound.Msg("session " + id + " has no live output")
+	}
+
+	return &sessionStreamState{
+		info:       info,
+		handle:     handle,
+		history:    history,
+		historyReq: historyReq,
+		hasHistory: hasHistory,
+		running:    running,
+	}, nil
+}
+
+// checkSessionStream is the precheck for GET /v0/session/{id}/stream.
+
+func (s *Server) checkSessionStream(ctx context.Context, input *SessionStreamInput) error {
+	state, err := s.resolveSessionStream(ctx, input)
+	if err != nil {
+		return err
+	}
+	input.resolved = state
+	return nil
+}
+
+// streamSession is the SSE streaming callback for GET /v0/session/{id}/stream.
+
+func (s *Server) streamSession(hctx huma.Context, input *SessionStreamInput, send StringIDSender) {
+	reqCtx := hctx.Context()
+	state := input.resolved
+	if state == nil {
+		var err error
+		state, err = s.resolveSessionStream(reqCtx, input)
+		if err != nil {
+			// Invariant violation: precheck passed, body resolve failed.
+			// Session vanished between precheck and streaming start, or a
+			// race we didn't anticipate. The SSE body callback cannot
+			// return a typed HTTP error at this point, so log before the
+			// response closes without events.
+			log.Printf("api: session-stream: resolve failed after precheck city=%s id=%s: %v",
+				input.CityName, input.ID, err)
+			return
+		}
+	}
+	info := state.info
+	handle := state.handle
+	history := state.history
+	historyReq := state.historyReq
+	hasHistory := state.hasHistory
+	running := state.running
+	format := input.Format
+	resumeToken := sessionStreamResumeToken(input.LastEventID, input.AfterCursor)
+	integerSend := integerSSESender(send)
+
+	// Custom session state headers.
+	if info.State != "" {
+		hctx.SetHeader("GC-Session-State", string(info.State))
+	}
+	if !running {
+		hctx.SetHeader("GC-Session-Status", "stopped")
+	}
+	flushSSEHeaders(hctx)
+
+	if info.Closed {
+		switch format {
+		case "raw":
+			s.emitClosedSessionSnapshotRawHuma(integerSend, info, history)
+		case "structured":
+			s.emitClosedSessionSnapshotStructuredHuma(send, info, history, input.IncludeThinking, resumeToken)
+		default:
+			s.emitClosedSessionSnapshotHuma(integerSend, info, history)
+		}
+		return
+	}
+	if format == "structured" && !hasHistory && !running {
+		s.emitStructuredFallbackSnapshotHuma(send, info, "", input.IncludeThinking, resumeToken)
+		return
+	}
+	if format == "raw" {
+		_ = integerSend(sse.Message{ID: 0, Data: SessionStreamRawMessageEvent{
+			ID:       info.ID,
+			Template: info.Template,
+			Provider: info.Provider,
+			Format:   "raw",
+			Messages: []SessionRawMessageFrame{},
+		}})
+	}
+	switch {
+	case hasHistory:
+		switch format {
+		case "raw":
+			s.streamSessionTranscriptLogRawHuma(reqCtx, integerSend, info, handle, history, historyReq)
+		case "structured":
+			s.streamSessionTranscriptLogStructuredHuma(reqCtx, send, info, handle, history, input.IncludeThinking, resumeToken, "", "")
+		default:
+			s.streamSessionTranscriptLogHuma(reqCtx, integerSend, info, handle, history)
+		}
+	case format == "structured":
+		s.streamSessionPeekStructuredHuma(reqCtx, send, info, handle, input.IncludeThinking, resumeToken)
+	case format == "raw":
+		s.streamSessionPeekRawHuma(reqCtx, integerSend, info)
+	default:
+		s.streamSessionPeekHuma(reqCtx, integerSend, info)
+	}
+}
+
+func (s *Server) emitClosedSessionSnapshotHuma(send sse.Sender, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
+		return
+	}
+	turns, _ := historySnapshotTurns(history)
+	if len(turns) == 0 {
+		return
+	}
+
+	_ = send(sse.Message{ID: 1, Data: SessionStreamMessageEvent{
+		ID:       info.ID,
+		Template: info.Template,
+		Provider: info.Provider,
+		Format:   "conversation",
+		Turns:    turns,
+	}})
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitClosedSessionSnapshotRawHuma(send sse.Sender, info session.Info, history *worker.HistorySnapshot) {
+	if history == nil {
+		return
+	}
+	rawMessages, _ := historySnapshotRawMessages(history)
+	if len(rawMessages) == 0 {
+		return
+	}
+
+	_ = send(sse.Message{ID: 1, Data: SessionStreamRawMessageEvent{
+		ID:       info.ID,
+		Template: info.Template,
+		Provider: info.Provider,
+		Format:   "raw",
+		Messages: wrapRawFrameBytes(rawMessages),
+	}})
+	_ = send(sse.Message{ID: 2, Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitClosedSessionSnapshotStructuredHuma(send StringIDSender, info session.Info, history *worker.HistorySnapshot, includeThinking bool, resumeToken string) {
+	if history == nil {
+		s.emitStructuredFallbackSnapshotHuma(send, info, "", includeThinking, resumeToken)
+		return
+	}
+	messages, _ := historySnapshotStructuredMessages(history, includeThinking)
+	projection := SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredHistoryFromSnapshot(history),
+		StructuredMessages: messages,
+	}
+	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {
+		_ = send(StringIDMessage{ID: update.History.Cursor.ResumeToken, Data: *update})
+	}
+	_ = send(StringIDMessage{Data: SessionActivityEvent{Activity: "idle"}})
+}
+
+func (s *Server) emitStructuredFallbackSnapshotHuma(send StringIDSender, info session.Info, output string, includeThinking bool, resumeToken string) {
+	projection := SessionStreamStructuredMessageEvent{
+		ID:                 info.ID,
+		Template:           info.Template,
+		Provider:           info.Provider,
+		Format:             "structured",
+		SchemaVersion:      sessionStructuredSchemaVersion,
+		History:            structuredFallbackHistory(info.ID, info.SessionKey, string(worker.TailActivityIdle)),
+		StructuredMessages: structuredFallbackMessages(info.ID, info.Provider, output),
+	}
+	if update := buildStructuredStreamUpdate(resumeToken, projection, includeThinking); update != nil {
+		_ = send(StringIDMessage{ID: update.History.Cursor.ResumeToken, Data: *update})
+	}
+	_ = send(StringIDMessage{Data: SessionActivityEvent{Activity: "idle"}})
+}

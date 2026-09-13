@@ -3,6 +3,7 @@ package molecule
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -130,6 +131,29 @@ func TestAttachBasic(t *testing.T) {
 	assertBlockingDep(t, store, leaf.ID, result.RootID)
 }
 
+func TestAttachBasicGraphApplyPreservesWorkflowRootID(t *testing.T) {
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	leaf := setupWorkflowChild(t, store, root.ID, "Leaf bead")
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, leaf.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	if result.WorkflowRootID != root.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (parent workflow root)", result.WorkflowRootID, root.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
+	assertBlockingDep(t, store, leaf.ID, result.RootID)
+}
+
 // Test 2: Attach to workflow root itself (bead with no gc.root_bead_id)
 func TestAttachToWorkflowRoot(t *testing.T) {
 	store := beads.NewMemStore()
@@ -149,6 +173,52 @@ func TestAttachToWorkflowRoot(t *testing.T) {
 
 	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
 	assertBlockingDep(t, store, root.ID, result.RootID)
+}
+
+// TestAttachResolvesRootFromRunChainNotOwnID is the regression for the
+// maintainer-city grafted-wisp incident (gcg-wisp-y785sz). A wisp/source bead
+// grafted mid-workflow carries the true top workflow root in its run-chain
+// metadata (workflow_id / molecule_id, written by sling) but NOT its own
+// gc.root_bead_id. The old Attach fallback checked only gc.root_bead_id and
+// then defaulted to the parent's own id, stamping the whole sub-DAG (attempt
+// container, scope-check, every child) with the WRONG root. Downstream
+// reconciliation then enumerated siblings via beads.DirectMembers(<wrong root>),
+// found the wrong set, and burned ralph attempts until abort_scope fired on
+// green work. Attach must resolve the root through the canonical run chain
+// (beadmeta.ResolveRunID), never the parent's own id.
+func TestAttachResolvesRootFromRunChainNotOwnID(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// The true top workflow root.
+	root := setupWorkflow(t, store)
+
+	// A wisp/source bead grafted mid-workflow: it carries the true root in the
+	// run chain (workflow_id) but has no gc.root_bead_id of its own.
+	wisp, err := store.Create(beads.Bead{
+		Title: "grafted wisp",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":     "wisp",
+			"workflow_id": root.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create grafted wisp: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, wisp.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// The sub-DAG must be rooted at the TRUE workflow root from the run chain,
+	// never at the grafted wisp's own id.
+	if result.WorkflowRootID != root.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (true root from run chain, not the wisp's own id %q)", result.WorkflowRootID, root.ID, wisp.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
 }
 
 // Test 3: Blocking dep prevents premature unblock
@@ -460,6 +530,56 @@ func TestAttachIdempotency(t *testing.T) {
 	}
 }
 
+func TestAttachIdempotencyFindsEphemeralExistingRoot(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+	existingRoot, err := store.Create(beads.Bead{
+		Title:     "attempt",
+		Type:      "task",
+		Ephemeral: true,
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.idempotency_key": "attempt:1",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "attempt",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create existing ephemeral root: %v", err)
+	}
+	existingRun, err := store.Create(beads.Bead{
+		Title:     "run",
+		Type:      "task",
+		Ephemeral: true,
+		ParentID:  existingRoot.ID,
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "attempt.run",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create existing ephemeral child: %v", err)
+	}
+
+	result, err := Attach(context.Background(), store, makeWorkflowRecipe("attempt", "run"), control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err != nil {
+		t.Fatalf("Attach duplicate: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatal("Attach duplicate should report Duplicate for ephemeral existing root")
+	}
+	if result.RootID != existingRoot.ID {
+		t.Fatalf("RootID = %q, want existing ephemeral root %q", result.RootID, existingRoot.ID)
+	}
+	if result.IDMapping["attempt"] != existingRoot.ID || result.IDMapping["attempt.run"] != existingRun.ID {
+		t.Fatalf("IDMapping = %#v, want existing ephemeral root and child", result.IDMapping)
+	}
+	assertBlockingDep(t, store, control.ID, existingRoot.ID)
+}
+
 // Test 13: Different idempotency keys create separate sub-DAGs
 func TestAttachDifferentKeysCreateSeparate(t *testing.T) {
 	store := beads.NewMemStore()
@@ -485,6 +605,32 @@ func TestAttachDifferentKeysCreateSeparate(t *testing.T) {
 	}
 	if result2.Duplicate {
 		t.Error("second attach with different key should not be duplicate")
+	}
+}
+
+func TestAttachPreservesExecutableTaskRootType(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+
+	recipe := &formula.Recipe{
+		Name: "attempt",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt", Title: "Attempt", Type: "task", IsRoot: true},
+		},
+	}
+
+	result, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	attachedRoot, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(attached root): %v", err)
+	}
+	if attachedRoot.Type != "task" {
+		t.Fatalf("attached root type = %q, want task", attachedRoot.Type)
 	}
 }
 
@@ -569,4 +715,171 @@ func TestAttachEpochWithIdempotency(t *testing.T) {
 	if !result2.Duplicate {
 		t.Fatal("second should be duplicate")
 	}
+}
+
+func TestAttachDuplicateRecoveryPopulatesIDMappingAndAdvancesEpoch(t *testing.T) {
+	base := beads.NewMemStore()
+	root := setupWorkflow(t, base)
+	control := setupWorkflowChild(t, base, root.ID, "Control")
+	_ = base.SetMetadata(control.ID, "gc.control_epoch", "1")
+
+	store := &attachFailOnceDepStore{
+		Store: base,
+		err:   errors.New("wiring outer dep: invalid connection: i/o timeout"),
+	}
+	recipe := makeWorkflowRecipe("attempt")
+	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected first attach to fail during outer dependency wiring")
+	}
+
+	afterFailedAttach, err := base.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control after failed attach: %v", err)
+	}
+	if afterFailedAttach.Metadata["gc.control_epoch"] != "1" {
+		t.Fatalf("epoch after failed attach = %q, want 1", afterFailedAttach.Metadata["gc.control_epoch"])
+	}
+
+	result, err := Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+		ExpectedEpoch:  1,
+		IdempotencyKey: "attempt:1",
+	})
+	if err != nil {
+		t.Fatalf("duplicate attach recovery: %v", err)
+	}
+	if !result.Duplicate {
+		t.Fatal("duplicate recovery should report Duplicate")
+	}
+	if result.IDMapping["attempt"] != result.RootID || result.RootID == "" {
+		t.Fatalf("duplicate IDMapping = %#v root=%q, want root step mapping", result.IDMapping, result.RootID)
+	}
+	assertBlockingDep(t, base, control.ID, result.RootID)
+	afterRecovery, err := base.Get(control.ID)
+	if err != nil {
+		t.Fatalf("get control after recovery: %v", err)
+	}
+	if afterRecovery.Metadata["gc.control_epoch"] != "2" {
+		t.Fatalf("epoch after duplicate recovery = %q, want 2", afterRecovery.Metadata["gc.control_epoch"])
+	}
+}
+
+func TestAttachIdempotencyRejectsFailedPartialSubDAG(t *testing.T) {
+	base := beads.NewMemStore()
+	root := setupWorkflow(t, base)
+	control := setupWorkflowChild(t, base, root.ID, "Control")
+
+	store := &attachFailOnceDepStore{
+		Store: base,
+		err:   errors.New("wiring dep: lock wait timeout exceeded; try restarting transaction"),
+	}
+	recipe := makeWorkflowRecipe("attempt", "run")
+	_, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected first attach to fail during dependency wiring")
+	}
+
+	failedRoots, err := base.List(beads.ListQuery{
+		Metadata: map[string]string{
+			"gc.idempotency_key": "attempt:1",
+			"gc.root_bead_id":    root.ID,
+			"molecule_failed":    "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("list failed partial roots: %v", err)
+	}
+	if len(failedRoots) != 1 {
+		t.Fatalf("failed partial roots = %d, want 1", len(failedRoots))
+	}
+
+	_, err = Attach(context.Background(), base, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "attempt:1",
+	})
+	if err == nil {
+		t.Fatal("expected duplicate attach to reject failed partial sub-DAG")
+	}
+	if !strings.Contains(err.Error(), "molecule_failed") {
+		t.Fatalf("duplicate attach error = %v, want molecule_failed context", err)
+	}
+}
+
+func TestAttachIdempotentDuplicateSkipsRuntimeVarValidation(t *testing.T) {
+	store := beads.NewMemStore()
+	root := setupWorkflow(t, store)
+	control := setupWorkflowChild(t, store, root.ID, "Control")
+
+	recipe := &formula.Recipe{
+		Name: "attempt-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt-required-vars", Title: "Attempt {{target_id}}", Type: "task", IsRoot: true},
+			{ID: "attempt-required-vars.run", Title: "Run in {{workspace}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attempt-required-vars.run", DependsOnID: "attempt-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}
+
+	result1, err := Attach(context.Background(), store, recipe, control.ID, AttachOptions{
+		IdempotencyKey: "retry:control:attempt-required-vars:1",
+		Vars: map[string]string{
+			"target_id": control.ID,
+			"workspace": "/tmp/repro",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Attach 1: %v", err)
+	}
+	if result1.Duplicate {
+		t.Fatal("first attach should not be duplicate")
+	}
+
+	result2, err := Attach(context.Background(), store, &formula.Recipe{
+		Name: "attempt-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attempt-required-vars", Title: "Attempt {{target_id}}", Type: "task", IsRoot: true},
+			{ID: "attempt-required-vars.run", Title: "Run in {{workspace}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attempt-required-vars.run", DependsOnID: "attempt-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}, control.ID, AttachOptions{
+		IdempotencyKey: "retry:control:attempt-required-vars:1",
+	})
+	if err != nil {
+		t.Fatalf("Duplicate attach should return existing sub-DAG before re-validating vars: %v", err)
+	}
+	if !result2.Duplicate {
+		t.Fatal("second attach should be duplicate")
+	}
+	if result2.RootID != result1.RootID {
+		t.Fatalf("duplicate attach root = %q, want %q", result2.RootID, result1.RootID)
+	}
+}
+
+type attachFailOnceDepStore struct {
+	beads.Store
+	err    error
+	failed bool
+}
+
+func (s *attachFailOnceDepStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if !s.failed {
+		s.failed = true
+		return s.err
+	}
+	return s.Store.DepAdd(issueID, dependsOnID, depType)
 }

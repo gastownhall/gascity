@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -14,30 +13,79 @@ import (
 
 // newRestartCmd creates the top-level "gc restart" command.
 func newRestartCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
-		Use:   "restart [path]",
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "restart [path|name]",
 		Short: "Restart all agent sessions in the city",
 		Long: `Restart the city by stopping it then starting it again.
 
 Equivalent to running "gc stop" followed by "gc start". Under supervisor
 mode this unregisters the city, then re-registers it and triggers an
 immediate reconcile.`,
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeCityNames,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdRestart(args, stdout, stderr) != 0 {
+			if cmdRestartJSON(args, stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
+	return cmd
 }
 
-// cmdRestart stops the city, then re-starts it under the supervisor.
-func cmdRestart(args []string, stdout, stderr io.Writer) int {
-	if code := cmdStop(args, stdout, stderr); code != 0 {
+func cmdRestartJSON(args []string, stdout, stderr io.Writer, jsonOut bool) int {
+	// Resolve the city reference ONCE up front (accepting a path or a
+	// registered name) and thread the resolved PATH into both the stop and
+	// start legs, so a bare name can never re-resolve to different targets
+	// across legs.
+	cityPath, nameOverride, err := restartTarget(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	resolvedArgs := []string{cityPath}
+	restartStdout := stdout
+	if jsonOut {
+		restartStdout = io.Discard
+	}
+	if code := cmdStop(resolvedArgs, restartStdout, stderr, 0, false); code != 0 {
 		return code
 	}
-	return doStart(args, false /*controllerMode*/, stdout, stderr)
+	code := doStartWithNameOverride(resolvedArgs, false /*controllerMode*/, restartStdout, stderr, nameOverride)
+	if code != 0 || !jsonOut {
+		return code
+	}
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc restart", lifecycleActionJSON{
+		Command:  "restart",
+		Action:   "restart",
+		Message:  "City restarted under supervisor.",
+		CityName: nameOverride,
+		CityPath: cityPath,
+	})
+}
+
+// restartTarget resolves the restart argument once to the city path and its
+// registered name (empty when the city is not registered), so both the stop
+// and start legs operate on the same resolved path.
+func restartTarget(args []string) (cityPath, nameOverride string, err error) {
+	dir, err := resolveStartDir(args)
+	if err != nil {
+		return "", "", err
+	}
+	cityPath, err = requireBootstrappedCity(dir)
+	if err != nil {
+		return "", "", err
+	}
+	entry, registered, lookupErr := registeredCityEntry(cityPath)
+	if lookupErr != nil {
+		return "", "", lookupErr
+	}
+	if registered {
+		nameOverride = entry.EffectiveName()
+	}
+	return cityPath, nameOverride, nil
 }
 
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
@@ -56,6 +104,7 @@ quick way to force-refresh all agents working on a particular project.`,
 			}
 			return nil
 		},
+		ValidArgsFunction: completeRigNames,
 	}
 }
 
@@ -76,7 +125,7 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cityPath := ctx.CityPath
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -103,14 +152,21 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	cityName := cfg.Workspace.Name
-	if cityName == "" {
-		cityName = filepath.Base(cityPath)
+	cityName := loadedCityName(cfg, cityPath)
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
-	sp := newSessionProvider()
 	rec := openCityRecorder(stderr)
 	store, _ := openCityStoreAt(cityPath)
-	return doRigRestart(sp, rec, store, cfg, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
+	// Every store consumer in doRigRestart is session-class (session-name
+	// lookups, pool session-ref resolution, runtime running-observation, and the
+	// session-runtime stop/kill in stopTargetsBounded), so route the whole flow
+	// through the session coordination-class store for relocation-safety — the
+	// same whole-store route as gc stop.
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	return doRigRestart(sp, rec, sessStore, cfg, rigAgents, rigName, cityName, cfg.Workspace.SessionTemplate, stdout, stderr)
 }
 
 // doRigRestart kills sessions for all agents in a rig. The reconciler will
@@ -127,30 +183,39 @@ func doRigRestart(
 	var targets []stopTarget
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
-		if !isMultiSessionCfgAgent(&a) {
-			// Single agent.
+		if !a.SupportsInstanceExpansion() {
+			// Non-expanding template.
 			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
-			if sp.IsRunning(sn) {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", sn, err) //nolint:errcheck
+				return 1
+			}
+			if running {
 				targets = append(targets, stopTarget{
-					name:     sn,
-					template: a.QualifiedName(),
-					subject:  a.QualifiedName(),
-					order:    len(targets),
-					resolved: true,
+					name:      sn,
+					template:  a.QualifiedName(),
+					agentName: a.QualifiedName(),
+					subject:   a.QualifiedName(),
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
-			for _, ref := range resolvePoolSessionRefs(store, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr) {
-				if !sp.IsRunning(ref.sessionName) {
-					continue
-				}
+			refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr))
+			if err != nil {
+				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", a.QualifiedName(), err) //nolint:errcheck
+				return 1
+			}
+			for _, ref := range refs {
 				targets = append(targets, stopTarget{
-					name:     ref.sessionName,
-					template: a.QualifiedName(),
-					subject:  ref.qualifiedInstance,
-					order:    len(targets),
-					resolved: true,
+					name:      ref.sessionName,
+					template:  a.QualifiedName(),
+					agentName: ref.qualifiedInstance,
+					subject:   ref.qualifiedInstance,
+					order:     len(targets),
+					resolved:  true,
 				})
 			}
 		}
@@ -159,7 +224,7 @@ func doRigRestart(
 	if dependencyCfg == nil {
 		dependencyCfg = &config.City{Agents: agents}
 	}
-	killed := stopTargetsBounded(targets, dependencyCfg, sp, rec, eventActor(), io.Discard, stderr)
+	killed := stopTargetsBounded(targets, dependencyCfg, store, sp, rec, eventActor(), io.Discard, stderr)
 
 	fmt.Fprintf(stdout, "Restarted %d agent(s) in rig '%s' (killed sessions; reconciler will restart)\n", killed, rigName) //nolint:errcheck // best-effort stdout
 	return 0

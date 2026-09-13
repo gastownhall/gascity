@@ -10,16 +10,14 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    # Step 1: Check hook for assigned work
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
+    ready=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
 
-    if echo "$hooked" | grep -q "^ID:"; then
-        # Step 2: Extract bead ID and close it (simulates executing the work)
-        id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
+    if echo "$ready" | grep -q "^gc-"; then
+        id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
         bd close "$id"
-        # Step 3: Done — one-shot agent exits after processing one bead
         exit 0
     fi
 

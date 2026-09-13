@@ -10,7 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *testing.T) {
@@ -24,6 +27,7 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 
 	defaultTarget := "codex"
 	recipe := &formula.Recipe{
@@ -37,13 +41,15 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 				Title:    "Root",
 				Type:     "task",
 				IsRoot:   true,
-				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2"},
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.run_target": "stale-target"},
 			},
 			{
-				ID:       "demo.design",
-				Title:    "Design",
-				Type:     "task",
-				Assignee: "{{design_target}}",
+				ID:    "demo.design",
+				Title: "Design",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "{{design_target}}",
+				},
 			},
 			{
 				ID:    "demo.review",
@@ -66,8 +72,18 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		t.Fatalf("expected non-empty sessions for frontend agents, got claude=%q codex=%q", claudeSession, codexSession)
 	}
 
-	if err := decorateGraphWorkflowRecipe(recipe, graphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg); err != nil {
-		t.Fatalf("decorateGraphWorkflowRecipe: %v", err)
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
+		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
+	}
+	root := recipe.StepByID("demo")
+	if root == nil {
+		t.Fatal("root step missing after decorate")
+	}
+	if root.Metadata["gc.routed_to"] != "frontend/claude" {
+		t.Fatalf("root gc.routed_to = %q, want frontend/claude", root.Metadata["gc.routed_to"])
+	}
+	if _, ok := root.Metadata["gc.run_target"]; ok {
+		t.Fatalf("root still carries retired gc.run_target = %q", root.Metadata["gc.run_target"])
 	}
 
 	design := recipe.StepByID("demo.design")
@@ -101,7 +117,7 @@ func TestGraphWorkflowRouteVarsCallerOverridesDefaults(t *testing.T) {
 		},
 	}
 
-	routeVars := graphWorkflowRouteVars(recipe, map[string]string{"design_target": "claude"})
+	routeVars := graphroute.GraphWorkflowRouteVars(recipe, map[string]string{"design_target": "claude"})
 	if got := routeVars["design_target"]; got != "claude" {
 		t.Fatalf("routeVars[design_target] = %q, want claude", got)
 	}
@@ -124,7 +140,7 @@ func (s *graphApplySpyStore) ApplyGraphPlan(_ context.Context, plan *beads.Graph
 }
 
 // TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo tests the full
-// code path: compile v2 formula -> decorateGraphWorkflowRecipe -> molecule.Instantiate
+// code path: compile v2 formula -> graphroute.DecorateGraphWorkflowRecipe -> molecule.Instantiate
 // -> graph apply plan, verifying gc.routed_to appears in the plan's node metadata.
 func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
 	// Create a v2 formula on disk.
@@ -132,35 +148,35 @@ func TestInstantiateSlingFormulaGraphWorkflowPreservesRoutedTo(t *testing.T) {
 	formulaContent := `
 formula = "wf-test"
 version = 2
+contract = "graph.v2"
 
 [[steps]]
 id = "work"
 title = "Do work"
 type = "task"
 `
-	if err := os.WriteFile(filepath.Join(formulaDir, "wf-test.formula.toml"), []byte(formulaContent), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(formulaDir, "wf-test.toml"), []byte(formulaContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Enable graph workflow features.
-	prevFormulaV2 := formula.FormulaV2Enabled
-	prevGraphApply := molecule.GraphApplyEnabled
-	formula.FormulaV2Enabled = true
-	molecule.GraphApplyEnabled = true
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
 	t.Cleanup(func() {
-		formula.FormulaV2Enabled = prevFormulaV2
-		molecule.GraphApplyEnabled = prevGraphApply
+		molecule.SetGraphApplyEnabled(prevGraphApply)
 	})
 
 	store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Agents: []config.Agent{
 			{Name: "worker", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
 
 	deps := slingDeps{
 		CityName: "test-city",
@@ -168,10 +184,12 @@ type = "task"
 		Cfg:      cfg,
 		Store:    store,
 		StoreRef: "city:test-city",
+		Resolver: cliAgentResolver{},
+		Notify:   cliNotifier{},
 	}
 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
-	result, err := instantiateSlingFormula(
+	result, err := sling.InstantiateSlingFormula(
 		context.Background(),
 		"wf-test",
 		[]string{formulaDir},
@@ -179,7 +197,7 @@ type = "task"
 		"", "", "", a, deps,
 	)
 	if err != nil {
-		t.Fatalf("instantiateSlingFormula: %v", err)
+		t.Fatalf("InstantiateSlingFormula: %v", err)
 	}
 	if result.RootID == "" {
 		t.Fatal("RootID is empty")
@@ -204,7 +222,7 @@ type = "task"
 	}
 
 	// This is the critical assertion: gc.routed_to must be set by
-	// decorateGraphWorkflowRecipe and preserved in the graph apply plan.
+	// graphroute.DecorateGraphWorkflowRecipe and preserved in the graph apply plan.
 	if got := stepNode.Metadata["gc.routed_to"]; got != "worker" {
 		t.Fatalf("gc.routed_to = %q, want %q; full metadata = %v", got, "worker", stepNode.Metadata)
 	}

@@ -2,18 +2,16 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"log"
+	"errors"
 	"net/http"
-	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // outputTurn is a single conversation turn in the unified output response.
@@ -25,84 +23,109 @@ type outputTurn struct {
 
 // agentOutputResponse is the response for GET /v0/agent/{name}/output.
 type agentOutputResponse struct {
-	Agent      string                     `json:"agent"`
-	Format     string                     `json:"format"` // "conversation" or "text"
-	Turns      []outputTurn               `json:"turns"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+	Agent      string                       `json:"agent"`
+	Format     string                       `json:"format"` // "conversation" or "text"
+	Turns      []outputTurn                 `json:"turns"`
+	Pagination *worker.TranscriptPagination `json:"pagination,omitempty"`
 }
 
-// handleAgentOutput returns unified conversation output for an agent.
-// Tries structured session logs first, falls back to Peek().
-//
-// Query params:
-//   - tail: number of compaction segments to return (default 1, 0 = all)
-//   - before: message UUID cursor for loading older messages
-func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name string) {
-	cfg := s.state.Config()
-	agentCfg, ok := findAgent(cfg, name)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	// Try structured session log first.
-	resp, err := s.trySessionLogOutput(r, name, agentCfg)
-	if err != nil {
-		// Session file exists but failed to read — surface the error.
-		writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-		return
-	}
-	if resp != nil {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-
-	// No session file found — fall back to Peek() (raw terminal text).
-	s.peekFallbackOutput(w, name, cfg)
+type agentPeekHandle interface {
+	worker.LiveObservationHandle
+	worker.StateHandle
+	worker.PeekHandle
 }
 
-// trySessionLogOutput attempts to read structured conversation data from
-// a Claude JSONL session file. Returns (nil, nil) if no session file is
-// found (expected — triggers fallback). Returns (nil, err) if the file
-// exists but cannot be read (unexpected — surface to caller).
-func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg config.Agent) (*agentOutputResponse, error) {
+type agentTranscriptState struct {
+	provider    string
+	workDir     string
+	sessionName string
+	sessionID   string
+	sessionKey  string
+	path        string
+}
+
+func (s *Server) resolveAgentTranscript(name string, agentCfg config.Agent) (*agentTranscriptState, error) {
 	cfg := s.state.Config()
-	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	if workDir == "" {
-		return nil, nil
-	}
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	state := &agentTranscriptState{}
+	if cfg == nil {
+		return state, nil
 	}
 
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	state.sessionName = agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	providerName := strings.TrimSpace(agentCfg.Provider)
+	if providerName == "" {
+		providerName = strings.TrimSpace(cfg.Workspace.Provider)
 	}
-	path := sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-	if path == "" {
-		return nil, nil
+	state.provider = agentTranscriptProvider(nil, providerName, cfg)
+	state.workDir = s.resolveAgentWorkDir(agentCfg, name)
+	if state.workDir == "" {
+		return state, nil
+	}
+	if abs, err := filepath.Abs(state.workDir); err == nil {
+		state.workDir = abs
 	}
 
-	tail := 1
-	if v := r.URL.Query().Get("tail"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			tail = n
+	state.sessionName, state.sessionID = s.resolveAgentSessionSubjects(name, cfg)
+	if state.sessionID == "" {
+		state.sessionName = agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+	}
+	if state.sessionID == "" {
+		if sp := s.state.SessionProvider(); sp != nil && state.sessionName != "" {
+			if sessionID, err := sp.GetMeta(state.sessionName, "GC_SESSION_ID"); err == nil {
+				state.sessionID = strings.TrimSpace(sessionID)
+			}
 		}
 	}
-	before := r.URL.Query().Get("before")
-
-	var sess *sessionlog.Session
-	var err error
-	if before != "" {
-		sess, err = sessionlog.ReadProviderFileOlder(provider, path, tail, before)
-	} else {
-		sess, err = sessionlog.ReadProviderFile(provider, path, tail)
+	if state.sessionID != "" {
+		if store := s.state.SessionsBeadStore().Store; store != nil {
+			if catalog, err := s.workerSessionCatalog(store); err == nil {
+				if info, err := catalog.Get(state.sessionID); err == nil {
+					state.sessionKey = strings.TrimSpace(info.SessionKey)
+					state.provider = agentTranscriptProvider(&info, providerName, cfg)
+				}
+			}
+		}
 	}
+
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
 	if err != nil {
 		return nil, err
 	}
+	state.path = factory.DiscoverTranscript(state.provider, state.workDir, state.sessionKey)
+	return state, nil
+}
+
+// trySessionLogOutputHuma is the Huma-compatible variant of trySessionLogOutput.
+// tail carries the client's ?tail= value; tailProvided reports whether the
+// client supplied the param at all.
+func (s *Server) trySessionLogOutputHuma(name string, agentCfg config.Agent, tailInput int, tailProvided bool, before string) (*agentOutputResponse, error) {
+	transcriptState, err := s.resolveAgentTranscript(name, agentCfg)
+	if err != nil {
+		return nil, err
+	}
+	if transcriptState.path == "" {
+		return nil, nil
+	}
+	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+	if err != nil {
+		return nil, err
+	}
+
+	tail := 1
+	if tailProvided {
+		tail = tailInput
+	}
+
+	transcript, err := factory.ReadTranscript(worker.TranscriptRequest{
+		Provider:        transcriptState.provider,
+		TranscriptPath:  transcriptState.path,
+		TailCompactions: tail,
+		BeforeEntryID:   before,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sess := transcript.Session
 
 	turns := make([]outputTurn, 0, len(sess.Messages))
 	for _, e := range sess.Messages {
@@ -121,17 +144,53 @@ func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg conf
 	}, nil
 }
 
-// peekFallbackOutput returns raw terminal text wrapped as a single turn.
-func (s *Server) peekFallbackOutput(w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
+// handleAgentOutput returns unified conversation output for an agent.
+// Tries structured session logs first, falls back to Peek().
+func (s *Server) handleAgentOutput(w http.ResponseWriter, r *http.Request, name string) {
+	cfg := s.state.Config()
+	agentCfg, ok := findAgent(cfg, name)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
+		return
+	}
 
-	if !sp.IsRunning(sessionName) {
+	resp, err := s.trySessionLogOutput(r, name, agentCfg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
+		return
+	}
+	if resp != nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	handle := s.agentWorkerHandle(name, cfg)
+	s.peekFallbackOutput(r.Context(), w, name, handle)
+}
+
+// trySessionLogOutput is the legacy HTTP wrapper around the shared Huma
+// transcript reader.
+func (s *Server) trySessionLogOutput(r *http.Request, name string, agentCfg config.Agent) (*agentOutputResponse, error) {
+	tailInput := 0
+	tailProvided := false
+	if rawTail := r.URL.Query().Get("tail"); rawTail != "" {
+		tailProvided = true
+		if parsedTail, err := strconv.Atoi(rawTail); err == nil && parsedTail >= 0 {
+			tailInput = parsedTail
+		}
+	}
+	return s.trySessionLogOutputHuma(name, agentCfg, tailInput, tailProvided, r.URL.Query().Get("before"))
+}
+
+// peekFallbackOutput returns raw terminal text wrapped as a single turn.
+func (s *Server) peekFallbackOutput(ctx context.Context, w http.ResponseWriter, name string, handle agentPeekHandle) {
+	running, err := workerHandleRunning(ctx, handle)
+	if err != nil || !running {
 		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
 		return
 	}
 
-	output, err := sp.Peek(sessionName, 100)
+	output, err := handle.Peek(ctx, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -162,346 +221,66 @@ func (s *Server) resolveAgentWorkDir(a config.Agent, qualifiedName string) strin
 	)
 }
 
-// entryToTurn converts a sessionlog Entry to a human-readable outputTurn.
-func entryToTurn(e *sessionlog.Entry) outputTurn {
-	turn := outputTurn{
-		Role: e.Type,
+func (s *Server) agentWorkerHandle(name string, cfg *config.City) agentPeekHandle {
+	if cfg == nil {
+		return nil
 	}
-	if !e.Timestamp.IsZero() {
-		turn.Timestamp = e.Timestamp.Format("2006-01-02T15:04:05Z07:00")
-	}
-
-	// Try plain string content (message is a JSON object with string content).
-	if text := e.TextContent(); text != "" {
-		turn.Text = text
-		return turn
-	}
-
-	// Try structured content blocks — extract human-readable text.
-	if blocks := e.ContentBlocks(); len(blocks) > 0 {
-		var parts []string
-		for _, b := range blocks {
-			switch b.Type {
-			case "text":
-				if b.Text != "" {
-					parts = append(parts, b.Text)
-				}
-			case "tool_use":
-				if b.Name != "" {
-					parts = append(parts, "["+b.Name+"]")
-				}
-			case "tool_result":
-				text := extractToolResultText(b.Content)
-				if text != "" {
-					if len(text) > 500 {
-						text = text[:500] + "…"
-					}
-					parts = append(parts, "[result] "+text)
-				}
-			case "thinking":
-				// Redact thinking blocks — internal model reasoning
-				// should not be surfaced to the UI.
-				parts = append(parts, "[thinking]")
-			}
-		}
-		turn.Text = strings.Join(parts, "\n")
-		return turn
-	}
-
-	// Claude JSONL double-encodes the message field as a JSON string
-	// containing JSON. Unwrap and try again.
-	turn.Text = unwrapDoubleEncoded(e.Message)
-	return turn
-}
-
-// extractToolResultText extracts human-readable text from a tool_result
-// Content field (json.RawMessage). The content can be a plain string or
-// an array of content blocks (e.g., [{type:"text", text:"..."}]).
-func extractToolResultText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	// Try plain string.
-	var s string
-	if json.Unmarshal(raw, &s) == nil && s != "" {
-		return s
-	}
-	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
-	if json.Unmarshal(raw, &blocks) == nil {
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
-}
-
-// outputStreamPollInterval controls how often the stream checks for new output.
-const outputStreamPollInterval = 2 * time.Second
-
-// handleAgentOutputStream streams agent output as SSE events.
-// New turns are sent as they appear; keepalives are sent every 15s.
-//
-// SSE event format:
-//
-//	event: turn
-//	data: {"turns": [...]}
-func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request, name string) {
-	cfg := s.state.Config()
-	agentCfg, ok := findAgent(cfg, name)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	// Try session log streaming first, fall back to peek polling.
-	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
-	searchPaths := s.sessionLogSearchPaths
-	if searchPaths == nil {
-		searchPaths = sessionlog.MergeSearchPaths(cfg.Daemon.ObservePaths)
-	}
-
-	var logPath string
-	if workDir != "" {
-		logPath = sessionlog.FindSessionFileForProvider(searchPaths, provider, workDir)
-	}
-
-	// Check if agent is running.
-	sp := s.state.SessionProvider()
 	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
-
-	// If no session log and agent isn't running, return 404 before committing SSE headers.
-	if logPath == "" && !running {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not running")
-		return
-	}
-
-	// Commit SSE headers. Include agent status so clients can distinguish
-	// live streaming from historical replay.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if !running {
-		w.Header().Set("GC-Agent-Status", "stopped")
-	}
-	w.WriteHeader(http.StatusOK)
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
-
-	ctx := r.Context()
-	if logPath != "" {
-		s.streamSessionLog(ctx, w, name, logPath)
-	} else {
-		s.streamPeekOutput(ctx, w, name, cfg)
-	}
+	handle, _ := s.workerHandleForSessionTarget(s.state.SessionsBeadStore().Store, sessionName)
+	return handle
 }
 
-// streamSessionLog polls a session log file and emits new turns as SSE events.
-// Uses file size tracking to skip re-reads when the file hasn't grown, and
-// UUID-based cursor to correctly identify new turns after DAG resolution.
-func (s *Server) streamSessionLog(ctx context.Context, w http.ResponseWriter, name string, logPath string) {
-	// Derive provider from agent config for session log parsing.
-	cfg := s.state.Config()
-	agentCfg, _ := findAgent(cfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
+func workerHandleRunning(ctx context.Context, handle interface {
+	worker.LiveObservationHandle
+	worker.StateHandle
+},
+) (bool, error) {
+	if handle == nil {
+		return false, nil
 	}
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	lw.onReset = func() { lastSize = 0 }
-	var lastSentUUID string
-	var seq uint64
-	sentUUIDs := make(map[string]struct{})
-
-	readAndEmit := func() {
-		info, err := os.Stat(logPath)
-		if err != nil {
-			return
-		}
-		currentSize := info.Size()
-		if currentSize == lastSize {
-			return
-		}
-
-		// Use tail=1 (last compaction segment) to limit parsing scope.
-		sess, err := sessionlog.ReadProviderFile(provider, logPath, 1)
-		if err != nil {
-			return
-		}
-		lastSize = currentSize
-
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, e := range sess.Messages {
-			turn := entryToTurn(e)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-			uuids = append(uuids, e.UUID)
-		}
-		if len(turns) == 0 {
-			return
-		}
-
-		var toSend []outputTurn
-
-		if lastSentUUID == "" {
-			// First emission: send everything.
-			toSend = turns
-		} else {
-			found := false
-			for i, uuid := range uuids {
-				if uuid == lastSentUUID {
-					toSend = turns[i+1:]
-					found = true
-					break
-				}
-			}
-			if !found {
-				// Cursor lost (DAG rewrite, compaction). Instead of
-				// re-syncing from the beginning (which causes duplicate/
-				// out-of-order messages on the client), emit only turns
-				// we haven't previously sent.
-				log.Printf("agent stream: cursor %s lost, emitting only new turns", lastSentUUID)
-				for i, uuid := range uuids {
-					if _, seen := sentUUIDs[uuid]; !seen {
-						toSend = append(toSend, turns[i])
-					}
-				}
-			}
-		}
-
-		// Track all current UUIDs so cursor-lost can filter correctly.
-		lastSentUUID = uuids[len(uuids)-1]
-		for _, uuid := range uuids {
-			sentUUIDs[uuid] = struct{}{}
-		}
-
-		if len(toSend) == 0 {
-			return
-		}
-		seq++
-
-		data, err := json.Marshal(agentOutputResponse{
-			Agent:  name,
-			Format: "conversation",
-			Turns:  toSend,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
-		}
+	obs, err := worker.ObserveHandle(ctx, handle)
+	if err == nil {
+		return obs.Running, nil
 	}
-
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	state, stateErr := handle.State(ctx)
+	if stateErr != nil {
+		if errors.Is(err, worker.ErrOperationUnsupported) {
+			return false, stateErr
+		}
+		return false, err
+	}
+	return state.Phase != worker.PhaseStopped && state.Phase != worker.PhaseFailed, nil
 }
 
-// streamPeekOutput polls Peek() and emits changes as SSE events.
-func (s *Server) streamPeekOutput(ctx context.Context, w http.ResponseWriter, name string, cfg *config.City) {
-	sp := s.state.SessionProvider()
-	sessionName := agentSessionName(s.state.CityName(), name, cfg.Workspace.SessionTemplate)
-
-	poll := time.NewTicker(outputStreamPollInterval)
-	defer poll.Stop()
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	var lastOutput string
-	var seq uint64
-
-	emitPeek := func() {
-		if !sp.IsRunning(sessionName) {
-			return
+// agentTranscriptProvider resolves the provider string transcript discovery
+// and reads dispatch on. The session bead's family metadata wins
+// (builtin_ancestor, then provider_kind) because a custom provider's name
+// carries no family signal ("glm53" is a zcode seat) or a misleading one
+// ("kimi-k3-manifold" is a claude seat). Without a bead, or on a bead stamped
+// before family metadata existed, the config chain's builtin ancestor
+// (config.BuiltinFamily) takes over. Only a name with no resolvable family
+// falls through unchanged. PR #6144 gave SessionHandle.historyProvider a
+// provider_kind rung ahead of the recorded provider name for the same reason,
+// but the two ladders are deliberately not identical: historyProvider leads
+// with the session Profile and falls back to the bead's recorded provider,
+// while this helper takes no Profile rung and falls back to the config chain
+// because a stamp-less bead's recorded name can be the misleading alias this
+// fix repairs. Within this API path the resolved string single-sources both
+// DiscoverTranscript and ReadTranscript, so the file found and the reader
+// used agree.
+func agentTranscriptProvider(info *session.Info, providerName string, cfg *config.City) string {
+	if info != nil {
+		if family := strings.TrimSpace(info.BuiltinAncestor); family != "" {
+			return family
 		}
-		output, err := sp.Peek(sessionName, 100)
-		if err != nil || output == lastOutput {
-			return
-		}
-		lastOutput = output
-		seq++
-
-		turns := []outputTurn{}
-		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
-		}
-		data, err := json.Marshal(agentOutputResponse{
-			Agent:  name,
-			Format: "text",
-			Turns:  turns,
-		})
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: turn\nid: %d\ndata: %s\n\n", seq, data) //nolint:errcheck
-		if err := http.NewResponseController(w).Flush(); err != nil {
-			_ = err
+		if kind := strings.TrimSpace(info.ProviderKind); kind != "" {
+			return kind
 		}
 	}
-
-	// Emit initial state immediately.
-	emitPeek()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-poll.C:
-			emitPeek()
-		case <-keepalive.C:
-			writeSSEComment(w)
+	if cfg != nil {
+		if family := strings.TrimSpace(config.BuiltinFamily(providerName, cfg.Providers)); family != "" {
+			return family
 		}
 	}
-}
-
-// unwrapDoubleEncoded handles Claude's double-encoded message format
-// where the "message" field is a JSON string containing a JSON object.
-// Returns the human-readable content text, or "" if not parseable.
-func unwrapDoubleEncoded(raw []byte) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	// Try to unwrap: raw might be a JSON string like "{\"role\":...}"
-	var inner string
-	if err := json.Unmarshal(raw, &inner); err != nil {
-		return ""
-	}
-	// Now inner is the JSON object as a string. Parse it.
-	var mc sessionlog.MessageContent
-	if err := json.Unmarshal([]byte(inner), &mc); err != nil {
-		return ""
-	}
-	// Try string content.
-	var s string
-	if err := json.Unmarshal(mc.Content, &s); err == nil && s != "" {
-		return s
-	}
-	// Try array of content blocks.
-	var blocks []sessionlog.ContentBlock
-	if err := json.Unmarshal(mc.Content, &blocks); err == nil {
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
+	return providerName
 }

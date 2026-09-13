@@ -14,8 +14,15 @@ Start with the overview, then dive into the subsystem you need.
 ### Foundation
 
 1. **[Glossary](./glossary.md)** — authoritative definitions of all terms
-2. **[Nine Concepts Overview](./nine-concepts.md)** — the 5 primitives + 4
-   derived mechanisms that compose Gas City
+2. **[Primitives](../../docs/getting-started/how-gas-city-works.md)** — the six-primitive user-facing
+   model (Agent, Bead, Formula, Rig, Pack, Event); start here for the
+   conceptual overview
+3. **[Code-layering View](./nine-concepts.md)** — the deeper
+   implementation-layering reference: how the Go code substrate maps onto
+   the six primitives
+4. **[Architecture Invariants](./invariants.md)** — the normative
+   cross-cutting rules: object model at the center, CLI and API as
+   projections over it, typed wire end-to-end
 
 ### Layer 0-1: Primitives
 
@@ -28,8 +35,8 @@ multi-agent orchestration system.
    activity
 5. **[Config System](./config.md)** — TOML loading, progressive activation,
    multi-layer override resolution
-6. **[Agent Protocol](./agent-protocol.md)** — agent lifecycle backed by
-   session providers (tmux, subprocess, k8s)
+6. **[Session](./session.md)** — session lifecycle backed by runtime
+   providers (tmux, subprocess, exec, k8s)
 7. **[Prompt Templates](./prompt-templates.md)** — Go `text/template` in
    Markdown defining role behavior
 
@@ -38,7 +45,7 @@ multi-agent orchestration system.
 Each is provably composable from the primitives.
 
 8. **[Messaging](./messaging.md)** — inter-agent mail via beads + nudge
-   via agent protocol
+   via the Session primitive
 9. **[Formulas & Molecules](./formulas.md)** — work definitions (TOML) and
    their runtime instances (bead trees)
 10. **[Dispatch](./dispatch.md)** — sling: agent selection + formula
@@ -48,19 +55,24 @@ Each is provably composable from the primitives.
 
 ### Infrastructure
 
-12. **[Controller](./controller.md)** — the main loop: config watch,
+12. **[API Control Plane](./api-control-plane.md)** — CLI/API projections,
+    typed HTTP + SSE wire contract, generated clients, and event payload
+    registry
+13. **[Controller](./controller.md)** — the main loop: config watch,
     reconciliation tick, order dispatch
-13. **[Orders](./orders.md)** — gate-conditioned formula/exec
+14. **[Orders](./orders.md)** — trigger-conditioned formula/exec
     dispatch, rig-scoped labels
+15. **[Gas City Pack Specification (2.0)](../../docs/reference/specs/pack-spec.md)** —
+    authoritative pack data model, file format, and loader semantics
 
 ### End-to-End Traces
 
 These trace a concrete operation through all layers. The most effective
 way to understand how the system fits together.
 
-14. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
+16. **[Life of a Bead](./life-of-a-bead.md)** — create → hook → claim →
     execute → close
-15. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
+17. **[Life of a Molecule](./life-of-a-molecule.md)** — formula parse →
     dispatch → molecule create → step execution → completion
 
 ## Document Types

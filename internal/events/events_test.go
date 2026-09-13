@@ -7,7 +7,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -80,7 +82,7 @@ func TestFileRecorderPayloadRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"type":"merge-request","title":"Fix bug","labels":["urgent"]}`)
 	rec.Record(Event{
 		Type:    BeadCreated,
-		Actor:   "polecat",
+		Actor:   "actor-payload",
 		Subject: "gc-42",
 		Payload: payload,
 	})
@@ -229,6 +231,40 @@ func TestFileRecorderResumesSeq(t *testing.T) {
 	}
 }
 
+func TestFileRecorderCoordinatesSeqAcrossStaleRecorders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+
+	rec1, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec1.Close() //nolint:errcheck // test cleanup
+	rec2, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec2.Close() //nolint:errcheck // test cleanup
+
+	rec1.Record(Event{Type: BeadCreated, Actor: "rec1"})
+	rec2.Record(Event{Type: BeadUpdated, Actor: "rec2"})
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	for i, event := range events {
+		want := uint64(i + 1)
+		if event.Seq != want {
+			t.Fatalf("events[%d].Seq = %d, want %d; events=%+v", i, event.Seq, want, events)
+		}
+	}
+}
+
 func TestFileRecorderFillsTimestamp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -281,6 +317,108 @@ func TestFileRecorderPreservesTimestamp(t *testing.T) {
 	}
 }
 
+// TestFileRecorderNormalizesExplicitTsToLocalZone is a regression test for
+// #5300: writeRecordLocked only filled Ts when zero, so a caller-supplied Ts
+// serialized in whatever zone the caller happened to construct it in --
+// three cmd/gc emitters pass .UTC() while every other row on the host goes
+// through the IsZero() branch and gets local-with-offset. The log ends up
+// mixing "...Z" and "...-04:00" rows for the same instant, which silently
+// breaks lexical/window filters over ts (a filter written against one form
+// drops every row in the other).
+func TestFileRecorderNormalizesExplicitTsToLocalZone(t *testing.T) {
+	// Force a non-UTC local zone for the test's duration -- per the issue's
+	// own note, "on a UTC host the bug is invisible", so a host-dependent
+	// zone would make this test meaningless on CI runners set to UTC.
+	origLocal := time.Local
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("America/New_York tzdata not available: %v", err)
+	}
+	time.Local = loc
+	defer func() { time.Local = origLocal }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	// A caller-supplied Ts, explicitly UTC -- the exact shape of the three
+	// buggy emitters (now.UTC() / time.Now().UTC()).
+	explicitUTC := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Ts: explicitUTC})
+
+	// A zero Ts on the same host, going through the recorder's own default --
+	// this is the format every other row in a real log actually has.
+	rec.Record(Event{Type: BeadCreated, Actor: "human"})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), raw)
+	}
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+
+	// The instant must survive normalization exactly (TestFileRecorderPreservesTimestamp's
+	// invariant) -- only the zone representation should change.
+	if !events[0].Ts.Equal(explicitUTC) {
+		t.Errorf("Ts instant changed: got %v, want %v", events[0].Ts, explicitUTC)
+	}
+
+	// Every row on this host must serialize in the same zone form. Decode the
+	// ts field itself -- it is the third key in the marshaled line, so a
+	// suffix check against the whole line can never observe it.
+	tsOf := func(line string) string {
+		t.Helper()
+		var row struct {
+			Ts string `json:"ts"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimRight(line, "\r")), &row); err != nil {
+			t.Fatalf("decoding ts from %q: %v", line, err)
+		}
+		return row.Ts
+	}
+	explicitTs, zeroTs := tsOf(lines[0]), tsOf(lines[1])
+	if strings.HasSuffix(explicitTs, "Z") {
+		t.Errorf("caller-supplied UTC Ts was not normalized to local -- ts is still %q", explicitTs)
+	}
+	if !strings.HasSuffix(explicitTs, "-04:00") {
+		t.Errorf("expected the explicit-Ts row normalized to America/New_York's offset, got ts %q", explicitTs)
+	}
+	if strings.HasSuffix(zeroTs, "Z") {
+		t.Fatalf("test invariant broken: the zero-Ts row (recorder's own default) serialized as UTC-Z: %q", zeroTs)
+	}
+
+	// marshalBatch carries the same normalization on the AppendBatch path.
+	if err := rec.AppendBatch([]Event{{Type: BeadCreated, Actor: "human", Ts: explicitUTC}}); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines after AppendBatch, want 3:\n%s", len(lines), raw)
+	}
+	if batchTs := tsOf(lines[2]); strings.HasSuffix(batchTs, "Z") || !strings.HasSuffix(batchTs, "-04:00") {
+		t.Errorf("AppendBatch did not normalize caller-supplied Ts: ts is %q", batchTs)
+	}
+}
+
 func TestFakeRecordsEvents(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
@@ -301,7 +439,7 @@ func TestFakeList(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	f.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	all, err := f.List(Filter{})
 	if err != nil {
@@ -317,6 +455,38 @@ func TestFakeList(t *testing.T) {
 	}
 	if len(byType) != 1 {
 		t.Fatalf("List(type) = %d, want 1", len(byType))
+	}
+}
+
+func TestFakeListTailFiltersLimitModesAndErrors(t *testing.T) {
+	f := NewFake()
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "old"})
+	f.Record(Event{Type: BeadClosed, Actor: "human", Subject: "ignored"})
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "middle"})
+	f.Record(Event{Type: BeadCreated, Actor: "gc", Subject: "wrong-actor"})
+	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "new"})
+
+	tail, err := f.ListTail(Filter{Type: BeadCreated, Actor: "human"}, 2)
+	if err != nil {
+		t.Fatalf("ListTail(limit): %v", err)
+	}
+	if len(tail) != 2 {
+		t.Fatalf("ListTail(limit) got %d events, want 2", len(tail))
+	}
+	if tail[0].Subject != "middle" || tail[1].Subject != "new" {
+		t.Fatalf("tail subjects = [%s %s], want [middle new]", tail[0].Subject, tail[1].Subject)
+	}
+
+	all, err := f.ListTail(Filter{Type: BeadCreated, Actor: "human"}, 0)
+	if err != nil {
+		t.Fatalf("ListTail(limit=0): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("ListTail(limit=0) got %d events, want 3", len(all))
+	}
+
+	if _, err := NewFailFake().ListTail(Filter{}, 1); err == nil {
+		t.Fatal("ListTail on broken fake returned nil error")
 	}
 }
 
@@ -338,32 +508,6 @@ func TestFakeLatestSeq(t *testing.T) {
 	}
 	if seq != 2 {
 		t.Errorf("LatestSeq = %d, want 2", seq)
-	}
-}
-
-func TestFakeWatch(t *testing.T) {
-	f := NewFake()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	w, err := f.Watch(ctx, 0)
-	if err != nil {
-		t.Fatalf("Watch: %v", err)
-	}
-	defer w.Close() //nolint:errcheck // test cleanup
-
-	// Record in a goroutine.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
-	}()
-
-	e, err := w.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	if e.Subject != "gc-1" {
-		t.Errorf("Subject = %q, want %q", e.Subject, "gc-1")
 	}
 }
 
@@ -429,7 +573,7 @@ func TestReadFiltered(t *testing.T) {
 	past := now.Add(-2 * time.Hour)
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1", Ts: past})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1", Ts: past})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor", Ts: now})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha", Ts: now})
 	rec.Close() //nolint:errcheck // test cleanup
 
 	t.Run("by_type", func(t *testing.T) {
@@ -493,6 +637,85 @@ func TestReadFiltered(t *testing.T) {
 	})
 }
 
+func TestReadFilteredMissingFile(t *testing.T) {
+	got, err := ReadFiltered(filepath.Join(t.TempDir(), "missing.jsonl"), Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered(missing): %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ReadFiltered(missing) = %v, want nil", got)
+	}
+}
+
+func TestReadFilteredSkipsMalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	data := strings.Join([]string{
+		`not-json`,
+		`{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredScannerError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1)
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{})
+	if err == nil {
+		t.Fatal("ReadFiltered returned nil error, want scanner error")
+	}
+	if !strings.Contains(err.Error(), "scanning events") {
+		t.Fatalf("ReadFiltered error = %q, want scanning events context", err.Error())
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d partial events, want 1", len(got))
+	}
+	if got[0].Subject != "gc-1" {
+		t.Errorf("partial Subject = %q, want gc-1", got[0].Subject)
+	}
+}
+
+func TestReadFilteredLimitStopsScanning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	first := `{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"}` + "\n"
+	oversizedLine := strings.Repeat("x", 1024*1024+1) + "\n"
+	if err := os.WriteFile(path, []byte(first+oversizedLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFiltered(path, Filter{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadFiltered: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1", len(got))
+	}
+	if got[0].Seq != 1 {
+		t.Errorf("got[0].Seq = %d, want 1", got[0].Seq)
+	}
+}
+
 func TestReadFilteredAfterSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -552,6 +775,221 @@ func TestReadFilteredAfterSeqCombined(t *testing.T) {
 	}
 }
 
+func TestReadFilteredTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 1
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 2
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 3
+	rec.Record(Event{Type: BeadClosed, Actor: "human"})  // seq 4
+	rec.Record(Event{Type: BeadCreated, Actor: "human"}) // seq 5
+	rec.Close()                                          //nolint:errcheck // test cleanup
+
+	got, err := ReadFilteredTail(path, Filter{Type: BeadCreated}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2", len(got))
+	}
+	if got[0].Seq != 3 || got[1].Seq != 5 {
+		t.Fatalf("tail seqs = [%d %d], want [3 5]", got[0].Seq, got[1].Seq)
+	}
+}
+
+func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event, ending string) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString(ending)
+	}
+
+	appendEvent(Event{Seq: 1, Type: SessionWoke, Actor: "api", Subject: "too-low-seq", Ts: base.Add(9 * time.Second)}, "\n")
+	appendEvent(Event{
+		Seq:     2,
+		Type:    SessionWoke,
+		Actor:   "api",
+		Subject: "cross-chunk",
+		Ts:      base.Add(10 * time.Second),
+		Message: string(bytes.Repeat([]byte("x"), 70*1024)),
+	}, "\n")
+	appendEvent(Event{Seq: 3, Type: SessionStopped, Actor: "api", Subject: "wrong-type", Ts: base.Add(11 * time.Second)}, "\n")
+	appendEvent(Event{Seq: 4, Type: SessionWoke, Actor: "worker", Subject: "wrong-actor", Ts: base.Add(12 * time.Second)}, "\n")
+	appendEvent(Event{Seq: 5, Type: SessionWoke, Actor: "api", Subject: "too-old", Ts: base.Add(-time.Second)}, "\n")
+	buf.WriteString("\nnot-json\n")
+	appendEvent(Event{Seq: 6, Type: SessionWoke, Actor: "api", Subject: "tail-match", Ts: base.Add(20 * time.Second)}, "\r\n")
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadFilteredTail(path, Filter{
+		AfterSeq: 1,
+		Type:     SessionWoke,
+		Actor:    "api",
+		Since:    base,
+	}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(got), got)
+	}
+	if got[0].Subject != "cross-chunk" || got[1].Subject != "tail-match" {
+		t.Fatalf("subjects = [%s %s], want [cross-chunk tail-match]", got[0].Subject, got[1].Subject)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesBoundsBackwardWalk is the regression for
+// #4418: a Filter.Type that never matches near EOF (the common case for a
+// rare/optional event type) otherwise forces readFilteredTailFromFile to
+// walk the entire file backward, at the same cost as an unfiltered forward
+// scan. MaxScanBytes caps that walk; "not found within the window" must be
+// the result rather than an unbounded scan.
+func TestReadFilteredTailMaxScanBytesBoundsBackwardWalk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	// The only matching event sits near the start of the file.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	// Pad well past a 64KB scan window with non-matching events before EOF —
+	// this is what a rare/optional Type filter looks like against a long,
+	// otherwise-unrelated event stream.
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; i < 40; i++ { // ~160KB of padding, several chunks past 64KB
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: 64 * 1024}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the 64KB window)", len(bounded))
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesNonAlignedLimit pins the per-chunk clamp:
+// a MaxScanBytes that is not a multiple of the 64KB chunk size must stop the
+// backward walk at exactly that byte, not at the next chunk boundary. The
+// file is sized so the only match sits in the dead zone between the two —
+// past the 100KB window, but inside the 128KB an unclamped walk would read
+// as two whole chunks — so a bound checked only between chunks returns the
+// match and fails this test.
+func TestReadFilteredTailMaxScanBytesNonAlignedLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	const window = 100 * 1024 // deliberately not a multiple of the 64KB chunk
+
+	// The only matching event is the first line in the file, so its distance
+	// from EOF is simply the file size.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; buf.Len() < 108*1024; i++ {
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+	if size := int64(buf.Len()); size <= window || size >= 128*1024 {
+		t.Fatalf("file is %d bytes, want in (%d, %d) so the match lands between the window and the next chunk boundary", size, window, 128*1024)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: window}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the %d-byte window; the chunk read must be clamped to it)", len(bounded), window)
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
+func TestReadFilteredTailLimitModesAndMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "created"})
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "closed"})
+	rec.Close() //nolint:errcheck // test cleanup
+
+	got, err := ReadFilteredTail(path, Filter{Actor: "human"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("limit=0 got %d events, want 2", len(got))
+	}
+
+	missing, err := ReadFilteredTail(filepath.Join(dir, "missing.jsonl"), Filter{}, 1)
+	if err != nil {
+		t.Fatalf("missing file error: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("missing file got %+v, want nil", missing)
+	}
+}
+
 func TestReadLatestSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -599,6 +1037,40 @@ func TestReadLatestSeqEmpty(t *testing.T) {
 	}
 }
 
+func TestReadLatestSeqUsesTailOfAppendOnlyLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	hugeMalformed := append(bytes.Repeat([]byte("x"), 2*1024*1024), '\n')
+	validTail := []byte(`{"seq":42,"type":"bead.updated","ts":"2026-01-01T00:00:00Z","actor":"test"}` + "\n")
+	if err := os.WriteFile(path, append(hugeMalformed, validTail...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, err := ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq: %v", err)
+	}
+	if seq != 42 {
+		t.Fatalf("ReadLatestSeq = %d, want 42", seq)
+	}
+
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	rec.Record(Event{Type: BeadClosed, Actor: "test"})
+	rec.Close() //nolint:errcheck // test cleanup
+
+	seq, err = ReadLatestSeq(path)
+	if err != nil {
+		t.Fatalf("ReadLatestSeq(after record): %v", err)
+	}
+	if seq != 43 {
+		t.Fatalf("ReadLatestSeq(after record) = %d, want 43", seq)
+	}
+}
+
 func TestReadFrom(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -628,7 +1100,7 @@ func TestReadFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec2.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 	rec2.Close() //nolint:errcheck // test cleanup
 
 	// Read from mid-file offset → only new event
@@ -704,7 +1176,7 @@ func TestFileRecorderList(t *testing.T) {
 
 	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
 	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
-	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "mayor"})
+	rec.Record(Event{Type: SessionWoke, Actor: "gc", Subject: "session-alpha"})
 
 	// List all
 	all, err := rec.List(Filter{})
@@ -728,6 +1200,32 @@ func TestFileRecorderList(t *testing.T) {
 	}
 }
 
+func TestFileRecorderListTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "old"})
+	rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "ignored"})
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "new"})
+
+	got, err := rec.ListTail(Filter{Type: BeadCreated}, 1)
+	if err != nil {
+		t.Fatalf("ListTail: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListTail got %d events, want 1", len(got))
+	}
+	if got[0].Subject != "new" {
+		t.Fatalf("subject = %q, want new", got[0].Subject)
+	}
+}
+
 func TestFileRecorderLatestSeq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -747,6 +1245,70 @@ func TestFileRecorderLatestSeq(t *testing.T) {
 	}
 	if seq != 2 {
 		t.Errorf("LatestSeq = %d, want 2", seq)
+	}
+}
+
+func TestFileRecorderLatestSeqSeesExternalAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	external, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Record(Event{Type: BeadCreated, Actor: "hook", Subject: "gc-1"})
+	if err := external.Close(); err != nil {
+		t.Fatalf("close external recorder: %v", err)
+	}
+
+	seq, err := rec.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq: %v", err)
+	}
+	if seq != 1 {
+		t.Fatalf("LatestSeq after external append = %d, want 1", seq)
+	}
+}
+
+func TestFileRecorderWatchSeesExternalAppendAfterRecorderOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	external, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external.Record(Event{Type: BeadCreated, Actor: "hook", Subject: "gc-1"})
+	if err := external.Close(); err != nil {
+		t.Fatalf("close external recorder: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, 0)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	e, err := w.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if e.Seq != 1 || e.Subject != "gc-1" {
+		t.Fatalf("event = seq %d subject %q, want seq 1 subject gc-1", e.Seq, e.Subject)
 	}
 }
 
@@ -803,6 +1365,59 @@ func TestFileRecorderWatch(t *testing.T) {
 	}
 }
 
+func TestFileRecorderWatchAfterLatestStartsAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
+	rec.Record(Event{Type: BeadUpdated, Actor: "human", Subject: "gc-1"})
+	seq, err := rec.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w, err := rec.Watch(ctx, seq)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	fw, ok := w.(*fileWatcher)
+	if !ok {
+		t.Fatalf("Watch returned %T, want *fileWatcher", w)
+	}
+	if fw.offset != info.Size() {
+		t.Fatalf("watch offset = %d, want EOF %d", fw.offset, info.Size())
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		rec.Record(Event{Type: BeadClosed, Actor: "human", Subject: "gc-1"})
+	}()
+	e, err := w.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if e.Seq != seq+1 {
+		t.Fatalf("Seq = %d, want %d", e.Seq, seq+1)
+	}
+	if e.Type != BeadClosed {
+		t.Fatalf("Type = %q, want %q", e.Type, BeadClosed)
+	}
+}
+
 func TestFileRecorderWatchContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -829,6 +1444,84 @@ func TestFileRecorderWatchContextCancel(t *testing.T) {
 	}
 }
 
+// TestWatchNextBlockedThenContextEndsReturnsContextErr pins the watcher
+// cancellation contract for a Next that is already blocked waiting for new
+// events (the steady state of an idle SSE stream). When the context ends while
+// Next sleeps it must return the context cause — context.Canceled or
+// context.DeadlineExceeded — not errWatcherClosed, so callers that classify the
+// context error can tell a real cancellation/deadline from a closed watcher.
+func TestWatchNextBlockedThenContextEndsReturnsContextErr(t *testing.T) {
+	newBlockedWatcher := func(t *testing.T, ctx context.Context) (Watcher, func()) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "events.jsonl")
+		var stderr bytes.Buffer
+		rec, err := NewFileRecorder(path, &stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec.Record(Event{Type: BeadCreated, Actor: "human", Subject: "seed"})
+		w, err := rec.Watch(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Consume the seed so the next Next has nothing to return and blocks in
+		// the poll sleep.
+		if _, err := w.Next(); err != nil {
+			t.Fatalf("draining seed: %v", err)
+		}
+		return w, func() {
+			_ = w.Close()
+			_ = rec.Close()
+		}
+	}
+
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		// End the context from a timer so Next is already parked in its poll
+		// sleep when cancellation lands, exercising the blocked-Next path
+		// without a wall-clock time.Sleep (mirrors the deadline subtest below).
+		time.AfterFunc(50*time.Millisecond, cancel)
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Next after cancel-while-blocked = %v, want context.Canceled", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe cancellation while blocked")
+		}
+	})
+
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		w, cleanup := newBlockedWatcher(t, ctx)
+		defer cleanup()
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := w.Next()
+			errCh <- err
+		}()
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Next after deadline-while-blocked = %v, want context.DeadlineExceeded", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Next did not observe deadline while blocked")
+		}
+	})
+}
+
 // writeEmpty creates an empty file at path.
 func writeEmpty(path string) error {
 	f, err := os.Create(path)
@@ -836,4 +1529,118 @@ func writeEmpty(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// mustOpenSiblingLock opens a separate file descriptor against path and
+// takes a non-blocking exclusive flock on it. The returned *os.File is
+// the caller's to close (which also releases the flock).
+func mustOpenSiblingLock(t *testing.T, path string) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open sibling: %v", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("sibling flock: %v", err)
+	}
+	return f
+}
+
+func TestFileRecorderFlockTimeoutFiresWithinBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	sib := mustOpenSiblingLock(t, path)
+	defer func() {
+		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
+		_ = sib.Close()
+	}()
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed < recordFlockTimeout {
+		t.Errorf("elapsed = %v, want >= %v", elapsed, recordFlockTimeout)
+	}
+	if elapsed >= recordFlockTimeout+100*time.Millisecond {
+		t.Errorf("elapsed = %v, want < %v", elapsed, recordFlockTimeout+100*time.Millisecond)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "events: lock: timed out") {
+		t.Errorf("stderr = %q, want substring %q", out, "events: lock: timed out")
+	}
+	if !strings.Contains(out, "waiting on flock at") {
+		t.Errorf("stderr = %q, want substring %q", out, "waiting on flock at")
+	}
+	if !strings.Contains(out, path) {
+		t.Errorf("stderr = %q, want substring %q", out, path)
+	}
+}
+
+func TestFileRecorderFlockSucceedsAfterShortContention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	sib := mustOpenSiblingLock(t, path)
+	time.AfterFunc(50*time.Millisecond, func() {
+		_ = syscall.Flock(int(sib.Fd()), syscall.LOCK_UN)
+		_ = sib.Close()
+	})
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= %v", elapsed, 40*time.Millisecond)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+	got, err := rec.List(Filter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d events, want 1", len(got))
+	}
+	if got[0].Type != "test" {
+		t.Errorf("recorded event type = %q, want %q", got[0].Type, "test")
+	}
+}
+
+func TestFileRecorderFlockSucceedsWithoutContention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	start := time.Now()
+	rec.Record(Event{Type: "test"})
+	elapsed := time.Since(start)
+
+	if elapsed >= 50*time.Millisecond {
+		t.Errorf("elapsed = %v, want < %v", elapsed, 50*time.Millisecond)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
 }

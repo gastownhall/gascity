@@ -2,13 +2,15 @@
 title: "Prompt Templates"
 ---
 
-> Last verified against code: 2026-03-01
+> Last revised for merge-wave decisions: 2026-04-10
 
 ## Summary
 
 Prompt Templates is a Layer 0-1 primitive that defines agent behavior
-through Go `text/template` in Markdown. All role-specific behavior is
-user-supplied configuration — the SDK contains zero hardcoded role
+through Go `text/template` in Markdown. Prompt files now opt in to
+template processing explicitly via the `.template.md` suffix; plain
+`prompt.md` files remain plain content. All role-specific behavior is
+user-supplied pack content — the SDK contains zero hardcoded role
 names. Templates are rendered at agent startup with a `PromptContext`
 that provides city, agent, rig, and git metadata, making every agent
 prompt dynamically customized to its deployment context.
@@ -16,20 +18,32 @@ prompt dynamically customized to its deployment context.
 ## Key Concepts
 
 - **Prompt Template**: A Markdown file with Go template directives
-  (`.md.tmpl` extension). Each agent's `prompt_template` config field
-  points to one. Templates define the agent's behavioral specification:
-  what it does, how it finds work, how it communicates.
+  (`.template.md` extension). Each agent's `prompt_template` config
+  field points to one. Templates define the agent's behavioral
+  specification: what it does, how it finds work, how it communicates.
 
 - **PromptContext**: The data available to templates during rendering.
   Includes CityRoot, AgentName (qualified: `rig/agent-1`),
   TemplateName (config name: `agent` for pool template), RigName,
-  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery, SlingQuery,
-  and custom Env vars from agent config.
+  WorkDir, IssuePrefix, Branch, DefaultBranch, WorkQuery,
+  AssignedInProgressQuery, AssignedReadyQuery, RoutedPoolQuery,
+  SlingQuery, and custom Env vars from agent config.
 
 - **Shared Templates**: Reusable template partials in a `shared/`
   directory next to the prompt templates. Automatically loaded and
   available via `{{template "name" .}}`. Used for cross-agent
   conventions like command glossaries and architecture context.
+
+- **Appended Fragments**: Named template fragments that are rendered and
+  appended after the main prompt body. Configured through
+  `append_fragments` on either `[agent_defaults]` (city- and pack-wide)
+  or per-agent on an `[[agent]]` block / `agents/<name>/agent.toml`.
+  Per-agent `append_fragments` layers in front of imported-pack and
+  city-level `[agent_defaults].append_fragments`. `inject_fragments` on
+  an agent is the legacy per-agent spelling; it still appends, but new
+  configs should prefer `append_fragments`. Explicit
+  `{{template "name" .}}` calls still control in-body placement;
+  appended fragment settings do not.
 
 - **Template Functions**: Three built-in functions: `cmd` (binary
   name), `session` (compute session name for an agent), `basename`
@@ -40,10 +54,10 @@ prompt dynamically customized to its deployment context.
 ```
   Agent Config                 Template File
   ┌──────────────┐            ┌──────────────────┐
-  │prompt_template│───────────▶│ prompts/agent.md  │
-  │  = "prompts/ │            │  .tmpl            │
-  │   agent.md   │            └────────┬──────────┘
-  │   .tmpl"     │                     │
+  │prompt_template│───────────▶│ prompts/agent     │
+  │  = "prompts/ │            │  .template.md     │
+  │   agent      │            └────────┬──────────┘
+  │   .template.md"│                   │
   └──────────────┘            ┌────────▼──────────┐
                               │ shared/ partials   │
                               │  (auto-loaded)     │
@@ -54,6 +68,7 @@ prompt dynamically customized to its deployment context.
   │ RigName      │            │  (text/template)  │
   │ WorkDir      │            └────────┬──────────┘
   │ WorkQuery    │                     │
+  │ Assigned...  │                     │
   │ SlingQuery   │                     ▼
   │ Env          │              Rendered Markdown
   └──────────────┘              (agent's prompt)
@@ -69,7 +84,9 @@ prompt dynamically customized to its deployment context.
 5. `buildTemplateData()` merges `Env` (lower priority) with SDK
    fields (higher priority) into a single `map[string]string`
 6. Template executes against the merged data map
-7. On parse/execute error, logs warning to stderr and returns raw text
+7. Any configured `append_fragments` are rendered and appended after
+   the main prompt body
+8. On parse/execute error, logs warning to stderr and returns raw text
    (graceful fallback — never blocks agent startup)
 
 ### Key Types
@@ -96,9 +113,13 @@ prompt dynamically customized to its deployment context.
    raw template text, not an empty string. Agents always get a prompt.
 4. **Missing template returns empty.** If `prompt_template` is empty or
    the file doesn't exist, `renderPrompt()` returns `""` without error.
-5. **Shared templates load from sibling directory.** Only `.md.tmpl`
-   files in the `shared/` subdirectory next to the template are loaded.
-   No recursive traversal.
+5. **Shared templates load from sibling directory.** Canonical
+   `.template.md` files and legacy `.md.tmpl` files in the `shared/`
+   subdirectory next to the template are loaded. Canonical files win on
+   definition collisions. No recursive traversal.
+6. **`append_fragments` is append-only.** It does not control in-body
+   placement. If a fragment is explicitly referenced in the template and
+   also listed in `append_fragments`, it appears twice.
 
 ## Interactions
 
@@ -121,17 +142,25 @@ prompt dynamically customized to its deployment context.
   promptFuncMap (141 LOC)
 - `cmd/gc/cmd_prime.go` — `gc prime` command (outputs rendered prompt)
 
-Template files are user-supplied, not SDK code. See example templates
-in `examples/gastown/packs/gastown/prompts/`.
+Template files are user-supplied pack content, not SDK code. See the example
+templates in the gastown pack's `prompts/` directory in the
+[gascity-packs repository](https://github.com/gastownhall/gascity-packs).
 
 ## Configuration
 
 ```toml
 [[agent]]
 name = "worker"
-prompt_template = "prompts/worker.md.tmpl"
+prompt_template = "prompts/worker.template.md"
 [agent.env]
 CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
+```
+
+Preferred defaults naming:
+
+```toml
+[agent_defaults]
+append_fragments = ["safety"]
 ```
 
 ### Template Variables
@@ -147,7 +176,48 @@ CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
 | `Branch` | Current git branch | `feature-x` |
 | `DefaultBranch` | Default branch | `main` |
 | `WorkQuery` | Work discovery command | `bd ready --assignee=...` |
+| `AssignedInProgressQuery` | Assigned in-progress recovery command | `bd list --include-ephemeral --status in_progress ...` |
+| `AssignedReadyQuery` | Assigned ready-work command | `bd ready --include-ephemeral --assignee=...` |
+| `RoutedPoolQuery` | Unassigned routed pool-work command | `bd ready --metadata-field gc.routed_to=... --unassigned` |
 | `SlingQuery` | Work routing command | `gc sling ...` |
+
+### Claim Identity Convention
+
+The `AssignedInProgressQuery` (Tier 1) and `RoutedPoolQuery` (Tier 3) rows
+above are rendered once, at session start, from Go `text/template`
+variables. But the *literal* prompt text written into `prompts/*.md.tmpl`
+files also references two OS environment variables directly — `$GC_TEMPLATE`
+and `$GC_ALIAS` — which the agent's own shell commands expand at run time,
+not at template-render time. These are a separate injection mechanism from
+the table above, and the two env vars are not interchangeable:
+
+- `$GC_TEMPLATE` is the qualified template identity, shared by *every* live
+  session of that template (the named-session holder and every pool slot
+  alike).
+- `$GC_ALIAS` is the current session's own concrete identity — the bare
+  qualified name for a named holder or canonical singleton slot, or the
+  suffixed `-N` identity (e.g. `rig/builder-1`) for a pool slot.
+
+Convention for which one to use in a prompt template's startup section:
+
+| Line | Token | Why |
+|---|---|---|
+| Tier 1 (crash-recovery query) | `${GC_ALIAS:-$GC_TEMPLATE}` | Ownership read — must resolve to *this session's own* prior claim, not a sibling's. |
+| Claim (`bd update <id> --claim --assignee=...`) | `${GC_ALIAS:-$GC_TEMPLATE}` | Ownership write — must stamp *this session's* concrete identity. |
+| Tier 2 (pre-assigned ready-work query) | bare `$GC_TEMPLATE` | Shared role discovery — pre-assigned work is deliberately assigned to the bare template. |
+| Tier 3 (routed-pool queue query) | bare `$GC_TEMPLATE` | Shared queue key — `gc.routed_to` is a role-level routing target, not a per-session claim. |
+
+Getting this wrong is not cosmetic: a template that is both a
+`[[named_session]]` and a multi-slot pool has more than one live identity
+sharing a single template string. If Tier 1 or the claim line uses the bare
+template, two sessions can independently "recover" or adopt the same
+in-progress bead and both complete it — duplicate commits, duplicate PRs,
+duplicate closes. See `engdocs/design/session-model-unification.md` (Runtime
+Environment) for where `GC_ALIAS`/`GC_TEMPLATE` are defined, and the
+`ga-i1d0tr` architecture decision for the full incident writeup. The
+`${GC_ALIAS:-$GC_TEMPLATE}` fallback form degrades safely to today's
+behavior for sessions where `GC_ALIAS` is unset (pure singleton/named
+templates, where the two values are identical anyway).
 
 ### Template Functions
 
@@ -156,6 +226,18 @@ CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
 | `cmd` | `{{cmd}}` | Binary name (`gc`) |
 | `session` | `{{session .AgentName}}` | Session name for agent |
 | `basename` | `{{basename .AgentName}}` | Base name from qualified name |
+
+### Fragment Composition
+
+There are two distinct ways fragment content can appear in a rendered
+prompt:
+
+| Mechanism | Where declared | Effect |
+|---|---|---|
+| `{{ template "name" . }}` | inside `prompt.template.md` | Places fragment content exactly where referenced |
+| `append_fragments = ["name"]` | `[agent_defaults]` | Appends fragment content after the rendered prompt body |
+| `append_fragments = ["name"]` | per-agent (`[[agent]]` or `agents/<name>/agent.toml`) | Appends fragment content after the rendered prompt body; layers in front of `[agent_defaults]` |
+| `inject_fragments = ["name"]` | per-agent settings (legacy) | Appends fragment content after the rendered prompt body; retained for migration, new configs should use `append_fragments` |
 
 ## Testing
 
@@ -176,7 +258,7 @@ CUSTOM_VAR = "value"    # available as {{.CUSTOM_VAR}} in template
 
 ## See Also
 
-- [Agent Protocol](agent-protocol.md) — how rendered prompts are
+- [Session](session.md) — how rendered prompts are
   delivered to agents via runtime.Provider
 - [Config System](config.md) — how Agent.PromptTemplate and Agent.Env
   are resolved through override layers

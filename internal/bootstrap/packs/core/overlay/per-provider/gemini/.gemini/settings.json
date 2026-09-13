@@ -1,0 +1,46 @@
+{
+  "tools": {
+    "shell": {
+      "enableInteractiveShell": false
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook --hook-format gemini"
+          }
+        ]
+      }
+    ],
+    "PreCompress": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc prime --hook --hook-format gemini"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"
+          },
+          {
+            "type": "command",
+            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+name: Setup Gas City Ubuntu CI
+description: Install the shared Ubuntu dependencies for Gas City CI jobs
+
+inputs:
+  go-version:
+    description: >-
+      Go version to install. Empty (the default) reads the version from go.mod,
+      so the toolchain can never skew from the module directive. Pass an
+      explicit version only to test against a different toolchain.
+    required: false
+    default: ""
+  node-version:
+    description: Node.js version to install
+    required: false
+    default: "22"
+  dolt-version:
+    description: Dolt version to install
+    required: true
+  bd-version:
+    description: >-
+      Beads release version to install. Empty string means the caller builds or
+      installs bd itself (used by the cross-version contract "current" cell).
+    required: false
+    default: ""
+  install-claude-cli:
+    description: Whether to install the Claude CLI
+    required: false
+    default: "true"
+  claude-version:
+    description: Claude Code version to install with the native binary installer
+    required: false
+    default: "2.1.123"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      with:
+        go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install system dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y tmux jq
+
+    - name: Install dolt v${{ inputs.dolt-version }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}"
+
+    - name: Install released bd v${{ inputs.bd-version }}
+      # Skip when no version is given: the contract cross-version "current" cell
+      # builds bd from source instead of installing a released tarball.
+      if: ${{ inputs.bd-version != '' }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}"
+
+    - name: Install Claude CLI
+      if: ${{ inputs.install-claude-cli == 'true' }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-claude-native.sh "${{ inputs.claude-version }}"

@@ -22,9 +22,10 @@ exec gc config show --validate
 stdout 'Config valid.'
 
 # Add an agent and verify it appears in output.
-cp $WORK/city-with-agent $WORK/my-city/city.toml
+mkdir -p $WORK/my-city/agents/reviewer
+cp $WORK/agent-reviewer $WORK/my-city/agents/reviewer/agent.toml
 exec gc config show
-stdout 'name = "mayor"'
+stdout 'name = "reviewer"'
 stdout '\[\[agent\]\]'
 
 # Validate passes with valid agent config.
@@ -41,32 +42,28 @@ stderr 'gc config show'
 ! exec gc config show --validate
 stderr 'gc config show'
 
-# Invalid config (duplicate agents) fails --validate.
-cp $WORK/dup-agents $WORK/my-city/city.toml
+# Invalid legacy inline agents fail --validate.
+cp $WORK/legacy-inline-agent $WORK/my-city/city.toml
 cd $WORK/my-city
 ! exec gc config show --validate
-stderr 'duplicate name'
+stderr 'unsupported PackV1 \[\[agent\]\]'
 
-# Show mode prints validation warnings to stderr but still outputs config.
+# Show mode prints non-fatal migration warnings to stderr but still outputs config.
+cp $WORK/city-warning-name $WORK/my-city/city.toml
 exec gc config show
-stderr 'warning.*duplicate'
-stdout '\[\[agent\]\]'
+stderr 'workspace identity fields are deprecated'
+stdout '\[workspace\]'
 
 -- broken-city/.gc/.keep --
 -- bad-toml --
 {{invalid toml
--- city-with-agent --
+-- agent-reviewer --
+start_command = "echo reviewer"
+-- legacy-inline-agent --
+[workspace]
+
+[[agent]]
+name = "mayor"
+-- city-warning-name --
 [workspace]
 name = "my-city"
-
-[[agent]]
-name = "mayor"
--- dup-agents --
-[workspace]
-name = "my-city"
-
-[[agent]]
-name = "mayor"
-
-[[agent]]
-name = "mayor"

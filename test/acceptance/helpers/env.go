@@ -1,6 +1,7 @@
 package acceptancehelpers
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -23,13 +24,31 @@ type Env struct {
 func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	e := &Env{vars: make(map[string]string)}
 
-	// Inherit minimum from host. HOME is NOT inherited — it's set to
-	// a test-specific directory to prevent gc from reading ~/.gc/,
-	// ~/.gitconfig, or other real user state.
+	// Inherit minimum from host. Keep the real HOME: the platform
+	// supervisor path now validates that HOME matches the OS user home
+	// and acceptance isolation should flow through GC_HOME instead.
 	for _, key := range []string{
-		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER",
+		"PATH", "TMPDIR", "LANG", "LC_ALL", "USER", "HOME",
 		"SHELL", "SSH_AUTH_SOCK", "TERM",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_SUBAGENT_MODEL",
+		"OPENAI_API_KEY",
+		"GEMINI_API_KEY",
+		"GOOGLE_GENERATIVE_AI_API_KEY",
+		"GOOGLE_API_KEY",
+		"OLLAMA_API_KEY",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_CLOUD_PROJECT",
+		"GOOGLE_CLOUD_PROJECT_ID",
+		"GOOGLE_CLOUD_LOCATION",
 	} {
 		if v := os.Getenv(key); v != "" {
 			e.vars[key] = v
@@ -42,15 +61,65 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		e.vars["PATH"] = filepath.Dir(gcBinary) + ":" + e.vars["PATH"]
 	}
 
-	// Test isolation: HOME points to gcHome so gc never reads real user state.
-	e.vars["HOME"] = gcHome
+	// Prepend shims for the platform service managers so `gc init` never
+	// hands the supervisor off to the real host launchd/systemd. The
+	// shims exit non-zero, which causes ensureSupervisorRunning to fall
+	// through to doSupervisorStart (bare fork). Without this on Mac,
+	// launchctl load succeeds and launchd starts a supervisor that
+	// doesn't inherit the test's isolation env vars, so the K8s session
+	// provider fires for hyperscale and fails on missing kubeconfig.
+	//
+	// Panic on failure: silently dropping the shim would look like a
+	// random hyperscale infra regression on Mac with no breadcrumb.
+	shimDir, err := installServiceManagerShims(gcHome)
+	if err != nil {
+		panic(fmt.Sprintf("acceptance: installing service-manager shims under %s: %v", gcHome, err))
+	}
+	e.vars["PATH"] = shimDir + ":" + e.vars["PATH"]
+
+	if e.vars["HOME"] == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			e.vars["HOME"] = home
+		}
+	}
 	e.vars["GC_HOME"] = gcHome
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
+	tmuxTmpDir := filepath.Join(runtimeDir, "tmux")
+	if err := os.MkdirAll(tmuxTmpDir, 0o700); err != nil {
+		panic(fmt.Sprintf("acceptance: creating tmux socket root under %s: %v", runtimeDir, err))
+	}
+	// TestMain callers that invoke tmux in the current process must call
+	// tmuxtest.ConfigureProcessEnv with this same root before building Env.
+	e.vars["TMUX_TMPDIR"] = tmuxTmpDir
 	e.vars["GC_DOLT"] = "skip"
-	e.vars["GC_BEADS"] = "file"
+	beadsProvider := "file"
+	if override := os.Getenv("GC_ACCEPTANCE_BEADS_PROVIDER"); override != "" {
+		beadsProvider = override
+	}
+	e.vars["GC_BEADS"] = beadsProvider
 	e.vars["GC_SESSION"] = "subprocess"
 
 	return e
+}
+
+// installServiceManagerShims writes no-op launchctl/systemctl stubs under
+// gcHome/bin and returns that directory so the acceptance env can prepend
+// it to PATH. The stubs exit 1 so gc's supervisor-install logic falls
+// back to an in-process supervisor start instead of delegating to the
+// host's real service manager (which would also inherit the wrong env).
+func installServiceManagerShims(gcHome string) (string, error) {
+	shimDir := filepath.Join(gcHome, "bin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		return "", err
+	}
+	const body = "#!/bin/sh\n# acceptance-test shim: force gc to bare-start the supervisor.\nexit 1\n"
+	for _, name := range []string{"launchctl", "systemctl"} {
+		p := filepath.Join(shimDir, name)
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			return "", err
+		}
+	}
+	return shimDir, nil
 }
 
 // With sets a variable, returning the Env for chaining.
@@ -122,6 +191,26 @@ func RunGC(env *Env, dir string, args ...string) (string, error) {
 	cmd.Env = env.List()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// RunGCStreams runs gc and returns stdout and stderr separately. Use this
+// when a test parses gc output positionally: config-load advisories go to
+// stderr, and CombinedOutput() would interleave them into the parse.
+func RunGCStreams(env *Env, dir string, args ...string) (string, string, error) {
+	gcPath, err := ResolveGCPath(env)
+	if err != nil {
+		return "", "", err
+	}
+	cmd := exec.Command(gcPath, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env.List()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 // ResolveGCPath returns the exact gc binary path for this acceptance env.

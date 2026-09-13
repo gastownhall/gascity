@@ -12,8 +12,11 @@
 package tierb_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +52,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	// Best-effort supervisor stop.
-	helpers.RunGC(testEnvB, "", "supervisor", "stop") //nolint:errcheck
+	helpers.RunGC(testEnvB, "", "supervisor", "stop", "--wait") //nolint:errcheck
 	os.Exit(code)
 }
 
@@ -112,14 +115,18 @@ func TestLifecycle_RigAgentGetsBeadsDir(t *testing.T) {
 
 	reportCmd := c.WriteReportScript("worker", true)
 
-	// Write config with a rig-scoped agent.
-	cityName := filepath.Base(c.Dir)
-	config := "[workspace]\nname = \"" + cityName + "\"\n" +
-		"\n[beads]\nprovider = \"file\"\n" +
-		"\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\n" +
-		"\n[[agent]]\nname = \"worker\"\ndir = \"myrig\"\n" +
-		"start_command = \"" + reportCmd + "\"\n"
-	c.WriteConfig(config)
+	// Register the rig through the CLI, then add a rig-scoped agent. The
+	// [[named_session]] entry
+	// reserves a canonical session so the reconciler materializes and
+	// starts the agent even without queued work — post-PR-666 templates
+	// are lazy.
+	c.RigAdd(rigDir, "")
+	c.WriteV2AgentDir("worker",
+		`dir = "myrig"`,
+		"max_active_sessions = 1",
+		"start_command = "+strconv.Quote(reportCmd),
+	)
+	c.AppendToPack("\n[[named_session]]\ntemplate = \"worker\"\ndir = \"myrig\"\nmode = \"always\"\n")
 
 	c.StartWithSupervisor()
 
@@ -197,39 +204,280 @@ func TestLifecycle_DrainAckStopsSession(t *testing.T) {
 	}
 }
 
-// TestLifecycle_PackMaterializationOnStart verifies that gc start
-// materializes gastown packs even if they were deleted after init.
-// This is the end-to-end regression test for Bug 4 (2026-03-18).
-func TestLifecycle_PackMaterializationOnStart(t *testing.T) {
+// TestLifecycle_DrainAckResponsiveRespawn verifies that after a sole pool
+// worker calls gc runtime drain-ack, the controller socket is poked
+// immediately (issue #2364) so a replacement worker is reconciled within a
+// tick or two instead of after the ~4-tick (~120s) discovery cascade.
+//
+// Both arrival orderings — #2364 (work pre-queued before the drain) and
+// #2251 (cold pool scaling from zero with work present) — ride the SAME
+// drain-ack → pokeController code path (plan R5: one code change covers both
+// orderings), so both subtests exercise that path end-to-end through the real
+// controller socket under StartWithSupervisor.
+//
+// AC8 verification vehicle: the mechanically tested unit is the per-step
+// respawn latency — a single drain → respawn cycle measured by the wall-clock
+// gap between consecutive spawn markers. The full "no step in the chain
+// regresses to 4 ticks" property is delegated to RC observation of that same
+// per-step signal; automating an N-cycle loop here would add wall-clock
+// flakiness without strengthening the per-step bound that already
+// discriminates the fix from the bug.
+//
+// Detection is provider-agnostic and dolt-free: the worker stand-in appends a
+// timestamped marker line each time it spawns, so the count and spacing of
+// marker lines measure respawn cadence directly. The file beads provider keeps
+// tier B free of an external dolt dependency, and the routed demand beads are
+// written straight into the in-process store file that the reconciler's
+// default scale_check reads.
+func TestLifecycle_DrainAckResponsiveRespawn(t *testing.T) {
+	t.Run("prequeued_respawn_2364", func(t *testing.T) {
+		// Long patrol interval: the only fast path to a replacement is the
+		// drain-ack poke. Without the fix the reconciler would not observe the
+		// drain until the next 60s tick, so a sub-40s respawn proves the poke
+		// drove an immediate reconcile.
+		runResponsiveRespawn(t, "60s", 40*time.Second, 50*time.Second)
+	})
+	t.Run("coldpool_arrival_2251", func(t *testing.T) {
+		// Short patrol: a cold pool (0 active) may use ordinary patrol timing to
+		// discover routed work. The measured post-drain replacement still covers
+		// #2251's arrival ordering over the shared drain-ack poke path.
+		runResponsiveRespawn(t, "10s", 30*time.Second, 30*time.Second)
+	})
+}
+
+// runResponsiveRespawn drives one responsive-respawn scenario: it stands up a
+// min=0/max=1 pool with pre-queued routed work, lets the worker stand-in
+// spawn-mark-drain-exit, and asserts that a replacement spawns within
+// maxRespawnLatency of the first worker. firstMarkerTimeout bounds the initial
+// cold scale-up. patrolInterval tunes how strongly the poke is isolated from
+// the patrol tick (a long interval makes the poke the only fast path).
+func runResponsiveRespawn(t *testing.T, patrolInterval string, maxRespawnLatency, firstMarkerTimeout time.Duration) {
+	t.Helper()
+	c := helpers.NewCity(t, testEnvB)
+	c.Init("claude")
+
+	scriptCmd, markersPath := writeRespawnMarkerScript(t, c)
+	writeRespawnPoolConfig(t, c, scriptCmd, patrolInterval)
+	writePrequeuedRoutedBeads(t, c, "worker", 4)
+
+	c.StartWithSupervisor()
+
+	// The cold pool must scale from zero to service the routed work.
+	if !c.WaitForCondition(func() bool {
+		return len(readRespawnMarkers(t, markersPath)) >= 1
+	}, firstMarkerTimeout) {
+		out, _ := c.GC("status", "--city", c.Dir)
+		t.Fatalf("pool worker never spawned to service pre-queued routed work within %s\nstatus:\n%s", firstMarkerTimeout, out)
+	}
+
+	// A replacement must spawn after the first worker drain-acked. Poll past
+	// the assertion bound so a marker landing right at the boundary is still
+	// observed before we measure it.
+	deadline := time.Now().Add(maxRespawnLatency + 15*time.Second)
+	for time.Now().Before(deadline) {
+		if len(readRespawnMarkers(t, markersPath)) >= 2 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	markers := readRespawnMarkers(t, markersPath)
+	if len(markers) < 2 {
+		out, _ := c.GC("status", "--city", c.Dir)
+		t.Fatalf("replacement worker did not spawn after drain-ack (poke not honored?); markers=%v\nstatus:\n%s", markers, out)
+	}
+
+	latency := time.Duration((markers[1] - markers[0]) * float64(time.Second))
+	if latency > maxRespawnLatency {
+		t.Fatalf("respawn latency %s exceeds responsive bound %s (markers=%v, patrol=%s)",
+			latency, maxRespawnLatency, markers, patrolInterval)
+	}
+	t.Logf("observed %d spawns; first respawn latency %s (bound %s, patrol %s)",
+		len(markers), latency, maxRespawnLatency, patrolInterval)
+}
+
+// writeRespawnMarkerScript writes the pool-worker stand-in: it appends a
+// timestamped marker line, calls the no-arg gc runtime drain-ack (which pokes
+// the controller via GC_CITY_PATH from the agent env), then exits. Returns the
+// start_command and the markers file path.
+func writeRespawnMarkerScript(t *testing.T, c *helpers.City) (scriptCmd, markersPath string) {
+	t.Helper()
+	scriptsDir := filepath.Join(c.Dir, ".gc", "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markersPath = filepath.Join(c.Dir, ".gc", "respawn-markers.txt")
+	script := fmt.Sprintf(`#!/bin/sh
+# Pool-worker stand-in for the responsive-respawn acceptance test. Each spawned
+# worker appends one timestamped marker line, drain-acks (poking the controller
+# so a replacement is reconciled immediately rather than on the next patrol
+# tick), then exits. No set -e: a failing drain-ack must not skip the marker.
+MARKERS=%q
+printf 'RUN %%s\n' "$(date +%%s)" >> "$MARKERS"
+gc runtime drain-ack 2>/dev/null || true
+sleep 1
+exit 0
+`, markersPath)
+	scriptPath := filepath.Join(scriptsDir, "respawn-marker.sh")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return "bash " + scriptPath, markersPath
+}
+
+// writeRespawnPoolConfig writes city.toml (workspace + file beads provider +
+// tuned daemon patrol interval) and a single city-scoped pool agent
+// (min=0/max=1, wake_mode=fresh) under the directory-based agents/worker/
+// surface. Inline [[agent]] tables in city.toml are a rejected PackV1 surface
+// under schema-2 enforcement, so the agent must live in agents/<name>/agent.toml.
+func writeRespawnPoolConfig(t *testing.T, c *helpers.City, scriptCmd, patrolInterval string) {
+	t.Helper()
+	cityName := filepath.Base(c.Dir)
+	c.WriteConfig(fmt.Sprintf(`[workspace]
+name = %q
+
+[beads]
+provider = "file"
+
+[daemon]
+patrol_interval = %q
+`, cityName, patrolInterval))
+	c.WriteV2AgentDir("worker",
+		fmt.Sprintf("start_command = %q", scriptCmd),
+		`wake_mode = "fresh"`,
+		"min_active_sessions = 0",
+		"max_active_sessions = 1",
+	)
+}
+
+// writePrequeuedRoutedBeads seeds the file beads store with n open, unassigned
+// task beads routed to the given pool template. The reconciler's default
+// scale_check counts these as pool demand (it reads the in-process store's
+// Ready() set and matches metadata gc.routed_to), so a min=0/max=1 pool scales
+// up to service them. A surplus of beads keeps demand positive across several
+// drain → respawn cycles regardless of whether the reconciler assigns a bead
+// per spawn.
+func writePrequeuedRoutedBeads(t *testing.T, c *helpers.City, template string, n int) {
+	t.Helper()
+	type fileBead struct {
+		ID        string            `json:"id"`
+		Title     string            `json:"title"`
+		Status    string            `json:"status"`
+		Type      string            `json:"issue_type"`
+		Priority  int               `json:"priority"`
+		CreatedAt string            `json:"created_at"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	store := struct {
+		Seq   int        `json:"seq"`
+		Beads []fileBead `json:"beads"`
+	}{Seq: n}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := 1; i <= n; i++ {
+		store.Beads = append(store.Beads, fileBead{
+			ID:        fmt.Sprintf("prequeued-%d", i),
+			Title:     fmt.Sprintf("pre-queued pool work %d", i),
+			Status:    "open",
+			Type:      "task",
+			Priority:  2,
+			CreatedAt: now,
+			Metadata:  map[string]string{"gc.routed_to": template},
+		})
+	}
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, ".gc", "beads.json"), data, 0o644); err != nil {
+		t.Fatalf("writing pre-queued beads.json: %v", err)
+	}
+}
+
+// readRespawnMarkers parses the marker file into spawn timestamps (epoch
+// seconds). A missing file yields no markers.
+func readRespawnMarkers(t *testing.T, path string) []float64 {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("reading respawn markers: %v", err)
+		}
+		return nil
+	}
+	var ts []float64
+	for lineNum, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "RUN ") {
+			continue
+		}
+		v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, "RUN ")), 64)
+		if err != nil {
+			t.Fatalf("parsing respawn marker line %d %q: %v", lineNum+1, line, err)
+		}
+		ts = append(ts, v)
+	}
+	return ts
+}
+
+// TestLifecycle_PackCacheSelfHealsOnStart verifies that gc start re-hydrates
+// the user-global bundled pack cache even if it was deleted after init.
+// End-to-end regression test for Bug 4 (2026-03-18), updated for the
+// imports-based composition model: builtin packs at their canonical pins
+// resolve from the GC_HOME cache that the binary self-heals from its
+// embedded content.
+func TestLifecycle_PackCacheSelfHealsOnStart(t *testing.T) {
 	c := helpers.NewCity(t, testEnvB)
 	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
-	// Verify packs exist after init.
-	if !c.HasFile("packs/gastown/pack.toml") {
-		t.Fatal("packs not materialized after init")
+	// gc init --from now completes startup registration. Stopping a
+	// supervisor-managed city also unregisters it, leaving the fixture ready
+	// for the explicit gc start path below.
+	if out, err := c.GC("stop", c.Dir); err != nil {
+		t.Fatalf("gc stop after init-from failed: %v\n%s", err, out)
+	}
+	if out, err := c.GC("supervisor", "stop", "--wait"); err != nil {
+		t.Fatalf("gc supervisor stop after init-from failed: %v\n%s", err, out)
 	}
 
-	// Delete packs to simulate partial init failure.
-	if err := os.RemoveAll(filepath.Join(c.Dir, "packs")); err != nil {
-		t.Fatal(err)
+	cacheRoot := filepath.Join(testEnvB.Get("GC_HOME"), "cache", "repos")
+	if _, err := os.Stat(cacheRoot); err != nil {
+		t.Fatalf("bundled pack cache missing after init: %v", err)
 	}
 
-	// gc start registers with the supervisor, which materializes packs
-	// during registration (before config load).
+	// Atomically move the user-global cache aside to simulate eviction (or a
+	// fresh host). A recursive delete can race a pack-cache writer that was
+	// already winding down when the supervisor stopped.
+	evictedCacheRoot := cacheRoot + ".evicted"
+	if err := os.Rename(cacheRoot, evictedCacheRoot); err != nil {
+		t.Fatalf("evicting bundled pack cache: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(evictedCacheRoot); err != nil {
+			t.Errorf("removing evicted bundled pack cache: %v", err)
+		}
+	})
+	if _, err := os.Stat(cacheRoot); !os.IsNotExist(err) {
+		t.Fatalf("bundled pack cache still present after eviction: %v", err)
+	}
+
+	// gc start registers with the supervisor; builtin readiness re-hydrates
+	// the bundled cache before config load.
 	out, err := c.GC("start", c.Dir)
 	if err != nil {
 		t.Logf("gc start returned error (may be expected): %v\n%s", err, out)
 	}
 
-	// Wait for the supervisor to materialize packs (reconcile tick).
 	found := c.WaitForCondition(func() bool {
-		return c.HasFile("packs/gastown/pack.toml")
+		entries, readErr := os.ReadDir(cacheRoot)
+		return readErr == nil && len(entries) > 0
 	}, 60*time.Second)
-
 	if !found {
-		t.Fatal("packs/gastown/pack.toml not re-materialized on start — Bug 4 regression")
+		t.Fatal("bundled pack cache not re-hydrated on start — Bug 4 regression")
 	}
-	if !c.HasFile("packs/maintenance/pack.toml") {
-		t.Fatal("packs/maintenance/pack.toml not re-materialized on start")
+
+	// The composed config must resolve every pinned import from the
+	// re-hydrated cache.
+	if out, err := c.GC("config", "show", "--validate"); err != nil {
+		t.Fatalf("gc config show --validate after self-heal failed: %v\n%s", err, out)
 	}
 }

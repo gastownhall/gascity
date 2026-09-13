@@ -2,36 +2,19 @@ package beadmail
 
 import (
 	"errors"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
-type hiddenMessageStore struct {
-	*beads.MemStore
-}
-
-func (s hiddenMessageStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Label == "gc:message" {
-		return s.MemStore.List(query)
-	}
-	all, err := s.MemStore.List(beads.ListQuery{AllowScan: true})
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]beads.Bead, 0, len(all))
-	for _, b := range all {
-		if !isMessage(b) {
-			filtered = append(filtered, b)
-		}
-	}
-	return beads.ApplyListQuery(filtered, query), nil
-}
-
 // noListScanStore errors when List is called without a filter, proving that
-// Inbox/Count/All use targeted queries (assignee+type or label) instead
-// of broad scans.
+// Inbox/Count/All use targeted type queries instead of broad scans.
 type noListScanStore struct {
 	*beads.MemStore
 }
@@ -41,6 +24,40 @@ func (s noListScanStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 		return nil, errors.New("unfiltered List() must not be called — use targeted queries")
 	}
 	return s.MemStore.List(query)
+}
+
+type noBroadSessionRouteStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.t.Fatalf("recipient routing used broad session scan: %+v", query)
+	}
+	return s.MemStore.List(query)
+}
+
+type messageListProbeStore struct {
+	*beads.MemStore
+	messageQueries []beads.ListQuery
+}
+
+func (s *messageListProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == "message" {
+		s.messageQueries = append(s.messageQueries, query)
+	}
+	return s.MemStore.List(query)
+}
+
+type noCloseAllStore struct {
+	*beads.MemStore
+	t *testing.T
+}
+
+func (s noCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	s.t.Fatal("ArchiveMany used CloseAll; mail archive must delete each bead eagerly")
+	return 0, nil
 }
 
 func TestInboxDoesNotCallBroadList(t *testing.T) {
@@ -58,6 +75,402 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Errorf("Inbox = %d messages, want 1", len(msgs))
 	}
+}
+
+func TestMessageCreatedInWispTier(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "hello", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	items, err := store.List(beads.ListQuery{
+		Type:      "message",
+		TierMode:  beads.TierWisps,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != sent.ID {
+		t.Fatalf("wisp-tier messages = %#v, want sent message %s", items, sent.ID)
+	}
+	if !items[0].Ephemeral {
+		t.Fatalf("sent message Ephemeral = false, want true")
+	}
+}
+
+func TestProviderWithSessionDirectoryKeepsMessageRowsInMessaging(t *testing.T) {
+	messaging := beads.NewMemStore()
+	sessions := beads.NewMemStore()
+	sessionBead, err := sessions.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias": "split-sender",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewWithSessionDirectory(messaging, session.NewStore(beads.SessionStore{Store: sessions}))
+	message, err := p.Send("split-sender", sessionBead.ID, "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := messaging.Get(message.ID); err != nil {
+		t.Fatalf("message not in Messaging store: %v", err)
+	}
+	rows, err := sessions.List(beads.ListQuery{Type: messageBeadType, IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("list messages in Sessions store: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("message rows leaked to Sessions store: %#v", rows)
+	}
+}
+
+func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor,witness",
+			"session_name":  "runtime-sky",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	for _, to := range []string{"sky", sessionBead.ID, "mayor", "runtime-sky"} {
+		if _, err := p.Send("human", to, "", "for "+to); err != nil {
+			t.Fatalf("Send(%q): %v", to, err)
+		}
+	}
+	if _, err := p.Send("human", "other", "", "not for sky"); err != nil {
+		t.Fatalf("Send(other): %v", err)
+	}
+
+	msgs, err := p.Inbox("sky")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("Inbox = %#v, want four routed messages", msgs)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+	query := store.messageQueries[0]
+	wantRoutes := []string{"sky", sessionBead.ID, "runtime-sky", "mayor", "witness"}
+	if query.TierMode != beads.TierBoth || query.AllowScan || query.Type != "message" || query.Status != "open" || query.Assignee != "" || !slices.Equal(query.Assignees, wantRoutes) {
+		t.Fatalf("message query = %+v, want one both-tier Assignees scan for %v", query, wantRoutes)
+	}
+	if !query.Live {
+		t.Fatalf("message query = %+v, want live read for command-visible mail freshness", query)
+	}
+}
+
+func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+
+	if _, err := backing.Create(beads.Bead{
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Title:       "fresh",
+		Description: "created after cache prime",
+	}); err != nil {
+		t.Fatalf("Create message in backing store: %v", err)
+	}
+
+	msgs, err := New(cache).Inbox("mayor")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Subject != "fresh" {
+		t.Fatalf("Inbox = %#v, want fresh message from backing store", msgs)
+	}
+}
+
+func TestInboxIncludesEphemeralMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	recipient := "agent-a"
+
+	ephemeral, err := store.Create(beads.Bead{
+		Title:       "status",
+		Type:        "message",
+		Status:      "open",
+		Assignee:    recipient,
+		From:        "human",
+		Description: "stored in wisps tier",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+
+	msgs, err := p.Inbox(recipient)
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != ephemeral.ID {
+		t.Fatalf("Inbox = %#v, want ephemeral message %s", msgs, ephemeral.ID)
+	}
+}
+
+func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
+	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "sky",
+			"alias_history": "mayor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	msg1, err := p.Send("human", "sky", "", "current alias")
+	if err != nil {
+		t.Fatalf("Send sky: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.ID, "", "session id"); err != nil {
+		t.Fatalf("Send session ID: %v", err)
+	}
+	readMsg, err := p.Send("human", "mayor", "", "read historical alias")
+	if err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients([]string{"sky", "mayor", "sky"})
+	if err != nil {
+		t.Fatalf("InboxRecipients: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("InboxRecipients = %#v, want two unread messages", msgs)
+	}
+	if msgs[0].ID != msg1.ID && msgs[1].ID != msg1.ID {
+		t.Fatalf("InboxRecipients = %#v, want current-alias message %s", msgs, msg1.ID)
+	}
+	if len(store.messageQueries) != 1 {
+		t.Fatalf("message query count = %d, want 1; queries=%+v", len(store.messageQueries), store.messageQueries)
+	}
+}
+
+func TestInboxRecipientsEmptyReturnsAllUnreadMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	if _, err := p.Send("human", "mayor", "", "one"); err != nil {
+		t.Fatalf("Send mayor: %v", err)
+	}
+	readMsg, err := p.Send("human", "worker", "", "read")
+	if err != nil {
+		t.Fatalf("Send worker: %v", err)
+	}
+	if _, err := p.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	msgs, err := p.InboxRecipients(nil)
+	if err != nil {
+		t.Fatalf("InboxRecipients(nil): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "one" {
+		t.Fatalf("InboxRecipients(nil) = %#v, want one unread message", msgs)
+	}
+}
+
+func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		if strings.Contains(cmd, "--label=gc:message") {
+			t.Fatalf("mail check used gc:message label supplement: %s", cmd)
+		}
+		if strings.Contains(cmd, "bd show --json mayor") {
+			return nil, errors.New("not found")
+		}
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field") {
+			return []byte(`[]`), nil
+		}
+		if strings.Contains(cmd, "bd query --json") {
+			return []byte(`[]`), nil
+		}
+		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open") {
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true,"labels":["gc:message"]}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
+	}
+}
+
+func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
+	recipient := "gascity/workflows.codex-max"
+	var messageListCalls int
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json "+recipient):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			if !strings.Contains(cmd, "--assignee="+recipient) {
+				t.Fatalf("slash recipient message query = %s, want single --assignee filter", cmd)
+			}
+			messageListCalls++
+			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			if strings.Contains(cmd, recipient) {
+				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+			}
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check(recipient)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-w" {
+		t.Fatalf("Check = %#v, want msg-w", msgs)
+	}
+}
+
+func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
+	var messageListCalls int
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		cmd := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(cmd, "bd show --json mayor"):
+			return nil, errors.New("not found")
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd query --json"):
+			return []byte(`[]`), nil
+		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
+			messageListCalls++
+			return []byte(`[{"id":"msg-1","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"mayor","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
+		}
+		return nil, errors.New("unexpected command: " + cmd)
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	msgs, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if messageListCalls != 1 {
+		t.Fatalf("message list calls = %d, want 1", messageListCalls)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "msg-1" {
+		t.Fatalf("Check = %#v, want msg-1", msgs)
+	}
+}
+
+func TestMessageQueriesUseBothTiers(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	wisp, err := store.Create(beads.Bead{
+		Title:       "wisp status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "wisp body",
+		Labels:      []string{"thread:t1"},
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+	msg, err := store.Create(beads.Bead{
+		Title:       "issue status",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "issue body",
+		Labels:      []string{"thread:t2"},
+	})
+	if err != nil {
+		t.Fatalf("Create issue-tier message: %v", err)
+	}
+
+	inbox, err := p.Check("mayor")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(inbox) != 2 || !hasMailMessageID(inbox, wisp.ID) || !hasMailMessageID(inbox, msg.ID) {
+		t.Fatalf("Check = %#v, want wisp %s and issue %s", inbox, wisp.ID, msg.ID)
+	}
+
+	all, err := p.All("")
+	if err != nil {
+		t.Fatalf("All: %v", err)
+	}
+	if len(all) != 2 || !hasMailMessageID(all, wisp.ID) || !hasMailMessageID(all, msg.ID) {
+		t.Fatalf("All = %#v, want wisp %s and issue %s", all, wisp.ID, msg.ID)
+	}
+
+	total, unread, err := p.Count("mayor")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 2 || unread != 2 {
+		t.Fatalf("Count = (%d, %d), want (2, 2)", total, unread)
+	}
+
+	thread, err := p.Thread("t1")
+	if err != nil {
+		t.Fatalf("Thread: %v", err)
+	}
+	if len(thread) != 1 || thread[0].ID != wisp.ID {
+		t.Fatalf("Thread = %#v, want wisp thread message %s", thread, wisp.ID)
+	}
+}
+
+func hasMailMessageID(messages []mail.Message, id string) bool {
+	for _, message := range messages {
+		if message.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestCountDoesNotCallBroadList(t *testing.T) {
@@ -179,8 +592,202 @@ func TestSend(t *testing.T) {
 	if b.Status != "open" {
 		t.Errorf("bead Status = %q, want %q", b.Status, "open")
 	}
-	if !hasLabel(b.Labels, "gc:message") {
-		t.Error("bead missing gc:message label")
+	if hasLabel(b.Labels, "gc:message") {
+		t.Error("bead should no longer carry the legacy gc:message label")
+	}
+}
+
+func TestSendStoresStableSessionRouteWithoutChangingDisplaySender(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-9",
+			"session_name": "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	msg, err := p.Send("gascity/workflows.codex-min-9", "human", "Approval", "please approve")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	if msg.From != "gascity/workflows.codex-min-9" {
+		t.Fatalf("message From = %q, want display alias", msg.From)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.From != "gascity/workflows.codex-min-9" {
+		t.Fatalf("bead From = %q, want display alias", b.From)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("%s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "gascity/workflows.codex-min-9" {
+		t.Fatalf("%s = %q, want original display alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+}
+
+func TestReplyUsesStoredSenderSessionIDAfterAliasRename(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "old-sender",
+			"session_name": "sender-gc-42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	original, err := p.Send("old-sender", "human", "Approval", "please approve")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := store.SetMetadataBatch(sender.ID, session.UpdatedAliasMetadata(sender.Metadata, "new-sender")); err != nil {
+		t.Fatalf("SetMetadataBatch(alias rename): %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "human", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.To != "old-sender" {
+		t.Fatalf("reply To = %q, want original display sender", reply.To)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want stable sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[toSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("reply %s = %q, want %q", toSessionIDMetadataKey, b.Metadata[toSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[toDisplayMetadataKey] != "old-sender" {
+		t.Fatalf("reply %s = %q, want original display sender", toDisplayMetadataKey, b.Metadata[toDisplayMetadataKey])
+	}
+	inbox, err := p.Inbox("new-sender")
+	if err != nil {
+		t.Fatalf("Inbox(new-sender): %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != reply.ID {
+		t.Fatalf("Inbox(new-sender) = %#v, want reply %s", inbox, reply.ID)
+	}
+	oldInbox, err := p.Inbox("old-sender")
+	if err != nil {
+		t.Fatalf("Inbox(old-sender): %v", err)
+	}
+	if len(oldInbox) != 1 || oldInbox[0].ID != reply.ID {
+		t.Fatalf("Inbox(old-sender) = %#v, want reply %s", oldInbox, reply.ID)
+	}
+	total, unread, err := p.Count("new-sender")
+	if err != nil {
+		t.Fatalf("Count(new-sender): %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Fatalf("Count(new-sender) = (%d, %d), want (1, 1)", total, unread)
+	}
+}
+
+func TestSendFallsBackToLiteralSenderWhenSessionIdentifierIsAmbiguous(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias": "duplicate",
+			},
+		}); err != nil {
+			t.Fatalf("Create session %d: %v", i, err)
+		}
+	}
+
+	msg, err := p.Send("duplicate", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if msg.From != "duplicate" {
+		t.Fatalf("message From = %q, want literal ambiguous sender", msg.From)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != "" {
+		t.Fatalf("ambiguous sender stored %s = %q, want empty", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey])
+	}
+}
+
+func TestInboxFallsBackToLiteralRecipientWhenSessionIdentifierIsAmbiguous(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias": "duplicate",
+			},
+		}); err != nil {
+			t.Fatalf("Create session %d: %v", i, err)
+		}
+	}
+	msg, err := p.Send("human", "duplicate", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	inbox, err := p.Inbox("duplicate")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != msg.ID {
+		t.Fatalf("Inbox = %#v, want literal recipient message %s", inbox, msg.ID)
+	}
+}
+
+func TestSendRejectsEmptyRecipient(t *testing.T) {
+	p := New(beads.NewMemStore())
+	if _, err := p.Send("human", "", "subject", "body"); err == nil {
+		t.Fatal("Send with empty recipient should error")
+	}
+}
+
+func TestGetRejectsNonMessageType(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	b, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(b.ID); err == nil {
+		t.Error("Get should reject non-message bead")
+	}
+
+	untyped, err := store.Create(beads.Bead{Title: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(untyped.ID); err == nil {
+		t.Error("Get should reject bead with empty type (Type=\"message\" is now required)")
 	}
 }
 
@@ -245,26 +852,6 @@ func TestInboxExcludesRead(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Errorf("Inbox = %d messages, want 0 (read messages excluded)", len(msgs))
-	}
-}
-
-func TestInboxUsesMessageLabelQueryWhenListOmitsMessages(t *testing.T) {
-	base := beads.NewMemStore()
-	p := New(hiddenMessageStore{MemStore: base})
-
-	if _, err := p.Send("human", "corp/lawrence", "", "for lawrence"); err != nil {
-		t.Fatal(err)
-	}
-
-	msgs, err := p.Inbox("corp/lawrence")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("Inbox = %d messages, want 1", len(msgs))
-	}
-	if msgs[0].Body != "for lawrence" {
-		t.Errorf("Body = %q, want %q", msgs[0].Body, "for lawrence")
 	}
 }
 
@@ -430,27 +1017,6 @@ func TestMarkReadMarkUnread(t *testing.T) {
 	}
 }
 
-func TestCountUsesMessageLabelQueryWhenListOmitsMessages(t *testing.T) {
-	base := beads.NewMemStore()
-	p := New(hiddenMessageStore{MemStore: base})
-
-	sent, err := p.Send("human", "corp/lawrence", "", "count me")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.MarkRead(sent.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	total, unread, err := p.Count("corp/lawrence")
-	if err != nil {
-		t.Fatalf("Count: %v", err)
-	}
-	if total != 1 || unread != 0 {
-		t.Fatalf("Count = (%d,%d), want (1,0)", total, unread)
-	}
-}
-
 // --- Archive ---
 
 func TestArchive(t *testing.T) {
@@ -466,13 +1032,157 @@ func TestArchive(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	// Bead should be closed.
 	b, err := store.Get(sent.ID)
 	if err != nil {
-		t.Fatalf("store.Get: %v", err)
+		t.Fatalf("store.Get(%s) after Archive: %v (want bead retained)", sent.ID, err)
 	}
 	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "dismiss me" {
+		t.Errorf("bead body = %q, want \"dismiss me\"", b.Description)
+	}
+}
+
+// TestLegacyClosedMessageBeadTreatedAsRemoved covers the upgrade path for a
+// store written by an earlier release that archived a message by closing its
+// bead instead of deleting it. The eager-delete archive contract says an
+// archived message is gone from every view, so a leftover closed
+// Type=="message" bead must not stay readable or mutable through the direct-ID
+// operations or thread lookup, while explicit Archive must still delete it.
+func TestLegacyClosedMessageBeadTreatedAsRemoved(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	legacy, err := p.Send("alice", "bob", "legacy", "closed by an old release")
+	if err != nil {
+		t.Fatalf("Send legacy: %v", err)
+	}
+	reply, err := p.Reply(legacy.ID, "bob", "RE: legacy", "still here")
+	if err != nil {
+		t.Fatalf("Reply before close: %v", err)
+	}
+	survivor, err := p.Send("alice", "bob", "survivor", "keep me")
+	if err != nil {
+		t.Fatalf("Send survivor: %v", err)
+	}
+
+	// Simulate the legacy archive: close the bead in place instead of deleting
+	// it, exactly what a close-on-archive release left behind.
+	if err := store.Close(legacy.ID); err != nil {
+		t.Fatalf("store.Close(legacy): %v", err)
+	}
+
+	// Direct-ID operations must treat the closed legacy bead as removed.
+	if _, err := p.Get(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Read(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Read(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkRead(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkRead(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkUnread(legacy.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkUnread(legacy closed) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Reply(legacy.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(legacy closed) error = %v, want ErrNotFound", err)
+	}
+
+	// List views already gate on open status; assert bob no longer sees the
+	// legacy message, only the survivor.
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if got := messageIDsOf(inbox); len(got) != 1 || got[0] != survivor.ID {
+		t.Errorf("Inbox(bob) = %v, want [%s]", got, survivor.ID)
+	}
+	total, unread, err := p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Errorf("Count(bob) = (%d, %d), want (1, 1)", total, unread)
+	}
+
+	// Thread lookup must exclude the closed legacy bead but keep the open reply,
+	// whether addressed by the stable thread ID or the removed message's own ID.
+	byThreadID, err := p.Thread(legacy.ThreadID)
+	if err != nil {
+		t.Fatalf("Thread(stable ID): %v", err)
+	}
+	if got := messageIDsOf(byThreadID); len(got) != 1 || got[0] != reply.ID {
+		t.Errorf("Thread(stable ID) = %v, want [%s]", got, reply.ID)
+	}
+	byRemovedID, err := p.Thread(legacy.ID)
+	if err != nil {
+		t.Fatalf("Thread(removed ID): %v", err)
+	}
+	for _, m := range byRemovedID {
+		if m.ID == legacy.ID {
+			t.Errorf("Thread(removed ID) returned removed message %q", legacy.ID)
+		}
+	}
+
+	// Archiving an already-closed legacy message is idempotent (ErrAlreadyArchived)
+	// and must NOT destroy the store row: #4422 forbids store.Delete on any archive
+	// path, including legacy cleanup. The bead stays retained and recoverable via
+	// bd show / store.Get, while remaining removed from every mail view (asserted
+	// above). View-removal (#4350) and store-retention (#4422) are orthogonal.
+	if err := p.Archive(legacy.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive(legacy closed) error = %v, want ErrAlreadyArchived", err)
+	}
+	retained, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("store.Get(legacy) after Archive: %v (want bead retained, not deleted)", err)
+	}
+	if retained.Status != "closed" {
+		t.Errorf("legacy bead status after Archive = %q, want \"closed\"", retained.Status)
+	}
+	if retained.Description != "closed by an old release" {
+		t.Errorf("legacy bead body after Archive = %q, want retained", retained.Description)
+	}
+}
+
+func messageIDsOf(msgs []mail.Message) []string {
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
+func TestArchiveCandidatesUseBothTiers(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	wisp, err := store.Create(beads.Bead{
+		Title:       "dismiss wisp",
+		Type:        "message",
+		Assignee:    "mayor",
+		From:        "human",
+		Description: "wisp body",
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create ephemeral message: %v", err)
+	}
+	issue, err := p.Send("human", "mayor", "dismiss issue", "issues body")
+	if err != nil {
+		t.Fatalf("Send issues-tier message: %v", err)
+	}
+
+	matches, err := p.ArchiveCandidates(ArchiveFilter{
+		Recipients:    []string{"mayor"},
+		SubjectPrefix: "dismiss",
+	})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(matches) != 2 || !hasMailMessageID(matches, issue.ID) || !hasMailMessageID(matches, wisp.ID) {
+		t.Fatalf("ArchiveCandidates = %#v, want issues-tier message %s and wisp message %s", matches, issue.ID, wisp.ID)
 	}
 }
 
@@ -502,10 +1212,36 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 	}
 	store.Close(sent.ID) //nolint:errcheck
 
-	// Archiving already-closed message returns ErrAlreadyArchived.
+	// Archiving an already-closed message returns ErrAlreadyArchived without
+	// deleting the bead (idempotent, body retained).
 	err = p.Archive(sent.ID)
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
 		t.Errorf("Archive already closed: got %v, want ErrAlreadyArchived", err)
+	}
+	b, getErr := store.Get(sent.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s) after Archive of closed bead: %v (want bead retained)", sent.ID, getErr)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+}
+
+func TestArchiveAlreadyDeleted(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+
+	err = p.Archive(sent.ID)
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive already deleted: got %v, want ErrAlreadyArchived", err)
 	}
 }
 
@@ -514,9 +1250,247 @@ func TestArchiveNotFound(t *testing.T) {
 	p := New(store)
 
 	err := p.Archive("gc-999")
-	if err == nil {
-		t.Error("Archive should fail for nonexistent ID")
+	if !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Errorf("Archive nonexistent ID: got %v, want ErrAlreadyArchived", err)
 	}
+}
+
+func TestArchiveRetainsBodyReadableAfterClose(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "dismiss me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	// #4422 guarantees the row is RETAINED at the store, not destroyed — the fix
+	// is that Archive closes instead of store.Delete. Recovery is via bd show /
+	// store.Get, NOT the mail API: p.Get correctly hides an archived message per
+	// #4350's view contract (isRemovedMessageBead). Assert the durability claim at
+	// the layer that actually carries it.
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after Archive: %v (want body retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("archived bead status = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "dismiss me" {
+		t.Errorf("archived bead body = %q, want \"dismiss me\"", b.Description)
+	}
+	// And it stays hidden from the mail API, like every archived message.
+	if _, err := p.Get(sent.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("p.Get after Archive err = %v, want ErrNotFound (hidden from mail views)", err)
+	}
+}
+
+func TestArchiveManyClosesAndRetains(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
+		}
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
+		}
+	}
+}
+
+func TestArchiveManyReportsPerIDResults(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{Title: "not mail", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, task.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want 3", len(results))
+	}
+	if results[0].Err != nil {
+		t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+	}
+	if results[1].Err == nil || !strings.Contains(results[1].Err.Error(), "not a message") {
+		t.Errorf("results[1].Err = %v, want not a message", results[1].Err)
+	}
+	if results[2].Err != nil {
+		t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		bead, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s) after ArchiveMany: %v (want bead retained)", id, err)
+		}
+		if bead.Status != "closed" {
+			t.Errorf("bead %s status = %q, want \"closed\"", id, bead.Status)
+		}
+	}
+	if _, err := store.Get(task.ID); err != nil {
+		t.Fatalf("task bead should remain after ArchiveMany partial error: %v", err)
+	}
+}
+
+// TestArchiveDoubleArchiveRetainsBody guards the edge case where the same
+// message is archived twice: the second call must NOT delete the bead (which
+// is now "closed" after the first call hits the closed-branch and returns
+// ErrAlreadyArchived without mutating it).
+func TestArchiveDoubleArchiveRetainsBody(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("human", "mayor", "", "archive twice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(sent.ID); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
+	if err := p.Archive(sent.ID); !errors.Is(err, mail.ErrAlreadyArchived) {
+		t.Fatalf("second Archive: err = %v, want ErrAlreadyArchived", err)
+	}
+
+	b, err := store.Get(sent.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after double Archive: %v (want bead retained)", sent.ID, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("bead status after double Archive = %q, want \"closed\"", b.Status)
+	}
+	if b.Description != "archive twice" {
+		t.Errorf("bead body after double Archive = %q, want \"archive twice\"", b.Description)
+	}
+}
+
+func TestArchiveManyDoesNotUseCloseAll(t *testing.T) {
+	store := noCloseAllStore{MemStore: beads.NewMemStore(), t: t}
+	p := New(store)
+
+	a, err := p.Send("human", "mayor", "", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.Send("human", "mayor", "", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := p.ArchiveMany([]string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ArchiveMany: %v", err)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("ArchiveMany[%d].Err = %v", i, r.Err)
+		}
+	}
+}
+
+func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
+	base := beads.NewMemStore()
+	store := noMessageGetStore{MemStore: base}
+	p := New(store)
+
+	matchingA, err := p.Send("human", "human", "Dolt health advisory one", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingB, err := p.Send("human", "human", "Dolt health advisory two", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := p.Send("human", "human", "Operator handoff", "leave open")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matches, results, err := p.ArchiveMatching(ArchiveFilter{
+		Recipients:      []string{"human"},
+		SubjectPrefix:   "Dolt health",
+		Limit:           10,
+		CaseInsensitive: true,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(matches) != 2 || len(results) != 2 {
+		t.Fatalf("ArchiveMatching returned %d matches/%d results, want 2/2", len(matches), len(results))
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Fatalf("results[%d].Err = %v", i, r.Err)
+		}
+	}
+	// Retention contract: matched messages are closed, not destroyed, so the
+	// bead stays retrievable and its body stays readable (see #4422).
+	for _, id := range []string{matchingA.ID, matchingB.ID} {
+		got, err := base.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after archive: %v, want the bead retained", id, err)
+		}
+		if got.Status != "closed" {
+			t.Fatalf("archived message %s status = %q, want closed", id, got.Status)
+		}
+		if got.Description == "" {
+			t.Fatalf("archived message %s lost its body, want it retained", id)
+		}
+	}
+	got, err := base.Get(other.ID)
+	if err != nil {
+		t.Fatalf("Get(other): %v", err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("nonmatching message status = %q, want open", got.Status)
+	}
+}
+
+type noMessageGetStore struct {
+	*beads.MemStore
+}
+
+func (s noMessageGetStore) Get(id string) (beads.Bead, error) {
+	if strings.HasPrefix(id, "gc-") {
+		return beads.Bead{}, errors.New("per-message Get must not be used")
+	}
+	return s.MemStore.Get(id)
 }
 
 // --- Delete ---
@@ -536,10 +1510,10 @@ func TestDelete(t *testing.T) {
 
 	b, err := store.Get(sent.ID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("store.Get(%s) after Delete: %v (want bead retained)", sent.ID, err)
 	}
 	if b.Status != "closed" {
-		t.Errorf("bead Status = %q, want %q", b.Status, "closed")
+		t.Errorf("bead status = %q, want \"closed\"", b.Status)
 	}
 }
 
@@ -570,6 +1544,652 @@ func TestReply(t *testing.T) {
 	}
 	if reply.ReplyTo != sent.ID {
 		t.Errorf("Reply ReplyTo = %q, want %q", reply.ReplyTo, sent.ID)
+	}
+
+	wispMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierWisps,
+	})
+	if err != nil {
+		t.Fatalf("List wisp-tier messages: %v", err)
+	}
+	if len(wispMessages) != 2 {
+		t.Fatalf("wisp-tier messages = %d, want sent message and reply", len(wispMessages))
+	}
+	replyInWisps := false
+	for _, b := range wispMessages {
+		if b.ID == reply.ID {
+			replyInWisps = true
+			if !b.Ephemeral {
+				t.Fatalf("reply Ephemeral = false, want true")
+			}
+		}
+	}
+	if !replyInWisps {
+		t.Fatalf("reply %s not found in wisp-tier messages: %#v", reply.ID, wispMessages)
+	}
+
+	issueMessages, err := store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		TierMode: beads.TierIssues,
+	})
+	if err != nil {
+		t.Fatalf("List issue-tier messages: %v", err)
+	}
+	if len(issueMessages) != 0 {
+		t.Fatalf("issue-tier messages = %#v, want none", issueMessages)
+	}
+}
+
+// TestReplyDerivesSubjectFromOriginal ensures an empty subject is replaced
+// with "Re: <original-subject>", so underlying stores that require a
+// non-empty title (e.g. BdStore → `bd create`) don't reject the reply.
+func TestReplyDerivesSubjectFromOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply with empty subject: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyPreservesExplicitSubject ensures an explicit subject is passed
+// through unchanged — no automatic "Re:" prefixing.
+func TestReplyPreservesExplicitSubject(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first message")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "Custom subject", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Custom subject" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Custom subject")
+	}
+}
+
+// TestReplyAvoidsDoubleRePrefix ensures that replying to a message whose
+// subject already starts with "Re:" does not produce "Re: Re: ..." when
+// the caller omits the subject.
+func TestReplyAvoidsDoubleRePrefix(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Re: Hello", "body")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(sent.ID, "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q (no double prefix)", reply.Subject, "Re: Hello")
+	}
+}
+
+// TestReplyFallsBackToBodyWhenOriginalTitleEmpty covers the degenerate case
+// where an original message somehow has no title (possible in stores that
+// don't enforce title). The reply still gets a non-empty title.
+func TestReplyFallsBackToBodyWhenOriginalTitleEmpty(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Create a message bead directly without a title.
+	orig, err := store.Create(beads.Bead{
+		Type:     "message",
+		Assignee: "bob",
+		From:     "alice",
+		Labels:   []string{"thread:t1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, err := p.Reply(orig.ID, "bob", "", "a terse reply body")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.Subject == "" {
+		t.Error("Reply Subject is empty; must be non-empty so bd create won't reject")
+	}
+	if reply.Subject != "a terse reply body" {
+		t.Errorf("Reply Subject = %q, want %q (first line of body)", reply.Subject, "a terse reply body")
+	}
+}
+
+// TestReplyAgainstBdStoreValidatesTitle is a regression test that exercises
+// the real BdStore code path: the fake runner emulates `bd create`'s
+// title-required validation. Without a derived title, Reply would fail here.
+func TestReplyAgainstBdStoreValidatesTitle(t *testing.T) {
+	// Fake runner that rejects `bd create` with empty positional title,
+	// the same way the real bd binary does.
+	runner := func(_ string, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			return nil, errors.New("unexpected command: " + name)
+		}
+		switch args[0] {
+		case "create":
+			// args: create --json <title> -t <type> [flags...]
+			if len(args) < 3 {
+				return nil, errors.New("bd create: too few args")
+			}
+			title := args[2]
+			if title == "" {
+				return nil, errors.New(`exit status 1: {"error":"validation failed for issue : title is required"}`)
+			}
+			// Return a minimal issue JSON.
+			id := "bd-" + title
+			return []byte(`{"id":"` + id + `","title":"` + title + `","status":"open","issue_type":"message","created_at":"2026-04-24T00:00:00Z"}`), nil
+		case "show":
+			// bd show --json returns a JSON array.
+			return []byte(`[{"id":"bd-Hello","title":"Hello","status":"open","issue_type":"message","assignee":"bob","from":"alice","created_at":"2026-04-24T00:00:00Z","labels":["thread:t1"]}]`), nil
+		case "update":
+			return []byte(`{}`), nil
+		case "list":
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected bd subcommand: " + args[0])
+	}
+	p := New(beads.NewBdStore(t.TempDir(), runner))
+
+	// Reply with empty subject — must succeed because the provider derives
+	// "Re: Hello" from the original message.
+	reply, err := p.Reply("bd-Hello", "bob", "", "reply body")
+	if err != nil {
+		t.Fatalf("Reply should derive a non-empty title to pass bd validation: %v", err)
+	}
+	if reply.Subject != "Re: Hello" {
+		t.Errorf("Reply Subject = %q, want %q", reply.Subject, "Re: Hello")
+	}
+}
+
+func TestReplyPrefersStoredSenderSessionID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-9",
+			"session_name": "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	responder, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-10",
+			"session_name": "workflows__codex-min-mc-responder",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create responder session: %v", err)
+	}
+	original, err := store.Create(beads.Bead{
+		Title:       "Approval needed",
+		Description: "please approve",
+		Type:        "message",
+		Assignee:    "human",
+		From:        "gascity/workflows.codex-min-9",
+		Labels:      []string{"thread:stable-route"},
+		Metadata: map[string]string{
+			fromSessionIDMetadataKey: sender.ID,
+			fromDisplayMetadataKey:   "gascity/workflows.codex-min-9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create original message: %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "gascity/workflows.codex-min-10", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	if reply.To != "gascity/workflows.codex-min-9" {
+		t.Fatalf("reply To = %q, want sender display alias", reply.To)
+	}
+	if reply.From != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply From = %q, want display alias", reply.From)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != responder.ID {
+		t.Fatalf("reply %s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], responder.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply %s = %q, want responder display alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want stable sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[toSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("reply %s = %q, want %q", toSessionIDMetadataKey, b.Metadata[toSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[toDisplayMetadataKey] != "gascity/workflows.codex-min-9" {
+		t.Fatalf("reply %s = %q, want sender display alias", toDisplayMetadataKey, b.Metadata[toDisplayMetadataKey])
+	}
+}
+
+func TestReplyToClosedSenderSessionIsDiscoverableByHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "gascity/workflows.codex-min-9",
+			"alias_history": "gascity/workflows.codex-min-8",
+			"session_name":  "workflows__codex-min-mc-sender",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create sender session: %v", err)
+	}
+	responder, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/workflows.codex-min-10",
+			"session_name": "workflows__codex-min-mc-responder",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create responder session: %v", err)
+	}
+	original, err := store.Create(beads.Bead{
+		Title:       "Approval needed",
+		Description: "please approve",
+		Type:        "message",
+		Assignee:    "human",
+		From:        "gascity/workflows.codex-min-8",
+		Labels:      []string{"thread:closed-sender-route"},
+		Metadata: map[string]string{
+			fromSessionIDMetadataKey: sender.ID,
+			fromDisplayMetadataKey:   "gascity/workflows.codex-min-8",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create original message: %v", err)
+	}
+	if err := store.Close(sender.ID); err != nil {
+		t.Fatalf("Close sender session: %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "gascity/workflows.codex-min-10", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.To != "gascity/workflows.codex-min-8" {
+		t.Fatalf("reply To = %q, want historical sender display alias", reply.To)
+	}
+	if reply.From != "gascity/workflows.codex-min-10" {
+		t.Fatalf("reply From = %q, want responder display alias", reply.From)
+	}
+	b, err := store.Get(reply.ID)
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if b.Assignee != sender.ID {
+		t.Fatalf("reply bead Assignee = %q, want closed sender session ID %q", b.Assignee, sender.ID)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != responder.ID {
+		t.Fatalf("reply %s = %q, want %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], responder.ID)
+	}
+
+	msgs, err := p.Inbox("gascity/workflows.codex-min-8")
+	if err != nil {
+		t.Fatalf("Inbox by historical alias: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox by historical alias returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != reply.ID {
+		t.Fatalf("Inbox by historical alias returned %s, want reply %s", msgs[0].ID, reply.ID)
+	}
+}
+
+func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "old-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed session: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live session: %v", err)
+	}
+	closedReply, err := store.Create(beads.Bead{
+		Title:    "old reply",
+		Type:     "message",
+		Assignee: closed.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed reply: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live mail",
+		Type:     "message",
+		Assignee: live.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != liveMail.ID {
+		t.Fatalf("Inbox returned %s, want live message %s; closed reply was %s", msgs[0].ID, liveMail.ID, closedReply.ID)
+	}
+}
+
+func TestInboxByCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
+	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
+	p := New(store)
+
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "old-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed session: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+	live, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live session: %v", err)
+	}
+	closedReply, err := store.Create(beads.Bead{
+		Title:    "old reply",
+		Type:     "message",
+		Assignee: closed.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed reply: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live mail",
+		Type:     "message",
+		Assignee: live.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != liveMail.ID {
+		t.Fatalf("Inbox returned %s, want live message %s; closed reply was %s", msgs[0].ID, liveMail.ID, closedReply.ID)
+	}
+}
+
+func TestInboxByClosedCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
+	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
+	p := New(store)
+
+	closed, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed session: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+	closedMail, err := store.Create(beads.Bead{
+		Title:    "closed mail",
+		Type:     "message",
+		Assignee: closed.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != closedMail.ID {
+		t.Fatalf("Inbox returned %s, want closed mail %s", msgs[0].ID, closedMail.ID)
+	}
+}
+
+func TestInboxByHistoricalAliasFallsBackToSessionScan(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	live, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "new-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live session: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live mail",
+		Type:     "message",
+		Assignee: live.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != liveMail.ID {
+		t.Fatalf("Inbox returned %s, want live message %s", msgs[0].ID, liveMail.ID)
+	}
+}
+
+func TestRecipientRoutesPreferCurrentAddressOverHistoricalAliasAmbiguity(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	historical, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "new-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-history",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create historical session: %v", err)
+	}
+	current, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-current",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create current session: %v", err)
+	}
+	historicalMail, err := store.Create(beads.Bead{
+		Title:    "historical mail",
+		Type:     "message",
+		Assignee: historical.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create historical mail: %v", err)
+	}
+	currentMail, err := store.Create(beads.Bead{
+		Title:    "current mail",
+		Type:     "message",
+		Assignee: current.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create current mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != currentMail.ID {
+		t.Fatalf("Inbox returned %s, want current mail %s; historical mail was %s", msgs[0].ID, currentMail.ID, historicalMail.ID)
+	}
+}
+
+func TestRecipientRoutesPreferClosedCurrentAddressOverLiveHistoricalAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	liveHistorical, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "new-worker",
+			"alias_history": "worker",
+			"session_name":  "workflows__codex-min-mc-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create live historical session: %v", err)
+	}
+	closedCurrent, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"session_name": "workflows__codex-min-mc-closed",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create closed current session: %v", err)
+	}
+	if err := store.Close(closedCurrent.ID); err != nil {
+		t.Fatalf("Close current session: %v", err)
+	}
+	liveMail, err := store.Create(beads.Bead{
+		Title:    "live historical mail",
+		Type:     "message",
+		Assignee: liveHistorical.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create live mail: %v", err)
+	}
+	closedMail, err := store.Create(beads.Bead{
+		Title:    "closed current mail",
+		Type:     "message",
+		Assignee: closedCurrent.ID,
+		From:     "human",
+	})
+	if err != nil {
+		t.Fatalf("Create closed mail: %v", err)
+	}
+
+	msgs, err := p.Inbox("worker")
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	}
+	if msgs[0].ID != closedMail.ID {
+		t.Fatalf("Inbox returned %s, want closed current mail %s; live historical mail was %s", msgs[0].ID, closedMail.ID, liveMail.ID)
 	}
 }
 
@@ -617,6 +2237,110 @@ func TestThreadEmpty(t *testing.T) {
 	}
 }
 
+// TestThreadAcceptsMessageIDOfOriginal locks in the fix for #1526. Callers
+// (notably `gc mail thread <id>` from cmd/gc/cmd_mail.go) pass a *message*
+// bead-ID, not the underlying thread-ID. Provider.Thread must resolve the
+// message-ID to its thread label and return the thread.
+func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Reply(sent.ID, "bob", "Re: Hello", "second"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(sent.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", sent.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(messageID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(messageID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
+// TestThreadSurfacesNonNotFoundStoreErrors verifies that a real store I/O
+// failure during message-id resolution propagates to the caller instead of
+// being silently swallowed as "treat input as thread-id".
+func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
+	mem := beads.NewMemStore()
+	failing := &getErrorStore{MemStore: mem, getErr: errors.New("simulated I/O failure")}
+	p := New(failing)
+
+	_, err := p.Thread("anything")
+	if err == nil {
+		t.Fatal("Thread: expected error from underlying store, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated I/O failure") {
+		t.Errorf("Thread: error %q does not wrap underlying store error", err)
+	}
+}
+
+func TestThreadRejectsNonMessageBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	task, err := store.Create(beads.Bead{
+		Title:  "not mail",
+		Type:   "task",
+		Labels: []string{"thread:looks-mail-like"},
+	})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	_, err = p.Thread(task.ID)
+	if err == nil {
+		t.Fatal("Thread(non-message bead ID): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), `bead "`) || !strings.Contains(err.Error(), "want message") {
+		t.Fatalf("Thread(non-message bead ID) error = %q, want clear non-message diagnostic", err)
+	}
+}
+
+// getErrorStore returns a custom error from Get; List defers to MemStore.
+type getErrorStore struct {
+	*beads.MemStore
+	getErr error
+}
+
+func (s *getErrorStore) Get(_ string) (beads.Bead, error) {
+	return beads.Bead{}, s.getErr
+}
+
+// TestThreadAcceptsMessageIDOfReply ensures the resolution works regardless
+// of which message in the thread the caller hands us — the parent OR any
+// reply should both surface the full thread.
+func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	sent, err := p.Send("alice", "bob", "Hello", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := p.Reply(sent.ID, "bob", "Re: Hello", "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := p.Thread(reply.ID)
+	if err != nil {
+		t.Fatalf("Thread(%q): %v", reply.ID, err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("Thread(replyID) = %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Body != "first" || msgs[1].Body != "second" {
+		t.Errorf("Thread(replyID) bodies = [%q, %q], want [first, second]", msgs[0].Body, msgs[1].Body)
+	}
+}
+
 // --- Count ---
 
 func TestCount(t *testing.T) {
@@ -648,6 +2372,22 @@ func TestCount(t *testing.T) {
 	}
 	if unread != 1 {
 		t.Errorf("unread = %d, want 1", unread)
+	}
+}
+
+func TestCountRecipientsEmptyDoesNotCountAllMessages(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	if _, err := p.Send("human", "mayor", "", "msg"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	total, unread, err := p.CountRecipients(nil)
+	if err != nil {
+		t.Fatalf("CountRecipients(nil): %v", err)
+	}
+	if total != 0 || unread != 0 {
+		t.Fatalf("CountRecipients(nil) = (%d,%d), want (0,0)", total, unread)
 	}
 }
 
@@ -685,6 +2425,503 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
+		t.Fatalf("Send ordinary: %v", err)
+	}
+	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "not deliverable",
+		ThreadID:    "thread-missing-marker",
+		ExtraLabels: []string{mail.AutoHandoffLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff missing archive marker: %v", err)
+	}
+	auto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff auto: %v", err)
+	}
+	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "already delivered",
+		ThreadID:    "thread-read-auto",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff read auto: %v", err)
+	}
+	if err := p.MarkRead(readAuto.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+
+	messages, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(messages) != 1 || messages[0].ID != auto.ID {
+		t.Fatalf("CheckAutoHandoffs = %#v, want only %q (not %q)", messages, auto.ID, missingArchiveMarker.ID)
+	}
+}
+
+// --- Provider session-list cache (ga-q6ct) ---
+
+// countingSessionListStore counts broad gc:session List calls and forwards
+// the rest. Used to pin that Provider memoizes the gc:session enumeration
+// across multiple Inbox calls in a single command invocation.
+type countingSessionListStore struct {
+	*beads.MemStore
+	mu               sync.Mutex
+	sessionListCalls int
+}
+
+func (s *countingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
+		s.mu.Lock()
+		s.sessionListCalls++
+		s.mu.Unlock()
+	}
+	return s.MemStore.List(query)
+}
+
+func (s *countingSessionListStore) sessionListCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionListCalls
+}
+
+func setCachedProviderClock(t *testing.T, p *Provider, start time.Time) func(time.Duration) {
+	t.Helper()
+	if p.sessionCache == nil {
+		t.Fatal("cached provider has nil session cache")
+	}
+	current := start
+	p.sessionCache.refreshInterval = time.Minute
+	p.sessionCache.now = func() time.Time { return current }
+	return func(d time.Duration) {
+		current = current.Add(d)
+	}
+}
+
+func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *testing.T) {
+	// Pin: the default Provider is safe for long-lived shared use. If a lookup
+	// runs before the matching session exists, later lookups must see newly
+	// created sessions instead of reusing a stale provider-lifetime snapshot.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := New(store)
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "for old route"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("second Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("Inbox(old-route) = %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Body != "for old route" {
+		t.Fatalf("Inbox(old-route) body = %q, want %q", msgs[0].Body, "for old route")
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want 2 (default provider must refetch per call to avoid stale shared state)", got)
+	}
+}
+
+func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
+	// Pin: the command-scoped cached Provider still dedupes the broad
+	// historical-alias session scan within one provider lifetime.
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+
+	// Two live sessions with alias_history that includes the route we'll
+	// search for. AliasHistory lookup is the path that does the broad scan.
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session A: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-b",
+			"alias_history": "old-route-2",
+			"session_name":  "wf__b",
+		},
+	}); err != nil {
+		t.Fatalf("Create session B: %v", err)
+	}
+
+	p := NewCached(store)
+
+	// Exercise three independent Inbox calls that each force the
+	// alias-history fallback (no current alias matches "old-route" or
+	// "old-route-2"). Without the cache: 3 broad scans. With cache: 1.
+	for _, recipient := range []string{"old-route", "old-route-2", "old-route"} {
+		if _, err := p.Inbox(recipient); err != nil {
+			t.Fatalf("Inbox(%q): %v", recipient, err)
+		}
+	}
+
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 (Provider must cache the enumeration)", got)
+	}
+}
+
+func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 1 {
+		t.Errorf("broad gc:session List calls = %d, want 1 under concurrent access", got)
+	}
+}
+
+func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("initial Inbox(old-route): %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if _, err := p.Send("human", sessionBead.Metadata["alias"], "", "visible after refresh"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "visible after refresh" {
+		t.Fatalf("Inbox(old-route) = %#v, want new session mail after refresh", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_RefreshRemovesClosedSessionFromLiveHistoricalMatch(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+
+	oldSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-old",
+			"alias_history": "old-route",
+			"session_name":  "wf__old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create old session: %v", err)
+	}
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	if _, err := p.Send("human", oldSession.Metadata["alias"], "", "stale closed session mail"); err != nil {
+		t.Fatalf("Send old: %v", err)
+	}
+	if err := store.Close(oldSession.ID); err != nil {
+		t.Fatalf("Close old session: %v", err)
+	}
+	newSession, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-new",
+			"alias_history": "old-route",
+			"session_name":  "wf__new",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create new session: %v", err)
+	}
+	if _, err := p.Send("human", newSession.Metadata["alias"], "", "live replacement mail"); err != nil {
+		t.Fatalf("Send new: %v", err)
+	}
+	advance(2 * time.Minute)
+
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("refreshed Inbox(old-route): %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "live replacement mail" {
+		t.Fatalf("Inbox(old-route) = %#v, want refreshed live replacement only", msgs)
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus refresh", got)
+	}
+}
+
+func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
+	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
+	if _, err := p.Inbox("old-route"); err != nil {
+		t.Fatalf("prime Inbox(old-route): %v", err)
+	}
+	advance(2 * time.Minute)
+
+	const workers = 16
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := p.Inbox("old-route")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Inbox(old-route): %v", err)
+		}
+	}
+	if got := store.sessionListCallCount(); got != 2 {
+		t.Errorf("broad gc:session List calls = %d, want initial scan plus one concurrent refresh", got)
+	}
+}
+
 // --- Compile-time interface check ---
 
 var _ mail.Provider = (*Provider)(nil)
+
+// --- Address contention fixtures ---
+//
+// Six fixtures in which two sessions contend for one address. They are the
+// cases where "resolve the recipient" and "resolve the sender" must NOT agree:
+// a recipient that two live sessions both claim is undeliverable and falls back
+// to the literal address, while the same identifier as a SENDER is a targeting
+// question with a settled answer (canonical session_name owns the identifier,
+// and a dual alias/session_name bead yields to a session_name-only one). Each
+// fixture states the routes or the stamped session id it must produce.
+
+// Fixture 1: one address, two live claimants (one by session_name, one by
+// alias). Undeliverable as a recipient: literal address only.
+func TestRecipientRoutesAreLiteralWhenTwoLiveSessionsClaimTheAddress(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
+
+	if got := p.recipientRoutes("contended"); !slices.Equal(got, []string{"contended"}) {
+		t.Fatalf("recipientRoutes = %v, want the literal address only", got)
+	}
+}
+
+// Fixture 2: the same contention as a SENDER. Sender resolution is targeting,
+// and canonical session_name owns the identifier.
+func TestSenderResolvesToTheSessionNameOwnerWhenAnAliasContendsForIt(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	named := mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
+
+	msg, err := p.Send("contended", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != named.ID {
+		t.Fatalf("%s = %q, want the session_name owner %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], named.ID)
+	}
+}
+
+// Fixture 3: a sender identified by the bead id of a CLOSED session. The
+// session is gone; its identity is not, so the message still carries it.
+func TestSenderResolvesTheBeadIDOfAClosedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	sender := mustCreateSessionBead(t, store, map[string]string{"alias": "retired-sender", "session_name": "retired-gc-1"})
+	if err := store.Close(sender.ID); err != nil {
+		t.Fatalf("Close session: %v", err)
+	}
+
+	msg, err := p.Send(sender.ID, "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != sender.ID {
+		t.Fatalf("%s = %q, want the closed sender %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], sender.ID)
+	}
+	if b.Metadata[fromDisplayMetadataKey] != "retired-sender" {
+		t.Fatalf("%s = %q, want the closed sender's alias", fromDisplayMetadataKey, b.Metadata[fromDisplayMetadataKey])
+	}
+}
+
+// Fixture 4: a recipient named by one session's bead id that another session
+// carries as its alias. Two claimants again, so literal only — a bead id is not
+// privileged over the alias that shadows it.
+func TestRecipientRoutesAreLiteralWhenAnAliasShadowsAnotherSessionsBeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	target := mustCreateSessionBead(t, store, map[string]string{"session_name": "target-name"})
+	mustCreateSessionBead(t, store, map[string]string{"alias": target.ID})
+
+	if got := p.recipientRoutes(target.ID); !slices.Equal(got, []string{target.ID}) {
+		t.Fatalf("recipientRoutes = %v, want the literal bead id only", got)
+	}
+}
+
+// Fixture 5: one session carries the address as BOTH alias and session_name
+// while another carries it as session_name only. As a sender the dual bead
+// yields: the session_name-only session owns the identifier.
+func TestSenderPrefersASessionNameOnlyClaimOverADualAliasClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
+	nameOnly := mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
+
+	msg, err := p.Send("shared-name", "human", "subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := store.Get(msg.ID)
+	if err != nil {
+		t.Fatalf("Get message: %v", err)
+	}
+	if b.Metadata[fromSessionIDMetadataKey] != nameOnly.ID {
+		t.Fatalf("%s = %q, want the session_name-only owner %q", fromSessionIDMetadataKey, b.Metadata[fromSessionIDMetadataKey], nameOnly.ID)
+	}
+}
+
+// Fixture 6: the same dual/session_name-only pair as a RECIPIENT. Two sessions
+// answer to the address, so mail refuses to choose between their mailboxes.
+func TestRecipientRoutesAreLiteralForADualClaimAndASessionNameOnlyClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
+	mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
+
+	if got := p.recipientRoutes("shared-name"); !slices.Equal(got, []string{"shared-name"}) {
+		t.Fatalf("recipientRoutes = %v, want the literal address only", got)
+	}
+}
+
+// TestRecipientRoutesCarryEveryAddressOfAnUncontendedSession is the positive
+// pole of the fixtures above: with a single claimant the routes widen to every
+// address that session answers to.
+func TestRecipientRoutesCarryEveryAddressOfAnUncontendedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+	only := mustCreateSessionBead(t, store, map[string]string{
+		"alias":         "current-alias",
+		"session_name":  "canonical-name",
+		"alias_history": "former-alias",
+	})
+
+	got := p.recipientRoutes("current-alias")
+	want := []string{"current-alias", only.ID, "canonical-name", "former-alias"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recipientRoutes = %v, want %v", got, want)
+	}
+}
+
+func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	return b
+}

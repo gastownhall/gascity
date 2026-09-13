@@ -16,12 +16,16 @@ import (
 
 // TestGastownPackMaterialization groups tests that verify materialized gastown
 // pack properties (permissions, completeness), sharing a single gc init call.
+// The gastown pack arrives via the pinned public import, so its content is
+// materialized into the user-global repo cache rather than a city-local
+// packs/ directory.
 func TestGastownPackMaterialization(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	packDir := gastownCachePackDir(t, c)
 
 	t.Run("GastownScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
+		scriptsDir := filepath.Join(packDir, "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
 			t.Fatalf("reading gastown scripts dir: %v", err)
@@ -38,39 +42,43 @@ func TestGastownPackMaterialization(t *testing.T) {
 				continue
 			}
 			if info.Mode()&0o111 == 0 {
-				t.Errorf("packs/gastown/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+				t.Errorf("cached gastown assets/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
 			}
 		}
 		if count == 0 {
-			t.Fatal("no .sh scripts found in packs/gastown/scripts/")
+			t.Fatal("no .sh scripts found in cached gastown assets/scripts/")
 		}
 	})
 
 	t.Run("Completeness", func(t *testing.T) {
-		expected := []string{
-			"packs/gastown/pack.toml",
-			"packs/gastown/prompts",
-			"packs/gastown/formulas",
-			"packs/gastown/scripts",
-			"packs/gastown/overlays",
-			"packs/gastown/commands",
-			"packs/maintenance/pack.toml",
-			"packs/maintenance/prompts",
-			"packs/maintenance/formulas",
+		// City-side wiring: the import pin and lock entry replace the old
+		// city-local packs/gastown materialization.
+		for _, rel := range []string{"pack.toml", "packs.lock"} {
+			if !c.HasFile(rel) {
+				t.Errorf("missing: %s", rel)
+			}
 		}
-		for _, e := range expected {
-			if !c.HasFile(e) {
-				t.Errorf("missing: %s", e)
+		// Cached pack content.
+		expected := []string{
+			"pack.toml",
+			"agents",
+			"template-fragments",
+			"formulas",
+			filepath.Join("assets", "scripts"),
+			"commands",
+		}
+		for _, rel := range expected {
+			if _, err := os.Stat(filepath.Join(packDir, rel)); err != nil {
+				t.Errorf("missing cached pack artifact %s: %v", rel, err)
 			}
 		}
 	})
 
-	t.Run("MaintenanceScriptsExecutable", func(t *testing.T) {
-		scriptsDir := filepath.Join(c.Dir, "packs", "maintenance", "scripts")
+	t.Run("CoreScriptsExecutable", func(t *testing.T) {
+		scriptsDir := filepath.Join(cachePackDirByName(t, c, "core"), "assets", "scripts")
 		entries, err := os.ReadDir(scriptsDir)
 		if err != nil {
-			// Not all maintenance packs have a scripts dir.
-			t.Skip("no maintenance scripts dir")
+			t.Fatalf("reading core pack scripts dir: %v", err)
 		}
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) != ".sh" {
@@ -82,7 +90,7 @@ func TestGastownPackMaterialization(t *testing.T) {
 				continue
 			}
 			if info.Mode()&0o111 == 0 {
-				t.Errorf("packs/maintenance/scripts/%s is not executable (mode %o)", e.Name(), info.Mode())
+				t.Errorf("core pack script %s is not executable (mode %o)", e.Name(), info.Mode())
 			}
 		}
 	})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,11 +19,11 @@ func TestEventList(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker", Subject: "gc-1"})
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -43,11 +44,11 @@ func TestEventListFilterByType(t *testing.T) {
 	ep := state.eventProv.(*events.Fake)
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker"})
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events?type=bead.created", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events?type=bead.created"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []events.Event `json:"items"`
@@ -59,22 +60,184 @@ func TestEventListFilterByType(t *testing.T) {
 	}
 }
 
+func TestEventListIncludesCustomEventTypes(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: "custom.untyped", Actor: "tester", Payload: json.RawMessage(`{"source":"test"}`)})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || len(resp.Items) != 2 {
+		t.Fatalf("response = %+v, want custom and registered events", resp)
+	}
+	custom := eventListItemByType(t, resp.Items, "custom.untyped")
+	payload := assertJSONPayloadObject(t, custom["payload"])
+	if payload["source"] != "test" {
+		t.Fatalf("custom payload = %v, want source=test", payload)
+	}
+}
+
+func TestEventListRejectsInvalidSince(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?since=notaduration"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid since duration") {
+		t.Fatalf("body = %q, want invalid since duration", rec.Body.String())
+	}
+}
+
+func TestEventRotateFileRecorderGoldenPath(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec.Record(events.Event{Type: events.BeadCreated, Actor: "worker"})
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Rotated {
+		t.Fatalf("rotated = false, want true; resp=%+v", resp)
+	}
+	if resp.Archive == nil {
+		t.Fatalf("archive = nil, want metadata; resp=%+v", resp)
+	}
+	if resp.Archive.FirstSeq != 1 || resp.Archive.LastSeq != 2 {
+		t.Fatalf("archive seq = %d-%d, want 1-2", resp.Archive.FirstSeq, resp.Archive.LastSeq)
+	}
+	if resp.Archive.CompressionStatus != "pending" {
+		t.Fatalf("compression_status = %q, want pending", resp.Archive.CompressionStatus)
+	}
+	if resp.AnchorEvent == nil || resp.AnchorEvent.Seq != 3 || resp.AnchorEvent.Type != events.EventsRotated {
+		t.Fatalf("anchor_event = %+v, want seq=3 type=%s", resp.AnchorEvent, events.EventsRotated)
+	}
+}
+
+func TestEventRotateEmptyActiveLogIsNoOp(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Rotated || resp.Reason != "active log is empty" {
+		t.Fatalf("response = %+v, want rotated=false reason", resp)
+	}
+}
+
+func TestEventRotateUnsupportedProviderReturnsMethodNotAllowed(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Events.Provider = "exec:my-script"
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusMethodNotAllowed, httpRec.Body.String())
+	}
+	want := "rotation is only supported for the file-backed events provider; current provider is 'exec:my-script'"
+	if !strings.Contains(httpRec.Body.String(), want) {
+		t.Fatalf("body = %q, want %q", httpRec.Body.String(), want)
+	}
+}
+
+func TestEventRotateWaitReturnsCompleteCompressionStatus(t *testing.T) {
+	state := newFakeState(t)
+	var stderr strings.Builder
+	rec, err := events.NewFileRecorder(filepath.Join(t.TempDir(), "events.jsonl"), &stderr)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { _ = rec.Close() })
+	state.eventProv = rec
+	rec.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	h := newTestCityHandler(t, state)
+
+	req := newPostRequest(cityURL(state, "/events/rotate?wait=true"), nil)
+	httpRec := httptest.NewRecorder()
+	h.ServeHTTP(httpRec, req)
+
+	if httpRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", httpRec.Code, http.StatusOK, httpRec.Body.String())
+	}
+	var resp EventRotateResponse
+	if err := json.NewDecoder(httpRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Archive == nil || resp.Archive.CompressionStatus != "complete" {
+		t.Fatalf("archive = %+v, want compression_status=complete", resp.Archive)
+	}
+}
+
 func TestEventStream(t *testing.T) {
 	state := newFakeState(t)
 	ep := state.eventProv.(*events.Fake)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	// Create a context with timeout to avoid hanging.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	// Run the handler in a goroutine since it blocks.
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -90,8 +253,13 @@ func TestEventStream(t *testing.T) {
 	<-done
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "event: session.woke") {
-		t.Errorf("SSE body missing event type, got: %s", body)
+	// Event name is now "event" (documented in OpenAPI spec via sse.Register).
+	// The actual event type is in the JSON body's "type" field.
+	if !strings.Contains(body, "event: event") {
+		t.Errorf("SSE body missing event: event line, got: %s", body)
+	}
+	if !strings.Contains(body, `"type":"session.woke"`) {
+		t.Errorf("SSE body missing event type in JSON body, got: %s", body)
 	}
 	if !strings.Contains(body, "id: 1") {
 		t.Errorf("SSE body missing event id, got: %s", body)
@@ -100,6 +268,33 @@ func TestEventStream(t *testing.T) {
 	// Check SSE headers.
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
+	}
+}
+
+func TestEventStreamCommitsHeadersBeforeFirstEvent(t *testing.T) {
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+cityURL(state, "/events/stream"), nil)
+	if err != nil {
+		t.Fatalf("build stream request: %v", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET events stream before first event: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
 	}
 }
 
@@ -125,16 +320,16 @@ func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
 		t.Fatalf("marshal root: %v", err)
 	}
 
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -196,11 +391,11 @@ func TestWatcherCloseUnblocksNext(t *testing.T) {
 func TestEventStreamNoEvents(t *testing.T) {
 	state := newFakeState(t)
 	state.eventProv = nil
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/events/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
@@ -209,12 +404,12 @@ func TestEventStreamNoEvents(t *testing.T) {
 
 func TestHandleEventEmit(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"deploy.completed","actor":"ci","subject":"myapp","message":"v2.3.1"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
@@ -238,43 +433,119 @@ func TestHandleEventEmit(t *testing.T) {
 
 func TestHandleEventEmit_MissingType(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleEventEmit_MissingActor(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"test.event"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
 	}
 }
 
 func TestHandleEventEmit_NoEventsProvider(t *testing.T) {
 	state := newFakeState(t)
 	state.eventProv = nil
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
 	body := `{"type":"test.event","actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
+	req := newPostRequest(cityURL(state, "/events"), strings.NewReader(body))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+// TestEventListLimitReturnsTail is a regression test for the perf bug where
+// the city events handler ignored the query limit and parsed the entire
+// events.jsonl on every request (O(file size), ~4s on a 100 MB log).
+// The fix routes limit=N through the TailProvider to return the N newest
+// events without scanning history.
+func TestEventListLimitReturnsTail(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "old"})
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker", Subject: "middle"})
+	ep.Record(events.Event{Type: events.SessionStopped, Actor: "gc", Subject: "new"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?limit=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0]["subject"]; got != "new" {
+		t.Fatalf("subject = %v, want \"new\" (newest event); tail semantics regressed", got)
+	}
+	// Total should report the full match count, not the page size, so
+	// callers can tell "server has N events" from "limit truncated".
+	if resp.Total != 3 {
+		t.Fatalf("total = %d, want 3", resp.Total)
+	}
+}
+
+// TestEventListLimitWithTypeFilterReturnsTail verifies the TailProvider
+// path still yields newest-first semantics when a type filter narrows
+// the result set. Total is best-effort (= returned count) because we
+// can't cheaply compute the filtered match count.
+func TestEventListLimitWithTypeFilterReturnsTail(t *testing.T) {
+	state := newFakeState(t)
+	ep := state.eventProv.(*events.Fake)
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "woke-old"})
+	ep.Record(events.Event{Type: events.BeadCreated, Actor: "gc", Subject: "ignored"})
+	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "woke-new"})
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/events?type=session.woke&limit=1"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0]["subject"]; got != "woke-new" {
+		t.Fatalf("subject = %v, want \"woke-new\" (newest matching); tail regressed", got)
 	}
 }

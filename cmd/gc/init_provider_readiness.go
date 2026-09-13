@@ -1,30 +1,36 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doltversion"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 var (
 	initProbeProvidersReadiness = api.ProbeProviders
 	errInitProviderPreflight    = errors.New("provider readiness preflight failed")
+	errDoltConfigKeyMissing     = errors.New("dolt config key missing")
 )
 
 type initFinalizeOptions struct {
 	skipProviderReadiness bool
 	showProgress          bool
 	commandName           string
+	noStart               bool
 }
 
 type initProviderTarget struct {
@@ -34,8 +40,7 @@ type initProviderTarget struct {
 }
 
 func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOptions) int {
-	MaterializeBeadsBdScript(cityPath) //nolint:errcheck // best-effort; only needed for bd provider
-	MaterializeBuiltinPacks(cityPath)  //nolint:errcheck // best-effort; only needed for bd provider
+	EnsureBuiltinRuntimeAssets(cityPath, os.Stderr) //nolint:errcheck // best-effort; needed before dependency and provider checks
 
 	// Check hard binary dependencies before handing off to the supervisor.
 	// Without this, missing deps (tmux, git, dolt, bd) cause the supervisor
@@ -53,6 +58,14 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: install the missing dependencies, then run 'gc start'\n", opts.commandName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if status := checkDoltAuthorIdentity(cityPath); status.blocked() {
+		printDoltAuthorIdentityBlock(stderr, opts.commandName, status)
+		return 1
+	}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if opts.showProgress {
 		if opts.skipProviderReadiness {
@@ -61,16 +74,21 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 			logInitProgress(stdout, 6, "Checking provider readiness")
 		}
 	}
-	if err := fetchCityPacksIfNeeded(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: fetching packs: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	if !opts.skipProviderReadiness {
 		if err := runInitProviderPreflight(cityPath, stdout, stderr, opts.commandName); err != nil {
 			return 1
 		}
 	} else if !opts.showProgress && stdout != nil {
 		fmt.Fprintln(stdout, "Skipping provider readiness checks.") //nolint:errcheck // best-effort stdout
+	}
+	if err := ensureInitRemoteImportsInstalled(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: installing imports: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	hasRemoteImports, err := initHasRemoteImports(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: reading imports for provider readiness: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	// Load config to resolve explicit HQ prefix (workspace.prefix field).
@@ -81,11 +99,27 @@ func finalizeInit(cityPath string, stdout, stderr io.Writer, opts initFinalizeOp
 		fmt.Fprintf(stderr, "%s: loading config for prefix resolution: %v\n", opts.commandName, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if !opts.skipProviderReadiness && hasRemoteImports {
+		if err := runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, opts.commandName); err != nil {
+			return 1
+		}
+	}
 	prefix := config.EffectiveHQPrefix(cfg)
 	if _, err := initDirIfReady(cityPath, cityPath, prefix); err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", opts.commandName, err)        //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, `hint: run "gc doctor" for diagnostics`) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if opts.noStart {
+		if opts.showProgress {
+			logInitProgress(stdout, 7, "Skipping supervisor startup")
+		} else if stdout != nil {
+			fmt.Fprintln(stdout, "Skipping supervisor startup.") //nolint:errcheck // best-effort stdout
+		}
+		if stdout != nil {
+			fmt.Fprintf(stdout, "Next: cd %s && gc start\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stdout
+		}
+		return 0
 	}
 	if opts.showProgress {
 		logInitProgress(stdout, 7, "Registering city with supervisor")
@@ -134,20 +168,24 @@ func wizardProviderGuidanceMessage(item api.ReadinessItem) string {
 }
 
 func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, commandName string) error {
-	// Materialize gastown packs before loading config — config.LoadWithIncludes
-	// resolves includes = ["packs/gastown"] which requires pack.toml on disk.
-	if err := MaterializeGastownPacks(cityPath); err != nil {
-		fmt.Fprintf(stderr, "%s: materializing gastown packs: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return errInitProviderPreflight
-	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, err := loadInitProviderPreflightConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by configuration loading\n", commandName) //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: loading config for provider readiness: %v\n", commandName, err)                //nolint:errcheck // best-effort stderr
 		fmt.Fprintf(stderr, "%s: fix the config issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
 		return errInitProviderPreflight
 	}
-	ensureInitArtifacts(cityPath, cfg, stderr, commandName)
+	return runInitProviderPreflightForConfig(cityPath, cfg, stdout, stderr, commandName)
+}
+
+func runInitProviderPreflightForConfig(cityPath string, cfg *config.City, stdout, stderr io.Writer, commandName string) error {
+	ensureInitArtifacts(cityPath, stderr, commandName)
+	if err := seedDeferredManagedBeadsBeforeProviderReadiness(cityPath, cfg); err != nil {
+		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by bead store initialization\n", commandName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: initializing canonical bead store files: %v\n", commandName, err)                  //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: fix the bead store issue, then run 'gc start'\n", commandName)                     //nolint:errcheck // best-effort stderr
+		return errInitProviderPreflight
+	}
 	targets, warnings, err := collectInitProviderTargets(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: city created, but startup is blocked by provider resolution\n", commandName) //nolint:errcheck // best-effort stderr
@@ -197,6 +235,34 @@ func runInitProviderPreflight(cityPath string, stdout, stderr io.Writer, command
 	fmt.Fprintf(stderr, "Next: cd %s && gc start\n", shellQuotePath(cityPath))                        //nolint:errcheck // best-effort stderr
 	fmt.Fprintf(stderr, "Override: gc init --skip-provider-readiness %s\n", shellQuotePath(cityPath)) //nolint:errcheck // best-effort stderr
 	return errInitProviderPreflight
+}
+
+func initHasRemoteImports(cityPath string) (bool, error) {
+	allImports, err := collectAllImportsFS(cityPath)
+	if err != nil {
+		return false, err
+	}
+	return hasRemoteImport(allImports), nil
+}
+
+func loadInitProviderPreflightConfig(cityPath string) (*config.City, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath)
+	if err == nil {
+		return cfg, nil
+	}
+	// Fresh init can check provider readiness before PackV2 remote imports
+	// have been installed. In that bootstrap-only case, fall back to raw
+	// city.toml so workspace.provider still gets checked before any network
+	// fetch. Other include/load errors remain startup-blocking.
+	if !strings.Contains(err.Error(), "remote import") || !strings.Contains(err.Error(), "gc import install") {
+		return nil, err
+	}
+	rawCfg, rawErr := config.Load(fsys.OSFS{}, tomlPath)
+	if rawErr != nil {
+		return nil, err
+	}
+	return rawCfg, nil
 }
 
 func collectInitProviderTargets(cfg *config.City) ([]initProviderTarget, []string, error) {
@@ -270,6 +336,30 @@ func explicitProviderRefs(cfg *config.City) []string {
 	return refs
 }
 
+func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *config.City) error {
+	if cfg == nil {
+		return nil
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	if !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+		return nil
+	}
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
+		if err := seedDeferredManagedBeadsErr(cityPath, cityPath, config.EffectiveHQPrefix(cfg), ""); err != nil {
+			return err
+		}
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" || !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		if err := seedDeferredManagedBeadsErr(cityPath, rig.Path, rig.EffectivePrefix(), ""); err != nil {
+			return fmt.Errorf("rig %q: %w", rig.Name, err)
+		}
+	}
+	return nil
+}
+
 func providerReadinessProbeName(ref string, cfg *config.City) string {
 	if api.SupportsProviderReadiness(ref) {
 		return ref
@@ -312,11 +402,11 @@ func providerStatusFixHint(probeName, status string) string {
 	case "claude":
 		switch status {
 		case api.ProbeStatusNeedsAuth:
-			return "run `claude auth login`"
+			return "run `claude auth login`, or run `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` for headless environments"
 		case api.ProbeStatusNotInstalled:
 			return "install Claude Code"
 		case api.ProbeStatusInvalidConfiguration:
-			return "use first-party Claude Code login (`claude.ai` / `firstParty`)"
+			return "use first-party Claude Code login (`claude.ai` or `oauth_token` / `firstParty`)"
 		case api.ProbeStatusProbeError:
 			return "run `claude auth status --json` and fix the local Claude setup"
 		}
@@ -341,6 +431,15 @@ func providerStatusFixHint(probeName, status string) string {
 			return "use Gemini CLI personal OAuth; API-key and ADC modes are not supported here"
 		case api.ProbeStatusProbeError:
 			return "check ~/.gemini/settings.json and oauth_creds.json"
+		}
+	case "pi":
+		switch status {
+		case api.ProbeStatusNeedsAuth:
+			return "authenticate pi so it writes ~/.pi/agent/auth.json"
+		case api.ProbeStatusNotInstalled:
+			return "install the pi coding agent"
+		case api.ProbeStatusProbeError:
+			return "check ~/.pi/agent/auth.json and the local pi installation"
 		}
 	}
 	return ""
@@ -419,10 +518,47 @@ type missingDep struct {
 // Tests can override this to simulate missing binaries.
 var initLookPath = exec.LookPath
 
+var initRunVersionCommandContext = exec.CommandContext
+
+var initRunVersionTimeout = 2 * time.Second
+
+var initRunDoltConfigGet = func(key string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "dolt", "config", "--global", "--get", key)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("dolt config probe timed out after %s", initRunVersionTimeout)
+	}
+	value := strings.TrimSpace(stdout.String())
+	if err != nil {
+		stderrText := strings.TrimSpace(stderr.String())
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && value == "" && stderrText == "" {
+			return "", errDoltConfigKeyMissing
+		}
+		if stderrText != "" {
+			return value, fmt.Errorf("%w: %s", err, stderrText)
+		}
+		return value, err
+	}
+	return value, nil
+}
+
 // initRunVersion runs "<binary> version" and returns the first line.
 // Tests can override this.
 var initRunVersion = func(binary string) (string, error) {
-	out, err := exec.Command(binary, "version").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), initRunVersionTimeout)
+	defer cancel()
+
+	out, err := initRunVersionCommandContext(ctx, binary, "version").Output()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("%s version probe timed out after %s", binary, initRunVersionTimeout)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -432,8 +568,8 @@ var initRunVersion = func(binary string) (string, error) {
 
 // Minimum versions for beads-provider binaries.
 const (
-	doltMinVersion = "1.80.0" // sql-server features used by gc-beads-bd
-	bdMinVersion   = "0.61.0" // BdStore shell-out interface
+	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
+	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
 )
 
 // checkHardDependencies verifies that all required binaries are available
@@ -447,10 +583,10 @@ func checkHardDependencies(cityPath string) []missingDep {
 		installHint string
 		minVersion  string      // empty = no version check
 		condition   func() bool // if non-nil, only checked when true
+		available   func() bool // if non-nil, custom availability probe
 	}
 
-	beadsProvider := rawBeadsProvider(cityPath)
-	needsBd := beadsProvider == "bd" || beadsProvider == ""
+	needsBd := initNeedsBdTooling(cityPath)
 
 	deps := []dep{
 		{
@@ -483,6 +619,14 @@ func checkHardDependencies(cityPath string) []missingDep {
 			condition:   func() bool { return needsBd },
 		},
 		{
+			name:        "timeout/gtimeout/python3",
+			installHint: "install GNU coreutils timeout/gtimeout or python3",
+			condition:   func() bool { return needsBd },
+			available: func() bool {
+				return initAnyToolAvailable("timeout", "gtimeout", "python3")
+			},
+		},
+		{
 			name:        "pgrep",
 			installHint: "brew install proctools (macOS) or apt install procps (Linux)",
 		},
@@ -497,6 +641,15 @@ func checkHardDependencies(cityPath string) []missingDep {
 		if d.condition != nil && !d.condition() {
 			continue
 		}
+		if d.available != nil {
+			if !d.available() {
+				missing = append(missing, missingDep{
+					name:        d.name,
+					installHint: d.installHint,
+				})
+			}
+			continue
+		}
 		if _, err := initLookPath(d.name); err != nil {
 			missing = append(missing, missingDep{
 				name:        d.name,
@@ -505,27 +658,224 @@ func checkHardDependencies(cityPath string) []missingDep {
 			continue
 		}
 		if d.minVersion != "" {
-			if ver := parseDepVersion(d.name); ver != "" {
-				if compareVersions(ver, d.minVersion) < 0 {
-					missing = append(missing, missingDep{
-						name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
-						installHint: d.installHint,
-					})
-				}
+			if ver, ok := depMeetsMinVersion(d.name, d.minVersion); ver != "" && !ok {
+				missing = append(missing, missingDep{
+					name:        fmt.Sprintf("%s (found v%s, need v%s+)", d.name, ver, d.minVersion),
+					installHint: d.installHint,
+				})
 			}
 		}
 	}
 	return missing
 }
 
-// parseDepVersion runs "<binary> version" and extracts a semver-like version string.
-// Returns "" if the version cannot be determined (non-fatal).
-func parseDepVersion(binary string) string {
+type doltAuthorIdentityProbeError struct {
+	key string
+	err error
+}
+
+type doltAuthorIdentityStatus struct {
+	missingKeys []string
+	probeErrors []doltAuthorIdentityProbeError
+}
+
+func (s doltAuthorIdentityStatus) blocked() bool {
+	return len(s.missingKeys) > 0 || len(s.probeErrors) > 0
+}
+
+func checkDoltAuthorIdentity(cityPath string) doltAuthorIdentityStatus {
+	if !initNeedsLocalDoltIdentity(cityPath) {
+		return doltAuthorIdentityStatus{}
+	}
+	if _, err := initLookPath("dolt"); err != nil {
+		return doltAuthorIdentityStatus{}
+	}
+	var status doltAuthorIdentityStatus
+	for _, key := range []string{"user.name", "user.email"} {
+		value, err := initRunDoltConfigGet(key)
+		value = strings.TrimSpace(value)
+		if errors.Is(err, errDoltConfigKeyMissing) && value == "" {
+			status.missingKeys = append(status.missingKeys, key)
+			continue
+		}
+		if err != nil {
+			status.probeErrors = append(status.probeErrors, doltAuthorIdentityProbeError{
+				key: key,
+				err: err,
+			})
+			continue
+		}
+		if value == "" {
+			status.missingKeys = append(status.missingKeys, key)
+		}
+	}
+	return status
+}
+
+func initNeedsLocalDoltIdentity(cityPath string) bool {
+	if gcDoltSkip() {
+		return false
+	}
+
+	cfg, ok := initConfigForBdTooling(cityPath)
+	var cityCfg *config.City
+	if ok {
+		cityCfg = cfg
+	}
+	if cityUsesBdStoreContract(cityPath) && initScopeNeedsLocalDoltIdentity(cityPath, cityPath, cityCfg) {
+		return true
+	}
+	if !ok {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if rigUsesManagedBdStoreContract(cityPath, rig) && initScopeNeedsLocalDoltIdentity(cityPath, rig.Path, cfg) {
+			return true
+		}
+	}
+	return false
+}
+
+func initScopeNeedsLocalDoltIdentity(cityPath, scopeRoot string, cfg *config.City) bool {
+	bound, err := scopeStoreIsExternallyBound(cityPath, scopeRoot)
+	if err != nil {
+		return true
+	}
+	if bound {
+		return false
+	}
+	return !initScopeUsesExternalDolt(cityPath, scopeRoot, cfg)
+}
+
+func initScopeUsesExternalDolt(cityPath, scopeRoot string, cfg *config.City) bool {
+	if samePath(scopeRoot, cityPath) {
+		if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); ok {
+			if err != nil {
+				return false
+			}
+			return target.External
+		}
+		if isExternalDolt(cityPath) {
+			return true
+		}
+		if cfg != nil {
+			host, port := configuredExternalDoltTargetForCity(cfg.Dolt)
+			return host != "" || port != ""
+		}
+		return false
+	}
+
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err == nil && ok {
+		return target.External
+	}
+	if cfg == nil {
+		return isExternalDolt(cityPath)
+	}
+	for _, rig := range cfg.Rigs {
+		if samePath(rig.Path, scopeRoot) {
+			host, port := configuredExternalDoltTargetForRig(rig)
+			if host != "" || port != "" {
+				return true
+			}
+			break
+		}
+	}
+	host, port := configuredExternalDoltTargetForCity(cfg.Dolt)
+	return host != "" || port != "" || isExternalDolt(cityPath)
+}
+
+func printDoltAuthorIdentityBlock(stderr io.Writer, commandName string, status doltAuthorIdentityStatus) {
+	fmt.Fprintf(stderr, "%s: city created, but startup is blocked by Dolt author identity\n\n", commandName) //nolint:errcheck // best-effort stderr
+	fmt.Fprintln(stderr, "Managed bd storage requires Dolt author identity before it can initialize.")       //nolint:errcheck // best-effort stderr
+
+	if len(status.probeErrors) > 0 {
+		fmt.Fprintln(stderr, "")                                //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "Could not verify Dolt identity:") //nolint:errcheck // best-effort stderr
+		for _, probeErr := range status.probeErrors {
+			fmt.Fprintf(stderr, "  - %s: %v\n", probeErr.key, probeErr.err) //nolint:errcheck // best-effort stderr
+		}
+	}
+
+	if len(status.missingKeys) > 0 {
+		fmt.Fprintln(stderr, "")                     //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "Missing Dolt config:") //nolint:errcheck // best-effort stderr
+		for _, key := range status.missingKeys {
+			fmt.Fprintf(stderr, "  - %s\n", key) //nolint:errcheck // best-effort stderr
+		}
+		fmt.Fprintln(stderr, "")                                                             //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, `Set it with:`)                                                 //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, `  dolt config --global --add user.name "Your Name"`)           //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, `  dolt config --global --add user.email "you@example.com"`)    //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "")                                                             //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: set the Dolt identity, then run 'gc start'\n", commandName) //nolint:errcheck // best-effort stderr
+		return
+	}
+
+	fmt.Fprintln(stderr, "")                                                                             //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: resolve the Dolt identity probe error, then run 'gc start'\n", commandName) //nolint:errcheck // best-effort stderr
+}
+
+func initAnyToolAvailable(names ...string) bool {
+	for _, name := range names {
+		if _, err := initLookPath(name); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func initNeedsBdTooling(cityPath string) bool {
+	if providerUsesBdStoreContract(rawBeadsProvider(cityPath)) {
+		return true
+	}
+	cfg, ok := initConfigForBdTooling(cityPath)
+	if !ok {
+		return false
+	}
+	return workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
+func initConfigForBdTooling(cityPath string) (*config.City, bool) {
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		return nil, false
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := config.ApplySiteBindings(fsys.OSFS{}, cityPath, cfg); err != nil {
+		return nil, false
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return cfg, true
+}
+
+func depMeetsMinVersion(binary, minVersion string) (string, bool) {
 	line, err := initRunVersion(binary)
 	if err != nil {
-		return ""
+		return "", true
 	}
-	// Patterns: "dolt version 1.83.1", "bd version 0.61.0 (3ac028bf: ...)"
+	if binary == "dolt" {
+		info, err := doltversion.CheckFinalMinimum(line, minVersion)
+		if errors.Is(err, doltversion.ErrPreRelease) || errors.Is(err, doltversion.ErrBelowMinimum) {
+			return info.Raw, false
+		}
+		if err != nil {
+			return "", true
+		}
+		return info.Raw, true
+	}
+	ver := parseDepVersionLine(line)
+	if ver == "" {
+		return "", true
+	}
+	return ver, compareVersions(ver, minVersion) >= 0
+}
+
+func parseDepVersionLine(line string) string {
+	// Patterns: "dolt version 1.86.1", "bd version 1.0.0 (3ac028bf: ...)"
 	for _, field := range strings.Fields(line) {
 		if len(field) > 0 && field[0] >= '0' && field[0] <= '9' && strings.Contains(field, ".") {
 			return field

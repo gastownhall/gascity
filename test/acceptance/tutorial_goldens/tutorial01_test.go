@@ -1,0 +1,275 @@
+//go:build acceptance_c
+
+package tutorialgoldens
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestTutorial01Cities(t *testing.T) {
+	t.Run("PrimaryWizardFlow", func(t *testing.T) {
+		ws := newTutorialWorkspace(t)
+		ws.attachDiagnostics(t, "tutorial-01-primary")
+
+		myCity := expandHome(ws.home(), "~/my-city")
+		myProject := expandHome(ws.home(), "~/my-project")
+		mustMkdirAll(t, myProject)
+
+		var helloTaskID string
+
+		t.Run("brew install gascity", func(t *testing.T) {
+			if _, err := os.Stat(goldenGCBinary); err != nil {
+				t.Fatalf("gc binary missing: %v", err)
+			}
+			ws.noteWarning("tutorial 01 setup: satisfied `brew install gascity` via harness bootstrap")
+			t.Log("workaround: `brew install gascity` is satisfied by the acceptance harness bootstrap")
+		})
+
+		t.Run("gc version", func(t *testing.T) {
+			out, err := ws.runShell("gc version", "")
+			if err != nil {
+				t.Fatalf("gc version: %v\n%s", err, out)
+			}
+			if strings.TrimSpace(out) == "" {
+				t.Fatal("gc version output is empty")
+			}
+		})
+
+		t.Run("gc init ~/my-city", func(t *testing.T) {
+			ws.noteWarning("tutorial 01 documents the interactive wizard, but the acceptance harness uses the equivalent non-interactive `gc init ~/my-city --default-provider claude --skip-provider-readiness` path because the wizard requires a real TTY and CI does not carry interactive Claude auth")
+			out, err := ws.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
+			if err != nil {
+				t.Fatalf("gc init wizard: %v\n%s", err, out)
+			}
+			for _, want := range []string{
+				"Welcome to Gas City!",
+				`Initialized city "my-city" with default provider "claude".`,
+				"Skipping provider readiness checks",
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("gc init output missing %q:\n%s", want, out)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(myCity, "city.toml")); err != nil {
+				t.Fatalf("city.toml missing after init: %v", err)
+			}
+		})
+
+		t.Run("gc cities", func(t *testing.T) {
+			out, err := ws.runShell("gc cities", "")
+			if err != nil {
+				t.Fatalf("gc cities: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "my-city") {
+				t.Fatalf("gc cities should list my-city:\n%s", out)
+			}
+		})
+
+		t.Run("gc init ~/my-city --default-provider claude", func(t *testing.T) {
+			wsProvider := newTutorialWorkspace(t)
+			wsProvider.attachDiagnostics(t, "tutorial-01-provider-branch")
+
+			out, err := wsProvider.runShell("gc init ~/my-city --default-provider claude --skip-provider-readiness", "")
+			if err != nil {
+				t.Fatalf("gc init --default-provider claude: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(filepath.Join(expandHome(wsProvider.home(), "~/my-city"), "city.toml")); err != nil {
+				t.Fatalf("city.toml missing after explicit provider init: %v", err)
+			}
+			if !strings.Contains(strings.ToLower(out), "created") && !strings.Contains(strings.ToLower(out), "registered") {
+				t.Fatalf("gc init --default-provider output missing creation marker:\n%s", out)
+			}
+		})
+
+		t.Run("cd ~/my-city", func(t *testing.T) {
+			if _, err := os.Stat(myCity); err != nil {
+				t.Fatalf("my-city missing: %v", err)
+			}
+			ws.setCWD(myCity)
+		})
+
+		t.Run("ls", func(t *testing.T) {
+			out, err := ws.runShell("ls", "")
+			if err != nil {
+				t.Fatalf("ls: %v\n%s", err, out)
+			}
+			for _, want := range []string{"city.toml", "pack.toml", "formulas", "orders", "agents", "overlays"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("ls output missing %q:\n%s", want, out)
+				}
+			}
+		})
+
+		t.Run("cat city.toml", func(t *testing.T) {
+			out, err := ws.runShell("cat city.toml", "")
+			if err != nil {
+				t.Fatalf("cat city.toml: %v\n%s", err, out)
+			}
+			for _, want := range []string{
+				`provider = "claude"`,
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("city.toml missing %q:\n%s", want, out)
+				}
+			}
+			// formula_v2 is on by default and intentionally omitted from
+			// generated city.toml (a pinned default is confusing and risks
+			// writing formula_v2=false). It must not appear at all.
+			if strings.Contains(out, "formula_v2") {
+				t.Fatalf("city.toml should omit formula_v2 (default-on):\n%s", out)
+			}
+			if strings.Contains(out, `includes = [".gc/system/packs/core"`) {
+				t.Fatalf("city.toml should not carry legacy builtin includes:\n%s", out)
+			}
+		})
+
+		t.Run("cat pack.toml", func(t *testing.T) {
+			out, err := ws.runShell("cat pack.toml", "")
+			if err != nil {
+				t.Fatalf("cat pack.toml: %v\n%s", err, out)
+			}
+			for _, want := range []string{
+				`name = "my-city"`,
+				`schema = 2`,
+				`[imports.core]`,
+				`[imports.bd]`,
+				`[imports.gascity]`,
+				`[[named_session]]`,
+				`template = "mayor"`,
+				`mode = "always"`,
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("pack.toml missing %q:\n%s", want, out)
+				}
+			}
+		})
+
+		t.Run("gc status", func(t *testing.T) {
+			out, err := ws.runShell("gc status", "")
+			if err != nil {
+				t.Fatalf("gc status: %v\n%s", err, out)
+			}
+			for _, want := range []string{"my-city", "Controller:", "Named sessions:", "mayor", "bd.dog", "control-dispatcher"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("gc status missing %q:\n%s", want, out)
+				}
+			}
+		})
+
+		t.Run("gc rig add ~/my-project", func(t *testing.T) {
+			out, err := ws.runShell("gc rig add ~/my-project", "")
+			if err != nil {
+				t.Fatalf("gc rig add: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "Rig added") {
+				t.Fatalf("gc rig add output missing success marker:\n%s", out)
+			}
+		})
+
+		t.Run("cat city.toml (with rig)", func(t *testing.T) {
+			out, err := ws.runShell("cat city.toml", "")
+			if err != nil {
+				t.Fatalf("cat city.toml: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, `name = "my-project"`) {
+				t.Fatalf("city.toml missing rig entry:\n%s", out)
+			}
+			if strings.Contains(out, myProject) {
+				t.Fatalf("city.toml should not contain machine-local rig path %q:\n%s", myProject, out)
+			}
+		})
+
+		t.Run("read .gc/site.toml (with rig)", func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(myCity, ".gc", "site.toml"))
+			if err != nil {
+				t.Fatalf("read .gc/site.toml: %v", err)
+			}
+			out := string(data)
+			if !strings.Contains(out, `workspace_name = "my-city"`) {
+				t.Fatalf(".gc/site.toml missing workspace binding:\n%s", out)
+			}
+			if !strings.Contains(out, `name = "my-project"`) {
+				t.Fatalf(".gc/site.toml missing rig entry:\n%s", out)
+			}
+			if !strings.Contains(out, myProject) {
+				t.Fatalf(".gc/site.toml missing rig path %q:\n%s", myProject, out)
+			}
+		})
+
+		t.Run("gc rig list", func(t *testing.T) {
+			out, err := ws.runShell("gc rig list", "")
+			if err != nil {
+				t.Fatalf("gc rig list: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "my-project") {
+				t.Fatalf("gc rig list missing my-project:\n%s", out)
+			}
+		})
+
+		t.Run("cd ~/my-project", func(t *testing.T) {
+			ws.setCWD(myProject)
+		})
+
+		t.Run(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, func(t *testing.T) {
+			out, err := ws.runShell(`gc sling my-project/claude "Write hello world in python to the file hello.py"`, "")
+			if err != nil {
+				t.Fatalf("gc sling rig task: %v\n%s", err, out)
+			}
+			for _, want := range []string{"Created ", "Attached workflow ", `formula "mol-do-work"`} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("gc sling output missing %q:\n%s", want, out)
+				}
+			}
+			helloTaskID = firstBeadID(out)
+			if helloTaskID == "" {
+				t.Fatalf("could not parse hello.py task id from gc sling output:\n%s", out)
+			}
+		})
+
+		t.Run("gc bd show mp-ff9 --watch", func(t *testing.T) {
+			if helloTaskID == "" {
+				t.Fatal("missing hello.py task id from prior sling step")
+			}
+			const helloPyReadyTimeout = 3 * time.Minute
+			rs, err := ws.startShell(fmt.Sprintf("gc bd show %s --watch", helloTaskID), "")
+			if err != nil {
+				t.Fatalf("gc bd show --watch start: %v", err)
+			}
+			defer func() { _ = rs.stop() }()
+
+			if err := rs.waitFor(helloTaskID, 30*time.Second); err != nil {
+				t.Fatalf("gc bd show --watch did not render target bead: %v", err)
+			}
+			if !waitForCondition(t, helloPyReadyTimeout, 2*time.Second, func() bool {
+				data, err := os.ReadFile(filepath.Join(myProject, "hello.py"))
+				return err == nil && strings.TrimSpace(string(data)) != ""
+			}) {
+				ws.noteWarning("tutorial 01 provider failure: gc sling rendered the visible watch flow but did not create hello.py within the acceptance timeout")
+				data, readErr := os.ReadFile(filepath.Join(myProject, "hello.py"))
+				switch {
+				case readErr != nil:
+					t.Fatalf("provider did not create hello.py within %s: %v", helloPyReadyTimeout, readErr)
+				case strings.TrimSpace(string(data)) == "":
+					t.Fatalf("provider created hello.py but left it empty after %s", helloPyReadyTimeout)
+				default:
+					t.Fatalf("provider created hello.py after timeout window; file was not ready within %s", helloPyReadyTimeout)
+				}
+			}
+		})
+
+		t.Run("ls (rig)", func(t *testing.T) {
+			out, err := ws.runShell("ls", "")
+			if err != nil {
+				t.Fatalf("ls in rig: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "hello.py") {
+				t.Fatalf("rig ls missing hello.py:\n%s", out)
+			}
+		})
+	})
+}

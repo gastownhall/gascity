@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
+
+var uniqueContractSeq atomic.Uint64
 
 type testRuntime struct {
 	cityPath string
@@ -70,7 +73,12 @@ func (t *testInstance) Close() error {
 
 func uniqueContract(t *testing.T) string {
 	t.Helper()
-	return fmt.Sprintf("test.%s.%d", strings.ReplaceAll(t.Name(), "/", "."), time.Now().UnixNano())
+	return fmt.Sprintf(
+		"test.%s.%d.%d",
+		strings.ReplaceAll(t.Name(), "/", "."),
+		time.Now().UnixNano(),
+		uniqueContractSeq.Add(1),
+	)
 }
 
 func registerWorkflowContractForTest(t *testing.T, contract string, factory WorkflowFactory) {

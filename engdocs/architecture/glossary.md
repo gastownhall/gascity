@@ -6,15 +6,20 @@ Authoritative definitions of Gas City terms. If a term's usage
 elsewhere conflicts with this glossary, this glossary wins and the
 other source should be updated.
 
-> Last verified against code: 2026-03-01
+> Last verified against code: 2026-04-25
 
 ## Primitives
 
-- **Agent Protocol**: Start/stop/prompt/observe agents regardless of
-  session provider. Covers identity, pools, sandboxes, resume, and
-  crash adoption. Layer 0-1 primitive. See
-  [`internal/agent/`](https://github.com/gastownhall/gascity/tree/main/internal/agent/) and
+- **Session**: Start/stop/prompt/observe sessions regardless of
+  provider. Covers identity, pools, sandboxes, resume, and crash
+  adoption. Layer 0-1 primitive. Lifecycle lives in
+  [`internal/session/`](https://github.com/gastownhall/gascity/tree/main/internal/session/);
+  the runtime boundary is `runtime.Provider` in
   [`internal/runtime/`](https://github.com/gastownhall/gascity/tree/main/internal/runtime/).
+  Naming and startup hints live in
+  [`internal/agent/`](https://github.com/gastownhall/gascity/tree/main/internal/agent/).
+  Renamed from "Agent Protocol" by the session-first migration
+  (commit `dd90ac0a`, Mar 8 2026).
 
 - **Bead**: A single unit of work. Everything is a bead: tasks, mail,
   molecules, convoys, and epics. Defined in the `Bead` struct with ID,
@@ -40,7 +45,7 @@ other source should be updated.
 ## Derived Mechanisms
 
 - **Order**: A formula or shell script dispatch triggered by a
-  gate condition. Lives in formula directories as
+  trigger condition. Lives in formula directories as
   `orders/<name>/order.toml`. Exec orders run shell
   scripts directly (no LLM, no agent, no wisp). Formula orders
   create wisps dispatched to agents. See
@@ -64,13 +69,13 @@ other source should be updated.
   resolves active files with `cmd/gc/formula_resolve.go`; convergence-specific
   validation lives in [`internal/convergence/formula.go`](https://github.com/gastownhall/gascity/blob/main/internal/convergence/formula.go).
 
-- **Gate**: The trigger condition for an order. Types: `cooldown`
+- **Trigger**: The trigger condition for an order. Types: `cooldown`
   (interval since last run), `cron` (schedule), `condition` (shell
   exits 0), `event` (specific event type occurs), `manual` (explicit
   invocation only). See
-  [`internal/orders/gates.go`](https://github.com/gastownhall/gascity/blob/main/internal/orders/gates.go).
+  [`internal/orders/triggers.go`](https://github.com/gastownhall/gascity/blob/main/internal/orders/triggers.go).
 
-- **Health Patrol**: Ping agents (Agent Protocol), compare thresholds
+- **Health Patrol**: Probe sessions (Session), compare thresholds
   (Config), publish stalls (Event Bus), restart with backoff. The
   supervision model follows Erlang/OTP patterns.
 
@@ -87,8 +92,10 @@ other source should be updated.
   queryable by label via `ListByLabel`.
 
 - **Messaging**: Inter-agent communication composed from primitives.
-  Mail = `TaskStore.Create(bead{type:"message"})`. Nudge =
-  `AgentProtocol.SendPrompt()`. No new primitive needed.
+  Mail = `TaskStore.Create(bead{type:"message"})`. Nudge = a
+  session-layer operation implemented via `runtime.Provider.Nudge()`
+  (and exposed through `worker.Handle.Nudge()` at the worker
+  boundary). No new primitive needed.
 
 - **Molecule**: A formula instantiated at runtime: one root bead plus
   zero or more provider-managed step beads. Progress is tracked by closing
@@ -127,8 +134,8 @@ other source should be updated.
 - **Provider** (Session): Manages agent sessions. The `Provider`
   interface defines lifecycle (Start, Stop, Interrupt), querying
   (IsRunning, ProcessAlive), communication (Attach, Nudge, SendKeys),
-  and metadata (SetMeta, GetMeta). Implementations: tmux (production),
-  subprocess (remote), k8s (Kubernetes), Fake (test). See
+  and metadata (SetMeta, GetMeta). Implementations: tmux, subprocess,
+  exec, k8s, acp, auto, hybrid, and Fake (test). See
   [`internal/runtime/runtime.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/runtime.go).
 
 - **Rig**: An external project directory registered in the city. Each
@@ -146,16 +153,18 @@ other source should be updated.
 
 ## Design Principles
 
-- **Bitter Lesson**: Every primitive must become MORE useful as models
-  improve, not less. Don't build heuristics or decision trees.
+- **Primitives must improve with the models**: Every primitive must
+  become MORE useful as models improve, not less. Don't build
+  heuristics or decision trees.
 
-- **GUPP**: "If you find work on your hook, YOU RUN IT." No
-  confirmation, no waiting. The hook having work IS the assignment.
+- **Work on your hook is yours to run**: "If you find work on your
+  hook, YOU RUN IT." No confirmation, no waiting. The hook having work
+  IS the assignment.
 
-- **NDI (Nondeterministic Idempotence)**: The system converges to
-  correct outcomes because work (beads), hooks, and molecules are all
-  persistent. Sessions come and go; the work survives.
+- **The system converges because work persists**: The system converges
+  to correct outcomes because work (beads), hooks, and molecules are
+  all persistent. Sessions come and go; the work survives.
 
-- **ZFC (Zero Framework Cognition)**: Go handles transport, not
-  reasoning. If a line of Go contains a judgment call, it's a
-  violation.
+- **Keep judgment out of Go**: Go handles transport, not reasoning. The
+  framework moves work; it doesn't reason. If a line of Go contains a
+  judgment call, it's a violation.

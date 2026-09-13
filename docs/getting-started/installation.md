@@ -7,7 +7,7 @@ description: Install Gas City from Homebrew, a release tarball, or source.
 
 | Method | Best for | Installs deps? | Auto-upgrades? |
 |--------|----------|----------------|----------------|
-| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (all 6) | `brew upgrade` |
+| [Homebrew](#homebrew-recommended) | macOS / Linux daily use | Yes (runtime deps) | `brew upgrade` |
 | [Direct download](#direct-download) | CI, containers, air-gapped hosts | No | Manual |
 | [Source build](#build-from-source) | Contributors, bleeding-edge | No | Manual |
 
@@ -21,32 +21,64 @@ managers). Choose source when you need unreleased changes or plan to contribute.
 Gas City requires a small set of runtime tools. Homebrew installs all of them
 for you; the other methods require manual installation.
 
-| Tool | Required | macOS | Linux | Notes |
-|------|----------|-------|-------|-------|
-| tmux | Yes | `brew install tmux` | `apt install tmux` | Session management |
-| jq | Yes | `brew install jq` | `apt install jq` | JSON processing |
-| git | Yes | (built-in) | (built-in) | Version control |
-| dolt | Yes | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
-| flock | Yes | `brew install flock` | (built-in via util-linux) | File locking |
-| Go 1.25+ | Source only | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| Tool | Required | Min version | macOS | Linux | Notes |
+|------|----------|-------------|-------|-------|-------|
+| tmux | Yes | — | `brew install tmux` | `apt install tmux` | Session management |
+| jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
+| git | Yes | — | (built-in) | (built-in) | Version control |
+| dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
+| bd (Beads CLI) | Yes | 1.0.4 | `brew install beads` (see note) | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
+| gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
+| Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
+| make | Source only | — | (built-in) | `apt install make` (or `build-essential`) | Drives `make install` |
+
+Use a final Dolt 2.1.0 or newer. Gas City's managed Dolt checks reject older
+and pre-release builds because they are below the managed bd/Dolt compatibility
+floor; releases before 1.86.2 can also miss the upstream GC/writer deadlock
+fix in dolthub/dolt commit `ccf7bde206`, which can hang `dolt_backup sync`
+under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
+
+**bd note:** `deps.env` currently pins `BD_VERSION=v1.3.0-rc.2`, a prerelease
+that is deliberately not published to Homebrew, npm or PyPI. `brew install
+beads` gives you the latest stable release instead, which is an OLDER bd than
+the one this gc was built and tested against. To match CI exactly, install the
+pinned tarball:
+
+```bash
+set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"
+```
 
 ## Homebrew (recommended)
 
 ```bash
-brew install gastownhall/gascity/gascity
+brew install gascity
 ```
 
-This taps the `gastownhall/gascity` formula, builds or fetches the `gc` binary,
-and installs all six runtime dependencies (tmux, jq, git, dolt, flock, beads).
+This taps the `gastownhall/gascity` formula, downloads the matching `gc`
+release asset, and installs all six runtime dependencies (tmux, jq, git, dolt,
+flock, beads).
+
+Once Gas City is accepted into homebrew-core, the normal install path will be
+`brew install gascity`; the `gastownhall/gascity` tap remains available for
+emergency updates.
 
 Verify the installation:
 
 ```bash
 gc version
 ```
+
+<Warning>
+If you use Oh My Zsh with the `git` plugin, `gc` may already be an alias for
+`git commit --verbose`. Run `command gc version` once to bypass the alias. For
+a persistent fix, add `unalias gc 2>/dev/null` or
+`zstyle ':omz:plugins:git' aliases no 'gc'` after Oh My Zsh loads in
+`~/.zshrc`, or put that line in a file such as
+`~/.oh-my-zsh/custom/gascity.zsh`.
+</Warning>
 
 ### Upgrading via Homebrew
 
@@ -89,7 +121,7 @@ Release tarballs are published for every tagged version. Supported platforms:
 
 ```bash
 # Set the version you want (check https://github.com/gastownhall/gascity/releases)
-VERSION=0.13.3
+VERSION=1.4.0
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -110,6 +142,39 @@ sudo install -m 755 gc /usr/local/bin/gc
 gc version
 ```
 
+### Verify release artifacts
+
+Homebrew verifies release checksums from the formula automatically. For direct
+downloads, verify the archive before installing it:
+
+```bash
+ARCHIVE="gascity_${VERSION}_${OS}_${ARCH}.tar.gz"
+CHECKSUMS="gascity_${VERSION}_checksums.txt"
+
+curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION}/${CHECKSUMS}"
+grep "  ${ARCHIVE}$" "${CHECKSUMS}" > "${ARCHIVE}.sha256"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum -c "${ARCHIVE}.sha256"
+else
+  shasum -a 256 -c "${ARCHIVE}.sha256"
+fi
+```
+
+Release archives are also published with GitHub artifact attestations. If you
+have the GitHub CLI installed, verify the downloaded archive against the
+`gastownhall/gascity` repository:
+
+```bash
+gh attestation verify "${ARCHIVE}" --repo gastownhall/gascity
+```
+
+Each release also includes an SPDX SBOM asset:
+
+```bash
+curl -fsSLO "https://github.com/gastownhall/gascity/releases/download/v${VERSION}/gascity-v${VERSION}.spdx.json"
+```
+
 ### Upgrading a direct-download install
 
 Repeat the download steps above with the new version number. The `gc` binary is
@@ -122,7 +187,7 @@ using direct download. Homebrew handles this automatically.
 
 ## Build from source
 
-Requires Go 1.25+ (pinned in `go.mod`).
+Requires `make` and Go 1.26+ (pinned in `go.mod` as 1.26.4).
 
 ```bash
 git clone https://github.com/gastownhall/gascity.git
@@ -138,7 +203,14 @@ make build          # outputs bin/gc in the repo root
 ./bin/gc version
 ```
 
-On macOS, `make build` automatically ad-hoc code-signs the binary (`codesign -s -`).
+On macOS, `make build` signs the binary with a stable local codesigning
+identity when one is available, which helps macOS remember local permission
+grants across rebuilds. Without a stable identity, the build leaves Go's
+linker-produced signature unchanged. Set `GC_SIGN_IDENTITY=<certificate name>`
+to choose a specific certificate, `GC_SIGN_IDENTIFIER=<identifier>` to use a
+separate local TCC identity, or `GC_ADHOC_SIGN=1` to opt into ad-hoc signing
+for a local experiment. Successful local signing also removes stale
+`com.apple.provenance` metadata when present.
 
 ### Contributor setup
 
@@ -160,23 +232,34 @@ Regardless of install method, confirm everything is working:
 gc version          # should print the installed version and commit
 ```
 
+If that runs `git commit` instead of Gas City, your shell has a `gc` alias.
+Use `command gc version` for this check and see
+[Troubleshooting](/getting-started/troubleshooting#oh-my-zsh-git-plugin-hides-gc)
+for the permanent fix.
+
 Then create your first city:
 
 ```bash
 gc init ~/my-city
 cd ~/my-city
-gc start
 ```
 
-See the [Quickstart](./quickstart.md) for a complete walkthrough.
+`gc init` registers the city with the supervisor, which then starts it. By the
+time the command returns, the city is running.
+See the [Quickstart](/getting-started/quickstart) for a complete walkthrough.
+
+Gas City ships a JSONL archive that snapshots every bead database for
+disaster recovery. By default it runs in local-only mode and keeps commits
+on this host. To enable off-box backup, see
+[JSONL archive push failures](/getting-started/troubleshooting#jsonl-archive-push-failures).
 
 ## Docs preview
 
-The docs site uses [Mintlify](https://mintlify.com). Preview locally:
+The docs site uses [Mintlify](https://mintlify.com). Preview locally from the
+repo root:
 
 ```bash
-cd docs
-npx --yes mint@latest dev
+./mint.sh dev
 ```
 
 Or run a link check without starting the server:

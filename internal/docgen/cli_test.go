@@ -2,6 +2,8 @@ package docgen
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,9 +52,13 @@ func TestRenderCLIMarkdown_BasicTree(t *testing.T) {
 
 	md := buf.String()
 
-	// Check header.
-	if !strings.Contains(md, "# CLI Reference") {
-		t.Error("missing CLI Reference header")
+	// Check frontmatter title (Mintlify renders it as the page header;
+	// a body H1 would duplicate it).
+	if !strings.Contains(md, `title: "CLI Reference"`) {
+		t.Error("missing CLI Reference frontmatter title")
+	}
+	if strings.Contains(md, "# CLI Reference") {
+		t.Error("body H1 duplicates the frontmatter title")
 	}
 	if !strings.Contains(md, "Auto-generated") {
 		t.Error("missing auto-generated note")
@@ -92,6 +98,24 @@ func TestRenderCLIMarkdown_HiddenCommandSkipped(t *testing.T) {
 
 	if strings.Contains(buf.String(), "internal") {
 		t.Error("hidden command 'internal' should not appear in output")
+	}
+}
+
+func TestRenderCLIMarkdown_AnnotatedCommandSkipped(t *testing.T) {
+	root := &cobra.Command{Use: "app", Short: "test"}
+	root.AddCommand(&cobra.Command{
+		Use:         "pack",
+		Short:       "local pack command",
+		Annotations: map[string]string{skipCLIDocAnnotation: "true"},
+	})
+
+	var buf bytes.Buffer
+	if err := RenderCLIMarkdown(&buf, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	if strings.Contains(buf.String(), "pack") {
+		t.Error("annotated command 'pack' should not appear in output")
 	}
 }
 
@@ -144,6 +168,23 @@ func TestRenderCLIMarkdown_ExampleField(t *testing.T) {
 	}
 	if !strings.Contains(md, "myapp deploy staging") {
 		t.Error("Example content missing")
+	}
+}
+
+func TestRenderCLIMarkdown_ExampleDedented(t *testing.T) {
+	root := testTree()
+	var buf bytes.Buffer
+	if err := RenderCLIMarkdown(&buf, root); err != nil {
+		t.Fatalf("RenderCLIMarkdown: %v", err)
+	}
+
+	md := buf.String()
+	// Cobra Example strings indent every line for terminal help; the
+	// rendered code fence must strip that common indent from all lines,
+	// not just the first.
+	want := "```\nmyapp deploy staging\nmyapp deploy production --force\n```"
+	if !strings.Contains(md, want) {
+		t.Errorf("Example block not dedented; want %q in output", want)
 	}
 }
 
@@ -238,5 +279,22 @@ func TestRenderCLIMarkdown_ZeroDefaultOmitted(t *testing.T) {
 	// Non-zero default should appear.
 	if !strings.Contains(md, "`json`") {
 		t.Error("non-zero default 'json' should appear")
+	}
+}
+
+func TestWriteCLIMarkdown_TrimsExtraBlankEOF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cli.md")
+	if err := WriteCLIMarkdown(path, testTree()); err != nil {
+		t.Fatalf("WriteCLIMarkdown: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.HasSuffix(string(data), "\n") {
+		t.Fatalf("generated markdown missing final newline")
+	}
+	if strings.HasSuffix(string(data), "\n\n") {
+		t.Fatalf("generated markdown has extra blank line at EOF")
 	}
 }

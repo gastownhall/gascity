@@ -50,7 +50,7 @@ and `poolAgents`.
 ### 1.2 PID Tracking — EXCLUDE
 
 **Gastown:** `session/pidtrack.go` — Writes pane PID + process start
-time to `.runtime/pids/<session>.pid`. On cleanup, verifies start time
+time to a local PID file. On cleanup, verifies start time
 matches before killing (prevents killing recycled PIDs). Defense-in-depth
 for when `tmux kill-session` fails or tmux itself dies.
 

@@ -14,73 +14,253 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func waitForSessionTargets(t *testing.T, cityDir string, targets []string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list", "--state", "all")
+		if err == nil {
+			allPresent := true
+			for _, target := range targets {
+				if !strings.Contains(out, target) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	out, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("expected session targets never appeared:\n%s", out)
+}
+
+func waitForActiveSessionTargets(t *testing.T, cityDir string, targets []string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		out, err := gc(cityDir, "session", "list")
+		if err == nil {
+			allPresent := true
+			for _, target := range targets {
+				if !strings.Contains(out, target) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	out, _ := gc(cityDir, "session", "list")
+	t.Fatalf("expected active session targets never appeared:\n%s", out)
+}
+
 // setupMultiRigCity creates a city scaffold with the given number of rig
-// directories. Returns the city directory and a slice of rig directory paths.
+// directories under an isolated integration GC_HOME. Returns the city
+// directory and a slice of rig directory paths.
 //
-// The city is NOT started. Callers should write their desired city.toml via
-// writeMultiRigToml and then call gc start themselves. This avoids the racy
-// stop/start dance that caused "standalone controller already running" errors.
+// The city starts from a file-backed schema-2 source so config-only multi-rig
+// tests do not depend on the developer machine's bd/dolt toolchain before the
+// test overwrites city.toml with its scenario-specific fixture.
 func setupMultiRigCity(t *testing.T, rigCount int) (cityDir string, rigDirs []string) {
 	t.Helper()
-	cityDir = t.TempDir()
+	env := newIsolatedCommandEnv(t, false)
+	cityName := uniqueCityName()
+	cityDir = filepath.Join(t.TempDir(), cityName)
+	sourceDir := filepath.Join(t.TempDir(), cityName+"-source")
+	require.NoError(t, os.MkdirAll(sourceDir, 0o755))
 
-	// Create the city scaffold. gc init registers with the supervisor, but
-	// callers overwrite city.toml before any test calls gc start, so the
-	// controller picks up the final config on first real start.
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
+	var source strings.Builder
+	fmt.Fprintf(&source, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&source, "\n[beads]\nprovider = \"file\"\n")
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "city.toml"), []byte(source.String()), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "pack.toml"), []byte(packTomlWithCoreImport(t, cityName)), 0o644))
+
+	// Create the city scaffold inside an isolated supervisor env so
+	// multi-rig tests do not contend with the suite-global supervisor.
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--from", sourceDir, cityDir)
 	require.NoError(t, err, "gc init: %s", out)
+	registerCityCommandEnv(cityDir, env)
 
 	rigDirs = make([]string, rigCount)
 	for i := 0; i < rigCount; i++ {
 		rigDirs[i] = filepath.Join(t.TempDir(), fmt.Sprintf("rig-%d", i))
 		require.NoError(t, os.MkdirAll(rigDirs[i], 0o755))
+		registerCityCommandEnv(rigDirs[i], env)
 	}
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		for _, rigDir := range rigDirs {
+			unregisterCityCommandEnv(rigDir)
+		}
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if err := os.RemoveAll(cityDir); err == nil || time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	})
 
 	return cityDir, rigDirs
 }
 
-// writeMultiRigToml writes a city.toml that references the given rig directories.
-// Each rig gets a [[rigs]] entry and a rig-scoped worker agent.
+// writeMultiRigToml writes a schema-2 city plus site bindings for the given
+// rig directories. City-scoped agents are declared under agents/<name>/agent.toml.
+// Rig-scoped agents come from a local pack imported by each rig so duplicate
+// agent names across rigs stay representable without legacy inline [[agent]].
 func writeMultiRigToml(t *testing.T, cityDir, cityName string, rigDirs []string, agents []gasTownAgent) {
 	t.Helper()
 
+	var cityAgents []gasTownAgent
+	rigAgentsByDir := make(map[string][]gasTownAgent)
+	rigPackAgentNames := make(map[string]gasTownAgent)
+	for _, a := range agents {
+		if a.Dir == "" {
+			cityAgents = append(cityAgents, a)
+			continue
+		}
+		rigAgentsByDir[a.Dir] = append(rigAgentsByDir[a.Dir], a)
+		if _, ok := rigPackAgentNames[a.Name]; !ok {
+			rigPackAgentNames[a.Name] = gasTownAgent{Name: a.Name}
+		}
+	}
+	if len(rigPackAgentNames) > 0 {
+		writeMultiRigAgentPack(t, cityDir, rigPackAgentNames)
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "[workspace]\nname = %s\n", quote(cityName))
+	fmt.Fprintf(&b, "\n[beads]\nprovider = \"file\"\n")
 	fmt.Fprintf(&b, "\n[daemon]\npatrol_interval = \"100ms\"\n")
 
-	for i, rd := range rigDirs {
+	for i := range rigDirs {
 		rigName := fmt.Sprintf("rig-%d", i)
-		fmt.Fprintf(&b, "\n[[rigs]]\nname = %s\npath = %s\n",
-			quote(rigName), quote(rd))
+		fmt.Fprintf(&b, "\n[[rigs]]\nname = %s\n", quote(rigName))
+		if rigAgents := rigAgentsByDir[rigName]; len(rigAgents) > 0 {
+			fmt.Fprintf(&b, "\n[rigs.imports.multirig_agents]\nsource = \"packs/multirig-agents\"\n")
+			for _, a := range rigAgents {
+				fmt.Fprintf(&b, "\n[[rigs.patches]]\nagent = %s\n", quote(a.Name))
+				if a.StartCommand != "" {
+					fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
+				}
+				if a.Suspended {
+					b.WriteString("suspended = true\n")
+				}
+			}
+		}
 	}
 
 	for _, a := range agents {
-		fmt.Fprintf(&b, "\n[[agent]]\nname = %s\n", quote(a.Name))
-		fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
-		if a.Dir != "" {
-			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
-		}
-		if a.Suspended {
-			fmt.Fprintf(&b, "suspended = true\n")
-		}
-		if len(a.Env) > 0 {
-			b.WriteString("\n[agent.env]\n")
-			for k, v := range a.Env {
-				fmt.Fprintf(&b, "%s = %s\n", k, quote(v))
-			}
-		}
 		if a.Pool != nil {
-			fmt.Fprintf(&b, "\n[agent.pool]\nmin = %d\nmax = %d\ncheck = %s\n",
-				a.Pool.Min, a.Pool.Max, quote(a.Pool.Check))
+			continue
+		}
+		template := a.Name
+		if a.Dir != "" {
+			template = "multirig_agents." + a.Name
+		}
+		fmt.Fprintf(&b, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(template))
+		if a.Dir != "" {
+			fmt.Fprintf(&b, "name = %s\n", quote(a.Name))
+			fmt.Fprintf(&b, "dir = %s\n", quote(a.Dir))
 		}
 	}
 
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	require.NoError(t, os.WriteFile(tomlPath, []byte(b.String()), 0o644))
+	writeGasTownAgentFiles(t, cityDir, cityAgents)
+
+	var site strings.Builder
+	fmt.Fprintf(&site, "workspace_name = %s\n", quote(cityName))
+	for i, rd := range rigDirs {
+		rigName := fmt.Sprintf("rig-%d", i)
+		fmt.Fprintf(&site, "\n[[rig]]\nname = %s\npath = %s\n", quote(rigName), quote(rd))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(site.String()), 0o644))
+}
+
+func writeMultiRigAgentPack(t *testing.T, cityDir string, agents map[string]gasTownAgent) {
+	t.Helper()
+
+	packDir := filepath.Join(cityDir, "packs", "multirig-agents")
+	require.NoError(t, os.MkdirAll(packDir, 0o755))
+	pack := "[pack]\nname = \"multirig-agents\"\nschema = 2\n"
+	require.NoError(t, os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(pack), 0o644))
+
+	for _, a := range agents {
+		agentDir := filepath.Join(packDir, "agents", a.Name)
+		require.NoError(t, os.MkdirAll(agentDir, 0o755))
+		var b strings.Builder
+		b.WriteString("scope = \"rig\"\n")
+		if a.StartCommand != "" {
+			fmt.Fprintf(&b, "start_command = %s\n", quote(a.StartCommand))
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644))
+	}
+}
+
+func installFakeBDForCity(t *testing.T, cityDir string) {
+	t.Helper()
+
+	shimDir := t.TempDir()
+	script := filepath.Join(shimDir, "bd")
+	content := `#!/bin/sh
+set -eu
+store="${BEADS_DIR:?}/fake-beads"
+mkdir -p "$store"
+case "${1:-}" in
+  create)
+    title="${2:?missing title}"
+    id="${GC_BEADS_PREFIX:-bd}-fake"
+    printf '%s' "$title" > "$store/$id"
+    printf 'Created issue: %s\n' "$id"
+    ;;
+  show)
+    id="${2:?missing id}"
+    if [ ! -f "$store/$id" ]; then
+      printf 'Error: issue not found: %s\n' "$id" >&2
+      exit 1
+    fi
+    printf 'ID: %s\n' "$id"
+    printf 'Title: %s\n' "$(cat "$store/$id")"
+    ;;
+  *)
+    printf 'unsupported fake bd command: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`
+	require.NoError(t, os.WriteFile(script, []byte(content), 0o755))
+
+	loaded, ok := cityCommandEnv.Load(cityDir)
+	require.True(t, ok, "city command env should be registered for %s", cityDir)
+	env := append([]string(nil), loaded.([]string)...)
+	envMap := parseEnvList(env)
+	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
+	registerCityCommandEnv(cityDir, env)
+}
+
+func seedConfiguredFakeBDWorkspace(t *testing.T, dir, prefix string) {
+	t.Helper()
+
+	beadsDir := filepath.Join(dir, ".beads")
+	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: "+prefix+"\n"), 0o644))
+	metadata := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":%q}`+"\n", prefix)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644))
 }
 
 // TestGastown_MultiRig_ConfigLoads creates a city with 2 rigs and verifies
@@ -151,9 +331,9 @@ sleep 3600
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
-	// Start the city.
-	out, err := gc("", "start", cityDir)
-	require.NoError(t, err, "gc start: %s", out)
+	out, err := gc("", "restart", cityDir)
+	require.NoError(t, err, "gc restart: %s", out)
+	waitForSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Wait for both reports.
 	deadline := time.Now().Add(30 * time.Second)
@@ -195,14 +375,18 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 		{Name: "worker", StartCommand: "sleep 3600"},
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
+	installFakeBDForCity(t, cityDir)
 
-	// Initialize beads in each rig directory with unique prefixes.
-	prefix0 := initBd(t, rigDirs[0])
-	prefix1 := initBd(t, rigDirs[1])
+	// Seed bd store markers after city.toml exists, then exercise only
+	// Gas City's configured rig route rather than direct cwd-based bd calls.
+	prefix0 := "r0"
+	prefix1 := "r1"
+	seedConfiguredFakeBDWorkspace(t, rigDirs[0], prefix0)
+	seedConfiguredFakeBDWorkspace(t, rigDirs[1], prefix1)
 	assert.NotEqual(t, prefix0, prefix1, "rig bead prefixes should differ")
 
-	// Create a bead from rig-0's directory.
-	out, err := bd(rigDirs[0], "create", "multi-rig bead test alpha")
+	// Create a bead through Gas City's configured rig route.
+	out, err := gc(cityDir, "bd", "--rig", "rig-0", "create", "multi-rig bead test alpha")
 	require.NoError(t, err, "bd create in rig-0: %s", out)
 	beadID := extractBeadID(t, out)
 
@@ -211,11 +395,17 @@ func TestGastown_MultiRig_BeadIsolation(t *testing.T) {
 	assert.True(t, strings.HasPrefix(beadID, prefix0),
 		"bead ID %q should start with rig-0 prefix %q", beadID, prefix0)
 
-	// Verify the bead is visible from rig-0.
-	out, err = bd(rigDirs[0], "show", beadID)
+	// Verify the bead is visible through rig-0's configured route.
+	out, err = gc(cityDir, "bd", "--rig", "rig-0", "show", beadID)
 	require.NoError(t, err, "bd show from rig-0: %s", out)
 	assert.Contains(t, out, "multi-rig bead test alpha",
 		"bead should be visible from rig-0")
+
+	// Verify the same bead is not visible through rig-1's configured route.
+	out, err = gc(cityDir, "bd", "--rig", "rig-1", "show", beadID)
+	require.Error(t, err, "bd show from rig-1 should fail for bead %s; output: %s", beadID, out)
+	assert.NotContains(t, out, "multi-rig bead test alpha",
+		"bead should not be visible from rig-1")
 }
 
 // TestGastown_MultiRig_IndependentLifecycle starts a city with 2 rigs, stops
@@ -230,9 +420,9 @@ func TestGastown_MultiRig_IndependentLifecycle(t *testing.T) {
 	}
 	writeMultiRigToml(t, cityDir, cityName, rigDirs, agents)
 
-	// Start the city.
-	out, err := gc("", "start", cityDir)
-	require.NoError(t, err, "gc start: %s", out)
+	out, err := gc("", "restart", cityDir)
+	require.NoError(t, err, "gc restart: %s", out)
+	waitForSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Let agents settle.
 	time.Sleep(500 * time.Millisecond)
@@ -252,8 +442,7 @@ func TestGastown_MultiRig_IndependentLifecycle(t *testing.T) {
 	out, err = gc("", "start", cityDir)
 	require.NoError(t, err, "gc start (restart): %s", out)
 
-	// Let agents settle after restart.
-	time.Sleep(500 * time.Millisecond)
+	waitForActiveSessionTargets(t, cityDir, []string{"rig-0/worker", "rig-1/worker"}, 30*time.Second)
 
 	// Verify both agents are back.
 	out, err = gc(cityDir, "session", "list")

@@ -21,6 +21,24 @@ func writeFile(t *testing.T, dir, name, content string) {
 	}
 }
 
+type readCountingFS struct {
+	fsys.OSFS
+	reads map[string]int
+}
+
+func newReadCountingFS() *readCountingFS {
+	return &readCountingFS{reads: make(map[string]int)}
+}
+
+func (f *readCountingFS) ReadFile(name string) ([]byte, error) {
+	f.reads[filepath.Clean(name)]++
+	return f.OSFS.ReadFile(name)
+}
+
+func (f *readCountingFS) ReadCount(name string) int {
+	return f.reads[filepath.Clean(name)]
+}
+
 func TestExpandPacks_Basic(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gastown/pack.toml", `
@@ -61,6 +79,34 @@ name = "refinery"
 	// witness should have adjusted prompt_template path.
 	if !strings.Contains(cfg.Agents[0].PromptTemplate, "prompts/witness.md") {
 		t.Errorf("witness prompt_template = %q, want to contain prompts/witness.md", cfg.Agents[0].PromptTemplate)
+	}
+}
+
+func TestExpandPacksAllowsSemanticallyInvalidFlatOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/tools/pack.toml", `
+[pack]
+name = "tools"
+version = "1.0.0"
+schema = 1
+`)
+	writeFile(t, dir, "packs/tools/orders/deploy.toml", `
+[order]
+formula = "mol-deploy"
+trigger = "manual"
+
+[order.env]
+CUSTOM_ORDER_FLAG = "enabled"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "demo", Path: "/work", Includes: []string{"packs/tools"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
 	}
 }
 
@@ -267,6 +313,342 @@ name = "witness"
 	}
 }
 
+// TestLoadWithIncludes_PatchTargetsRigPackDerivedAgent verifies that a
+// city-level [[patches.agent]] block can target a rig-scope agent that
+// comes from a rig pack via [rigs.imports.<binding>]. The merged agent's
+// canonical identity is "rig/binding.name" (e.g., "proj/gs.refinery"),
+// and patches keyed by dir="rig" name="binding.name" must resolve to it.
+//
+// Regression for gco-dma / HQ gc-t2c: city-level patches were applied
+// before rig pack expansion, so the target agent didn't exist in
+// cfg.Agents when ApplyPatches ran and every form of [[patches.agent]]
+// pointing at a rig pack agent failed with "not found in merged config".
+func TestLoadWithIncludes_PatchTargetsRigPackDerivedAgent(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "dir plus binding qualified name",
+			patch: `
+[[patches.agent]]
+dir = "proj"
+name = "gs.refinery"
+suspended = true
+`,
+		},
+		{
+			name: "single qualified name",
+			patch: `
+[[patches.agent]]
+name = "proj/gs.refinery"
+suspended = true
+`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+`+tt.patch)
+			writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+			cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+
+			var refinery *Agent
+			for i := range cfg.Agents {
+				if cfg.Agents[i].QualifiedName() == "proj/gs.refinery" {
+					refinery = &cfg.Agents[i]
+					break
+				}
+			}
+			if refinery == nil {
+				names := make([]string, 0, len(cfg.Agents))
+				for _, a := range cfg.Agents {
+					names = append(names, a.QualifiedName())
+				}
+				t.Fatalf("agent proj/gs.refinery not found in merged config; agents: %v", names)
+			}
+			if !refinery.Suspended {
+				t.Errorf("refinery.Suspended = false, want true (patch should have applied)")
+			}
+		})
+	}
+}
+
+func TestLoadWithIncludes_RigPatchOverridesCityPatchForRigPackDerivedAgent(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "refinery"
+suspended = false
+
+[[patches.agent]]
+dir = "proj"
+name = "gs.refinery"
+suspended = true
+nudge = "city patch applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var refinery *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.refinery" {
+			refinery = &cfg.Agents[i]
+			break
+		}
+	}
+	if refinery == nil {
+		t.Fatal("agent proj/gs.refinery not found in merged config")
+	}
+	if refinery.Nudge != "city patch applied" {
+		t.Errorf("refinery.Nudge = %q, want city patch to apply before rig patch", refinery.Nudge)
+	}
+	if refinery.Suspended {
+		t.Errorf("refinery.Suspended = true, want false (rig patch should win after city patch)")
+	}
+}
+
+// TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence is the
+// regression for the wildcard partitioning bug: a city-level rig="*" patch
+// whose Name also matches an implicit provider-derived agent used to be fully
+// deferred until AFTER rig overrides ran, so it clobbered the rig override and
+// reversed city-before-rig precedence.
+//
+// The agent is named "claude" — the same name as the provider — so it is BOTH
+// an already-present rig-pack agent (proj/gs.claude) AND an implicit-agent name.
+// The wildcard patch must apply in the normal city patch phase (so the rig
+// override, applied later, still wins on the field they share) while ALSO
+// deferring to the injected implicit-agent tail. Assertions: the wildcard ran
+// (it set Nudge, which the rig override does not touch) AND the rig override
+// won (Suspended=false, set after the wildcard's Suspended=true).
+func TestLoadWithIncludes_WildcardPatchKeepsCityBeforeRigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "claude"
+suspended = false
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+nudge = "city wildcard applied"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "claude"
+provider = "claude"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var claude *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].QualifiedName() == "proj/gs.claude" {
+			claude = &cfg.Agents[i]
+			break
+		}
+	}
+	if claude == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for _, a := range cfg.Agents {
+			names = append(names, a.QualifiedName())
+		}
+		t.Fatalf("agent proj/gs.claude not found in merged config; agents: %v", names)
+	}
+	if claude.Nudge != "city wildcard applied" {
+		t.Errorf("claude.Nudge = %q, want city wildcard patch to apply in the normal city phase", claude.Nudge)
+	}
+	if claude.Suspended {
+		t.Errorf("claude.Suspended = true, want false (rig override must win after the city wildcard)")
+	}
+}
+
+func TestLoadWithIncludes_ProvenanceUsesDeferredRigPatchFinalIdentity(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[rigs.patches]]
+agent = "refinery"
+dir = "ops"
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Agents[0].QualifiedName() != "ops/gs.refinery" {
+		t.Fatalf("agent QualifiedName() = %q, want ops/gs.refinery", cfg.Agents[0].QualifiedName())
+	}
+	if _, ok := prov.Agents["ops/gs.refinery"]; !ok {
+		t.Fatalf("provenance missing final identity ops/gs.refinery; agents: %v", prov.Agents)
+	}
+	if _, ok := prov.Agents["proj/gs.refinery"]; ok {
+		t.Fatalf("provenance retained stale identity proj/gs.refinery; agents: %v", prov.Agents)
+	}
+}
+
+func TestApplyDeferredRigPatchesRejectsShiftedAgentRange(t *testing.T) {
+	suspended := true
+	cfg := &City{
+		Agents: []Agent{
+			{Dir: "proj", BindingName: "gs", Name: "refinery"},
+			{Dir: "proj", BindingName: "gs", Name: "refinery"},
+		},
+	}
+	deferred := []deferredRigPatches{
+		{
+			rigName:            "proj",
+			agentStart:         0,
+			agentEnd:           1,
+			expectedAgentCount: len(cfg.Agents),
+			expectedAgentNames: []string{"proj/gs.refinery"},
+			overrides:          []AgentOverride{{Agent: "refinery", Suspended: &suspended}},
+		},
+	}
+
+	cfg.Agents[0].Dir = "other"
+
+	err := applyDeferredRigPatches(cfg, deferred)
+	if err == nil {
+		t.Fatal("expected shifted deferred range to fail")
+	}
+	if !strings.Contains(err.Error(), "changed before deferred rig patches") {
+		t.Fatalf("error = %q, want changed-range message", err)
+	}
+	if cfg.Agents[0].Suspended {
+		t.Fatal("wrong agent was patched before shifted range was rejected")
+	}
+}
+
+// TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors verifies
+// that a misspelled [[patches.agent]] target still produces a clear
+// "not found in merged config" error after the ordering fix. Without
+// this check, the swap could mask typos by silently no-oping if the
+// patch list ever became deferral-friendly. The merged config sees both
+// city-scope and rig-scope pack agents before the error is raised.
+func TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = "./packs/gastown"
+
+[[patches.agent]]
+dir = "proj"
+name = "gs.nonexistent"
+suspended = true
+`)
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[[agent]]
+name = "refinery"
+scope = "rig"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to fail for nonexistent patch target")
+	}
+	if !strings.Contains(err.Error(), "proj/gs.nonexistent") {
+		t.Errorf("error = %q, want mention of proj/gs.nonexistent", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want mention of 'not found'", err)
+	}
+}
+
 func TestExpandPacks_OverrideNotFound(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `
@@ -379,6 +761,90 @@ version = "1.0.0"
 	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
 	if err == nil {
 		t.Fatal("expected error for missing schema")
+	}
+}
+
+func TestExpandPacks_RejectsUnknownPackTomlFields(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/bad/pack.toml", `
+[pack]
+name = "bad"
+schema = 1
+scheam = 1
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
+		},
+	}
+
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown pack.toml field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "pack.scheam"`) {
+		t.Fatalf("error should mention unknown pack field, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "schema"`) {
+		t.Fatalf("error should suggest schema, got: %v", err)
+	}
+}
+
+func TestExpandPacks_AcceptsPackDescription(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/described/pack.toml", `
+[pack]
+name = "described"
+schema = 2
+description = "Human-readable pack summary"
+
+[[agent]]
+name = "worker"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/described"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks rejected [pack].description: %v", err)
+	}
+}
+
+func TestExpandPacks_RejectsUnknownPackImportFields(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/helper/pack.toml", `
+[pack]
+name = "helper"
+schema = 1
+`)
+	writeFile(t, dir, "packs/bad/pack.toml", `
+[pack]
+name = "bad"
+schema = 2
+
+[imports.helper]
+sorce = "../helper"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "hw", Path: "/hw", Includes: []string{"packs/bad"}},
+		},
+	}
+
+	err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown import field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "imports.helper.sorce"`) {
+		t.Fatalf("error should mention unknown import field, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `did you mean "source"`) {
+		t.Fatalf("error should suggest source, got: %v", err)
 	}
 }
 
@@ -557,6 +1023,120 @@ func TestPackContentHashRecursive(t *testing.T) {
 	}
 }
 
+func TestPackContentHashRecursiveCachesUnchangedTree(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", `name = "p"`)
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+	writeFile(t, dir, "assets/big.txt", strings.Repeat("x", 4096))
+
+	cfs := newReadCountingFS()
+	bigPath := filepath.Join(dir, "assets/big.txt")
+
+	h1 := PackContentHashRecursive(cfs, dir)
+	if cfs.ReadCount(bigPath) == 0 {
+		t.Fatal("first hash should read file content")
+	}
+
+	// Second call on the unchanged tree: cache hit, zero additional content reads.
+	before := cfs.ReadCount(bigPath)
+	h2 := PackContentHashRecursive(cfs, dir)
+	if h2 != h1 {
+		t.Fatalf("cached hash mismatch: %q vs %q", h1, h2)
+	}
+	if after := cfs.ReadCount(bigPath); after != before {
+		t.Fatalf("cache hit re-read content (%d→%d), want no new reads (stat fingerprint should gate)", before, after)
+	}
+
+	// Mutating a file bumps its mtime/size → fingerprint changes → re-read + new hash.
+	writeFile(t, dir, "prompts/a.md", "prompt a (edited, longer)")
+	beforeChange := cfs.ReadCount(bigPath)
+	h3 := PackContentHashRecursive(cfs, dir)
+	if h3 == h1 {
+		t.Fatal("hash should change after content change")
+	}
+	if cfs.ReadCount(bigPath) == beforeChange {
+		t.Fatal("changed tree should be re-read, not served from cache")
+	}
+}
+
+// TestPackContentHashRecursiveDetectsMtimePreservingEdit reproduces ga-b675vk:
+// mtime-preserving deploy tooling (cp -p, rsync --checksum --times) can edit
+// file content without changing size or mtime, which previously let a stale
+// hash survive in the cache. ctime cannot be rolled back by any standard
+// syscall, so it must break the tie.
+func TestPackContentHashRecursiveDetectsMtimePreservingEdit(t *testing.T) {
+	ResetPackContentHashCache()
+	t.Cleanup(ResetPackContentHashCache)
+
+	dir := "/pack"
+	path := filepath.Join(dir, "pack.toml")
+	fs := fsys.NewFake()
+	fs.Dirs[dir] = true
+
+	if err := fs.WriteFile(path, []byte("name = \"a\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := PackContentHashRecursive(fs, dir)
+	origModTime := fs.ModTimes[path]
+
+	// Same size (10 bytes), different content, then mtime forced back to its
+	// original value — simulating tooling that preserves mtime across a
+	// content-changing write. ctime is deliberately left alone: Fake advances
+	// it on every WriteFile and never lets a test roll it back, mirroring the
+	// real kernel where no userspace syscall sets ctime.
+	if err := fs.WriteFile(path, []byte("name = \"b\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs.ModTimes[path] = origModTime
+
+	h2 := PackContentHashRecursive(fs, dir)
+	if h2 == h1 {
+		t.Fatal("hash should change when content changes even though size and mtime match the cached fingerprint exactly (ctime must break the tie)")
+	}
+}
+
+func TestPackContentHashRecursiveIgnoresRuntimeDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", "test")
+	writeFile(t, dir, "prompts/a.md", "prompt a")
+
+	h1 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	writeFile(t, dir, "state/triage/runs/audit.json", `{"status":"running"}`)
+	writeFile(t, dir, "tmp/scratch.txt", "scratch")
+	writeFile(t, dir, "__pycache__/helper.pyc", "compiled")
+	writeFile(t, dir, ".gc/runtime.json", `{"pid":123}`)
+	writeFile(t, dir, ".beads/db", "runtime state")
+	writeFile(t, dir, ".cache/tool/result.json", `{"cached":true}`)
+	writeFile(t, dir, ".git/HEAD", "ref: refs/heads/main")
+	writeFile(t, dir, "nested/__pycache__/helper.pyc", "compiled")
+	// gastownhall/gascity#2954: node_modules at any depth must be skipped.
+	// Packs anchored at monorepo roots previously dragged tens of thousands
+	// of node_modules files through the supervisor on every dirty reload.
+	writeFile(t, dir, "node_modules/.package-lock.json", `{"name":"x"}`)
+	writeFile(t, dir, "node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "packages/foo/node_modules/lodash/index.js", "module.exports = {}")
+	writeFile(t, dir, "apps/bar/node_modules/.bun/install-cache.bin", "binary")
+	h2 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h2 != h1 {
+		t.Fatalf("hash changed after runtime output writes: %q vs %q", h1, h2)
+	}
+
+	writeFile(t, dir, "prompts/state/example.md", "state prompt")
+	hPromptState := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if hPromptState == h1 {
+		t.Fatal("hash should change for config content below a non-runtime state path")
+	}
+
+	writeFile(t, dir, "prompts/a.md", "modified prompt a")
+	h3 := PackContentHashRecursive(fsys.OSFS{}, dir)
+	if h3 == h1 {
+		t.Fatal("hash should still change when config-bearing pack content changes")
+	}
+}
+
 func TestExpandPacks_ViaLoadWithIncludes(t *testing.T) {
 	dir := t.TempDir()
 
@@ -613,6 +1193,115 @@ includes = ["packs/gt"]
 	} else if !strings.Contains(src, "pack.toml") {
 		t.Errorf("witness provenance = %q, want to contain pack.toml", src)
 	}
+}
+
+func TestLoadWithIncludes_PackAgentDefaultsProviderAppliesToIncludedAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gt/pack.toml", `
+[pack]
+name = "gastown"
+version = "1.0.0"
+schema = 1
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.codex]
+base = "builtin:codex"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+
+[[agent]]
+name = "reviewer"
+provider = "claude"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+provider = "gemini"
+includes = ["packs/gt"]
+
+[providers.gemini]
+base = "builtin:gemini"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker, reviewer *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].QualifiedName() {
+		case "worker":
+			worker = &cfg.Agents[i]
+		case "reviewer":
+			reviewer = &cfg.Agents[i]
+		}
+	}
+	if worker == nil || reviewer == nil {
+		t.Fatalf("expected worker and reviewer, got worker=%v reviewer=%v", worker != nil, reviewer != nil)
+	}
+	if got := worker.Provider; got != "codex" {
+		t.Fatalf("worker Provider = %q, want pack default codex", got)
+	}
+	if got := reviewer.Provider; got != "claude" {
+		t.Fatalf("reviewer Provider = %q, want explicit claude", got)
+	}
+}
+
+func TestLoadWithIncludes_CityAgentDefaultsProviderOverridesIncludedPackDefault(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/gt/pack.toml", `
+[pack]
+name = "gastown"
+version = "1.0.0"
+schema = 1
+
+[providers.codex]
+base = "builtin:codex"
+
+[agent_defaults]
+provider = "codex"
+
+[[agent]]
+name = "worker"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test-city"
+includes = ["packs/gt"]
+
+[agent_defaults]
+provider = "gemini"
+
+[providers.gemini]
+base = "builtin:gemini"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, a := range cfg.Agents {
+		if a.QualifiedName() != "worker" {
+			continue
+		}
+		if got := a.Provider; got != "gemini" {
+			t.Fatalf("worker Provider = %q, want city default gemini", got)
+		}
+		return
+	}
+	t.Fatal("worker agent not found")
 }
 
 func TestExpandPacks_OverrideEnv(t *testing.T) {
@@ -772,8 +1461,14 @@ func TestHasPackRigs(t *testing.T) {
 	if HasPackRigs(nil) {
 		t.Error("nil rigs should return false")
 	}
-	if HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
-		t.Error("rig without pack should return false")
+	if HasPackRigs([]Rig{{Name: "a"}}) {
+		t.Error("rig with no path and no includes should return false")
+	}
+	// A rig with only a path is treated as potentially having a pack (expandPacks
+	// will discover the root pack.toml if present). This enables the packV2
+	// convention where a rig root carries agents/ directories directly.
+	if !HasPackRigs([]Rig{{Name: "a", Path: "/a"}}) {
+		t.Error("rig with path should return true (may have root pack.toml)")
 	}
 	if !HasPackRigs([]Rig{{Name: "a", Path: "/a", Includes: []string{"topo"}}}) {
 		t.Error("rig with includes should return true")
@@ -812,7 +1507,7 @@ name = "agent-b"
 		Agents: []Agent{{Name: "existing"}},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -844,8 +1539,6 @@ func TestExpandCityPacks_FormulaDirsStacked(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-a"
@@ -856,8 +1549,6 @@ name = "agent-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "agent-b"
@@ -870,7 +1561,7 @@ name = "agent-b"
 		}},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -891,7 +1582,7 @@ func TestExpandCityPacks_Empty(t *testing.T) {
 		Agents: []Agent{{Name: "mayor"}},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, "/tmp")
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -918,7 +1609,7 @@ name = "mayor"
 		Workspace: Workspace{Includes: []string{"packs/gt"}},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -968,7 +1659,7 @@ name = "agent-b"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1046,8 +1737,6 @@ func TestExpandPacks_RigFormulaDirsMultiple(t *testing.T) {
 name = "alpha"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-a"
@@ -1058,8 +1747,6 @@ name = "worker-a"
 name = "beta"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "worker-b"
@@ -1206,7 +1893,7 @@ name = "deacon"
 		Agents:    []Agent{{Name: "existing"}},
 	}
 
-	formulaDirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	formulaDirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1246,19 +1933,17 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
 `)
-	writeFile(t, dir, "packs/gastown/formulas/mol-a.formula.toml", "test formula")
+	writeFile(t, dir, "packs/gastown/formulas/mol-a.toml", "test formula")
 
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/gastown"}},
 	}
 
-	formulaDirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	formulaDirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1274,7 +1959,7 @@ func TestExpandCityPack_NoPack(t *testing.T) {
 		Agents: []Agent{{Name: "mayor"}},
 	}
 
-	formulaDirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, "/tmp")
+	formulaDirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, "/tmp")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1308,7 +1993,7 @@ name = "mayor"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1421,13 +2106,11 @@ name = "gastown"
 version = "1.0.0"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "witness"
 `)
-	writeFile(t, dir, "packs/gt/formulas/mol-a.formula.toml", "test")
+	writeFile(t, dir, "packs/gt/formulas/mol-a.toml", "test")
 
 	cfg := &City{
 		Rigs: []Rig{
@@ -1474,7 +2157,7 @@ name = "witness"
 	}
 }
 
-func TestExpandPacks_SessionSetupScriptAdjusted(t *testing.T) {
+func TestExpandPacks_SessionSetupScriptPreserved(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/gt/pack.toml", `
 [pack]
@@ -1497,8 +2180,8 @@ session_setup_script = "scripts/setup.sh"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// session_setup_script should be adjusted relative to pack dir → city root.
-	want := "packs/gt/scripts/setup.sh"
+	// session_setup_script stays pack-local and resolves later via SourceDir.
+	want := "scripts/setup.sh"
 	if cfg.Agents[0].SessionSetupScript != want {
 		t.Errorf("SessionSetupScript = %q, want %q", cfg.Agents[0].SessionSetupScript, want)
 	}
@@ -1520,7 +2203,7 @@ name = "mayor"
 		Workspace: Workspace{Includes: []string{"packs/gastown"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1591,7 +2274,7 @@ scope = "rig"
 		Workspace: Workspace{Includes: []string{"packs/combined"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1650,22 +2333,35 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Should only have rig agents (witness, polecat), not city agents.
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
-	}
-	names := make(map[string]bool)
+	// Rig agents (witness, polecat) are stamped with the rig dir; city-scoped
+	// agents (mayor, deacon) are hoisted to city scope (dir cleared) rather
+	// than dropped.
+	byName := make(map[string]Agent)
 	for _, a := range cfg.Agents {
-		names[a.Name] = true
+		byName[a.Name] = a
+	}
+	if len(cfg.Agents) != 4 {
+		t.Fatalf("got %d agents, want 4 (2 rig + 2 hoisted city): %v", len(cfg.Agents), agentNamesOf(cfg.Agents))
+	}
+	for _, n := range []string{"witness", "polecat"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("missing rig agent %q", n)
+			continue
+		}
 		if a.Dir != "hw" {
-			t.Errorf("rig agent %q: dir = %q, want %q", a.Name, a.Dir, "hw")
+			t.Errorf("rig agent %q: dir = %q, want %q", n, a.Dir, "hw")
 		}
 	}
-	if !names["witness"] || !names["polecat"] {
-		t.Errorf("agents = %v, want witness and polecat", names)
-	}
-	if names["mayor"] || names["deacon"] {
-		t.Error("city agents should be filtered out of rig pack expansion")
+	for _, n := range []string{"mayor", "deacon"} {
+		a, ok := byName[n]
+		if !ok {
+			t.Errorf("city-scoped agent %q was dropped, want hoisted to city scope", n)
+			continue
+		}
+		if a.Dir != "" {
+			t.Errorf("hoisted city agent %q: dir = %q, want empty (city scope)", n, a.Dir)
+		}
 	}
 }
 
@@ -1688,7 +2384,7 @@ name = "beta"
 		Workspace: Workspace{Includes: []string{"packs/simple"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -1773,7 +2469,7 @@ name = "overseer"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
 		t.Fatal("expected error for duplicate agent across city packs")
 	}
@@ -1885,7 +2581,7 @@ includes = ["../maintenance"]
 name = "mayor"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -1932,7 +2628,7 @@ name = "mayor"
 scope = "city"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -1988,7 +2684,7 @@ scope = "rig"
 			Includes: []string{"packs/gastown"},
 		},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 
@@ -2035,11 +2731,20 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	if len(cfg.NamedSessions) != 1 {
-		t.Fatalf("NamedSessions = %d, want 1", len(cfg.NamedSessions))
+	// The rig-scoped witness session stays rig-qualified; the city-scoped
+	// mayor session is hoisted to city scope rather than dropped.
+	got := make(map[string]bool)
+	for i := range cfg.NamedSessions {
+		got[cfg.NamedSessions[i].QualifiedName()] = true
 	}
-	if got := cfg.NamedSessions[0].QualifiedName(); got != "frontend/witness" {
-		t.Fatalf("NamedSessions[0] = %q, want frontend/witness", got)
+	if len(cfg.NamedSessions) != 2 {
+		t.Fatalf("NamedSessions = %d, want 2 (rig witness + hoisted city mayor): %v", len(cfg.NamedSessions), got)
+	}
+	if !got["frontend/witness"] {
+		t.Errorf("expected rig-scoped named session frontend/witness, got %v", got)
+	}
+	if !got["mayor"] {
+		t.Errorf("expected city-scoped named session mayor to be hoisted, got %v", got)
 	}
 }
 
@@ -2052,8 +2757,6 @@ func TestPackIncludesFormulas(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2067,15 +2770,13 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
 `)
 	writeFile(t, dir, "packs/gastown/formulas/.keep", "")
 
-	_, _, _, _, topoDirs, _, _, err := loadPack(
+	_, _, _, _, _, topoDirs, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/gastown/pack.toml"),
 		filepath.Join(dir, "packs/gastown"),
@@ -2119,7 +2820,7 @@ includes = ["../a"]
 name = "beta"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/a/pack.toml"),
 		filepath.Join(dir, "packs/a"),
@@ -2145,7 +2846,7 @@ includes = ["../nonexistent"]
 name = "alpha"
 `)
 
-	_, _, _, _, _, _, _, err := loadPack(
+	_, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2188,7 +2889,7 @@ command = "main-claude"
 name = "boss"
 `)
 
-	_, _, providers, _, _, _, _, err := loadPack(
+	_, _, providers, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(dir, "packs/main/pack.toml"),
 		filepath.Join(dir, "packs/main"),
@@ -2211,8 +2912,6 @@ func TestExpandCityPacksWithIncludes(t *testing.T) {
 name = "maintenance"
 schema = 1
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "dog"
@@ -2227,8 +2926,6 @@ name = "gastown"
 schema = 1
 includes = ["../maintenance"]
 
-[formulas]
-dir = "formulas"
 
 [[agent]]
 name = "mayor"
@@ -2243,7 +2940,7 @@ scope = "rig"
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/gastown"}},
 	}
-	formulaDirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	formulaDirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -2281,10 +2978,10 @@ schema = 1
 
 [[agent]]
 name = "worker"
-prompt_template = "prompts/worker.md.tmpl"
+prompt_template = "prompts/worker.template.md"
 `)
-	writeFile(t, filepath.Join(topoDir, "prompts"), "worker.md.tmpl", "Worker prompt")
-	writeFile(t, filepath.Join(topoDir, "prompts", "shared"), "common.md.tmpl",
+	writeFile(t, filepath.Join(topoDir, "prompts"), "worker.template.md", "Worker prompt")
+	writeFile(t, filepath.Join(topoDir, "prompts", "shared"), "common.template.md",
 		`{{ define "common" }}shared content{{ end }}`)
 
 	writeFile(t, tmp, "city.toml", `
@@ -2335,7 +3032,7 @@ name = "polecat"
 scope = "rig"
 `)
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{}, filepath.Join(dir, "packs/test/pack.toml"),
 		filepath.Join(dir, "packs/test"), dir, "myrig", nil)
 	if err != nil {
@@ -2383,7 +3080,7 @@ scope = "rig"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -2423,13 +3120,583 @@ scope = "rig"
 		t.Fatalf("ExpandPacks: %v", err)
 	}
 
-	// Only scope="rig" agents should be kept (scope="city" excluded).
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	// The rig-scoped polecat is stamped with the rig dir; the city-scoped
+	// mayor is hoisted to city scope (dir cleared) rather than dropped.
+	byName := make(map[string]Agent)
+	for _, a := range cfg.Agents {
+		byName[a.Name] = a
 	}
-	if cfg.Agents[0].Name != "polecat" {
-		t.Errorf("agent name = %q, want polecat", cfg.Agents[0].Name)
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2 (rig polecat + hoisted city mayor)", len(cfg.Agents))
 	}
+	polecat, ok := byName["polecat"]
+	if !ok {
+		t.Fatal("expected rig-scoped polecat agent")
+	}
+	if polecat.Dir != "myrig" {
+		t.Errorf("polecat dir = %q, want myrig", polecat.Dir)
+	}
+	mayor, ok := byName["mayor"]
+	if !ok {
+		t.Fatal("expected city-scoped mayor to be hoisted from rig include")
+	}
+	if mayor.Dir != "" {
+		t.Errorf("hoisted mayor dir = %q, want \"\" (city scope)", mayor.Dir)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedFromSingleRig verifies a city-scoped agent
+// (and named session) that lives in a pack reached only through a single
+// rig include is hoisted to city scope and registers, rather than being
+// silently dropped. This is the root-cause fix for ga-hy0co: a city-scoped
+// routing coordinator (e.g. "deacon") that ships in a rig-included pack must
+// still register, or autonomous routing never starts.
+func TestExpandPacks_HoistCityScopedFromSingleRig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks: %v", err)
+	}
+
+	var deacon *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacon = &cfg.Agents[i]
+		}
+	}
+	if deacon == nil {
+		t.Fatalf("city-scoped deacon was dropped, not hoisted; agents: %v", agentNamesOf(cfg.Agents))
+	}
+	if deacon.Dir != "" {
+		t.Errorf("hoisted deacon dir = %q, want \"\" (city scope)", deacon.Dir)
+	}
+	if deacon.Scope != "city" {
+		t.Errorf("hoisted deacon scope = %q, want city", deacon.Scope)
+	}
+
+	// The city-scoped named session is hoisted too.
+	var sawDeaconSession bool
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			sawDeaconSession = true
+		}
+	}
+	if !sawDeaconSession {
+		t.Errorf("city-scoped deacon named session was dropped, not hoisted; sessions: %v", cfg.NamedSessions)
+	}
+}
+
+// TestExpandPacks_HoistCityScopedDedupAcrossRigs verifies the same pack
+// included by MULTIPLE rigs registers its city-scoped agent exactly ONCE
+// (dedup), instead of registering one copy per rig and colliding via
+// checkPackAgentCollisions / duplicate_agent_error.go. In this city
+// packs/actual/all is rig-included by four rigs; a naive hoist would
+// register "deacon" four times.
+func TestExpandPacks_HoistCityScopedDedupAcrossRigs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/supervisor/pack.toml", `
+[pack]
+name = "supervisor"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+
+[[named_session]]
+template = "deacon"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg := &City{
+		Rigs: []Rig{
+			{Name: "gascity", Path: "/tmp/gascity", Includes: []string{"packs/supervisor"}},
+			{Name: "mcdclient", Path: "/tmp/mcdclient", Includes: []string{"packs/supervisor"}},
+			{Name: "beads", Path: "/tmp/beads", Includes: []string{"packs/supervisor"}},
+			{Name: "wren", Path: "/tmp/wren", Includes: []string{"packs/supervisor"}},
+		},
+	}
+
+	// Must not error on the multi-rig collision; dedup makes it register once.
+	if err := ExpandPacks(cfg, fsys.OSFS{}, dir, nil); err != nil {
+		t.Fatalf("ExpandPacks (multi-rig dedup): %v", err)
+	}
+
+	var deaconCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deaconCount++
+		}
+	}
+	if deaconCount != 1 {
+		t.Fatalf("deacon registered %d times across 4 rigs, want exactly 1 (dedup); agents: %v", deaconCount, agentNamesOf(cfg.Agents))
+	}
+
+	var deaconSessions int
+	for i := range cfg.NamedSessions {
+		if cfg.NamedSessions[i].QualifiedName() == "deacon" {
+			deaconSessions++
+		}
+	}
+	if deaconSessions != 1 {
+		t.Fatalf("deacon named session registered %d times, want exactly 1 (dedup)", deaconSessions)
+	}
+
+	// Each rig still gets its own rig-scoped polecat.
+	var polecatCount int
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "polecat" {
+			polecatCount++
+		}
+	}
+	if polecatCount != 4 {
+		t.Errorf("polecat (rig-scoped) registered %d times, want 4 (one per rig)", polecatCount)
+	}
+}
+
+// TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent verifies that when a
+// city-scoped agent already exists at city scope (here via city includes),
+// hoisting the same-named agent from a rig include does NOT add a duplicate:
+// the existing city-scope/city-root definition wins.
+func TestExpandPacks_HoistDoesNotDuplicateCityScopeAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	// City pack defines deacon at city scope (the canonical definition).
+	writeFile(t, dir, "packs/citysup/pack.toml", `
+[pack]
+name = "citysup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+prompt_template = "prompts/deacon.md"
+`)
+	writeFile(t, dir, "packs/citysup/prompts/deacon.md", "city-scope deacon")
+
+	// Rig pack ALSO defines a city-scoped deacon; reached via a rig include.
+	writeFile(t, dir, "packs/rigsup/pack.toml", `
+[pack]
+name = "rigsup"
+schema = 1
+
+[[agent]]
+name = "deacon"
+scope = "city"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/citysup"]
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/rigsup"]
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var deacons []Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "deacon" {
+			deacons = append(deacons, cfg.Agents[i])
+		}
+	}
+	if len(deacons) != 1 {
+		t.Fatalf("deacon registered %d times, want exactly 1 (city-scope wins over hoist); agents: %v", len(deacons), agentNamesOf(cfg.Agents))
+	}
+	// The surviving deacon is the city-scope definition (has the prompt
+	// template), not the bare rig-pack one.
+	if !strings.Contains(deacons[0].PromptTemplate, "prompts/deacon.md") {
+		t.Errorf("surviving deacon prompt_template = %q, want the city-scope definition (prompts/deacon.md)", deacons[0].PromptTemplate)
+	}
+	if deacons[0].Dir != "" {
+		t.Errorf("surviving deacon dir = %q, want \"\" (city scope)", deacons[0].Dir)
+	}
+}
+
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, "packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["packs/gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestLoadWithIncludes_SkipsExtraIncludeReachableFromNamedRigPackGraph(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, ".gc/cache/packs/maintenance/agents/dog/agent.toml", `
+scope = "city"
+fallback = true
+`)
+
+	writeFile(t, dir, ".gc/cache/packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, ".gc/cache/packs/gastown/agents/polecat/agent.toml", `
+scope = "rig"
+`)
+
+	writeFile(t, dir, "city.toml", `
+[workspace]
+name = "test"
+
+[packs.gastown]
+source = "https://example.com/gastown.git"
+
+[[rigs]]
+name = "gascity"
+path = "/tmp/gascity"
+includes = ["gastown"]
+`)
+
+	cfg, _, err := LoadWithIncludes(
+		fsys.OSFS{},
+		filepath.Join(dir, "city.toml"),
+		filepath.Join(dir, "packs", "maintenance"),
+	)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	for _, packDir := range cfg.PackDirs {
+		if filepath.Base(packDir) == "maintenance" {
+			t.Fatalf("maintenance was injected at city scope despite being reachable from named rig pack graph: PackDirs=%v RigPackDirs=%v",
+				cfg.PackDirs, cfg.RigPackDirs)
+		}
+	}
+	if got := cfg.RigPackDirs["gascity"]; len(got) != 2 {
+		t.Fatalf("rig pack graph dirs = %v, want gastown plus transitive maintenance", got)
+	}
+}
+
+func TestResolvedPackNames_ExpandsRepeatedSourceWhenAnyVisitIsTransitive(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/wrapper/pack.toml", `
+[pack]
+name = "wrapper"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+transitive = false
+`)
+
+	names := mustResolvedPackNames(t, []string{"packs/wrapper"}, map[string]Import{
+		"shared": {Source: "packs/shared"},
+	}, fsys.OSFS{}, dir)
+
+	if !names["maintenance"] {
+		t.Fatalf("maintenance missing after mixed shallow/deep visits: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotCollectDeepDependency(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+
+	transitiveFalse := false
+	names := mustResolvedPackNames(t, nil, map[string]Import{
+		"shared": {Source: "packs/shared", Transitive: &transitiveFalse},
+	}, fsys.OSFS{}, dir)
+
+	if !names["shared"] {
+		t.Fatalf("shared missing from non-transitive visit: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("maintenance collected through non-transitive import: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_NonTransitiveImportDoesNotExposeNestedPack(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+
+	names := mustResolvedPackNames(t, []string{"packs/root"}, nil, fsys.OSFS{}, dir)
+	if !names["middle"] {
+		t.Fatalf("middle pack was not recorded: names=%v", names)
+	}
+	if names["maintenance"] {
+		t.Fatalf("non-transitive import exposed nested maintenance pack: names=%v", names)
+	}
+}
+
+func TestResolvedPackNames_RevisitsPackReachedFirstThroughNonTransitiveImport(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+`)
+	writeFile(t, dir, "packs/middle/pack.toml", `
+[pack]
+name = "middle"
+schema = 2
+
+[imports.maintenance]
+source = "../maintenance"
+`)
+	writeFile(t, dir, "packs/shallow/pack.toml", `
+[pack]
+name = "shallow"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+transitive = false
+`)
+	writeFile(t, dir, "packs/deep/pack.toml", `
+[pack]
+name = "deep"
+schema = 2
+
+[imports.middle]
+source = "../middle"
+`)
+
+	for _, includes := range [][]string{
+		{"packs/shallow", "packs/deep"},
+		{"packs/deep", "packs/shallow"},
+	} {
+		names := mustResolvedPackNames(t, includes, nil, fsys.OSFS{}, dir)
+		if !names["maintenance"] {
+			t.Fatalf("includes %v did not resolve transitive maintenance after shallow visit: names=%v", includes, names)
+		}
+	}
+}
+
+func TestResolvedPackNames_AvoidsRedundantPackReads(t *testing.T) {
+	t.Run("repeated shallow imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+
+		transitiveFalse := false
+		countingFS := newReadCountingFS()
+		names := mustResolvedPackNames(t, nil, map[string]Import{
+			"shared_a": {Source: "packs/shared", Transitive: &transitiveFalse},
+			"shared_b": {Source: "packs/shared", Transitive: &transitiveFalse},
+		}, countingFS, dir)
+
+		if !names["shared"] {
+			t.Fatalf("shared missing from repeated shallow imports: names=%v", names)
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
+
+	t.Run("diamond transitive imports", func(t *testing.T) {
+		dir := t.TempDir()
+
+		writeFile(t, dir, "packs/shared/pack.toml", `
+[pack]
+name = "shared"
+schema = 2
+`)
+		writeFile(t, dir, "packs/left/pack.toml", `
+[pack]
+name = "left"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/right/pack.toml", `
+[pack]
+name = "right"
+schema = 2
+
+[imports.shared]
+source = "../shared"
+`)
+		writeFile(t, dir, "packs/root/pack.toml", `
+[pack]
+name = "root"
+schema = 2
+
+[imports.left]
+source = "../left"
+
+[imports.right]
+source = "../right"
+`)
+
+		countingFS := newReadCountingFS()
+		names := mustResolvedPackNames(t, []string{"packs/root"}, nil, countingFS, dir)
+
+		for _, name := range []string{"root", "left", "right", "shared"} {
+			if !names[name] {
+				t.Fatalf("%s missing from diamond imports: names=%v", name, names)
+			}
+		}
+		if got := countingFS.ReadCount(filepath.Join(dir, "packs/shared/pack.toml")); got != 1 {
+			t.Fatalf("shared pack.toml read count = %d, want 1", got)
+		}
+	})
+}
+
+// agentNamesOf is a small test helper for readable failure messages.
+func agentNamesOf(agents []Agent) []string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	return names
 }
 
 // ---------------------------------------------------------------------------
@@ -2462,7 +3729,7 @@ name = "mayor"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -2537,7 +3804,7 @@ scope = "city"
 		Workspace: Workspace{Includes: []string{"packs/consumer"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -2682,7 +3949,7 @@ agent = "dog"
 		Workspace: Workspace{Includes: []string{"packs/bad"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
 		t.Fatal("expected error for invalid scope, got nil")
 	}
@@ -2708,7 +3975,7 @@ agent = ""
 		Workspace: Workspace{Includes: []string{"packs/bad"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
 		t.Fatal("expected error for empty agent, got nil")
 	}
@@ -2718,114 +3985,14 @@ agent = ""
 }
 
 // ---------------------------------------------------------------------------
-// Fallback agent tests
+// Pack agent collision tests
 // ---------------------------------------------------------------------------
+// The fallback-agent mechanism was removed: packs own their agents under
+// unambiguous names and cross-pack duplicates are hard errors. A stale
+// `fallback` key in a V2 agents/<name>/agent.toml is ignored; in a V1
+// inline [[agent]] it fails the pack's unknown-key gate.
 
-func TestFallbackAgent_NonFallbackWins(t *testing.T) {
-	// Non-fallback dog from pack A, fallback dog from pack B.
-	// Only A's dog should survive.
-	dir := t.TempDir()
-	writeFile(t, dir, "packs/maintenance/pack.toml", `
-[pack]
-name = "maintenance"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-nudge = "full dog"
-`)
-	writeFile(t, dir, "packs/dolt/pack.toml", `
-[pack]
-name = "dolt"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "fallback dog"
-`)
-
-	cfg := &City{
-		Workspace: Workspace{
-			Includes: []string{"packs/maintenance", "packs/dolt"},
-		},
-	}
-
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
-	if err != nil {
-		t.Fatalf("ExpandCityPacks: %v", err)
-	}
-
-	// Only the non-fallback dog should remain.
-	var dogs []Agent
-	for _, a := range cfg.Agents {
-		if a.Name == "dog" {
-			dogs = append(dogs, a)
-		}
-	}
-	if len(dogs) != 1 {
-		t.Fatalf("got %d dogs, want 1", len(dogs))
-	}
-	if dogs[0].Nudge != "full dog" {
-		t.Errorf("surviving dog nudge = %q, want %q", dogs[0].Nudge, "full dog")
-	}
-}
-
-func TestFallbackAgent_BothFallback_FirstWins(t *testing.T) {
-	// Two fallback dogs from different packs. First loaded wins.
-	dir := t.TempDir()
-	writeFile(t, dir, "packs/alpha/pack.toml", `
-[pack]
-name = "alpha"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "alpha dog"
-`)
-	writeFile(t, dir, "packs/beta/pack.toml", `
-[pack]
-name = "beta"
-schema = 1
-
-[[agent]]
-name = "dog"
-scope = "city"
-fallback = true
-nudge = "beta dog"
-`)
-
-	cfg := &City{
-		Workspace: Workspace{
-			Includes: []string{"packs/alpha", "packs/beta"},
-		},
-	}
-
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
-	if err != nil {
-		t.Fatalf("ExpandCityPacks: %v", err)
-	}
-
-	var dogs []Agent
-	for _, a := range cfg.Agents {
-		if a.Name == "dog" {
-			dogs = append(dogs, a)
-		}
-	}
-	if len(dogs) != 1 {
-		t.Fatalf("got %d dogs, want 1", len(dogs))
-	}
-	if dogs[0].Nudge != "alpha dog" {
-		t.Errorf("surviving dog nudge = %q, want %q (first loaded wins)", dogs[0].Nudge, "alpha dog")
-	}
-}
-
-func TestFallbackAgent_NeitherFallback_CollisionError(t *testing.T) {
-	// Two non-fallback dogs from different packs. Should still error.
+func TestPackAgents_DuplicateAcrossPacksErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/alpha/pack.toml", `
 [pack]
@@ -2852,35 +4019,35 @@ scope = "city"
 		},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
-		t.Fatal("expected collision error for two non-fallback dogs")
+		t.Fatal("expected collision error for two dogs from different packs")
 	}
 	if !strings.Contains(err.Error(), "duplicate agent") {
 		t.Errorf("error = %q, want 'duplicate agent'", err.Error())
 	}
 }
 
-func TestFallbackAgent_StandaloneWorks(t *testing.T) {
-	// Single fallback agent, no collision — should be kept normally.
+func TestPackAgents_StaleFallbackKeyInAgentTomlIgnored(t *testing.T) {
+	// The removed `fallback` key in a V2 agent.toml must not break loading;
+	// the agent is kept as a normal definition.
 	dir := t.TempDir()
 	writeFile(t, dir, "packs/health/pack.toml", `
 [pack]
 name = "health"
-schema = 1
-
-[[agent]]
-name = "dog"
+schema = 2
+`)
+	writeFile(t, dir, "packs/health/agents/dog/agent.toml", `
 scope = "city"
 fallback = true
-nudge = "standalone fallback"
+nudge = "standalone dog"
 `)
 
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/health"}},
 	}
 
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -2890,9 +4057,6 @@ nudge = "standalone fallback"
 	}
 	if cfg.Agents[0].Name != "dog" {
 		t.Errorf("agent name = %q, want dog", cfg.Agents[0].Name)
-	}
-	if !cfg.Agents[0].Fallback {
-		t.Error("agent should have Fallback = true")
 	}
 }
 
@@ -3036,7 +4200,7 @@ session_setup_script = "scripts/theme.sh"
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/overlay"}},
 	}
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -3047,12 +4211,14 @@ session_setup_script = "scripts/theme.sh"
 	if a.Name != "worker" {
 		t.Errorf("name = %q, want worker", a.Name)
 	}
-	// session_setup_script should be set (resolved path).
+	// session_setup_script should be resolved against the patch pack since
+	// patches do not retain their own SourceDir at runtime.
 	if a.SessionSetupScript == "" {
 		t.Fatal("SessionSetupScript not set by patch")
 	}
-	if !strings.Contains(a.SessionSetupScript, "scripts/theme.sh") {
-		t.Errorf("SessionSetupScript = %q, want to contain scripts/theme.sh", a.SessionSetupScript)
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/theme.sh")
+	if a.SessionSetupScript != wantScript {
+		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}
 	// Nudge should be inherited from base (not cleared by patch).
 	if a.Nudge != "do work" {
@@ -3087,13 +4253,13 @@ overlay_dir = "overlays/custom"
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/overlay"}},
 	}
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	a := cfg.Agents[0]
 	// Paths should be resolved relative to the overlay pack dir.
-	wantScript := "packs/overlay/scripts/neon.sh"
+	wantScript := filepath.Join(dir, "packs/overlay/scripts/neon.sh")
 	if a.SessionSetupScript != wantScript {
 		t.Errorf("SessionSetupScript = %q, want %q", a.SessionSetupScript, wantScript)
 	}
@@ -3132,7 +4298,7 @@ nudge = "boo"
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/overlay"}},
 	}
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err == nil {
 		t.Fatal("expected error for patch targeting nonexistent agent")
 	}
@@ -3172,7 +4338,7 @@ pre_start_append = ["extra.sh"]
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/overlay"}},
 	}
-	_, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
@@ -3294,6 +4460,164 @@ name = "worker"
 	if entries[1].Entry.Description != "" {
 		t.Errorf("second Entry.Description = %q, want empty", entries[1].Entry.Description)
 	}
+
+	// Fix field defaults to empty when not declared (diagnostic-only check).
+	if entries[0].Entry.Fix != "" {
+		t.Errorf("Entry.Fix = %q, want empty when not declared", entries[0].Entry.Fix)
+	}
+}
+
+func TestPackDoctorEntriesParsesFixField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "pack.toml", `
+[pack]
+name = "fixable"
+schema = 1
+
+[[doctor]]
+name = "check-with-fix"
+script = "doctor/check.sh"
+fix = "doctor/fix.sh"
+description = "Check that opts into auto-remediation"
+
+[[doctor]]
+name = "check-no-fix"
+script = "doctor/check2.sh"
+`)
+
+	entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	if entries[0].Entry.Fix != "doctor/fix.sh" {
+		t.Errorf("Entry.Fix = %q, want %q", entries[0].Entry.Fix, "doctor/fix.sh")
+	}
+	if entries[1].Entry.Fix != "" {
+		t.Errorf("Entry.Fix without fix field = %q, want empty", entries[1].Entry.Fix)
+	}
+}
+
+func TestPackDoctorWarmupFlagParses(t *testing.T) {
+	cases := []struct {
+		name       string
+		toml       string
+		wantWarmup bool
+	}{
+		{
+			name: "explicit_true",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = true
+`,
+			wantWarmup: true,
+		},
+		{
+			name: "explicit_false",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+warmup = false
+`,
+			wantWarmup: false,
+		},
+		{
+			name: "default_omitted",
+			toml: `
+[pack]
+name = "warmup-pack"
+schema = 1
+
+[[doctor]]
+name = "check-x"
+script = "doctor/check-x.sh"
+`,
+			wantWarmup: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "pack.toml", tc.toml)
+
+			entries := LoadPackDoctorEntries(fsys.OSFS{}, []string{dir})
+			if len(entries) != 1 {
+				t.Fatalf("got %d entries, want 1", len(entries))
+			}
+			if entries[0].Entry.Warmup != tc.wantWarmup {
+				t.Fatalf("Entry.Warmup = %v, want %v", entries[0].Entry.Warmup, tc.wantWarmup)
+			}
+
+			doctors, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{entries[0].Entry}, dir, entries[0].PackName)
+			if err != nil {
+				t.Fatalf("legacyPackDoctors: %v", err)
+			}
+			if len(doctors) != 1 {
+				t.Fatalf("got %d synthesized doctors, want 1", len(doctors))
+			}
+			if doctors[0].Warmup != tc.wantWarmup {
+				t.Errorf("DiscoveredDoctor.Warmup = %v, want %v", doctors[0].Warmup, tc.wantWarmup)
+			}
+		})
+	}
+}
+
+func TestLegacyPackDoctorsRejectsEscapingFixPaths(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name string
+		fix  string
+	}{
+		{name: "absolute", fix: filepath.Join(dir, "outside.sh")},
+		{name: "relative escape", fix: "../../../outside.sh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{{
+				Name:   "check",
+				Script: "doctor/check.sh",
+				Fix:    tt.fix,
+			}}, filepath.Join(dir, "pack"), "pack")
+			if err == nil {
+				t.Fatal("legacyPackDoctors error = nil, want containment error")
+			}
+			if !strings.Contains(err.Error(), "doctor check fix") {
+				t.Fatalf("legacyPackDoctors error = %v, want check fix context", err)
+			}
+		})
+	}
+}
+
+func TestLegacyPackDoctorsRejectsMissingFixScript(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := legacyPackDoctors(fsys.OSFS{}, []PackDoctorEntry{{
+		Name:   "check",
+		Script: "doctor/check.sh",
+		Fix:    "doctor/missing-fix.sh",
+	}}, packDir, "pack")
+	if err == nil {
+		t.Fatal("legacyPackDoctors error = nil, want missing fix script error")
+	}
+	if !strings.Contains(err.Error(), "doctor check fix") {
+		t.Fatalf("legacyPackDoctors error = %v, want check fix context", err)
+	}
 }
 
 func TestPackDoctorEntriesDeduplicatesDirs(t *testing.T) {
@@ -3410,7 +4734,7 @@ name = "worker"
 		Workspace: Workspace{Includes: []string{"packs/skills"}},
 	}
 
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 
@@ -3437,7 +4761,7 @@ name = "worker"
 		Workspace: Workspace{Includes: []string{"packs/bare"}},
 	}
 
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 
@@ -3472,7 +4796,7 @@ schema = 1
 		Workspace: Workspace{Includes: []string{"packs/alpha", "packs/beta"}},
 	}
 
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 
@@ -3575,7 +4899,7 @@ includes = ["../child"]
 		Workspace: Workspace{Includes: []string{"packs/parent"}},
 	}
 
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 
@@ -3612,7 +4936,7 @@ session_live = ["echo theme applied"]
 			{Name: "beta"},
 		},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	applyPackGlobals(cfg)
@@ -3683,7 +5007,7 @@ session_live = [
 		Workspace: Workspace{Includes: []string{"packs/scripts"}},
 		Agents:    []Agent{{Name: "test-agent"}},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	applyPackGlobals(cfg)
@@ -3724,7 +5048,7 @@ session_live = ["echo B"]
 		Workspace: Workspace{Includes: []string{"packs/theme-a", "packs/theme-b"}},
 		Agents:    []Agent{{Name: "solo"}},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	applyPackGlobals(cfg)
@@ -3755,7 +5079,7 @@ session_live = []
 		Workspace: Workspace{Includes: []string{"packs/empty"}},
 		Agents:    []Agent{{Name: "untouched", SessionLive: []string{"existing"}}},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	applyPackGlobals(cfg)
@@ -3789,7 +5113,7 @@ session_live = ["echo global"]
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/full"}},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	applyPackGlobals(cfg)
@@ -3806,6 +5130,32 @@ session_live = ["echo global"]
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("SessionLive[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestPackGlobal_DedupesPackAcrossCityAndRigScopes(t *testing.T) {
+	cfg := &City{
+		PackGlobals: []ResolvedPackGlobal{
+			{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}},
+		},
+		RigPackGlobals: map[string][]ResolvedPackGlobal{
+			"my-rig": {{PackName: "gastown", SessionLive: []string{"theme.sh", "keys.sh"}}},
+		},
+		Agents: []Agent{
+			{Name: "city-agent"},
+			{Name: "rig-agent", Dir: "my-rig"},
+		},
+	}
+
+	applyPackGlobals(cfg)
+
+	for _, a := range cfg.Agents {
+		if len(a.SessionLive) != 2 {
+			t.Fatalf("agent %q SessionLive = %v, want one gastown global application", a.Name, a.SessionLive)
+		}
+		if a.SessionLive[0] != "theme.sh" || a.SessionLive[1] != "keys.sh" {
+			t.Fatalf("agent %q SessionLive = %v, want [theme.sh keys.sh]", a.Name, a.SessionLive)
 		}
 	}
 }
@@ -3957,4 +5307,200 @@ depends_on = ["db"]
 	if err := ValidateAgents(cfg.Agents); err != nil {
 		t.Errorf("ValidateAgents failed after pack expansion: %v", err)
 	}
+}
+
+// TestMergeHoistedCityAgents_DedupAcrossBindings covers the topology where a
+// pack (here "maintenance") is imported at the city level under one binding
+// (e.g. "gastown") and ALSO transitively pulled in via rig includes that
+// restamp the binding to something else (e.g. "atlas"). The same underlying
+// agent — same (Dir, Name) — then appears twice with different binding
+// prefixes. Hoist dedup must collapse these by (Dir, Name) because
+// ValidateAgents keys collisions on (Dir, Name), not on QualifiedName.
+//
+// Before the fix, hoist dedup only checked QualifiedName, so "gastown.dog"
+// and "atlas.dog" both survived and ValidateAgents reported a duplicate.
+//
+// The shared Dir mirrors the production reproducer literally: both entries
+// resolve to the same on-disk pack (.../packs/maintenance), which is why the
+// original failure rendered the same path twice in its "duplicate name
+// (from X and X)" message.
+func TestMergeHoistedCityAgents_DedupAcrossBindings(t *testing.T) {
+	const maintenanceDir = "/home/user/.gc/packs/maintenance"
+	agents := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: maintenanceDir, BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1 (city-scope dog should only appear once)", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+
+	if err := ValidateAgents(merged); err != nil {
+		t.Errorf("ValidateAgents failed after dedup: %v", err)
+	}
+}
+
+// TestMergeHoistedCityAgents_SameNameDifferentDirPreserved locks the dedup key
+// to (Dir, Name) rather than Name alone. Two agents that share a Name but
+// originate from different on-disk packs are genuinely distinct definitions,
+// so both must survive the hoist. This guards against a future regression that
+// collapses the key down to Name and silently drops a legitimate agent.
+func TestMergeHoistedCityAgents_SameNameDifferentDirPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/maintenance", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "dog", Dir: "/home/user/.gc/packs/atlas", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 2 {
+		t.Fatalf("merged length = %d, want 2 (same Name from different Dir are distinct definitions)", len(merged))
+	}
+}
+
+// TestMergeHoistedCityAgents_DistinctNamesPreserved guards against
+// over-aggressive dedup: hoisted agents with the same binding but different
+// names must all survive.
+func TestMergeHoistedCityAgents_DistinctNamesPreserved(t *testing.T) {
+	agents := []Agent{
+		{Name: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []Agent{
+		{Name: "deacon", Dir: "", BindingName: "atlas", Scope: "city"},
+		{Name: "boot", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityAgents(agents, hoisted)
+	if len(merged) != 3 {
+		t.Fatalf("merged length = %d, want 3", len(merged))
+	}
+}
+
+// TestMergeHoistedCityNamedSessions_DedupAcrossBindings mirrors the agent
+// case for named sessions. ValidateNamedSessions does not currently key on
+// BindingName, so a duplicate (Dir, Template) under different bindings
+// would still wedge city startup once the hoist re-introduced the conflict.
+func TestMergeHoistedCityNamedSessions_DedupAcrossBindings(t *testing.T) {
+	sessions := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "gastown", Scope: "city"},
+	}
+	hoisted := []NamedSession{
+		{Template: "mayor", Dir: "", BindingName: "atlas", Scope: "city"},
+	}
+
+	merged := mergeHoistedCityNamedSessions(sessions, hoisted)
+	if len(merged) != 1 {
+		t.Fatalf("merged length = %d, want 1", len(merged))
+	}
+	if merged[0].BindingName != "gastown" {
+		t.Errorf("first-occurrence-wins: BindingName = %q, want %q", merged[0].BindingName, "gastown")
+	}
+}
+
+func TestCachedPackField(t *testing.T) {
+	dir := t.TempDir()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &packLoadCache{results: map[string]*packLoadResult{
+		abs: {warnings: []string{"w1", "w2"}},
+	}}
+
+	get := func(r *packLoadResult) []string { return append([]string(nil), r.warnings...) }
+
+	t.Run("nil cache returns zero value", func(t *testing.T) {
+		if got := cachedPackField(nil, dir, get); got != nil {
+			t.Errorf("cachedPackField(nil) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache miss returns zero value", func(t *testing.T) {
+		if got := cachedPackField(cache, filepath.Join(dir, "missing"), get); got != nil {
+			t.Errorf("cachedPackField(miss) = %v, want nil", got)
+		}
+	})
+
+	t.Run("cache hit resolves relative path and runs get", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		if len(got) != 2 || got[0] != "w1" || got[1] != "w2" {
+			t.Errorf("cachedPackField(hit) = %v, want [w1 w2]", got)
+		}
+	})
+
+	t.Run("get closure copies on read", func(t *testing.T) {
+		got := cachedPackField(cache, dir, get)
+		got[0] = "mutated"
+		if cache.results[abs].warnings[0] != "w1" {
+			t.Errorf("get closure did not copy: cache mutated to %q", cache.results[abs].warnings[0])
+		}
+	})
+}
+
+// TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports is the
+// end-to-end regression for #4524: a pack's [agent_defaults] never applies
+// to agents brought in by the pack's own [imports.*]. This confirms the
+// warning actually surfaces through the real pack-load path, not just the
+// pure warnUnusedPackAgentDefaultsForImports function in isolation.
+func TestLoadPackForLint_WarnsWhenAgentDefaultsUnusedByImports(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, dir, "packs/roles/pack.toml", `
+[pack]
+name = "roles"
+schema = 2
+
+[[agent]]
+name = "requirements-planner"
+`)
+
+	writeFile(t, dir, "packs/local/pack.toml", `
+[pack]
+name = "local"
+schema = 2
+
+[agent_defaults]
+provider = "cacc-sol"
+
+[imports.roles]
+source = "../roles"
+`)
+
+	loaded, err := LoadPackForLint(fsys.OSFS{}, filepath.Join(dir, "packs", "local"))
+	if err != nil {
+		t.Fatalf("LoadPackForLint: %v", err)
+	}
+	const wantSubstring = "does not apply to a pack's own [imports.*] agents"
+	found := false
+	for _, w := range loaded.Warnings {
+		if strings.Contains(w, wantSubstring) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %#v, want one containing %q", loaded.Warnings, wantSubstring)
+	}
+}
+
+// mustResolvedPackNames is resolvedPackNames for the blocking callers above.
+// They wait out contention, so the only error class they can hit is a new one
+// the walk grows later. Asserting that here keeps such an error from being
+// silently discarded and turning those assertions into claims about a
+// half-walked graph. The non-blocking mode has its own tests, which care about
+// the error rather than the names.
+func mustResolvedPackNames(t *testing.T, includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+	t.Helper()
+	names, err := resolvedPackNames(includes, imports, sysFS, cityRoot, false)
+	if err != nil {
+		t.Fatalf("resolvedPackNames: %v", err)
+	}
+	return names
 }

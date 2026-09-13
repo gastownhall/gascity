@@ -1,0 +1,3 @@
+scope = "city"
+nudge = "Run 'gc prime' to check patrol status and begin heartbeat cycle."
+idle_timeout = "1h"

@@ -83,18 +83,7 @@ func TestGastown_MailArchive(t *testing.T) {
 		t.Fatalf("expected message in inbox:\n%s", out)
 	}
 
-	// Get message ID from inbox.
-	var msgID string
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) > 0 && strings.HasPrefix(fields[0], "bd-") {
-			msgID = fields[0]
-			break
-		}
-	}
-	if msgID == "" {
-		t.Fatalf("could not find message ID in inbox output:\n%s", out)
-	}
+	msgID := extractBeadID(t, out)
 
 	// Archive it.
 	out, err = gc(cityDir, "mail", "archive", msgID)

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -27,16 +28,11 @@ import (
 // env vars → isExternalDolt → skip managed Dolt). This test verifies
 // the real network + bd stack that the wiring feeds into.
 //
-// Requires: dolt and bd installed.
+// Requires: Dolt and bd binaries configured via PATH or the integration
+// override env vars.
 func TestDoltConfigWiringExternalHost(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	ensureDoltIdentity(t)
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -45,7 +41,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	// Start a Dolt server on 0.0.0.0 so it's reachable beyond localhost.
 	doltDataDir := filepath.Join(t.TempDir(), "dolt-data")
-	port := startDoltServerOnAllInterfaces(t, doltDataDir)
+	port := startDoltServerOnAllInterfaces(t, env, doltDataDir)
 
 	// Phase 1: Verify hostname resolves and server is reachable via it.
 	// This proves the network path that a cross-machine setup would use.
@@ -77,12 +73,12 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 
 	// Use the port we started the server on — NOT a port from a local
 	// state file. This proves the "config port → env → bd" path works.
-	bdEnv := append(os.Environ(),
+	bdEnv := append(append([]string(nil), env...),
 		"GC_DOLT_HOST=127.0.0.1",
 		"GC_DOLT_PORT="+port,
 	)
 
-	runBDInitCompat(t, wsDir, "dc", port)
+	runBDInitCompat(t, env, wsDir, "dc", port, "")
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -122,9 +118,16 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	// Init with same prefix and server — simulates a second machine's
-	// agent sharing the same bead store.
-	runBDInitCompat(t, wsDir2, "dc", port)
+	// Init with same prefix and server, naming the database workspace 1
+	// created — simulates a second machine's agent sharing the same bead
+	// store. --database is the documented way to join a database another
+	// tool already created, and the same invocation gascity's own rig init
+	// uses (initDefaultRigBdStore in cmd/gc/beads_provider_lifecycle.go).
+	// Without it bd mints a fresh project ID for this workspace and then
+	// refuses to open the existing database (PROJECT IDENTITY MISMATCH) —
+	// its guard against silently adopting a foreign project's data, not a
+	// cross-workspace sharing failure.
+	runBDInitCompat(t, env, wsDir2, "dc", port, doltDatabaseName(t, wsDir))
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -142,28 +145,60 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 }
 
 // runBDInitCompat initializes beads against a shared server, compatible
-// with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, dir, prefix, port string) {
+// with bd v0.60.0 (which lacks --skip-agents). A non-empty database joins
+// that existing server database instead of letting bd derive a new one
+// from prefix; leave it empty to create the database.
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, port, database string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
+	args := []string{
+		"init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
+		"-p", prefix, "--skip-hooks",
+	}
+	if database != "" {
+		args = append(args, "--database", database)
+	}
+	cmd := exec.CommandContext(ctx, bdBinary, args...)
 	cmd.Dir = dir
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("bd init timed out: %s", out)
+		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
 	}
 	if err != nil {
 		t.Fatalf("bd init: exit status %v: %s", err, out)
 	}
 }
 
+// doltDatabaseName returns the server-side Dolt database name bd recorded
+// for an already-initialized workspace. Reading it back (rather than
+// assuming bd's prefix-to-database derivation) keeps the sharing assertion
+// honest if that derivation ever changes.
+func doltDatabaseName(t *testing.T, wsDir string) string {
+	t.Helper()
+	path := filepath.Join(wsDir, ".beads", "metadata.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading beads metadata: %v", err)
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	if meta.DoltDatabase == "" {
+		t.Fatalf("%s records no dolt_database — cannot join it from a second workspace:\n%s", path, raw)
+	}
+	return meta.DoltDatabase
+}
+
 // startDoltServerOnAllInterfaces starts a Dolt server bound to 0.0.0.0
 // on an ephemeral port and returns the port string. The server is killed
 // when the test ends.
-func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
+func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) string {
 	t.Helper()
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -186,8 +221,9 @@ func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "dolt", "sql-server",
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server",
 		"-H", "0.0.0.0", "-P", port, "--data-dir", dataDir)
+	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -199,7 +235,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
 	go func() { waitCh <- cmd.Wait() }()
 
 	// Wait for server to be ready.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(doltServerReadyTimeout)
 	addr := net.JoinHostPort("127.0.0.1", port)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -217,7 +253,7 @@ func startDoltServerOnAllInterfaces(t *testing.T, dataDir string) string {
 			<-waitCh
 			_ = logFile.Close()
 			logBytes, _ := os.ReadFile(logPath)
-			t.Fatalf("dolt sql-server did not become ready on %s within 15s:\n%s", addr, logBytes)
+			t.Fatalf("dolt sql-server did not become ready on %s within %s:\n%s", addr, doltServerReadyTimeout, logBytes)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

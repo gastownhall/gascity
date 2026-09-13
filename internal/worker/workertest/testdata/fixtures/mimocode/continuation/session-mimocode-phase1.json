@@ -1,0 +1,55 @@
+{
+  "info": {
+    "id": "ses_mimocode_phase1",
+    "directory": "/tmp/gascity/phase1/mimocode"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user_1",
+        "sessionID": "ses_mimocode_phase1",
+        "role": "user",
+        "time": {"created": 1770000000000}
+      },
+      "parts": [
+        {"id": "part_user_1", "type": "text", "text": "Summarize the MiMo Code worker transcript contract."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant_1",
+        "sessionID": "ses_mimocode_phase1",
+        "role": "assistant",
+        "parentID": "msg_user_1",
+        "time": {"created": 1770000001000}
+      },
+      "parts": [
+        {"id": "part_assistant_1", "type": "text", "text": "MiMo Code phase 1 validates the tmux CLI transcript contract."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_user_2",
+        "sessionID": "ses_mimocode_phase1",
+        "role": "user",
+        "parentID": "msg_assistant_1",
+        "time": {"created": 1770000002000}
+      },
+      "parts": [
+        {"id": "part_user_2", "type": "text", "text": "Repeat the exact MiMo Code phase-1 summary from earlier before answering."}
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant_2",
+        "sessionID": "ses_mimocode_phase1",
+        "role": "assistant",
+        "parentID": "msg_user_2",
+        "time": {"created": 1770000003000}
+      },
+      "parts": [
+        {"id": "part_assistant_2", "type": "text", "text": "MiMo Code phase 1 validates the tmux CLI transcript contract."}
+      ]
+    }
+  ]
+}

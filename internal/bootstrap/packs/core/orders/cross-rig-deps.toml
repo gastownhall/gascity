@@ -1,0 +1,13 @@
+# Replaces deacon patrol step: cross-rig-deps
+#
+# When an issue in one rig closes, dependent issues in other rigs stay
+# blocked because computeBlockedIDs doesn't resolve across rig boundaries.
+# This order converts satisfied cross-rig blocks deps to related,
+# preserving the audit trail while removing blocking semantics.
+#
+# Becomes unnecessary when beads supports cross-rig computeBlockedIDs.
+[order]
+description = "Convert satisfied cross-rig blocks deps to related"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/cross-rig-deps.sh"

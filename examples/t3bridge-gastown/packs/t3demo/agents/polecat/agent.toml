@@ -1,0 +1,7 @@
+scope = "rig"
+wake_mode = "fresh"
+work_dir = ".gc/agents/{{.Rig}}/polecats/{{.AgentBase}}"
+nudge = "Run 'gc hook'; it checks assigned work first, then routed pool work."
+idle_timeout = "2h"
+min_active_sessions = 0
+max_active_sessions = 2

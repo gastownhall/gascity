@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "state",
+    "reason",
+    "home_stable",
+    "home_reason",
+    "config_path",
+    "config_present",
+    "state_schema",
+    "required_notice_version",
+    "accepted_notice_version",
+    "endpoint_hostname",
+    "installation_id_present",
+    "spool_generation_present",
+    "cleanup_pending",
+    "queue",
+    "diagnostics",
+    "retention",
+    "independence"
+  ],
+  "properties": {
+    "ok": {"const": true},
+    "state": {
+      "enum": [
+        "pending-notice",
+        "notice-update-required",
+        "enabled",
+        "disabled",
+        "disabled-cleanup-pending",
+        "environment-disabled",
+        "fail-closed",
+        "server-paused"
+      ]
+    },
+    "reason": {
+      "enum": [
+        "preference-unset",
+        "enabled",
+        "persisted-disabled",
+        "disable-cleanup-pending",
+        "pause-cleanup-pending",
+        "notice-version-stale",
+        "server-pause-covers-epoch",
+        "greater-epoch-resume-required",
+        "do-not-track",
+        "gc-disable-usage-metrics",
+        "development-build",
+        "unsupported-platform",
+        "endpoint-missing",
+        "rollout-default-off",
+        "notice-unavailable",
+        "home-unstable",
+        "config-unreadable",
+        "config-invalid",
+        "state-schema-newer",
+        "notice-floor-newer",
+        "counter-namespace-exhausted"
+      ]
+    },
+    "home_stable": {"type": "boolean"},
+    "home_reason": {"enum": [null, "home-unstable"]},
+    "config_path": {"type": "string"},
+    "config_present": {"type": "boolean"},
+    "state_schema": {"type": "integer", "minimum": 0},
+    "required_notice_version": {"type": "integer", "minimum": 0},
+    "accepted_notice_version": {"type": "integer", "minimum": 0},
+    "endpoint_hostname": {"type": "string"},
+    "installation_id_present": {"type": "boolean"},
+    "spool_generation_present": {"type": "boolean"},
+    "cleanup_pending": {"type": "boolean"},
+    "queue": {
+      "type": "object",
+      "required": ["available", "events", "bytes", "oldest_age_seconds"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "events": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "oldest_age_seconds": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "object",
+      "required": [
+        "available",
+        "dropped_events",
+        "last_upload_attempt_hour_utc",
+        "last_upload_success_hour_utc",
+        "last_error_class",
+        "spawn_throttle_age_seconds"
+      ],
+      "properties": {
+        "available": {"type": "boolean"},
+        "dropped_events": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "last_upload_attempt_hour_utc": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):00:00Z$"
+            }
+          ]
+        },
+        "last_upload_success_hour_utc": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):00:00Z$"
+            }
+          ]
+        },
+        "last_error_class": {
+          "enum": [
+            null,
+            "lock-timeout",
+            "disk-full",
+            "storage-failure",
+            "network-timeout",
+            "network-failure",
+            "server-4xx",
+            "server-5xx",
+            "invalid-response",
+            "server-paused"
+          ]
+        },
+        "spawn_throttle_age_seconds": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "retention": {
+      "type": "object",
+      "required": ["edge_log_days", "raw_event_days", "aggregate_months", "privacy_url"],
+      "properties": {
+        "edge_log_days": {"const": 7},
+        "raw_event_days": {"const": 90},
+        "aggregate_months": {"const": 13},
+        "privacy_url": {
+          "oneOf": [
+            {"const": ""},
+            {"type": "string", "format": "uri"}
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "independence": {
+      "const": "Gas City OTel, local costs, event export, and Beads telemetry are separate and unchanged."
+    }
+  },
+  "additionalProperties": false
+}

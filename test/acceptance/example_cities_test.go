@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -43,7 +44,7 @@ func TestExampleInit_AllCities_Succeed(t *testing.T) {
 	for _, name := range cities {
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			if !c.HasFile("city.toml") {
 				t.Fatal("city.toml not created")
@@ -74,7 +75,7 @@ func TestExampleValidate_AllCities_PassValidation(t *testing.T) {
 		name := e.Name()
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			out, err := c.GC("config", "show", "--validate")
 			if err != nil {
@@ -92,15 +93,45 @@ func TestExampleValidate_AllCities_PassValidation(t *testing.T) {
 func TestExamplePacks_PackArtifacts(t *testing.T) {
 	t.Run("Gastown", func(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
-		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
+
+		// The gastown pack arrives via the pinned public import, not a
+		// city-local packs/ copy: the city carries the import pin plus the
+		// lock entry, and the pack content is materialized into the
+		// user-global repo cache.
+		for _, rel := range []string{"city.toml", "pack.toml", "packs.lock"} {
+			if !c.HasFile(rel) {
+				t.Errorf("missing expected artifact: %s", rel)
+			}
+		}
+		packToml := c.ReadFile("pack.toml")
+		if !strings.Contains(packToml, `source = "`+config.PublicGastownPackSource+`"`) {
+			t.Errorf("pack.toml missing pinned public gastown source:\n%s", packToml)
+		}
+
+		packDir := gastownCachePackDir(t, c)
+		expected := []string{
+			"pack.toml",
+			"agents",
+			"template-fragments",
+			"formulas",
+			filepath.Join("assets", "scripts"),
+		}
+		for _, rel := range expected {
+			if _, err := os.Stat(filepath.Join(packDir, rel)); err != nil {
+				t.Errorf("missing expected cached pack artifact %s: %v", rel, err)
+			}
+		}
+	})
+
+	t.Run("Hyperscale", func(t *testing.T) {
+		c := helpers.NewCity(t, testEnv)
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "hyperscale"))
 
 		expected := []string{
-			"packs/gastown/pack.toml",
-			"packs/gastown/prompts",
-			"packs/gastown/formulas",
-			"packs/gastown/scripts",
-			"packs/maintenance/pack.toml",
-			"packs/maintenance/formulas",
+			"packs/hyperscale/pack.toml",
+			"packs/hyperscale/agents",
+			"packs/hyperscale/assets/scripts",
 		}
 		for _, rel := range expected {
 			if !c.HasFile(rel) {
@@ -109,14 +140,16 @@ func TestExamplePacks_PackArtifacts(t *testing.T) {
 		}
 	})
 
-	t.Run("Hyperscale", func(t *testing.T) {
+	t.Run("Lifecycle", func(t *testing.T) {
 		c := helpers.NewCity(t, testEnv)
-		c.InitFrom(filepath.Join(helpers.ExamplesDir(), "hyperscale"))
+		c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "lifecycle"))
 
 		expected := []string{
-			"packs/hyperscale/pack.toml",
-			"packs/hyperscale/prompts",
-			"packs/hyperscale/scripts",
+			"packs/lifecycle/pack.toml",
+			"packs/lifecycle/agents/polecat/agent.toml",
+			"packs/lifecycle/agents/refinery/agent.toml",
+			"packs/lifecycle/assets/scripts/lifecycle-polecat-claim-handoff.yaml",
+			"packs/lifecycle/assets/scripts/lifecycle-refinery-merge.yaml",
 		}
 		for _, rel := range expected {
 			if !c.HasFile(rel) {
@@ -146,7 +179,7 @@ func TestExampleDoctor_AllCities_RunWithoutCrash(t *testing.T) {
 		name := e.Name()
 		t.Run(name, func(t *testing.T) {
 			c := helpers.NewCity(t, testEnv)
-			c.InitFrom(filepath.Join(examplesDir, name))
+			c.InitFromNoStart(filepath.Join(examplesDir, name))
 
 			// Doctor may return non-zero for warnings, but should not crash.
 			out, _ := c.GC("doctor")

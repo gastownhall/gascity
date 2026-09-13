@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "bead_id", "mode"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "bead_id": { "type": "string" },
+    "mode": { "type": "string" },
+    "condition": { "type": "string" },
+    "outcome": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "stdout": { "type": "string" },
+    "stderr": { "type": "string" },
+    "skipped": { "type": "boolean" },
+    "reason": { "type": "string" }
+  },
+  "additionalProperties": true
+}

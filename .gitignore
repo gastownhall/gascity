@@ -1,13 +1,39 @@
 .DS_Store
 CLAUDE.local.md
 coverage.txt
+coverage.integration-*.txt
+coverage.noncmdgc.txt
+coverage.cmdgc.*.txt
+cmd/gc/.runtime/
 /bin/
+/dist/
 /gc
+
+# Dashboard e2e (Layer B) build + run artifacts. The fakesupervisor is a
+# compiled -tags integration binary; Playwright emits reports/results/browsers.
+# The bare /fakesupervisor guard catches `go build ./test/.../fakesupervisor/`
+# run from the repo root (which drops the binary in cwd), not just the -o form.
+test/dashport/cmd/fakesupervisor/fakesupervisor
+/fakesupervisor
+internal/api/dashboardspa/web/frontend/test-results/
+internal/api/dashboardspa/web/frontend/playwright-report/
+internal/api/dashboardspa/web/frontend/blob-report/
+internal/api/dashboardspa/web/frontend/.playwright/
 /genschema
 /bd
 /br
+/tmp/
+.runtime/
 *.test
-.beads/
+**/.beads/*
+!**/.beads/identity.toml
+# bd's workspace gate sits BESIDE .beads, not inside it (`<dir>/.beads.gate.lock`),
+# so the pattern above never covered it. These flock files are never deleted, so
+# every scope root accumulates one as an untracked stray -- which the plain `git
+# status --porcelain` run by pack-source hashing (internal/config/pack_include.go)
+# and by review quorum (internal/reviewquorum/mutations.go) then reports as a
+# spurious mutation. Same pattern `bd doctor --fix` writes.
+*.gate.lock*
 .claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/
 !examples/gastown/packs/gastown/overlays/default/.claude/settings.json
@@ -15,6 +41,16 @@ coverage.txt
 !examples/gastown/packs/maintenance/overlays/default/.claude/settings.json
 !examples/swarm/packs/swarm/overlays/default/.claude/
 !examples/swarm/packs/swarm/overlays/default/.claude/settings.json
+
+# Commit the shared project skill tree (Claude Code's documented location).
+# The rest of the developer-local root .claude/ stays ignored. Anchored to the
+# repo root so the nested example-pack .claude/ rules above are untouched.
+!/.claude/
+/.claude/*
+!/.claude/skills/
+
+# sync-project-agents writes local migration backups here; don't commit them.
+.agents/migration/
 .gc/
 
 # Dolt database files (added by bd init)
@@ -28,3 +64,22 @@ reports/
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
 .cache/
+
+# Bugflow policy — strictly local state, configured per operator
+.github/bugflow.toml
+
+.vscode/settings.json
+.env
+/gen-client
+
+# Developer scratch — diff dumps and ad-hoc patches created during review
+tmp_*.diff
+tmp_*.patch
+issues.jsonl
+
+# Python bytecode from script tests
+__pycache__/
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/
+.beads.backup-*

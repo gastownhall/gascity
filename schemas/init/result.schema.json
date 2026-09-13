@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "city_path",
+    "city_name",
+    "mode"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "city_name": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "bootstrap_profile": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

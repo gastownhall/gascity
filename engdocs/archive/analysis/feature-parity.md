@@ -286,7 +286,7 @@ become role-agnostic infrastructure that any pack can use.
 |---------|----------|--------|-------|
 | `gt mq submit` | — | **REMAP** | Just bd: polecat sets `metadata.branch`/`metadata.target` + assigns to refinery |
 | `gt mq list` | — | **REMAP** | Just bd: `bd list --assignee=refinery --status=open` |
-| `gt mq status` | — | **REMAP** | Just bd: `bd show $WORK --json \| jq '.metadata'` |
+| `gt mq status` | — | **REMAP** | Just bd: `bd show $WORK --json \| jq '.[0].metadata'` |
 | `gt mq retry` | — | **REMAP** | Just bd: refinery rejects back to pool, new polecat picks up |
 | `gt mq reject` | — | **REMAP** | Just bd: `bd update --status=open --assignee="" --set-metadata rejection_reason=...` |
 | `gt mq next` | — | **REMAP** | Just bd: `bd list --assignee=$GC_AGENT --limit=1` |
@@ -511,7 +511,7 @@ become role-agnostic infrastructure that any pack can use.
 | `gt dolt migrate` | — | **N/A** | Schema migration; one-time |
 | `gt dolt fix-metadata` | — | **TODO** | Repair metadata.json |
 | `gt dolt recover` | `gc dolt recover` | **DONE** | Recover from corruption: backup, rebuild metadata, verify |
-| `gt dolt cleanup` | — | **TODO** | Remove orphaned databases |
+| `gt dolt cleanup` | `gc dolt cleanup` | **DONE** | Fixed in #706 (external-rig discovery via registry); #711 fixes --force for default data-dir orphans (`examples/dolt/commands/cleanup.sh`) |
 | `gt dolt rollback` | `gc dolt rollback` | **DONE** | List backups or restore with --force |
 | `gt dolt sync` | `gc dolt sync` | **DONE** | Push to configured remotes; stages, commits, pushes each database |
 | Dolt branch per agent | — | **TODO** | Write isolation branches |

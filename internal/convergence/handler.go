@@ -38,6 +38,22 @@ func ParseIterationFromKey(key string) (int, bool) {
 	return n, true
 }
 
+// Canonical close_reason strings for convergence-handler-driven closes.
+// Every CloseBead caller uses one of these so bd's
+// validation.on-close=error validator (which rejects close_reason of
+// <20 chars) accepts the close. The reason also lands in the closed
+// bead's metadata for audit.
+const (
+	CloseReasonCreateRollback  = "convergence: bead-create rollback after error"
+	CloseReasonRetryRollback   = "convergence: retry-create rollback after error"
+	CloseReasonManualApprove   = "convergence: iteration closed by manual approve"
+	CloseReasonManualSupersede = "convergence: active wisp superseded during manual stop"
+	CloseReasonManualStop      = "convergence: iteration closed by manual stop"
+	CloseReasonReconcileDone   = "convergence reconcile: terminated-state bead closed"
+	CloseReasonHandlerCleanup  = "convergence: terminated state observed; closing root"
+	CloseReasonHandlerRoot     = "convergence: workflow handler closing root after terminate"
+)
+
 // BeadInfo holds the minimal bead information needed by the handler.
 type BeadInfo struct {
 	ID             string
@@ -62,8 +78,15 @@ type Store interface {
 	// SetMetadata writes a single metadata key-value pair.
 	SetMetadata(id, key, value string) error
 
-	// CloseBead sets a bead's status to "closed".
-	CloseBead(id string) error
+	// CloseBead sets a bead's status to "closed" and stamps reason as
+	// the bead's close_reason metadata. reason must be >=20 chars to
+	// satisfy bd's validation.on-close=error validator. Use one of the
+	// CloseReason* constants below for canonical wording.
+	CloseBead(id, reason string) error
+
+	// DeleteBead permanently removes a bead. Used to burn discarded
+	// speculative wisps so they are not counted as completed iterations.
+	DeleteBead(id string) error
 
 	// Children returns child beads of a parent.
 	Children(parentID string) ([]BeadInfo, error)
@@ -71,6 +94,13 @@ type Store interface {
 	// PourWisp creates a new convergence wisp with an idempotency key.
 	// If a wisp with this key already exists, returns the existing wisp's ID.
 	PourWisp(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string) (string, error)
+
+	// PourSpeculativeWisp creates a hidden/unassigned convergence wisp that can
+	// be activated after a nonterminal gate outcome adopts it.
+	PourSpeculativeWisp(parentID, formula, idempotencyKey string, vars map[string]string, evaluatePrompt string) (string, error)
+
+	// ActivateWisp publishes a previously speculative wisp for agent work.
+	ActivateWisp(id string) error
 
 	// FindByIdempotencyKey looks up a wisp by its idempotency key.
 	FindByIdempotencyKey(key string) (string, bool, error)
@@ -88,12 +118,13 @@ type HandlerAction string
 
 // HandlerAction values describing the outcome of wisp_closed processing.
 const (
-	ActionIterate       HandlerAction = "iterate"
-	ActionApproved      HandlerAction = "approved"
-	ActionNoConvergence HandlerAction = "no_convergence"
-	ActionWaitingManual HandlerAction = "waiting_manual"
-	ActionStopped       HandlerAction = "stopped"
-	ActionSkipped       HandlerAction = "skipped"
+	ActionIterate        HandlerAction = "iterate"
+	ActionApproved       HandlerAction = "approved"
+	ActionNoConvergence  HandlerAction = "no_convergence"
+	ActionWaitingManual  HandlerAction = "waiting_manual"
+	ActionWaitingTrigger HandlerAction = "waiting_trigger"
+	ActionStopped        HandlerAction = "stopped"
+	ActionSkipped        HandlerAction = "skipped"
 )
 
 // HandlerResult holds the outcome of HandleWispClosed.
@@ -113,13 +144,20 @@ type HandlerResult struct {
 // root bead at a time. The controller event loop provides this guarantee.
 // Violating this assumption can cause stale-read races on metadata snapshots.
 type Handler struct {
-	Store   Store
-	Emitter EventEmitter
-	Clock   func() time.Time // injectable for testing; defaults to time.Now
+	Store     Store
+	StorePath string
+	Emitter   EventEmitter
+	Clock     func() time.Time // injectable for testing; defaults to time.Now
 }
 
 // HandleWispClosed processes a wisp_closed event for a convergence root bead.
 // This is the core 9-step algorithm from the spec.
+//
+// Crash safety: the next wisp is speculatively poured BEFORE gate evaluation
+// (step 3b). If the outcome is terminal or waiting_manual, the speculative
+// wisp is burned. If the process crashes after the pour but before the burn,
+// the reconciler finds the speculative wisp via pending_next_wisp or
+// FindByIdempotencyKey and adopts it.
 func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID string) (HandlerResult, error) {
 	now := h.clock()
 
@@ -132,7 +170,7 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	// Step 1: Guard check.
 	state := meta[FieldState]
 	if state == StateTerminated {
-		_ = h.Store.CloseBead(rootBeadID) // best-effort cleanup
+		_ = h.Store.CloseBead(rootBeadID, CloseReasonHandlerCleanup) // best-effort cleanup
 		return HandlerResult{Action: ActionSkipped}, nil
 	}
 
@@ -177,16 +215,67 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 
 	maxIterations, _ := DecodeInt(meta[FieldMaxIterations])
 
-	// Parse gate config.
+	// Parse gate config before creating speculative work. Invalid config or
+	// deterministic manual-waiting paths must not leave behind a successor wisp.
 	gateConfig, err := ParseGateConfig(meta)
 	if err != nil {
 		return HandlerResult{}, fmt.Errorf("parsing gate config: %w", err)
 	}
 
-	// Step 4: Gate evaluation (idempotent).
-	var gateResult GateResult
+	triggerConfig, err := ParseTriggerConfig(meta)
+	if err != nil {
+		return HandlerResult{}, fmt.Errorf("parsing trigger config: %w", err)
+	}
+
+	nextIteration := wispIteration + 1
+	nextKey := IdempotencyKey(rootBeadID, nextIteration)
+
 	gateOutcomeWisp := meta[FieldGateOutcomeWisp]
 	skipGateEval := gateOutcomeWisp == wispID
+	if !skipGateEval && gateConfig.Mode == GateModeCondition && gateConfig.Condition == "" {
+		if pending := h.validPendingNextWisp(rootBeadID, nextKey, meta[FieldPendingNextWisp]); pending != "" {
+			if burnErr := h.burnSpeculativeWisp(rootBeadID, pending); burnErr != nil {
+				return HandlerResult{}, fmt.Errorf("gate mode is %q but no condition path configured; additionally burning pending wisp: %w", GateModeCondition, burnErr)
+			}
+		}
+		return HandlerResult{}, fmt.Errorf("gate mode is %q but no condition path configured", GateModeCondition)
+	}
+
+	// Step 3b: Speculative pour - create the next wisp BEFORE gate evaluation
+	// so that a crash between gate eval and commit cannot break the chain.
+	// If the outcome is terminal or waiting_manual, we burn this wisp.
+	speculativeWispID := h.validPendingNextWisp(rootBeadID, nextKey, meta[FieldPendingNextWisp])
+	var speculativePourErr error
+	needsManualWithoutGate := gateConfig.Mode == GateModeManual ||
+		(gateConfig.Mode == GateModeHybrid && HybridNeedsManual(gateConfig))
+	// A trigger-gated loop defers the next pour to HandleTrigger, so no
+	// speculative successor wisp is created here.
+	skipSpeculativePour := needsManualWithoutGate || triggerConfig.Enabled()
+	if wispIteration < maxIterations && !skipSpeculativePour && speculativeWispID == "" {
+		formula := meta[FieldFormula]
+		vars := ExtractVars(meta)
+		evaluatePrompt := meta[FieldEvaluatePrompt]
+		speculativeWispID, err = h.Store.PourSpeculativeWisp(rootBeadID, formula, nextKey, vars, evaluatePrompt)
+		if err != nil {
+			existingID, found, lookupErr := h.Store.FindByIdempotencyKey(nextKey)
+			if lookupErr == nil && found {
+				speculativeWispID = existingID
+			} else {
+				speculativePourErr = err
+			}
+		}
+		if speculativeWispID != "" {
+			if err := h.Store.SetMetadata(rootBeadID, FieldPendingNextWisp, speculativeWispID); err != nil {
+				if burnErr := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); burnErr != nil {
+					return HandlerResult{}, fmt.Errorf("setting pending next wisp: %w; additionally burning speculative wisp: %w", err, burnErr)
+				}
+				return HandlerResult{}, fmt.Errorf("setting pending next wisp: %w", err)
+			}
+		}
+	}
+
+	// Step 4: Gate evaluation (idempotent).
+	var gateResult GateResult
 
 	if skipGateEval {
 		// Replay: use persisted outcome.
@@ -210,19 +299,20 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	} else {
 		// Manual mode: no gate evaluation, transition to waiting_manual.
 		if gateConfig.Mode == GateModeManual {
+			if err := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); err != nil {
+				return HandlerResult{}, fmt.Errorf("burning speculative wisp before waiting_manual: %w", err)
+			}
 			return h.transitionToWaitingManual(rootBeadID, wispID, wispIteration,
 				gateConfig, GateResult{}, WaitManual, "", meta, now)
 		}
 
 		// Hybrid mode with no condition: fallback to manual.
 		if gateConfig.Mode == GateModeHybrid && HybridNeedsManual(gateConfig) {
+			if err := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); err != nil {
+				return HandlerResult{}, fmt.Errorf("burning speculative wisp before waiting_manual: %w", err)
+			}
 			return h.transitionToWaitingManual(rootBeadID, wispID, wispIteration,
 				gateConfig, GateResult{}, WaitHybridNoCondition, "", meta, now)
-		}
-
-		// Condition mode with no condition path: this is a configuration error.
-		if gateConfig.Mode == GateModeCondition && gateConfig.Condition == "" {
-			return HandlerResult{}, fmt.Errorf("gate mode is %q but no condition path configured", GateModeCondition)
 		}
 
 		// Read agent verdict (only if scoped to this wisp).
@@ -240,6 +330,9 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	// Step 5: Persist gate outcome.
 	if !skipGateEval {
 		if err := h.persistGateOutcome(rootBeadID, wispID, gateResult); err != nil {
+			if burnErr := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); burnErr != nil {
+				return HandlerResult{}, fmt.Errorf("persisting gate outcome: %w; additionally burning speculative wisp: %w", err, burnErr)
+			}
 			return HandlerResult{}, fmt.Errorf("persisting gate outcome: %w", err)
 		}
 	}
@@ -250,6 +343,9 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	// Step 7: Prepare outcome.
 	// Check for timeout with manual action first.
 	if gateResult.Outcome == GateTimeout && gateConfig.TimeoutAction == TimeoutActionManual {
+		if err := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); err != nil {
+			return HandlerResult{}, fmt.Errorf("burning speculative wisp before waiting_manual: %w", err)
+		}
 		return h.transitionToWaitingManual(rootBeadID, wispID, wispIteration,
 			gateConfig, gateResult, WaitTimeout, gateResult.Outcome, meta, now)
 	}
@@ -272,11 +368,23 @@ func (h *Handler) HandleWispClosed(ctx context.Context, rootBeadID, wispID strin
 	}
 
 	if !isTerminal {
-		// Iterate: clear verdict and pour next wisp.
-		return h.iterate(ctx, rootBeadID, wispID, wispIteration, gateConfig, gateResult, meta, now)
+		if speculativePourErr != nil {
+			return h.handleSlingFailure(rootBeadID, wispID, wispIteration,
+				gateConfig, gateResult, meta, now)
+		}
+		// Iteration gate: a trigger-gated loop holds in waiting_trigger until
+		// the trigger condition passes, rather than pouring the next wisp now.
+		if triggerConfig.Enabled() {
+			return h.transitionToWaitingTrigger(rootBeadID, wispID, wispIteration, gateConfig, gateResult, meta)
+		}
+		// Iterate: clear verdict and use speculatively poured wisp.
+		return h.iterate(ctx, rootBeadID, wispID, wispIteration, gateConfig, gateResult, meta, now, speculativeWispID)
 	}
 
-	// Terminal transition.
+	// Terminal transition - burn the speculative wisp if one was poured.
+	if err := h.burnSpeculativeWisp(rootBeadID, speculativeWispID); err != nil {
+		return HandlerResult{}, fmt.Errorf("burning speculative wisp before terminal transition: %w", err)
+	}
 	return h.terminate(rootBeadID, wispID, wispIteration, gateConfig, gateResult,
 		terminalReason, "controller", globalIteration, meta, now)
 }
@@ -327,21 +435,17 @@ func (h *Handler) transitionToWaitingManual(
 	}
 	h.emitEvent(EventIteration, EventIDIteration(rootBeadID, iteration), rootBeadID, iterPayload)
 
-	// Step 9: Commit point — write state changes.
-	// Write last_processed_wisp LAST (write ordering contract):
-	// it is the dedup/idempotency marker — if the process crashes before
-	// this write, recovery re-processes this wisp rather than skipping it.
-	if err := h.Store.SetMetadata(rootBeadID, FieldActiveWisp, ""); err != nil {
-		return HandlerResult{}, fmt.Errorf("clearing active wisp: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldWaitingReason, reason); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting waiting reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateWaitingManual); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting state to waiting_manual: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
+	// Step 9: Commit point — write state changes, dedup marker LAST.
+	if err := h.commit(rootBeadID,
+		[]metaWrite{
+			{FieldActiveWisp, "", "clearing active wisp"},
+			{FieldWaitingReason, reason, "setting waiting reason"},
+			{FieldState, StateWaitingManual, "setting state to waiting_manual"},
+		},
+		nil,
+		metaWrite{FieldLastProcessedWisp, wispID, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
 	}
 
 	// Emit ConvergenceWaitingManual event.
@@ -366,7 +470,9 @@ func (h *Handler) transitionToWaitingManual(
 	}, nil
 }
 
-// iterate clears verdict and pours the next convergence wisp.
+// iterate clears verdict and adopts the speculatively poured wisp (or pours
+// a new one as fallback). The speculative wisp was created in step 3b of
+// HandleWispClosed before gate evaluation, ensuring crash safety.
 func (h *Handler) iterate(
 	_ context.Context,
 	rootBeadID, wispID string,
@@ -375,6 +481,7 @@ func (h *Handler) iterate(
 	gateResult GateResult,
 	meta map[string]string,
 	now time.Time,
+	speculativeWispID string,
 ) (HandlerResult, error) {
 	// Clear verdict for next iteration (only if verdict belongs to this wisp).
 	if meta[FieldAgentVerdictWisp] == wispID {
@@ -386,25 +493,33 @@ func (h *Handler) iterate(
 		}
 	}
 
-	// Pour next wisp.
+	// Adopt speculatively poured wisp, or pour a new one as fallback.
 	nextIteration := iteration + 1
 	nextKey := IdempotencyKey(rootBeadID, nextIteration)
-	formula := meta[FieldFormula]
-	vars := ExtractVars(meta)
-	evaluatePrompt := meta[FieldEvaluatePrompt] // may be empty for default
 
-	nextWispID, err := h.Store.PourWisp(rootBeadID, formula, nextKey, vars, evaluatePrompt)
-	if err != nil {
-		// Sling failure: check if wisp was created despite the error.
-		existingID, found, lookupErr := h.Store.FindByIdempotencyKey(nextKey)
-		if lookupErr == nil && found {
-			// Wisp was created — adopt it.
-			nextWispID = existingID
-		} else {
-			// Genuine sling failure: transition to waiting_manual.
-			return h.handleSlingFailure(rootBeadID, wispID, iteration,
-				gateConfig, gateResult, meta, now)
+	var nextWispID string
+	if speculativeWispID != "" {
+		// Speculative wisp was pre-poured in step 3b — adopt it.
+		nextWispID = speculativeWispID
+	} else {
+		// Fallback: pour now (e.g., at max iterations boundary or error).
+		formula := meta[FieldFormula]
+		vars := ExtractVars(meta)
+		evaluatePrompt := meta[FieldEvaluatePrompt]
+		var pourErr error
+		nextWispID, pourErr = h.Store.PourWisp(rootBeadID, formula, nextKey, vars, evaluatePrompt)
+		if pourErr != nil {
+			existingID, found, lookupErr := h.Store.FindByIdempotencyKey(nextKey)
+			if lookupErr == nil && found {
+				nextWispID = existingID
+			} else {
+				return h.handleSlingFailure(rootBeadID, wispID, iteration,
+					gateConfig, gateResult, meta, now)
+			}
 		}
+	}
+	if err := h.Store.ActivateWisp(nextWispID); err != nil {
+		return HandlerResult{}, fmt.Errorf("activating next wisp %q: %w", nextWispID, err)
 	}
 
 	// Compute durations.
@@ -433,20 +548,88 @@ func (h *Handler) iterate(
 	}
 	h.emitEvent(EventIteration, EventIDIteration(rootBeadID, iteration), rootBeadID, iterPayload)
 
-	// Step 9: Commit point.
-	// Write last_processed_wisp LAST — it is the dedup marker.
-	if err := h.Store.SetMetadata(rootBeadID, FieldActiveWisp, nextWispID); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting active wisp: %w", err)
+	// Step 9: Commit point — active wisp then dedup marker LAST.
+	if err := h.commit(rootBeadID,
+		[]metaWrite{
+			{FieldActiveWisp, nextWispID, "setting active wisp"},
+		},
+		nil,
+		metaWrite{FieldLastProcessedWisp, wispID, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
 	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
-	}
+	// Clear pending_next_wisp after the dedup marker commits. If this best-effort
+	// cleanup fails, validPendingNextWisp will self-heal on the next entry.
+	_ = h.Store.SetMetadata(rootBeadID, FieldPendingNextWisp, "")
 
 	return HandlerResult{
 		Action:      ActionIterate,
 		Iteration:   iteration,
 		GateOutcome: gateOutcome,
 		NextWispID:  nextWispID,
+	}, nil
+}
+
+// transitionToWaitingTrigger holds a trigger-gated loop after a non-terminal
+// gate outcome. The gate has already decided to iterate; the loop now waits in
+// waiting_trigger until HandleTrigger observes the trigger condition pass and
+// pours the next wisp. No successor wisp is poured here (the speculative pour
+// was skipped for trigger-gated loops).
+func (h *Handler) transitionToWaitingTrigger(
+	rootBeadID, wispID string,
+	iteration int,
+	gateConfig GateConfig,
+	gateResult GateResult,
+	meta map[string]string,
+) (HandlerResult, error) {
+	// Clear the verdict consumed by this iteration's gate so it cannot leak
+	// into the next wisp (which HandleTrigger pours fresh).
+	if meta[FieldAgentVerdictWisp] == wispID {
+		if err := h.Store.SetMetadata(rootBeadID, FieldAgentVerdict, ""); err != nil {
+			return HandlerResult{}, fmt.Errorf("clearing agent verdict: %w", err)
+		}
+		if err := h.Store.SetMetadata(rootBeadID, FieldAgentVerdictWisp, ""); err != nil {
+			return HandlerResult{}, fmt.Errorf("clearing agent verdict wisp: %w", err)
+		}
+	}
+
+	iterDur, cumDur := h.computeDurations(rootBeadID, wispID)
+	verdict := ""
+	if meta[FieldAgentVerdictWisp] == wispID {
+		verdict = NormalizeVerdict(meta[FieldAgentVerdict])
+	}
+
+	// Step 8: Emit ConvergenceIteration event recording the hold.
+	iterPayload := IterationPayload{
+		Iteration:            iteration,
+		WispID:               wispID,
+		AgentVerdict:         verdict,
+		GateMode:             gateConfig.Mode,
+		GateOutcome:          NullableString(gateResult.Outcome),
+		GateResult:           GateResultToPayload(gateResult),
+		GateRetryCount:       gateResult.RetryCount,
+		Action:               string(ActionWaitingTrigger),
+		IterationDurationMs:  iterDur.Milliseconds(),
+		CumulativeDurationMs: cumDur.Milliseconds(),
+	}
+	h.emitEvent(EventIteration, EventIDIteration(rootBeadID, iteration), rootBeadID, iterPayload)
+
+	// Step 9: Commit point — clear active wisp, set state, dedup marker LAST.
+	if err := h.commit(rootBeadID,
+		[]metaWrite{
+			{FieldActiveWisp, "", "clearing active wisp"},
+			{FieldState, StateWaitingTrigger, "setting state to waiting_trigger"},
+		},
+		nil,
+		metaWrite{FieldLastProcessedWisp, wispID, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
+	}
+
+	return HandlerResult{
+		Action:      ActionWaitingTrigger,
+		Iteration:   iteration,
+		GateOutcome: gateResult.Outcome,
 	}, nil
 }
 
@@ -501,22 +684,23 @@ func (h *Handler) terminate(
 	h.emitEvent(EventTerminated, EventIDTerminated(rootBeadID), rootBeadID, termPayload)
 
 	// Step 9: Commit point.
-	// Write terminal_reason and terminal_actor BEFORE state=terminated,
-	// then last_processed_wisp LAST — it is the dedup marker.
-	if err := h.Store.SetMetadata(rootBeadID, FieldTerminalReason, reason); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal reason: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldTerminalActor, actor); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting terminal actor: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldState, StateTerminated); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting state to terminated: %w", err)
-	}
-	if err := h.Store.CloseBead(rootBeadID); err != nil {
-		return HandlerResult{}, fmt.Errorf("closing root bead: %w", err)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldLastProcessedWisp, wispID); err != nil {
-		return HandlerResult{}, fmt.Errorf("setting last processed wisp: %w", err)
+	// Write terminal_reason and terminal_actor BEFORE state=terminated, close
+	// the root bead, then last_processed_wisp LAST — it is the dedup marker.
+	if err := h.commit(rootBeadID,
+		[]metaWrite{
+			{FieldTerminalReason, reason, "setting terminal reason"},
+			{FieldTerminalActor, actor, "setting terminal actor"},
+			{FieldState, StateTerminated, "setting state to terminated"},
+		},
+		func() error {
+			if err := h.Store.CloseBead(rootBeadID, CloseReasonHandlerRoot); err != nil {
+				return fmt.Errorf("closing root bead: %w", err)
+			}
+			return nil
+		},
+		metaWrite{FieldLastProcessedWisp, wispID, "setting last processed wisp"},
+	); err != nil {
+		return HandlerResult{}, err
 	}
 
 	return HandlerResult{
@@ -561,6 +745,7 @@ func (h *Handler) evaluateGate(
 		BeadID:      rootBeadID,
 		Iteration:   iteration,
 		CityPath:    cityPath,
+		StorePath:   h.StorePath,
 		WispID:      wispID,
 		DocPath:     meta[VarPrefix+"doc_path"],
 		ArtifactDir: ArtifactDirFor(cityPath, rootBeadID, iteration),
@@ -585,41 +770,68 @@ func (h *Handler) evaluateGate(
 	}
 }
 
+// metaWrite is a single root-bead metadata assignment applied by commit.
+// desc supplies the error context wrapped around a store failure for that write.
+type metaWrite struct {
+	key, value, desc string
+}
+
+// commit applies a convergence state transition to the root bead, writing the
+// dedup marker LAST. The non-marker writes are applied in order; then preMarker
+// (if non-nil) runs — used to emit critical events and close the root bead
+// before the marker commits; then the marker is written, unless its value is
+// empty (callers that only conditionally stamp the marker pass "").
+//
+// The marker is a dedicated trailing parameter rather than an entry in writes,
+// which makes the "dedup marker written last" ordering contract unrepresentable
+// to violate at a call site: a crash before the marker commits re-processes the
+// wisp instead of skipping it, preserving replay-idempotency.
+func (h *Handler) commit(rootID string, writes []metaWrite, preMarker func() error, marker metaWrite) error {
+	for _, w := range writes {
+		if err := h.Store.SetMetadata(rootID, w.key, w.value); err != nil {
+			return fmt.Errorf("%s: %w", w.desc, err)
+		}
+	}
+	if preMarker != nil {
+		if err := preMarker(); err != nil {
+			return err
+		}
+	}
+	if marker.value == "" {
+		return nil
+	}
+	if err := h.Store.SetMetadata(rootID, marker.key, marker.value); err != nil {
+		return fmt.Errorf("%s: %w", marker.desc, err)
+	}
+	return nil
+}
+
 // persistGateOutcome writes gate results to bead metadata (step 5).
 // Persists the full result for replay fidelity: stdout, stderr, duration,
 // and truncated flag are needed to reconstruct event payloads after crash recovery.
+// gate_outcome_wisp is the idempotency marker and is written LAST via commit.
 func (h *Handler) persistGateOutcome(rootBeadID, wispID string, result GateResult) error {
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateOutcome, result.Outcome); err != nil {
-		return err
-	}
 	exitCode := ""
 	if result.ExitCode != nil {
 		exitCode = EncodeInt(*result.ExitCode)
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateExitCode, exitCode); err != nil {
-		return err
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateRetryCount, EncodeInt(result.RetryCount)); err != nil {
-		return err
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateStdout, result.Stdout); err != nil {
-		return err
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateStderr, result.Stderr); err != nil {
-		return err
-	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateDurationMs, strconv.FormatInt(result.Duration.Milliseconds(), 10)); err != nil {
-		return err
 	}
 	truncated := ""
 	if result.Truncated {
 		truncated = "true"
 	}
-	if err := h.Store.SetMetadata(rootBeadID, FieldGateTruncated, truncated); err != nil {
-		return err
-	}
-	// Write gate_outcome_wisp LAST — this is the idempotency marker.
-	return h.Store.SetMetadata(rootBeadID, FieldGateOutcomeWisp, wispID)
+	return h.commit(rootBeadID,
+		[]metaWrite{
+			{FieldGateOutcome, result.Outcome, "setting gate outcome"},
+			{FieldGateExitCode, exitCode, "setting gate exit code"},
+			{FieldGateRetryCount, EncodeInt(result.RetryCount), "setting gate retry count"},
+			{FieldGateStdout, result.Stdout, "setting gate stdout"},
+			{FieldGateStderr, result.Stderr, "setting gate stderr"},
+			{FieldGateDurationMs, strconv.FormatInt(result.Duration.Milliseconds(), 10), "setting gate duration"},
+			{FieldGateTruncated, truncated, "setting gate truncated"},
+		},
+		nil,
+		metaWrite{FieldGateOutcomeWisp, wispID, "setting gate outcome wisp"},
+	)
 }
 
 // deriveIterationCount counts closed child wisps with convergence idempotency
@@ -629,14 +841,7 @@ func (h *Handler) deriveIterationCount(rootBeadID string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	prefix := IdempotencyKeyPrefix(rootBeadID)
-	count := 0
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" {
-			count++
-		}
-	}
-	return count, nil
+	return childStats(children, rootBeadID).ClosedCount, nil
 }
 
 // computeDurations computes iteration and cumulative durations.
@@ -654,14 +859,7 @@ func (h *Handler) computeDurations(rootBeadID, wispID string) (iterDur, cumDur t
 	if err != nil {
 		return iterDur, 0
 	}
-	prefix := IdempotencyKeyPrefix(rootBeadID)
-	for _, child := range children {
-		if strings.HasPrefix(child.IdempotencyKey, prefix) && child.Status == "closed" &&
-			!child.ClosedAt.IsZero() && !child.CreatedAt.IsZero() {
-			cumDur += child.ClosedAt.Sub(child.CreatedAt)
-		}
-	}
-	return iterDur, cumDur
+	return iterDur, childStats(children, rootBeadID).CumulativeDur
 }
 
 // emitEvent emits a convergence event through the EventEmitter.
@@ -669,7 +867,44 @@ func (h *Handler) emitEvent(eventType, eventID, beadID string, payload any) {
 	if h.Emitter == nil {
 		return
 	}
-	h.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(payload), false)
+	h.Emitter.Emit(eventType, eventID, beadID, MarshalPayload(h.withEventRig(beadID, payload)), false)
+}
+
+func (h *Handler) withEventRig(beadID string, payload any) any {
+	rig := h.eventRig(beadID)
+	if rig == "" {
+		return payload
+	}
+	switch p := payload.(type) {
+	case CreatedPayload:
+		p.Rig = rig
+		return p
+	case IterationPayload:
+		p.Rig = rig
+		return p
+	case TerminatedPayload:
+		p.Rig = rig
+		return p
+	case WaitingManualPayload:
+		p.Rig = rig
+		return p
+	case ManualActionPayload:
+		p.Rig = rig
+		return p
+	default:
+		return payload
+	}
+}
+
+func (h *Handler) eventRig(beadID string) string {
+	if h.Store == nil || beadID == "" {
+		return ""
+	}
+	meta, err := h.Store.GetMetadata(beadID)
+	if err != nil {
+		return ""
+	}
+	return meta[FieldRig]
 }
 
 // clock returns the current time, using the injected Clock or time.Now.
@@ -678,6 +913,48 @@ func (h *Handler) clock() time.Time {
 		return h.Clock()
 	}
 	return time.Now()
+}
+
+// burnSpeculativeWisp deletes a speculatively poured wisp and clears the
+// pending_next_wisp metadata field. Called when the gate outcome is terminal
+// or waiting_manual and the speculative wisp is not needed.
+func (h *Handler) burnSpeculativeWisp(rootBeadID, speculativeWispID string) error {
+	if speculativeWispID == "" {
+		return nil
+	}
+	if err := h.deleteBeadSubtree(speculativeWispID); err != nil {
+		return err
+	}
+	_ = h.Store.SetMetadata(rootBeadID, FieldPendingNextWisp, "")
+	return nil
+}
+
+func (h *Handler) deleteBeadSubtree(id string) error {
+	children, err := h.Store.Children(id)
+	if err != nil {
+		return fmt.Errorf("listing children for delete %q: %w", id, err)
+	}
+	for _, child := range children {
+		if err := h.deleteBeadSubtree(child.ID); err != nil {
+			return err
+		}
+	}
+	if err := h.Store.DeleteBead(id); err != nil {
+		return fmt.Errorf("deleting bead %q: %w", id, err)
+	}
+	return nil
+}
+
+func (h *Handler) validPendingNextWisp(rootBeadID, nextKey, pendingID string) string {
+	if pendingID == "" {
+		return ""
+	}
+	info, err := h.Store.GetBead(pendingID)
+	if err != nil || info.ParentID != rootBeadID || info.IdempotencyKey != nextKey || info.Status == "closed" {
+		_ = h.Store.SetMetadata(rootBeadID, FieldPendingNextWisp, "")
+		return ""
+	}
+	return pendingID
 }
 
 // CheckNestedConvergence validates that creating a new convergence loop

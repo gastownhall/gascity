@@ -12,12 +12,197 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	execerr "k8s.io/client-go/util/exec"
+
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestProviderImplementsInterface(_ *testing.T) {
 	// Compile-time check is in provider.go, but verify at test time too.
 	var _ runtime.Provider = (*Provider)(nil)
+}
+
+func TestManagedServiceAliasDefaults(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "canonical-dolt.example.com")
+	t.Setenv("GC_DOLT_PORT", "4407")
+
+	host, port, err := managedServiceAlias()
+	if err != nil {
+		t.Fatalf("managedServiceAlias() error = %v", err)
+	}
+	if host != podManagedDoltHost {
+		t.Fatalf("host = %q, want %q", host, podManagedDoltHost)
+	}
+	if port != podManagedDoltPort {
+		t.Fatalf("port = %q, want %q", port, podManagedDoltPort)
+	}
+}
+
+func TestManagedServiceAliasCompatOverride(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "canonical-dolt.example.com")
+	t.Setenv("GC_DOLT_PORT", "4407")
+	t.Setenv("GC_K8S_DOLT_HOST", "legacy-dolt.example.com")
+	t.Setenv("GC_K8S_DOLT_PORT", "3308")
+
+	host, port, err := managedServiceAlias()
+	if err != nil {
+		t.Fatalf("managedServiceAlias() error = %v", err)
+	}
+	if host != "legacy-dolt.example.com" {
+		t.Fatalf("host = %q, want legacy-dolt.example.com", host)
+	}
+	if port != "3308" {
+		t.Fatalf("port = %q, want 3308", port)
+	}
+}
+
+func TestManagedServiceAliasRejectsPartialCompatOverride(t *testing.T) {
+	t.Setenv("GC_K8S_DOLT_HOST", "legacy-dolt.example.com")
+
+	_, _, err := managedServiceAlias()
+	if err == nil {
+		t.Fatal("expected partial compatibility override to fail")
+	}
+	if got := err.Error(); got != "requires both GC_K8S_DOLT_HOST and GC_K8S_DOLT_PORT when either is set" {
+		t.Fatalf("managedServiceAlias() error = %q", got)
+	}
+}
+
+func TestParseSchedulingEnvHappyPath(t *testing.T) {
+	clearSchedulingEnv(t)
+	t.Setenv("GC_K8S_NODE_SELECTOR", `{"workload":"gc-agents"}`)
+	t.Setenv("GC_K8S_TOLERATIONS", `[{"key":"gc-agents","operator":"Exists","effect":"NoSchedule","tolerationSeconds":60}]`)
+	t.Setenv("GC_K8S_AFFINITY", `{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"node-type","operator":"In","values":["gpu"]}]}]}}}`)
+	t.Setenv("GC_K8S_PRIORITY_CLASS_NAME", "gc-agent-high")
+
+	scheduling, err := parseSchedulingEnv()
+	if err != nil {
+		t.Fatalf("parseSchedulingEnv: %v", err)
+	}
+	if scheduling.nodeSelector["workload"] != "gc-agents" {
+		t.Fatalf("nodeSelector[workload] = %q, want gc-agents", scheduling.nodeSelector["workload"])
+	}
+	if len(scheduling.tolerations) != 1 {
+		t.Fatalf("len(tolerations) = %d, want 1", len(scheduling.tolerations))
+	}
+	if scheduling.tolerations[0].TolerationSeconds == nil || *scheduling.tolerations[0].TolerationSeconds != 60 {
+		t.Fatalf("tolerationSeconds = %v, want 60", scheduling.tolerations[0].TolerationSeconds)
+	}
+	if scheduling.affinity == nil ||
+		scheduling.affinity.NodeAffinity == nil ||
+		scheduling.affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("affinity did not parse required node affinity: %#v", scheduling.affinity)
+	}
+	if got := scheduling.priorityClassName; got != "gc-agent-high" {
+		t.Fatalf("priorityClassName = %q, want gc-agent-high", got)
+	}
+}
+
+func TestParseSchedulingEnvRejectsMalformedJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{name: "node selector", key: "GC_K8S_NODE_SELECTOR"},
+		{name: "tolerations", key: "GC_K8S_TOLERATIONS"},
+		{name: "affinity", key: "GC_K8S_AFFINITY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSchedulingEnv(t)
+			t.Setenv(tc.key, "{")
+
+			_, err := parseSchedulingEnv()
+			if err == nil {
+				t.Fatal("expected malformed JSON to fail")
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error = %q, want to mention %s", err, tc.key)
+			}
+		})
+	}
+}
+
+func TestParseSchedulingEnvEmptyAndNullAffinitySemantics(t *testing.T) {
+	t.Run("empty strings are unset", func(t *testing.T) {
+		clearSchedulingEnv(t)
+
+		scheduling, err := parseSchedulingEnv()
+		if err != nil {
+			t.Fatalf("parseSchedulingEnv: %v", err)
+		}
+		if scheduling.nodeSelector != nil {
+			t.Fatalf("nodeSelector = %#v, want nil", scheduling.nodeSelector)
+		}
+		if len(scheduling.tolerations) != 0 {
+			t.Fatalf("len(tolerations) = %d, want 0", len(scheduling.tolerations))
+		}
+		if scheduling.affinity != nil {
+			t.Fatalf("affinity = %#v, want nil", scheduling.affinity)
+		}
+		if scheduling.priorityClassName != "" {
+			t.Fatalf("priorityClassName = %q, want empty", scheduling.priorityClassName)
+		}
+	})
+
+	t.Run("affinity null is unset", func(t *testing.T) {
+		clearSchedulingEnv(t)
+		t.Setenv("GC_K8S_AFFINITY", "null")
+
+		scheduling, err := parseSchedulingEnv()
+		if err != nil {
+			t.Fatalf("parseSchedulingEnv: %v", err)
+		}
+		if scheduling.affinity != nil {
+			t.Fatalf("affinity = %#v, want nil", scheduling.affinity)
+		}
+	})
+
+	t.Run("affinity empty object is explicit empty", func(t *testing.T) {
+		clearSchedulingEnv(t)
+		t.Setenv("GC_K8S_AFFINITY", "{}")
+
+		scheduling, err := parseSchedulingEnv()
+		if err != nil {
+			t.Fatalf("parseSchedulingEnv: %v", err)
+		}
+		if scheduling.affinity == nil {
+			t.Fatal("affinity = nil, want explicit empty affinity")
+		}
+		if scheduling.affinity.NodeAffinity != nil {
+			t.Fatalf("NodeAffinity = %#v, want nil", scheduling.affinity.NodeAffinity)
+		}
+	})
+}
+
+func clearSchedulingEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"GC_K8S_NODE_SELECTOR",
+		"GC_K8S_TOLERATIONS",
+		"GC_K8S_AFFINITY",
+		"GC_K8S_PRIORITY_CLASS_NAME",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func TestProjectedPodStoreRootPrefersGCStoreRoot(t *testing.T) {
+	cfg := runtime.Config{
+		WorkDir: "/host/city/workspaces/agent",
+		Env: map[string]string{
+			"GC_CITY":       "/host/city",
+			"GC_STORE_ROOT": "/host/city/rigs/frontend",
+		},
+	}
+
+	podWorkDir := projectedPodWorkDir(cfg)
+	if podWorkDir != "/workspace/workspaces/agent" {
+		t.Fatalf("projectedPodWorkDir = %q, want %q", podWorkDir, "/workspace/workspaces/agent")
+	}
+	if got := projectedPodStoreRoot(cfg, podWorkDir); got != "/workspace/rigs/frontend" {
+		t.Fatalf("projectedPodStoreRoot = %q, want %q", got, "/workspace/rigs/frontend")
+	}
 }
 
 func TestIsRunning(t *testing.T) {
@@ -164,6 +349,89 @@ func TestSendKeys(t *testing.T) {
 	}
 	if !found {
 		t.Error("no tmux send-keys call with Down Enter")
+	}
+}
+
+// TestNudgePropagatesTransportError verifies that a transport failure (no
+// running pod for the session) surfaces as a non-nil error instead of being
+// swallowed — Nudge is not best-effort at the delivery layer, callers up
+// through worker.RuntimeHandle.Nudge and `gc session nudge` rely on this
+// error to report failed delivery (#4389). It also verifies the missing-pod
+// case is specifically [runtime.ErrSessionNotFound] — distinct from a live
+// pod's exec-stream failure — so callers like internal/session/chat.go and
+// internal/api/session_resolution.go can no-op on a gone session instead of
+// hard-failing (sjarmak's #4405 review).
+func TestNudgePropagatesTransportError(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	// No pod registered for this session name, so findRunningPod fails.
+	err := p.Nudge("gc-missing-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for missing pod, got nil")
+	}
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge missing-pod error = %v, want errors.Is(..., runtime.ErrSessionNotFound)", err)
+	}
+}
+
+// TestSendKeysMissingSessionIsNoOp verifies SendKeys honors the documented
+// best-effort contract (runtime.go SendKeys_MissingSession): a missing pod
+// (ErrSessionNotFound at the carrier) is a no-op returning nil, not an error.
+// This is the deliberate asymmetry with Nudge (#4389/#4405): SendKeys is
+// best-effort on a gone session, while a genuine transport failure to a live
+// pod still propagates (see TestSendKeysExecStreamFailureIsNotErrSessionNotFound).
+func TestSendKeysMissingSessionIsNoOp(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	err := p.SendKeys("gc-missing-agent", "Down", "Enter")
+	if err != nil {
+		t.Fatalf("SendKeys: expected nil for missing pod (best-effort contract), got %v", err)
+	}
+}
+
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound verifies the other half
+// of sjarmak's #4405 review: a running pod whose exec stream fails (a real
+// transport failure — #4389's actual bug) must NOT be mistaken for a gone
+// session. Only the pod-not-found case is ErrSessionNotFound; this failure
+// mode must propagate as a plain error so callers correctly treat it as a
+// hard failure rather than silently no-opping.
+func TestNudgeExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "-l", "hello world"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.Nudge("gc-test-agent", runtime.TextContent("hello world"))
+	if err == nil {
+		t.Fatal("Nudge: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("Nudge exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
+	}
+}
+
+// TestSendKeysExecStreamFailureIsNotErrSessionNotFound mirrors
+// TestNudgeExecStreamFailureIsNotErrSessionNotFound for SendKeys.
+func TestSendKeysExecStreamFailureIsNotErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+
+	addRunningPod(fake, "gc-test-agent", "gc-test-agent")
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "send-keys", "-t", "main", "Down", "Enter"},
+		"", errors.New("stream error: broken pipe"))
+
+	err := p.SendKeys("gc-test-agent", "Down", "Enter")
+	if err == nil {
+		t.Fatal("SendKeys: expected error for exec-stream failure, got nil")
+	}
+	if errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Errorf("SendKeys exec-stream-failure error = %v, must NOT be ErrSessionNotFound (pod exists, this is a real transport failure)", err)
 	}
 }
 
@@ -367,7 +635,8 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude --settings .gc/settings.json",
+		Command:      "claude --settings .gc/settings.json",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -415,7 +684,8 @@ func TestStartDetectsStalePod(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude",
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -448,8 +718,9 @@ func TestStartRejectsExistingLiveSession(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude",
-		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -479,8 +750,9 @@ func TestStartTreatsYoungPodWithDeadTmuxAsInitializing(t *testing.T) {
 		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
 
 	cfg := runtime.Config{
-		Command: "claude",
-		Env:     map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		Env:          map[string]string{"GC_AGENT": "mayor", "GC_CITY": "/workspace"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -511,17 +783,22 @@ func TestStartDeletesOldPodWithDeadTmux(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	// tmux dead — genuinely stale.
+	// tmux dead — genuinely stale. `tmux has-session` RAN in the container and
+	// exited 1, which is what makes this a stale pod rather than an
+	// unreachable one; the real execInPod surfaces that as a client-go
+	// ExitError wrapping tmux's stderr, and Start now requires that
+	// distinction before it will delete a Running pod (ga-vcjr9).
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "",
-		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+		execerr.CodeExitError{Err: fmt.Errorf("no server running on /tmp/tmux-1000/default"), Code: 1})
 
 	// Block createPod so Start() stops after deletion — we only need to
 	// verify the stale pod was cleaned up, not the full startup.
 	fake.createErr = fmt.Errorf("intentional: verify deletion only")
 
 	cfg := runtime.Config{
-		Command: "claude",
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
 		Env: map[string]string{
 			"GC_AGENT": "mayor",
 			"GC_CITY":  "/workspace",
@@ -587,10 +864,16 @@ func TestPodManifestCompatibility(t *testing.T) {
 		}
 	}
 
-	// Verify working directory is pod-mapped.
-	if pod.Spec.Containers[0].WorkingDir != "/workspace/demo-rig" {
-		t.Errorf("workingDir = %q, want /workspace/demo-rig",
-			pod.Spec.Containers[0].WorkingDir)
+	// The manifest's workingDir is the workspace root, which always exists —
+	// the kubelet chdirs there before the entrypoint runs. The pod-mapped agent
+	// directory is entered by the entrypoint instead. gc-session-k8s builds its
+	// manifest the same way, so the two providers stay interchangeable.
+	if pod.Spec.Containers[0].WorkingDir != podWorkspaceRoot {
+		t.Errorf("workingDir = %q, want %q",
+			pod.Spec.Containers[0].WorkingDir, podWorkspaceRoot)
+	}
+	if args := strings.Join(pod.Spec.Containers[0].Args, " "); !strings.Contains(args, "cd "+shellquote.Quote("/workspace/demo-rig")) {
+		t.Errorf("entrypoint should enter the pod-mapped agent dir; got: %s", args)
 	}
 }
 
@@ -638,35 +921,48 @@ func TestWorkspaceVolumeMountsAtRoot(t *testing.T) {
 	}
 }
 
+func mustBuildPodEnv(t *testing.T, cfgEnv map[string]string, podWorkDir, managedServiceHost, managedServicePort string) []corev1.EnvVar {
+	t.Helper()
+	env, err := buildPodEnv(cfgEnv, podWorkDir, managedServiceHost, managedServicePort)
+	if err != nil {
+		t.Fatalf("buildPodEnv: %v", err)
+	}
+	return env
+}
+
 func TestBuildPodEnvRemapsVars(t *testing.T) {
 	cfgEnv := map[string]string{
-		"GC_AGENT":               "mayor",
-		"GC_CITY":                "/host/city",
-		"GC_CITY_PATH":           "/host/city",
-		"GC_DIR":                 "/host/city/rig",
-		"GC_RIG_ROOT":            "/host/city/rig",
-		"BEADS_DIR":              "/host/city/rig/.beads",
-		"GT_ROOT":                "/host/city",
-		"GC_CITY_RUNTIME_DIR":    "/host/city/.gc/runtime",
-		"GC_PACK_STATE_DIR":      "/host/city/.gc/runtime/packs/rlm",
-		"GC_PACK_DIR":            "/host/city/packs/maintenance",
-		"GC_SESSION":             "exec:gc-session-k8s",
-		"GC_BEADS":               "exec:something",
-		"GC_EVENTS":              "exec:other",
-		"GC_DOLT_HOST":           "localhost",
-		"GC_DOLT_PORT":           "3307",
-		"BEADS_DOLT_SERVER_HOST": "localhost",
-		"BEADS_DOLT_SERVER_PORT": "3307",
-		"GC_DOLT_USER":           "admin",
-		"GC_DOLT_PASSWORD":       "secret",
-		"BEADS_DOLT_SERVER_USER": "admin",
-		"BEADS_DOLT_PASSWORD":    "secret",
-		"GC_MAIL":                "exec:mail",
-		"GC_MCP_MAIL_URL":        "http://localhost:8765",
-		"CUSTOM_VAR":             "preserved",
+		"GC_AGENT":                            "mayor",
+		"GC_CITY":                             "/host/city",
+		"GC_CITY_PATH":                        "/host/city",
+		"GC_DIR":                              "/host/city/rig",
+		"GC_RIG_ROOT":                         "/host/city/rig",
+		"GC_STORE_ROOT":                       "/host/city/rig",
+		"BEADS_DIR":                           "/host/city/rig/.beads",
+		"GT_ROOT":                             "/host/city",
+		"GC_CITY_RUNTIME_DIR":                 "/host/city/.gc/runtime",
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": "/host/city/.gc/runtime/control-dispatcher-trace.log",
+		"GC_PACK_STATE_DIR":                   "/host/city/.gc/runtime/packs/rlm",
+		"GC_PACK_DIR":                         "/host/city/packs/maintenance",
+		"GC_SESSION":                          "exec:gc-session-k8s",
+		"GC_BEADS":                            "exec:something",
+		"GC_EVENTS":                           "exec:other",
+		"GC_DOLT_HOST":                        "",
+		"GC_DOLT_PORT":                        "3307",
+		"BEADS_DOLT_SERVER_HOST":              "",
+		"BEADS_DOLT_SERVER_PORT":              "3307",
+		"GC_K8S_DOLT_HOST":                    "legacy-dolt.example.com",
+		"GC_K8S_DOLT_PORT":                    "3308",
+		"GC_DOLT_USER":                        "admin",
+		"GC_DOLT_PASSWORD":                    "secret",
+		"BEADS_DOLT_SERVER_USER":              "admin",
+		"BEADS_DOLT_PASSWORD":                 "secret",
+		"GC_MAIL":                             "exec:mail",
+		"GC_MCP_MAIL_URL":                     "http://localhost:8765",
+		"CUSTOM_VAR":                          "preserved",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
 	for _, e := range env {
@@ -691,6 +987,11 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		t.Errorf("GC_RIG_ROOT = %q, want /workspace/rig", envMap["GC_RIG_ROOT"])
 	}
 
+	// GC_STORE_ROOT should be remapped from controller city path to /workspace.
+	if envMap["GC_STORE_ROOT"] != "/workspace/rig" {
+		t.Errorf("GC_STORE_ROOT = %q, want /workspace/rig", envMap["GC_STORE_ROOT"])
+	}
+
 	// BEADS_DIR should be remapped from controller city path to /workspace.
 	if envMap["BEADS_DIR"] != "/workspace/rig/.beads" {
 		t.Errorf("BEADS_DIR = %q, want /workspace/rig/.beads", envMap["BEADS_DIR"])
@@ -706,6 +1007,11 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		t.Errorf("GC_CITY_RUNTIME_DIR = %q, want /workspace/.gc/runtime", envMap["GC_CITY_RUNTIME_DIR"])
 	}
 
+	// GC_CONTROL_DISPATCHER_TRACE_DEFAULT should be remapped.
+	if envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != "/workspace/.gc/runtime/control-dispatcher-trace.log" {
+		t.Errorf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want /workspace/.gc/runtime/control-dispatcher-trace.log", envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"])
+	}
+
 	// GC_PACK_STATE_DIR should be remapped.
 	if envMap["GC_PACK_STATE_DIR"] != "/workspace/.gc/runtime/packs/rlm" {
 		t.Errorf("GC_PACK_STATE_DIR = %q, want /workspace/.gc/runtime/packs/rlm", envMap["GC_PACK_STATE_DIR"])
@@ -716,18 +1022,31 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 		t.Errorf("GC_PACK_DIR = %q, want /workspace/packs/maintenance", envMap["GC_PACK_DIR"])
 	}
 
-	// Controller-only connection vars should be removed (host/port are
-	// replaced with K8s-specific endpoints). Auth credentials pass through.
-	for _, key := range []string{"GC_SESSION", "GC_BEADS", "GC_EVENTS", "GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
+	// Controller-only vars should be removed. The pod adapter reprojects the
+	// canonical GC target and derives the BEADS host/port mirror from it.
+	for _, key := range []string{"GC_SESSION", "GC_BEADS", "GC_EVENTS", "GC_K8S_DOLT_HOST", "GC_K8S_DOLT_PORT"} {
 		if _, exists := envMap[key]; exists {
 			t.Errorf("controller-only var %s should be removed", key)
 		}
 	}
-	// Auth credentials should pass through to agent pods.
-	for _, key := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_PASSWORD"} {
+	// Canonical Dolt connection vars should remain present, and local/controller
+	// endpoints should be reprojected to the in-cluster managed service target.
+	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_PASSWORD"} {
 		if _, exists := envMap[key]; !exists {
-			t.Errorf("auth var %s should be preserved in agent pods", key)
+			t.Errorf("connection var %s should be preserved in agent pods", key)
 		}
+	}
+	if envMap["GC_DOLT_HOST"] != podManagedDoltHost {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", envMap["GC_DOLT_HOST"], podManagedDoltHost)
+	}
+	if envMap["GC_DOLT_PORT"] != podManagedDoltPort {
+		t.Errorf("GC_DOLT_PORT = %q, want %q", envMap["GC_DOLT_PORT"], podManagedDoltPort)
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != podManagedDoltHost {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want %q", envMap["BEADS_DOLT_SERVER_HOST"], podManagedDoltHost)
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != podManagedDoltPort {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", envMap["BEADS_DOLT_SERVER_PORT"], podManagedDoltPort)
 	}
 
 	// Mail vars should be passed through to agent pods.
@@ -747,36 +1066,223 @@ func TestBuildPodEnvRemapsVars(t *testing.T) {
 	if envMap["GC_TMUX_SESSION"] != "main" {
 		t.Errorf("GC_TMUX_SESSION = %q, want main", envMap["GC_TMUX_SESSION"])
 	}
-
-	// GC_K8S_DOLT_* defaults should be injected when not in config.
-	if envMap["GC_K8S_DOLT_HOST"] != "dolt.gc.svc.cluster.local" {
-		t.Errorf("GC_K8S_DOLT_HOST = %q, want dolt.gc.svc.cluster.local", envMap["GC_K8S_DOLT_HOST"])
-	}
-	if envMap["GC_K8S_DOLT_PORT"] != "3307" {
-		t.Errorf("GC_K8S_DOLT_PORT = %q, want 3307", envMap["GC_K8S_DOLT_PORT"])
-	}
 }
 
-func TestBuildPodEnvPreservesExplicitDoltVars(t *testing.T) {
+func TestBuildPodEnvReprojectsExternalRuntimeRoots(t *testing.T) {
 	cfgEnv := map[string]string{
-		"GC_AGENT":         "worker",
-		"GC_K8S_DOLT_HOST": "custom-dolt.example.com",
-		"GC_K8S_DOLT_PORT": "3308",
+		"GC_CITY":                             "/host/city",
+		"GC_CITY_PATH":                        "/host/city",
+		"GC_CITY_RUNTIME_DIR":                 "/var/tmp/gascity-runtime",
+		"GC_CONTROL_DISPATCHER_TRACE_DEFAULT": "/var/tmp/gascity-runtime/control-dispatcher-trace.log",
+		"GC_PACK_STATE_DIR":                   "/var/tmp/gascity-runtime/packs/rlm",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
 
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
 	}
 
-	// Explicit values should not be overwritten by defaults.
-	if envMap["GC_K8S_DOLT_HOST"] != "custom-dolt.example.com" {
-		t.Errorf("GC_K8S_DOLT_HOST = %q, want custom-dolt.example.com", envMap["GC_K8S_DOLT_HOST"])
+	if envMap["GC_CITY_RUNTIME_DIR"] != "/workspace/.gc/runtime" {
+		t.Fatalf("GC_CITY_RUNTIME_DIR = %q, want /workspace/.gc/runtime", envMap["GC_CITY_RUNTIME_DIR"])
 	}
-	if envMap["GC_K8S_DOLT_PORT"] != "3308" {
-		t.Errorf("GC_K8S_DOLT_PORT = %q, want 3308", envMap["GC_K8S_DOLT_PORT"])
+	if envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"] != "/workspace/.gc/runtime/control-dispatcher-trace.log" {
+		t.Fatalf("GC_CONTROL_DISPATCHER_TRACE_DEFAULT = %q, want /workspace/.gc/runtime/control-dispatcher-trace.log", envMap["GC_CONTROL_DISPATCHER_TRACE_DEFAULT"])
+	}
+	if envMap["GC_PACK_STATE_DIR"] != "/workspace/.gc/runtime/packs/rlm" {
+		t.Fatalf("GC_PACK_STATE_DIR = %q, want /workspace/.gc/runtime/packs/rlm", envMap["GC_PACK_STATE_DIR"])
+	}
+}
+
+func TestBuildPodEnvProjectsManagedDoltEndpoint(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT":               "worker",
+		"GC_DOLT_HOST":           "",
+		"GC_DOLT_PORT":           "4123",
+		"BEADS_DOLT_SERVER_HOST": "",
+		"BEADS_DOLT_SERVER_PORT": "4123",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_DOLT_HOST"] != podManagedDoltHost {
+		t.Errorf("GC_DOLT_HOST = %q, want %q", envMap["GC_DOLT_HOST"], podManagedDoltHost)
+	}
+	if envMap["GC_DOLT_PORT"] != podManagedDoltPort {
+		t.Errorf("GC_DOLT_PORT = %q, want %q", envMap["GC_DOLT_PORT"], podManagedDoltPort)
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != podManagedDoltHost {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want %q", envMap["BEADS_DOLT_SERVER_HOST"], podManagedDoltHost)
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != podManagedDoltPort {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want %q", envMap["BEADS_DOLT_SERVER_PORT"], podManagedDoltPort)
+	}
+}
+
+func TestBuildPodEnvProjectsManagedLocalDoltTarget(t *testing.T) {
+	env := mustBuildPodEnv(t, map[string]string{
+		"GC_AGENT":         "worker",
+		"GC_DOLT_PORT":     "31364",
+		"GC_K8S_DOLT_HOST": "legacy-dolt.example.com",
+		"GC_K8S_DOLT_PORT": "3309",
+	}, "/workspace", podManagedDoltHost, podManagedDoltPort)
+
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_DOLT_HOST"] != podManagedDoltHost {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", envMap["GC_DOLT_HOST"], podManagedDoltHost)
+	}
+	if envMap["GC_DOLT_PORT"] != podManagedDoltPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", envMap["GC_DOLT_PORT"], podManagedDoltPort)
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != podManagedDoltHost {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q", envMap["BEADS_DOLT_SERVER_HOST"], podManagedDoltHost)
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != podManagedDoltPort {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", envMap["BEADS_DOLT_SERVER_PORT"], podManagedDoltPort)
+	}
+}
+
+func TestBuildPodEnvRejectsHostOnlyProjectedTarget(t *testing.T) {
+	_, err := buildPodEnv(map[string]string{
+		"GC_AGENT":     "worker",
+		"GC_DOLT_HOST": "canonical-dolt.example.com",
+	}, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	if err == nil {
+		t.Fatal("expected host-only GC_DOLT_* projection to fail")
+	}
+	if got := err.Error(); got != "requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set" {
+		t.Fatalf("buildPodEnv error = %q", got)
+	}
+}
+
+func TestBuildPodEnvPreservesExplicitDoltVars(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT":               "worker",
+		"GC_DOLT_HOST":           "custom-dolt.example.com",
+		"GC_DOLT_PORT":           "3308",
+		"BEADS_DOLT_SERVER_HOST": "custom-dolt.example.com",
+		"BEADS_DOLT_SERVER_PORT": "3308",
+		"GC_K8S_DOLT_HOST":       "legacy-dolt.example.com",
+		"GC_K8S_DOLT_PORT":       "3309",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	// Explicit canonical values should pass through unchanged and the legacy
+	// K8s-only aliases should be stripped.
+	if envMap["GC_DOLT_HOST"] != "custom-dolt.example.com" {
+		t.Errorf("GC_DOLT_HOST = %q, want custom-dolt.example.com", envMap["GC_DOLT_HOST"])
+	}
+	if envMap["GC_DOLT_PORT"] != "3308" {
+		t.Errorf("GC_DOLT_PORT = %q, want 3308", envMap["GC_DOLT_PORT"])
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "custom-dolt.example.com" {
+		t.Errorf("BEADS_DOLT_SERVER_HOST = %q, want custom-dolt.example.com", envMap["BEADS_DOLT_SERVER_HOST"])
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "3308" {
+		t.Errorf("BEADS_DOLT_SERVER_PORT = %q, want 3308", envMap["BEADS_DOLT_SERVER_PORT"])
+	}
+	if _, exists := envMap["GC_K8S_DOLT_HOST"]; exists {
+		t.Error("GC_K8S_DOLT_HOST should be stripped")
+	}
+	if _, exists := envMap["GC_K8S_DOLT_PORT"]; exists {
+		t.Error("GC_K8S_DOLT_PORT should be stripped")
+	}
+}
+
+func TestBuildPodEnvMirrorsBeadsEndpointFromProjectedGCDoltVars(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT":               "worker",
+		"GC_DOLT_HOST":           "canonical-dolt.example.com",
+		"GC_DOLT_PORT":           "3308",
+		"BEADS_DOLT_SERVER_HOST": "stale-beads.example.com",
+		"BEADS_DOLT_SERVER_PORT": "9911",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", podManagedDoltHost, podManagedDoltPort)
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_DOLT_HOST"] != "canonical-dolt.example.com" {
+		t.Fatalf("GC_DOLT_HOST = %q, want canonical-dolt.example.com", envMap["GC_DOLT_HOST"])
+	}
+	if envMap["GC_DOLT_PORT"] != "3308" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 3308", envMap["GC_DOLT_PORT"])
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "canonical-dolt.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want mirrored canonical host", envMap["BEADS_DOLT_SERVER_HOST"])
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "3308" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want mirrored canonical port", envMap["BEADS_DOLT_SERVER_PORT"])
+	}
+}
+
+func TestBuildPodEnvUsesProviderManagedAlias(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT":     "worker",
+		"GC_DOLT_PORT": "31364",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", "pod-dolt.internal", "4407")
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_DOLT_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want pod-dolt.internal", envMap["GC_DOLT_HOST"])
+	}
+	if envMap["GC_DOLT_PORT"] != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407", envMap["GC_DOLT_PORT"])
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want pod-dolt.internal", envMap["BEADS_DOLT_SERVER_HOST"])
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407", envMap["BEADS_DOLT_SERVER_PORT"])
+	}
+}
+
+func TestBuildPodEnvRemapsLoopbackDoltTargetToManagedService(t *testing.T) {
+	cfgEnv := map[string]string{
+		"GC_AGENT":     "worker",
+		"GC_DOLT_HOST": "127.0.0.1",
+		"GC_DOLT_PORT": "3308",
+	}
+
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace", "pod-dolt.internal", "4407")
+	envMap := map[string]string{}
+	for _, e := range env {
+		envMap[e.Name] = e.Value
+	}
+
+	if envMap["GC_DOLT_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("GC_DOLT_HOST = %q, want pod-dolt.internal", envMap["GC_DOLT_HOST"])
+	}
+	if envMap["GC_DOLT_PORT"] != "4407" {
+		t.Fatalf("GC_DOLT_PORT = %q, want 4407", envMap["GC_DOLT_PORT"])
+	}
+	if envMap["BEADS_DOLT_SERVER_HOST"] != "pod-dolt.internal" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want pod-dolt.internal", envMap["BEADS_DOLT_SERVER_HOST"])
+	}
+	if envMap["BEADS_DOLT_SERVER_PORT"] != "4407" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 4407", envMap["BEADS_DOLT_SERVER_PORT"])
 	}
 }
 
@@ -789,7 +1295,7 @@ func TestBuildPodEnvFallbackCityPath(t *testing.T) {
 		"GT_ROOT":      "/host/city",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -814,7 +1320,7 @@ func TestBuildPodEnvFallbackCityRoot(t *testing.T) {
 		"BEADS_DIR":    "/host/city/rig/.beads",
 	}
 
-	env := buildPodEnv(cfgEnv, "/workspace/rig")
+	env := mustBuildPodEnv(t, cfgEnv, "/workspace/rig", podManagedDoltHost, podManagedDoltPort)
 	envMap := map[string]string{}
 	for _, e := range env {
 		envMap[e.Name] = e.Value
@@ -847,6 +1353,12 @@ func TestNeedsStaging(t *testing.T) {
 			want: true,
 		},
 		{
+			name:     "pack overlay dir",
+			cfg:      runtime.Config{WorkDir: "/city", PackOverlayDirs: []string{"/some/pack"}},
+			ctrlCity: "/city",
+			want:     true,
+		},
+		{
 			name: "copy files",
 			cfg:  runtime.Config{CopyFiles: []runtime.CopyEntry{{Src: "/a"}}},
 			want: true,
@@ -871,6 +1383,33 @@ func TestNeedsStaging(t *testing.T) {
 				t.Errorf("needsStaging = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPodManifestAddsInitContainerForPackOverlayCityAgent(t *testing.T) {
+	p := newProviderWithOps(newFakeK8sOps())
+
+	cfg := runtime.Config{
+		Command:         "kiro-cli chat --no-interactive --agent gascity",
+		WorkDir:         "/city",
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{"/packs/core/overlay"},
+		Env: map[string]string{
+			"GC_AGENT": "mayor",
+			"GC_CITY":  "/city",
+		},
+	}
+
+	pod, err := buildPod("gc-city-mayor", cfg, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pod.Spec.InitContainers) == 0 {
+		t.Fatal("expected init container for city agent with pack overlay")
+	}
+	if pod.Spec.InitContainers[0].Name != "stage" {
+		t.Errorf("init container name = %q, want %q", pod.Spec.InitContainers[0].Name, "stage")
 	}
 }
 
@@ -933,82 +1472,278 @@ func TestBuildPodPrebaked(t *testing.T) {
 	}
 }
 
-func TestInitBeadsInPod(t *testing.T) {
+func TestInitBeadsInPodUsesProjectedStoreRootAndPrefix(t *testing.T) {
 	fake := newFakeK8sOps()
-
 	cfg := runtime.Config{
+		WorkDir: "/host/city/rigs/frontend",
 		Env: map[string]string{
-			"GC_K8S_DOLT_HOST": "dolt.gc.svc.cluster.local",
-			"GC_K8S_DOLT_PORT": "3307",
+			"GC_CITY":         "/host/city",
+			"GC_STORE_ROOT":   "/host/city/custom-scope",
+			"GC_BEADS_PREFIX": "cs",
+			"GC_DOLT_HOST":    "canonical-dolt.example.com",
+			"GC_DOLT_PORT":    "3308",
 		},
 	}
-
-	err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo")
-	if err != nil {
+	podWorkDir := projectedPodWorkDir(cfg)
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, podWorkDir, podManagedDoltHost, podManagedDoltPort); err != nil {
 		t.Fatalf("initBeadsInPod: %v", err)
 	}
-
-	// Verify bd init was called with correct args (base64-encoded to prevent
-	// shell injection). Decode the base64 tokens in the script and verify they
-	// contain the expected values.
+	wantStoreRootB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/custom-scope"))
+	wantPrefixB64 := base64.StdEncoding.EncodeToString([]byte("cs"))
+	wrongWorkDirB64 := base64.StdEncoding.EncodeToString([]byte("/workspace/rigs/frontend"))
 	found := false
 	for _, c := range fake.calls {
-		if c.method == "execInPod" && len(c.cmd) >= 3 {
-			if c.cmd[0] == "sh" && c.cmd[1] == "-c" {
-				script := c.cmd[2]
-				// The script uses base64-encoded values. Verify they decode correctly.
-				if containsStr(script, "bd init --server") &&
-					containsStr(script, "--skip-agents") &&
-					containsStr(script, "base64 -d") &&
-					scriptContainsB64(script, "/workspace/demo-repo") &&
-					scriptContainsB64(script, "dolt.gc.svc.cluster.local") &&
-					scriptContainsB64(script, "3307") &&
-					scriptContainsB64(script, "dr") {
-					found = true
-				}
-			}
+		if c.method != "execInPod" || len(c.cmd) < 3 {
+			continue
 		}
+		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
+			continue
+		}
+		script := c.cmd[2]
+		if !strings.Contains(script, wantStoreRootB64) || !strings.Contains(script, wantPrefixB64) {
+			continue
+		}
+		if strings.Contains(script, wrongWorkDirB64) {
+			t.Fatalf("repair script used pod workdir instead of projected store root: %s", script)
+		}
+		if !strings.Contains(script, "m.pop('project_id'") {
+			t.Fatalf("repair script did not strip project_id: %s", script)
+		}
+		found = true
 	}
 	if !found {
-		t.Error("initBeadsInPod did not exec bd init with expected args")
-		for _, c := range fake.calls {
-			t.Logf("  call: %s cmd=%v", c.method, c.cmd)
-		}
+		t.Fatal("initBeadsInPod did not use projected store root and prefix")
 	}
 }
 
-func TestInitBeadsInPodPrefixDerivation(t *testing.T) {
-	tests := []struct {
-		workDir    string
-		wantPrefix string
-	}{
-		{"/workspace/demo-repo", "dr"},
-		{"/workspace/tower-of-hanoi", "toh"},
-		{"/workspace/simple", "s"},
+func TestVerifyBeadsInPodChecksCanonicalFiles(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_STORE_ROOT": "/host/city/frontend",
+			"GC_DOLT_HOST":  "dolt.gc.svc.cluster.local",
+			"GC_DOLT_PORT":  "3307",
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.workDir, func(t *testing.T) {
-			fake := newFakeK8sOps()
-			cfg := runtime.Config{
-				Env: map[string]string{
-					"GC_K8S_DOLT_HOST": "dolt",
-					"GC_K8S_DOLT_PORT": "3307",
-				},
-			}
-			_ = initBeadsInPod(context.Background(), fake, "test-pod", cfg, tt.workDir)
 
-			found := false
-			for _, c := range fake.calls {
-				if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" {
-					if scriptContainsB64(c.cmd[2], tt.wantPrefix) {
-						found = true
-					}
-				}
-			}
-			if !found {
-				t.Errorf("prefix %q not found in bd init for %s", tt.wantPrefix, tt.workDir)
-			}
-		})
+	if err := verifyBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/frontend", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("verifyBeadsInPod: %v", err)
+	}
+
+	found := false
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 5 {
+			continue
+		}
+		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
+			continue
+		}
+		script := c.cmd[2]
+		if containsStr(script, "test -f .beads/metadata.json") &&
+			containsStr(script, "test -f .beads/config.yaml") &&
+			!containsStr(script, "bd init") &&
+			c.cmd[4] == "/workspace/frontend" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("verifyBeadsInPod did not check canonical .beads files with the expected workdir")
+	}
+}
+
+func TestVerifyBeadsInPodRunsForManagedProjection(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_PORT": "31364",
+		},
+	}
+
+	if err := verifyBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("verifyBeadsInPod() error = %v", err)
+	}
+	if len(fake.calls) == 0 {
+		t.Fatal("expected managed projection to trigger canonical .beads verification")
+	}
+}
+
+func TestVerifyBeadsInPodSkipsWithoutProjectedTarget(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{Env: map[string]string{}}
+
+	if err := verifyBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("verifyBeadsInPod() error = %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("expected no pod exec calls without a projected Dolt target, got %d", len(fake.calls))
+	}
+}
+
+func TestVerifyBeadsInPodRejectsHostOnlyProjectedTarget(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_HOST": "canonical-dolt.example.com",
+		},
+	}
+
+	err := verifyBeadsInPod(context.Background(), fake, "test-pod", cfg, "/workspace/frontend", podManagedDoltHost, podManagedDoltPort)
+	if err == nil {
+		t.Fatal("expected host-only GC_DOLT_* projection to fail")
+	}
+	if got := err.Error(); got != "requires both GC_DOLT_HOST and GC_DOLT_PORT when GC_DOLT_HOST is set" {
+		t.Fatalf("verifyBeadsInPod error = %q", got)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("expected no pod exec calls after invalid projected target, got %d", len(fake.calls))
+	}
+}
+
+func TestStartUsesPodBeadsRepairScript(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	p.postStartSettle = 0
+
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		WorkDir: "/city/rig",
+		Env: map[string]string{
+			"GC_AGENT":        "rig/polecat",
+			"GC_CITY":         "/city",
+			"GC_STORE_ROOT":   "/city/custom-scope",
+			"GC_BEADS_PREFIX": "cs",
+			"GC_DOLT_PORT":    "31364",
+		},
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	foundRepair := false
+	for _, c := range fake.calls {
+		if c.method != "execInPod" || len(c.cmd) < 3 {
+			continue
+		}
+		if c.cmd[0] != "sh" || c.cmd[1] != "-c" {
+			continue
+		}
+		script := c.cmd[2]
+		if containsStr(script, "bd init --server") && containsStr(script, "m.pop('project_id'") {
+			foundRepair = true
+			break
+		}
+	}
+	if !foundRepair {
+		t.Fatal("Start did not invoke the pod .beads repair/bootstrap script")
+	}
+}
+
+func TestStartWarnsWhenInitBeadsInPodFails(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.prebaked = true
+	p.postStartSettle = 0
+
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "sh" && cmd[1] == "-c" && containsStr(cmd[2], "bd init --server") {
+			return "", errors.New("missing canonical beads")
+		}
+		return "", nil
+	}
+	fake.setExecResult("gc-test-agent",
+		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	cfg := runtime.Config{
+		Command: "claude --settings .gc/settings.json",
+		WorkDir: "/city/rig",
+		Env: map[string]string{
+			"GC_AGENT":     "rig/polecat",
+			"GC_CITY":      "/city",
+			"GC_DOLT_PORT": "31364",
+		},
+	}
+	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
+		t.Fatalf("Start should warn and continue when pod beads repair fails: %v", err)
+	}
+}
+
+// TestInitBeadsInPodBdInitSetsBEADSDIR verifies that the pod bootstrap bd init
+// sets BEADS_DIR so bd does not create a .git/ as a side effect in the pod
+// workspace. Regression for #399.
+func TestInitBeadsInPodBdInitSetsBEADSDIR(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_HOST":    podManagedDoltHost,
+			"GC_DOLT_PORT":    podManagedDoltPort,
+			"GC_BEADS_PREFIX": "demo",
+		},
+	}
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+	var script string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" {
+			script = c.cmd[2]
+			break
+		}
+	}
+	if script == "" {
+		t.Fatal("no sh -c exec call found")
+	}
+	want := `BEADS_DIR="$WD/.beads" bd init --server`
+	if !strings.Contains(script, want) {
+		t.Errorf("bd init invocation missing BEADS_DIR env prefix: %q not found in script:\n%s", want, script)
+	}
+}
+
+// TestInitBeadsInPodStripsProjectIDFromMetadata verifies that the metadata
+// patch removes the controller's project_id so the agent pod's bd does not
+// fail with PROJECT IDENTITY MISMATCH against the in-cluster Dolt server.
+// The staged .beads/metadata.json carries the controller's project_id, which
+// is wrong for the pod and must be dropped so bd rediscovers it.
+func TestInitBeadsInPodStripsProjectIDFromMetadata(t *testing.T) {
+	fake := newFakeK8sOps()
+	cfg := runtime.Config{
+		Env: map[string]string{
+			"GC_DOLT_HOST":    podManagedDoltHost,
+			"GC_DOLT_PORT":    podManagedDoltPort,
+			"GC_BEADS_PREFIX": "demo",
+		},
+	}
+
+	if err := initBeadsInPod(context.Background(), fake, "gc-test-pod", cfg, "/workspace/demo-repo", podManagedDoltHost, podManagedDoltPort); err != nil {
+		t.Fatalf("initBeadsInPod: %v", err)
+	}
+
+	var script string
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && len(c.cmd) >= 3 && c.cmd[0] == "sh" && c.cmd[1] == "-c" {
+			script = c.cmd[2]
+			break
+		}
+	}
+	if script == "" {
+		t.Fatal("no sh -c exec call found")
+	}
+
+	// Both the argv and stdin python3 fallback paths must drop project_id
+	// after merging the patch into the staged metadata.
+	want := "m.pop('project_id', None)"
+	count := strings.Count(script, want)
+	if count < 2 {
+		t.Errorf("expected %q to appear in both python3 patch invocations (>=2 times), got %d\nscript:\n%s", want, count, script)
+	}
+	if strings.Contains(script, "<<<") {
+		t.Errorf("metadata patch script must be POSIX sh compatible; found bash here-string in:\n%s", script)
+	}
+	if !strings.Contains(script, `printf '%s' "$PATCH" | python3 -c`) {
+		t.Errorf("metadata patch fallback should pipe PATCH into python3 stdin for POSIX sh compatibility:\n%s", script)
 	}
 }
 
@@ -1069,8 +1804,9 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 
 	cfg := runtime.Config{
-		Command: "claude --resume stale-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --resume stale-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err == nil {
@@ -1086,6 +1822,130 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 }
 
+func TestStartAllowsOneShotLifecycleCommands(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "direct agent script",
+			command: "gc agent-script --script /workspace/rig/assets/scripts/hyperscale-worker.yaml",
+		},
+		{
+			name:    "wrapped one shot",
+			command: "env GC_LOG_LEVEL=debug custom-once --work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeK8sOps()
+			p := newProviderWithOps(fake)
+			p.postStartSettle = 100 * time.Millisecond
+
+			hasSessionCalls := 0
+			fake.execFunc = func(_ string, cmd []string) (string, error) {
+				if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+					hasSessionCalls++
+					if hasSessionCalls == 1 {
+						return "", nil
+					}
+					return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+				}
+				return "", nil
+			}
+
+			cfg := runtime.Config{
+				Command:   tt.command,
+				Env:       map[string]string{"GC_AGENT": "hyperscale/worker", "GC_CITY": "/workspace"},
+				Lifecycle: runtime.LifecycleOneShot,
+				Nudge:     "Check your hook for work.",
+			}
+
+			started := time.Now()
+			err := p.Start(context.Background(), "gc-test-agent", cfg)
+			if err != nil {
+				t.Fatalf("Start should allow one-shot lifecycle command: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed >= p.postStartSettle {
+				t.Fatalf("Start returned after %v, want before settle duration %v", elapsed, p.postStartSettle)
+			}
+			if hasSessionCalls != 1 {
+				t.Fatalf("tmux has-session calls = %d, want only waitForTmux check", hasSessionCalls)
+			}
+			if _, exists := fake.pods["gc-test-agent"]; !exists {
+				t.Fatal("pod should remain for normal session reconciliation after one-shot command")
+			}
+		})
+	}
+}
+
+func TestStartChecksLivenessForScriptCommandWithoutOneShotLifecycle(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	hasSessionCalls := 0
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			hasSessionCalls++
+			if hasSessionCalls == 1 {
+				return "", nil
+			}
+			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command: "gc agent-script --script /workspace/rig/assets/scripts/hyperscale-worker.yaml",
+		Env:     map[string]string{"GC_AGENT": "hyperscale/worker", "GC_CITY": "/workspace"},
+		Nudge:   "Check your hook for work.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if hasSessionCalls != 2 {
+		t.Fatalf("tmux has-session calls = %d, want waitForTmux and post-start liveness checks", hasSessionCalls)
+	}
+}
+
+func TestStartChecksLivenessForCustomCommandWithSetupAndNudgeHints(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	p.postStartSettle = 0
+
+	// tmux has-session succeeds during waitForTmux, then fails on post-start check.
+	hasSessionCalls := 0
+	fake.execFunc = func(_ string, cmd []string) (string, error) {
+		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
+			hasSessionCalls++
+			if hasSessionCalls == 1 {
+				return "", nil
+			}
+			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		return "", nil
+	}
+
+	cfg := runtime.Config{
+		Command:      "custom-agent --interactive",
+		Env:          map[string]string{"GC_AGENT": "custom/worker", "GC_CITY": "/workspace"},
+		SessionSetup: []string{"printf setup-ready >/tmp/agent-ready"},
+		Nudge:        "Check your hook for work.",
+	}
+	err := p.Start(context.Background(), "gc-test-agent", cfg)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if hasSessionCalls != 2 {
+		t.Fatalf("tmux has-session calls = %d, want waitForTmux and post-start liveness checks", hasSessionCalls)
+	}
+	if _, exists := fake.pods["gc-test-agent"]; exists {
+		t.Error("pod should have been deleted after immediate session death")
+	}
+}
+
 func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 	fake := newFakeK8sOps()
 	p := newProviderWithOps(fake)
@@ -1096,8 +1956,9 @@ func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
 	cfg := runtime.Config{
-		Command: "claude --session-id fresh-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --session-id fresh-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 	err := p.Start(context.Background(), "gc-test-agent", cfg)
 	if err != nil {
@@ -1125,8 +1986,9 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 	}()
 
 	cfg := runtime.Config{
-		Command: "claude --session-id fresh-key",
-		Env:     map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		Command:      "claude --session-id fresh-key",
+		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
+		ProcessNames: []string{"claude"},
 	}
 
 	started := time.Now()
@@ -1219,6 +2081,100 @@ func TestStartSkipsNudgeWhenEmpty(t *testing.T) {
 	}
 }
 
+// --- Relaunch (un-weld B3a) ---
+
+// findExecCmd returns the cmd of the first execInPod call whose joined cmd
+// contains substr (nil if none).
+func findExecCmd(fake *fakeK8sOps, substr string) []string { //nolint:unparam // substr varies in future tests
+	for _, c := range fake.calls {
+		if c.method == "execInPod" && strings.Contains(strings.Join(c.cmd, " "), substr) {
+			return c.cmd
+		}
+	}
+	return nil
+}
+
+func TestProvider_RelaunchRespawnsAgentInWarmPod(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s") // guard + liveness recheck both succeed
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+
+	respawn := findExecCmd(fake, "respawn-pane")
+	if respawn == nil {
+		t.Fatal("Relaunch did not issue tmux respawn-pane over execInPod")
+	}
+	body := respawn[len(respawn)-1] // sh -c <body>
+	if !strings.Contains(body, "tmux respawn-pane -k -t main") {
+		t.Errorf("respawn body = %q, want it to respawn the 'main' session in place", body)
+	}
+	// The command is base64-shipped, not inlined verbatim.
+	wantB64 := base64.StdEncoding.EncodeToString([]byte("agent --resume"))
+	if !strings.Contains(body, wantB64) {
+		t.Errorf("respawn body = %q, want base64 %q of the agent command", body, wantB64)
+	}
+	if strings.Contains(body, "agent --resume") {
+		t.Errorf("respawn body = %q leaked the raw command; it must be base64-shipped", body)
+	}
+	// Warm reuse: no pod was created or deleted.
+	for _, c := range fake.calls {
+		if c.method == "createPod" || c.method == "deletePod" {
+			t.Errorf("Relaunch must reuse the warm pod, but called %s", c.method)
+		}
+	}
+}
+
+func TestProvider_RelaunchMissingPodIsErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps() // no pods
+	p := newProviderWithOps(fake)
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionNotFound", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("respawn-pane must not be issued when there is no running pod")
+	}
+}
+
+func TestProvider_RelaunchDeadTmuxIsErrSessionNotFound(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	// Pod runs but tmux "main" is gone: relaunch must NOT recreate the pod.
+	fake.setExecResult("s", []string{"tmux", "has-session", "-t", tmuxSession}, "", errors.New("no session"))
+	err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent"})
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Relaunch err = %v, want ErrSessionNotFound", err)
+	}
+	if findExecCmd(fake, "respawn-pane") != nil {
+		t.Error("respawn-pane must not be issued when the tmux session is dead")
+	}
+}
+
+func TestProvider_RelaunchSuWrapsForLinuxUsername(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	addRunningPod(fake, "s", "s")
+	hasSessionAlive(fake, "s")
+
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"LINUX_USERNAME": "dev"}}
+	if err := p.Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	body := findExecCmd(fake, "respawn-pane")
+	if body == nil {
+		t.Fatal("no respawn-pane call")
+	}
+	last := body[len(body)-1]
+	if !strings.Contains(last, `su - dev -c`) {
+		t.Errorf("respawn body = %q, want it su-wrapped for the LINUX_USERNAME tmux socket", last)
+	}
+}
+
 // --- Test helpers ---
 
 func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
@@ -1228,6 +2184,18 @@ func addRunningPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unpar
 			Labels: map[string]string{"app": "gc-agent", "gc-session": sessionLabel},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+// addFailedPod adds a pod that exists by session label but is NOT Running, so
+// IsRunning(name) is false while Stop (list-by-label, any phase) still finds it.
+func addFailedPod(fake *fakeK8sOps, name, sessionLabel string) { //nolint:unparam // name varies in future tests
+	fake.pods[name] = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"app": "gc-agent", "gc-session": sessionLabel},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 }
 
@@ -1287,14 +2255,6 @@ func TestBuildPodServiceAccount(t *testing.T) {
 	})
 }
 
-// scriptContainsB64 checks that the base64 encoding of want appears as a
-// single-quoted token in the shell script. This verifies that base64-encoded
-// values in the initBeadsInPod script decode to expected values.
-func scriptContainsB64(script, want string) bool {
-	encoded := base64.StdEncoding.EncodeToString([]byte(want))
-	return strings.Contains(script, "'"+encoded+"'")
-}
-
 func TestInitCityInPodSkipsDolt(t *testing.T) {
 	fake := newFakeK8sOps()
 
@@ -1305,7 +2265,7 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 
 	// gc init must run with GC_DOLT=skip so it does not attempt to start a
 	// local Dolt server. In K8s pods, the in-cluster Dolt service is set up
-	// separately by initBeadsInPod.
+	// separately by verifyBeadsInPod.
 	var gcInitCmd []string
 	for _, c := range fake.calls {
 		if c.method == "execInPod" && len(c.cmd) > 0 {
@@ -1333,5 +2293,22 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 	}
 	if !hasSkip {
 		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	}
+
+	// Pod-local init only scaffolds a session filesystem; it must not register
+	// or start a city, and must not run provider login/readiness probes (a
+	// gateway-backed provider cannot satisfy a first-party-login probe, and the
+	// controller owns readiness). Assert both flags are present.
+	for _, flag := range []string{"--no-start", "--skip-provider-readiness"} {
+		found := false
+		for _, arg := range gcInitCmd {
+			if arg == flag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
 	}
 }

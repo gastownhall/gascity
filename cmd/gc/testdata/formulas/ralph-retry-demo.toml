@@ -1,0 +1,20 @@
+formula = "ralph-retry-demo"
+description = "Inline Check demo that fails once and then passes"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "implement"
+title = "Write retry demo output"
+description = """
+Create the retry demo output artifact.
+"""
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/ralph-retry-check.sh"
+timeout = "30s"

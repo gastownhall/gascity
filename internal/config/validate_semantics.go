@@ -1,6 +1,17 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
+
+const idleSleepMaskedByIdleTimeoutWarningFragment = "idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence"
+
+// IsIdleSleepMaskedByIdleTimeoutWarning reports whether warning describes the
+// supported idle-timeout precedence case where sleep_after_idle is masked.
+func IsIdleSleepMaskedByIdleTimeoutWarning(warning string) bool {
+	return strings.Contains(warning, idleSleepMaskedByIdleTimeoutWarningFragment)
+}
 
 // ValidateSemantics checks cross-entity semantic constraints in the config
 // and returns warnings for issues that cannot be caught by individual struct
@@ -10,11 +21,8 @@ import "fmt"
 func ValidateSemantics(cfg *City, source string) []string {
 	var warnings []string
 
-	// Build known provider name set: built-in + city-defined.
+	// Build known provider name set from the explicit catalog.
 	knownProviders := make(map[string]bool)
-	for name := range BuiltinProviders() {
-		knownProviders[name] = true
-	}
 	for name := range cfg.Providers {
 		knownProviders[name] = true
 	}
@@ -26,7 +34,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		}
 		if !knownProviders[a.Provider] {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: provider %q is not a built-in or city-defined provider",
+				"%s: agent %q: provider %q is not defined in [providers]",
 				source, a.QualifiedName(), a.Provider))
 		}
 	}
@@ -35,16 +43,25 @@ func ValidateSemantics(cfg *City, source string) []string {
 	if p := cfg.Workspace.Provider; p != "" {
 		if !knownProviders[p] {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: [workspace] provider %q is not a built-in or city-defined provider",
+				"%s: [workspace] provider %q is not defined in [providers]",
+				source, p))
+		}
+	}
+
+	// Check agent default provider.
+	if p := cfg.AgentDefaults.Provider; p != "" {
+		if !knownProviders[p] {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [agent_defaults] provider %q is not a built-in or city-defined provider",
 				source, p))
 		}
 	}
 
 	// Check agent session field.
 	for _, a := range cfg.Agents {
-		if a.Session != "" && a.Session != "acp" {
+		if !IsValidSessionTransport(a.Session) {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: session %q is not a valid session transport (use \"acp\" or omit)",
+				"%s: agent %q: session %q is not a valid session transport (use \"acp\", \"tmux\", or omit)",
 				source, a.QualifiedName(), a.Session))
 		}
 	}
@@ -63,8 +80,57 @@ func ValidateSemantics(cfg *City, source string) []string {
 	for _, a := range cfg.Agents {
 		if a.IdleTimeout != "" && a.SleepAfterIdle != "" {
 			warnings = append(warnings, fmt.Sprintf(
-				"%s: agent %q: idle_timeout and sleep_after_idle are both set; idle_timeout takes precedence and sleep_after_idle only applies when the session survives the idle_timeout check",
-				source, a.QualifiedName()))
+				"%s: agent %q: %s and sleep_after_idle only applies when the session survives the idle_timeout check",
+				source, a.QualifiedName(), idleSleepMaskedByIdleTimeoutWarningFragment))
+		}
+	}
+
+	// Custom provider names must not contain the reserved ":" character
+	// (used by the base = "builtin:..." / "provider:..." namespace prefixes).
+	for name := range cfg.Providers {
+		if strings.Contains(name, ":") {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] custom provider name contains reserved character \":\" (used for \"builtin:\" / \"provider:\" namespace prefixes on base field)",
+				source, name))
+		}
+	}
+
+	// Validate base field grammar when set.
+	for name, spec := range cfg.Providers {
+		if spec.Base == nil {
+			continue
+		}
+		bv := *spec.Base
+		if bv == "" {
+			continue // explicit standalone opt-out is valid
+		}
+		switch {
+		case strings.HasPrefix(bv, BasePrefixBuiltin):
+			suffix := strings.TrimPrefix(bv, BasePrefixBuiltin)
+			if suffix == "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s: [providers.%s] base %q has empty suffix after %q prefix",
+					source, name, bv, BasePrefixBuiltin))
+			}
+		case strings.HasPrefix(bv, BasePrefixProvider):
+			suffix := strings.TrimPrefix(bv, BasePrefixProvider)
+			if suffix == "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s: [providers.%s] base %q has empty suffix after %q prefix",
+					source, name, bv, BasePrefixProvider))
+			}
+		}
+	}
+
+	// Validate options_schema_merge grammar.
+	for name, spec := range cfg.Providers {
+		switch spec.OptionsSchemaMerge {
+		case "", "replace", "by_key":
+			// valid
+		default:
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [providers.%s] options_schema_merge must be \"replace\" or \"by_key\", got %q",
+				source, name, spec.OptionsSchemaMerge))
 		}
 	}
 

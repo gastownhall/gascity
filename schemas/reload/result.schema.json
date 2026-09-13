@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "city_path", "async", "soft", "outcome"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "reload" },
+    "action": { "const": "reload" },
+    "message": { "type": "string" },
+    "city_path": { "type": "string" },
+    "async": { "type": "boolean" },
+    "soft": { "type": "boolean" },
+    "outcome": { "enum": ["accepted", "applied", "no_change"] },
+    "revision": { "type": "string" }
+  },
+  "additionalProperties": true
+}

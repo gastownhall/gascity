@@ -155,6 +155,10 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 		after = 0
 	}
 	limit := clampTranscriptLimit(input.Limit)
+	order, err := normalizeTranscriptOrder(input.Order)
+	if err != nil {
+		return nil, err
+	}
 	var out []ConversationTranscriptRecord
 	err = withBindingLock(s.locks, ref, func() error {
 		state, err := s.findStateLocked(ref)
@@ -165,7 +169,7 @@ func (s *transcriptService) List(ctx context.Context, input ListTranscriptInput)
 			out = nil
 			return nil
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit)
+		out, err = s.listTranscriptLocked(ref, after, limit, order)
 		return err
 	})
 	return out, err
@@ -290,7 +294,25 @@ func (s *transcriptService) RemoveMembership(ctx context.Context, input RemoveMe
 	})
 }
 
+// membershipWriter is the write surface ensureMembershipLockedWriter needs.
+// Both beads.Store and beads.Tx satisfy it, so a caller can route the
+// membership writes through a coalescing transaction (one commit) or commit
+// them standalone.
+type membershipWriter interface {
+	Create(b beads.Bead) (beads.Bead, error)
+	SetMetadataBatch(id string, kvs map[string]string) error
+}
+
 func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) (ConversationMembershipRecord, error) {
+	return s.ensureMembershipLockedWriter(s.store, input)
+}
+
+// ensureMembershipLockedWriter is ensureMembershipLocked with its writes routed
+// through w. Reads stay on s.store. When w is a transaction, the post-write
+// re-fetch of an existing membership reads pre-commit state; callers that pass a
+// transaction must not depend on the returned record (the bind path discards
+// it). The committed writes are correct in either case.
+func (s *transcriptService) ensureMembershipLockedWriter(w membershipWriter, input EnsureMembershipInput) (ConversationMembershipRecord, error) {
 	ref, err := validateConversationRef(input.Conversation)
 	if err != nil {
 		return ConversationMembershipRecord{}, err
@@ -308,7 +330,7 @@ func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) 
 		return ConversationMembershipRecord{}, err
 	}
 	now := zeroNow(input.Now)
-	state, err := s.ensureStateLocked(ref)
+	state, err := s.ensureStateLockedWriter(w, ref)
 	if err != nil {
 		return ConversationMembershipRecord{}, err
 	}
@@ -336,7 +358,7 @@ func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) 
 		if effectivePolicy != existing.BackfillPolicy {
 			fields["membership_backfill_policy"] = string(effectivePolicy)
 		}
-		if err := s.store.SetMetadataBatch(existing.ID, fields); err != nil {
+		if err := w.SetMetadataBatch(existing.ID, fields); err != nil {
 			return ConversationMembershipRecord{}, fmt.Errorf("update membership owners: %w", err)
 		}
 		updated, err := s.store.Get(existing.ID)
@@ -365,7 +387,7 @@ func (s *transcriptService) ensureMembershipLocked(input EnsureMembershipInput) 
 		"manual_backfill_policy":     manualBackfillMetadataValue(owner, policy),
 		"membership_owner_kinds":     encodeMembershipOwners([]MembershipOwner{owner}),
 	})
-	created, err := s.store.Create(beads.Bead{
+	created, err := w.Create(beads.Bead{
 		Title:    sessionID + " -> " + conversationTitle(ref),
 		Type:     "task",
 		Labels:   []string{"gc:extmsg-membership", labelMembershipBase, membershipConversationLabel(ref), membershipExactLabel(ref, sessionID), membershipSessionLabel(sessionID)},
@@ -548,7 +570,7 @@ func (s *transcriptService) ListBackfill(ctx context.Context, input ListBackfill
 		if after == 0 && membership.BackfillPolicy == MembershipBackfillSinceJoin {
 			after = membership.JoinedSequence
 		}
-		out, err = s.listTranscriptLocked(ref, after, limit)
+		out, err = s.listTranscriptLocked(ref, after, limit, TranscriptOrderAsc)
 		return err
 	})
 	return out, err
@@ -707,6 +729,13 @@ func (s *transcriptService) updateHydrationState(ctx context.Context, caller Cal
 }
 
 func (s *transcriptService) ensureStateLocked(ref ConversationRef) (ConversationTranscriptStateRecord, error) {
+	return s.ensureStateLockedWriter(s.store, ref)
+}
+
+// ensureStateLockedWriter is ensureStateLocked with its create routed through w,
+// so a first-touch transcript-state bead can be created inside the same
+// transaction as the membership and binding writes it accompanies.
+func (s *transcriptService) ensureStateLockedWriter(w membershipWriter, ref ConversationRef) (ConversationTranscriptStateRecord, error) {
 	state, err := s.findStateLocked(ref)
 	if err != nil {
 		return ConversationTranscriptStateRecord{}, err
@@ -727,7 +756,7 @@ func (s *transcriptService) ensureStateLocked(ref ConversationRef) (Conversation
 		"hydration_status":            string(HydrationLiveOnly),
 		"max_retained_entries":        "0",
 	}
-	created, err := s.store.Create(beads.Bead{
+	created, err := w.Create(beads.Bead{
 		Title:    conversationTitle(ref) + "/state",
 		Type:     "task",
 		Labels:   []string{"gc:extmsg-transcript-state", labelTranscriptStateBase, transcriptStateLabel(ref)},
@@ -817,7 +846,7 @@ func (s *transcriptService) findActiveMembershipLocked(ref ConversationRef, sess
 	return out, nil
 }
 
-func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int64, limit int) ([]ConversationTranscriptRecord, error) {
+func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int64, limit int, order TranscriptOrder) ([]ConversationTranscriptRecord, error) {
 	state, err := s.ensureStateLocked(ref)
 	if err != nil {
 		return nil, err
@@ -835,11 +864,12 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 	}
 	startBucket := transcriptBucket(startSeq)
 	endBucket := transcriptBucket(endSeq)
+	descending := order == TranscriptOrderDesc
 	records := make([]ConversationTranscriptRecord, 0, limit)
-	for bucket := startBucket; bucket <= endBucket && len(records) < limit; bucket++ {
+	appendBucket := func(bucket int64) error {
 		items, err := s.store.List(beads.ListQuery{Label: transcriptBucketLabel(ref, bucket)})
 		if err != nil {
-			return nil, fmt.Errorf("list transcript bucket %d: %w", bucket, err)
+			return fmt.Errorf("list transcript bucket %d: %w", bucket, err)
 		}
 		bucketRecords := make([]ConversationTranscriptRecord, 0, len(items))
 		for _, item := range items {
@@ -848,31 +878,61 @@ func (s *transcriptService) listTranscriptLocked(ref ConversationRef, after int6
 			}
 			record, err := decodeTranscriptBead(item)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if !sameConversationRef(record.Conversation, ref) || record.Sequence <= after {
 				continue
 			}
 			bucketRecords = append(bucketRecords, record)
 		}
-		slices.SortFunc(bucketRecords, func(a, b ConversationTranscriptRecord) int {
-			switch {
-			case a.Sequence < b.Sequence:
-				return -1
-			case a.Sequence > b.Sequence:
-				return 1
-			default:
-				return strings.Compare(a.ID, b.ID)
-			}
-		})
+		sortTranscriptRecords(bucketRecords, descending)
 		for _, record := range bucketRecords {
 			if len(records) >= limit {
 				break
 			}
 			records = append(records, record)
 		}
+		return nil
+	}
+	// Descending walks newest bucket first so the most recent entries are
+	// collected without scanning the entire stream on busy conversations.
+	if descending {
+		for bucket := endBucket; bucket >= startBucket && len(records) < limit; bucket-- {
+			if err := appendBucket(bucket); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for bucket := startBucket; bucket <= endBucket && len(records) < limit; bucket++ {
+			if err := appendBucket(bucket); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return records, nil
+}
+
+// sortTranscriptRecords orders records by sequence (ID as tiebreaker),
+// ascending by default or descending when newest-first is requested.
+func sortTranscriptRecords(records []ConversationTranscriptRecord, descending bool) {
+	slices.SortFunc(records, func(a, b ConversationTranscriptRecord) int {
+		cmp := compareTranscriptRecords(a, b)
+		if descending {
+			return -cmp
+		}
+		return cmp
+	})
+}
+
+func compareTranscriptRecords(a, b ConversationTranscriptRecord) int {
+	switch {
+	case a.Sequence < b.Sequence:
+		return -1
+	case a.Sequence > b.Sequence:
+		return 1
+	default:
+		return strings.Compare(a.ID, b.ID)
+	}
 }
 
 func decodeTranscriptBead(b beads.Bead) (ConversationTranscriptRecord, error) {
@@ -1138,6 +1198,19 @@ func requireControllerCaller(caller Caller) error {
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+// normalizeTranscriptOrder validates the requested order, defaulting empty to
+// ascending (oldest-first) for backwards compatibility.
+func normalizeTranscriptOrder(order TranscriptOrder) (TranscriptOrder, error) {
+	switch order {
+	case "", TranscriptOrderAsc:
+		return TranscriptOrderAsc, nil
+	case TranscriptOrderDesc:
+		return TranscriptOrderDesc, nil
+	default:
+		return "", fmt.Errorf("%w: invalid transcript order %q", ErrInvalidInput, order)
+	}
 }
 
 func clampTranscriptLimit(limit int) int {

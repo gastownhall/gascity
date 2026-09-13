@@ -5,7 +5,6 @@ package integration
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,7 +40,11 @@ func TestE2E_Drain_SetAndCheck(t *testing.T) {
 }
 
 // TestE2E_Drain_Ack verifies that gc runtime drain-ack sets the GC_DRAIN_ACK
-// metadata flag.
+// metadata flag. It is not a respawn-timing venue: there is no running
+// controller/reconciler here, so drain-ack's controller-socket poke (#2364)
+// has no listener and emits a best-effort "poke failed" WARN to stderr that
+// does not affect exit status. Respawn timing is covered in tier B by
+// TestLifecycle_DrainAckResponsiveRespawn.
 func TestE2E_Drain_Ack(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -185,15 +188,14 @@ func TestE2E_Peek(t *testing.T) {
 	}
 }
 
-// TestE2E_ConfigDrift verifies that changing city.toml while agents are
-// running triggers reconciliation on next gc start.
+// TestE2E_ConfigDrift verifies that changing a fingerprinted agent field in
+// city.toml while agents are running triggers reconciliation via the watcher.
 func TestE2E_ConfigDrift(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{
 				Name:         "drifter",
-				StartCommand: e2eReportScript(),
-				Env:          map[string]string{"CUSTOM_VERSION": "v1"},
+				StartCommand: "CUSTOM_VERSION=v1 " + e2eReportScript(),
 			},
 		},
 	}
@@ -205,25 +207,27 @@ func TestE2E_ConfigDrift(t *testing.T) {
 		t.Fatalf("initial CUSTOM_VERSION: got %v, want [v1]", report.getAll("CUSTOM_VERSION"))
 	}
 
-	// Change config.
-	city.Workspace.Name = "" // Will be filled from cityDir base.
-	city.Agents[0].Env["CUSTOM_VERSION"] = "v2"
-	city.Workspace.Name = findCityName(t, cityDir)
-	writeE2EToml(t, cityDir, city)
-
 	// Remove old report so we can detect a new one.
 	reportPath := strings.ReplaceAll("drifter", "/", "__")
 	reportDir := cityDir + "/.gc-reports"
 	_ = removeFile(reportDir + "/" + reportPath + ".report")
 
-	// Run gc start again to trigger reconciliation.
-	out, err := gc("", "start", cityDir)
+	// Change config by mutating the fingerprinted start_command. Custom env
+	// keys are intentionally ignored by the runtime fingerprint, so changing
+	// Env alone should not imply restart.
+	city.Agents[0].StartCommand = "CUSTOM_VERSION=v2 " + e2eReportScript()
+	rewriteE2ETomlPreservingNamedSessions(t, cityDir, city)
+
+	out, err := gc(cityDir, "reload", "--timeout", "45s")
 	if err != nil {
-		t.Fatalf("gc start (reconcile) failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc reload after config drift failed: %v\noutput: %s", err, out)
 	}
 
-	// Wait for new report with updated env.
-	report2 := waitForReport(t, cityDir, "drifter", e2eDefaultTimeout())
+	// The controller is already running. Reloading city.toml should reconcile
+	// and restart the drifted session. Named sessions can defer config drift
+	// while recent activity cannot be ruled out, so allow the bounded deferral
+	// window to expire on slower providers.
+	report2 := waitForReport(t, cityDir, "drifter", 3*time.Minute)
 	if !report2.has("CUSTOM_VERSION", "v2") {
 		t.Errorf("post-drift CUSTOM_VERSION: got %v, want [v2]", report2.getAll("CUSTOM_VERSION"))
 	}
@@ -235,6 +239,7 @@ func gcWithEnv(dir string, env map[string]string, args ...string) (string, error
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = commandEnvForDir(dir, false)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -247,26 +252,6 @@ func gcCommand(args ...string) *exec.Cmd {
 	cmd := exec.Command(gcBinary, args...)
 	cmd.Env = integrationEnv()
 	return cmd
-}
-
-// findCityName reads city.toml to extract the workspace name.
-func findCityName(t *testing.T, cityDir string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
-	if err != nil {
-		t.Fatalf("reading city.toml: %v", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "name") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				return strings.Trim(strings.TrimSpace(parts[1]), "\"")
-			}
-		}
-	}
-	t.Fatal("city name not found in city.toml")
-	return ""
 }
 
 // removeFile removes a file, ignoring errors.

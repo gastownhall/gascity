@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -10,225 +9,158 @@ import (
 )
 
 const (
-	namedSessionMetadataKey      = "configured_named_session"
-	namedSessionIdentityMetadata = "configured_named_identity"
-	namedSessionModeMetadata     = "configured_named_mode"
+	namedSessionMetadataKey      = session.NamedSessionMetadataKey
+	namedSessionIdentityMetadata = session.NamedSessionIdentityMetadata
+	namedSessionModeMetadata     = session.NamedSessionModeMetadata
 )
 
-type namedSessionSpec struct {
-	Named       *config.NamedSession
-	Agent       *config.Agent
-	Identity    string
-	SessionName string
-	Mode        string
-}
+type namedSessionSpec = session.NamedSessionSpec
 
 func normalizeNamedSessionTarget(target string) string {
-	target = strings.TrimSpace(target)
-	target = strings.TrimSuffix(target, "/")
-	return target
+	return session.NormalizeNamedSessionTarget(target)
 }
 
 func targetBasename(target string) string {
-	target = normalizeNamedSessionTarget(target)
-	if i := strings.LastIndex(target, "/"); i >= 0 {
-		return target[i+1:]
-	}
-	return target
+	return session.TargetBasename(target)
 }
 
 func findNamedSessionSpec(cfg *config.City, cityName, identity string) (namedSessionSpec, bool) {
-	identity = normalizeNamedSessionTarget(identity)
-	if cfg == nil || identity == "" {
+	return session.FindNamedSessionSpec(cfg, cityName, identity)
+}
+
+func namedSessionBackingTemplate(spec namedSessionSpec) string {
+	return session.NamedSessionBackingTemplate(spec)
+}
+
+// namedSessionAssigneeMatchesSpec reports whether assignee names spec's session.
+// Work routed to a named session is claimed under the session's runtime name
+// (config.NamedSessionRuntimeName: "/" -> "--", "." -> "__"), not under its
+// qualified identity, so both forms have to count. spec.SessionName is already
+// an accepted alias for the identity in the resolver
+// (session.ResolveNamedSessionSpecForConfigTarget); matching only the qualified
+// form here left on-demand named sessions asleep on their own assigned work
+// (ga-e70d2).
+func namedSessionAssigneeMatchesSpec(spec namedSessionSpec, identity, assignee string) bool {
+	if assignee == "" {
+		return false
+	}
+	return assignee == identity || assignee == strings.TrimSpace(spec.SessionName)
+}
+
+// findNamedSessionSpecForAssignee resolves the configured named session that a
+// bead's assignee refers to, accepting every form a real claim can carry.
+//
+// findNamedSessionSpec alone is not enough: it matches the qualified identity
+// (and the V2 bare leaf), but a named session claims work under its tmux-safe
+// runtime name — "seth.seth" claims as "seth__seth". Callers that resolved
+// assignees with the identity-only lookup were therefore inert for the one form
+// that actually appears on claimed beads (ga-e70d2).
+//
+// The fallback deliberately reuses namedSessionAssigneeMatchesSpec rather than
+// session.ResolveNamedSessionSpecForConfigTarget. That resolver also accepts
+// bare template names because it resolves USER input (`gc session wake seth`);
+// an assignee is not user input, and widening claim resolution that far would
+// preserve routes for names no session ever claimed under. Config load rejects
+// identity/session-name collisions city-wide (config.validateNamedSessions), so
+// at most one spec can match.
+func findNamedSessionSpecForAssignee(cfg *config.City, cityName, assignee string) (namedSessionSpec, bool) {
+	if cfg == nil || strings.TrimSpace(assignee) == "" {
 		return namedSessionSpec{}, false
 	}
-	named := config.FindNamedSession(cfg, identity)
-	if named == nil {
-		return namedSessionSpec{}, false
+	if spec, ok := findNamedSessionSpec(cfg, cityName, assignee); ok {
+		return spec, true
 	}
-	agentCfg := config.FindAgent(cfg, identity)
-	if agentCfg == nil {
-		return namedSessionSpec{}, false
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+		if !ok {
+			continue
+		}
+		if namedSessionAssigneeMatchesSpec(spec, identity, assignee) {
+			return spec, true
+		}
 	}
-	return namedSessionSpec{
-		Named:       named,
-		Agent:       agentCfg,
-		Identity:    identity,
-		SessionName: config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity),
-		Mode:        named.ModeOrDefault(),
-	}, true
+	return namedSessionSpec{}, false
 }
 
 func resolveNamedSessionSpecForConfigTarget(cfg *config.City, cityName, target, rigContext string) (namedSessionSpec, bool, error) {
-	target = normalizeNamedSessionTarget(target)
-	if cfg == nil || target == "" {
-		return namedSessionSpec{}, false, nil
-	}
-
-	var identities []string
-	if !strings.Contains(target, "/") && rigContext != "" {
-		identities = append(identities, rigContext+"/"+target)
-	}
-	identities = append(identities, target)
-	seen := make(map[string]bool, len(identities))
-	for _, identity := range identities {
-		if identity == "" || seen[identity] {
-			continue
-		}
-		seen[identity] = true
-		if spec, ok := findNamedSessionSpec(cfg, cityName, identity); ok {
-			return spec, true, nil
-		}
-	}
-
-	var matched namedSessionSpec
-	found := false
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-		if !ok {
-			continue
-		}
-		if spec.SessionName != target {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return namedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-		}
-		matched = spec
-		found = true
-	}
-	if found {
-		return matched, true, nil
-	}
-
-	if resolved, ok := resolveSessionTemplate(cfg, target, rigContext); ok {
-		if spec, ok := findNamedSessionSpec(cfg, cityName, resolved.QualifiedName()); ok {
-			return spec, true, nil
-		}
-	}
-
-	if strings.Contains(target, "/") {
-		return namedSessionSpec{}, false, nil
-	}
-
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-		if !ok {
-			continue
-		}
-		if targetBasename(spec.Identity) != target {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return namedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-		}
-		matched = spec
-		found = true
-	}
-	return matched, found, nil
+	return session.ResolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
 }
 
-func findNamedSessionSpecForTarget(cfg *config.City, cityName string, store beads.Store, target string) (namedSessionSpec, bool, error) {
-	target = normalizeNamedSessionTarget(target)
-	if cfg == nil || target == "" {
-		return namedSessionSpec{}, false, nil
-	}
-	if spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, currentRigContext(cfg)); err != nil {
-		return namedSessionSpec{}, false, err
-	} else if ok {
-		return spec, true, nil
-	}
-
-	var matched namedSessionSpec
-	found := false
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-		if !ok {
-			continue
-		}
-		if spec.SessionName == target {
-			if found {
-				return namedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-			}
-			matched = spec
-			found = true
-		}
-	}
-
-	sessionBeads, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		return namedSessionSpec{}, false, err
-	}
-	for _, b := range sessionBeads.Open() {
-		if !isNamedSessionBead(b) {
-			continue
-		}
-		if !sessionAliasHistoryContains(b.Metadata, target) {
-			continue
-		}
-		spec, ok := findNamedSessionSpec(cfg, cityName, namedSessionIdentity(b))
-		if !ok {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return namedSessionSpec{}, false, fmt.Errorf("%w: %q matches multiple configured named sessions", session.ErrAmbiguous, target)
-		}
-		matched = spec
-		found = true
-	}
-
-	return matched, found, nil
+func findNamedSessionSpecForTarget(cfg *config.City, cityName, target string) (namedSessionSpec, bool, error) {
+	return session.FindNamedSessionSpecForTarget(cfg, cityName, target, currentRigContext(cfg))
 }
 
 func isNamedSessionBead(b beads.Bead) bool {
-	return strings.TrimSpace(b.Metadata[namedSessionMetadataKey]) == "true"
+	return session.IsNamedSessionBead(b)
+}
+
+// isNamedSessionInfo is the session.Info mirror of isNamedSessionBead:
+// session.IsNamedSessionBead reads the trimmed configured_named_session flag,
+// which Info.ConfiguredNamedSession already projects identically.
+func isNamedSessionInfo(i session.Info) bool {
+	return i.ConfiguredNamedSession
 }
 
 func namedSessionIdentity(b beads.Bead) string {
-	return strings.TrimSpace(b.Metadata[namedSessionIdentityMetadata])
+	return session.NamedSessionIdentity(b)
+}
+
+// namedSessionIdentityInfo is the session.Info mirror of namedSessionIdentity:
+// session.NamedSessionIdentityInfo reads the trimmed configured_named_identity,
+// which Info.ConfiguredNamedIdentity carries verbatim.
+func namedSessionIdentityInfo(i session.Info) string {
+	return session.NamedSessionIdentityInfo(i)
+}
+
+func configuredNamedSessionBeadHasSpec(b beads.Bead, cfg *config.City, cityName string) bool {
+	if cfg == nil || !isNamedSessionBead(b) {
+		return false
+	}
+	identity := namedSessionIdentity(b)
+	if identity == "" {
+		return false
+	}
+	_, ok := findNamedSessionSpec(cfg, cityName, identity)
+	return ok
+}
+
+// configuredNamedSessionBeadHasSpecInfo is the session.Info mirror of
+// configuredNamedSessionBeadHasSpec: isNamedSessionInfo and namedSessionIdentityInfo
+// are the equivalence-proven siblings, and findNamedSessionSpec keys off the
+// projected identity string identically.
+func configuredNamedSessionBeadHasSpecInfo(i session.Info, cfg *config.City, cityName string) bool {
+	if cfg == nil || !isNamedSessionInfo(i) {
+		return false
+	}
+	identity := namedSessionIdentityInfo(i)
+	if identity == "" {
+		return false
+	}
+	_, ok := findNamedSessionSpec(cfg, cityName, identity)
+	return ok
 }
 
 func namedSessionMode(b beads.Bead) string {
-	return strings.TrimSpace(b.Metadata[namedSessionModeMetadata])
+	return session.NamedSessionMode(b)
 }
 
-func namedSessionBeadMatchesSpec(b beads.Bead, spec namedSessionSpec) bool {
-	if isNamedSessionBead(b) && namedSessionIdentity(b) == spec.Identity {
-		return true
-	}
-	template := normalizeNamedSessionTarget(strings.TrimSpace(b.Metadata["template"]))
-	agentName := normalizeNamedSessionTarget(strings.TrimSpace(b.Metadata["agent_name"]))
-	return template == spec.Identity || agentName == spec.Identity
+// namedSessionModeInfo is the session.Info mirror of namedSessionMode:
+// session.NamedSessionModeInfo trims the raw configured_named_mode
+// (Info.ConfiguredNamedMode), identical to the bead form.
+func namedSessionModeInfo(i session.Info) string {
+	return session.NamedSessionModeInfo(i)
 }
 
-func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (beads.Bead, bool) {
+func namedSessionContinuityEligible(b beads.Bead) bool {
+	return session.NamedSessionContinuityEligible(b)
+}
+
+func findCanonicalNamedSessionInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {
 	if sessionBeads == nil {
-		return beads.Bead{}, false
+		return session.Info{}, false
 	}
-	identity := normalizeNamedSessionTarget(spec.Identity)
-	// First pass: look for beads explicitly tagged as this named session.
-	for _, b := range sessionBeads.Open() {
-		if isNamedSessionBead(b) && namedSessionIdentity(b) == identity {
-			return b, true
-		}
-	}
-	// Second pass: adopt pre-existing session beads whose canonical runtime
-	// session_name matches the named session. This
-	// covers beads created before the named session config was added
-	// (e.g., implicit agents promoted to named sessions).
-	for _, b := range sessionBeads.Open() {
-		if !namedSessionBeadMatchesSpec(b, spec) {
-			continue
-		}
-		sn := strings.TrimSpace(b.Metadata["session_name"])
-		if sn == spec.SessionName || sn == identity {
-			return b, true
-		}
-	}
-	return beads.Bead{}, false
+	return session.FindCanonicalNamedSessionInfo(sessionBeads.OpenInfos(), spec)
 }
 
 // findClosedNamedSessionBead searches for a closed bead that was previously
@@ -236,104 +168,22 @@ func findCanonicalNamedSessionBead(sessionBeads *sessionBeadSnapshot, spec named
 // metadata query (Store.ListByMetadata) so only matching beads are returned
 // — no bulk scan of all closed beads.
 func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
-	return findClosedNamedSessionBeadForSessionName(store, identity, "")
+	bead, ok, _ := session.FindClosedNamedSessionBead(store, identity)
+	return bead, ok
 }
 
 func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
-	identity = normalizeNamedSessionTarget(identity)
-	sessionName = strings.TrimSpace(sessionName)
-	candidates, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{
-			namedSessionIdentityMetadata: identity,
-		},
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-	})
-	if err != nil {
-		return beads.Bead{}, false
-	}
-	var fallback beads.Bead
-	hasFallback := false
-	for _, b := range candidates {
-		if b.Status != "closed" {
-			continue
-		}
-		if sessionName != "" {
-			if strings.TrimSpace(b.Metadata["session_name"]) == sessionName {
-				return b, true
-			}
-			continue
-		}
-		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-			return b, true
-		}
-		if !hasFallback {
-			fallback = b
-			hasFallback = true
-		}
-	}
-	if hasFallback {
-		return fallback, true
-	}
-	return beads.Bead{}, false
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	return bead, ok
 }
 
-func beadConflictsWithNamedSession(b beads.Bead, spec namedSessionSpec) bool {
-	if isNamedSessionBead(b) && namedSessionIdentity(b) == spec.Identity {
-		return false
-	}
-	if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
-		return !namedSessionBeadMatchesSpec(b, spec)
-	}
-	if strings.TrimSpace(b.Metadata["alias"]) == spec.Identity {
-		return true
-	}
-	for _, alias := range session.AliasHistory(b.Metadata) {
-		if alias == spec.Identity {
-			return true
-		}
-	}
-	return false
-}
-
-func findNamedSessionConflict(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (beads.Bead, bool) {
+func findNamedSessionConflictInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {
 	if sessionBeads == nil {
-		return beads.Bead{}, false
+		return session.Info{}, false
 	}
-	for _, b := range sessionBeads.Open() {
-		if beadConflictsWithNamedSession(b, spec) {
-			return b, true
-		}
-	}
-	return beads.Bead{}, false
+	return session.FindNamedSessionConflictInfo(sessionBeads.OpenInfos(), spec)
 }
 
 func findConflictingNamedSessionSpecForBead(cfg *config.City, cityName string, b beads.Bead) (namedSessionSpec, bool, error) {
-	if cfg == nil {
-		return namedSessionSpec{}, false, nil
-	}
-	var matched namedSessionSpec
-	found := false
-	for i := range cfg.NamedSessions {
-		identity := cfg.NamedSessions[i].QualifiedName()
-		spec, ok := findNamedSessionSpec(cfg, cityName, identity)
-		if !ok || !beadConflictsWithNamedSession(b, spec) {
-			continue
-		}
-		if found && matched.Identity != spec.Identity {
-			return namedSessionSpec{}, false, fmt.Errorf("%w: bead %s conflicts with multiple configured named sessions", session.ErrAmbiguous, b.ID)
-		}
-		matched = spec
-		found = true
-	}
-	return matched, found, nil
-}
-
-func sessionAliasHistoryContains(metadata map[string]string, target string) bool {
-	for _, alias := range session.AliasHistory(metadata) {
-		if alias == target {
-			return true
-		}
-	}
-	return false
+	return session.FindConflictingNamedSessionSpecForBead(cfg, cityName, b)
 }

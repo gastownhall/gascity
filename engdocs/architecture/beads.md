@@ -51,16 +51,16 @@ The bead store is a single interface with four implementations, selected
 at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 
 ```
-                        beads.Store (interface)
-                       /       |        \         \
-                      /        |         \         \
-               BdStore    FileStore   MemStore   exec.Store
-             (bd CLI)   (JSON file)  (in-mem)   (user script)
-                 |            |
-                 |        embeds MemStore
-                 |
-          ExecCommandRunner
-           (with telemetry)
+                       beads.Store (interface)
+                      /       |        \      \
+                     /        |         \      \
+              BdStore    FileStore   MemStore  exec.Store
+            (bd CLI)   (JSON file)  (in-mem) (user script)
+                |            |
+                |        embeds MemStore
+                |
+         ExecCommandRunner
+          (with telemetry)
 ```
 
 **Provider resolution** (in `cmd/gc/main.go:openCityStore`):
@@ -69,8 +69,10 @@ at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 2. `[beads].provider` in `city.toml`
 3. Default: `"bd"`
 
-Valid provider values: `"bd"` (BdStore), `"file"` (FileStore),
-`"exec:<script-path>"` (exec.Store).
+Valid provider values: `"bd"` (BdStore, default), `"file"` (FileStore),
+and `"exec:<script-path>"` (exec.Store). The `"sqlite"`, `"sqlite-cgo"`, and
+`"coordstore"` coordination-store providers were removed in favor of
+`"doltlite"` and now hard-error.
 
 ### Data Flow
 
@@ -180,14 +182,112 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     `internal/beads/` (and `test/integration/`) directly invokes the bd
     binary.
 
-14. **BdStore maps bd's extended statuses to Gas City's three.** bd uses
-    open, in_progress, blocked, review, testing, closed. Gas City maps
-    closed to closed, in_progress to in_progress, and everything else
-    to open.
+14. **BdStore maps backend statuses onto Gas City's three-state contract.**
+    bd uses open, in_progress, blocked, review, testing, closed. Gas City
+    exposes open, in_progress, closed, so BdStore maps blocked/review/testing
+    to open and normalizes an empty backend status to open.
 
 15. **FileStore uses atomic writes.** Persistence writes go to a temp
     file first, then `os.Rename` to the target path -- never partial
     writes.
+
+16. **A namespace-fenced store refuses a pinned id outside the namespaces
+    it serves.** Minting settles the ids a store *generates*, not the ids a
+    caller *pins*, and Create honors a pinned id verbatim -- so a binding
+    that claims a namespace stops holding that claim the moment anything
+    pins a foreign id into it. A fenced store refuses one, wrapping
+    `beads.ErrPinnedIDOutsideNamespace` (the contract is the sentinel; an
+    out-of-tree store cannot be held to error prose). The refusal writes
+    nothing and runs before normalization and before any read, so it neither
+    advances the mint sequence nor reveals whether the store holds the row.
+    Membership covers every namespace the binding holds, not just the mint
+    one, is tested on the separator and on the id exactly as it will be
+    stored, and folds case without rewriting the id. Mints,
+    `CreateWithForeignID` (the `gc storage migrate` copy path) and the ids a
+    bead *refers* to are all outside the fence. A store configured with no
+    namespaces is unfenced, which is how a binding serving the work class is
+    opened -- work beads carry the operator's configured prefix.
+    The fence covers `Store.Tx`'s create as well as the standalone one -- a
+    transaction is not an exemption, since the bead it commits is just as
+    resident and just as unreachable. `CreateWithForeignID` has no
+    transactional variant for that reason: the migration copy runs on the
+    store, not inside a caller's transaction.
+    `beadstest.RunPinnedIDFenceConformance` is the executable form, and its
+    `OverRestrictionControls` rows pass unfenced by design: without them,
+    refusing every pinned id would conform.
+
+    Fencing is a property of the binding provider, not of every Store. Both
+    shipped providers fence: `internal/storebinding/sqlite` and
+    `internal/storebinding/beadsworkspace`. Which namespaces a binding claims
+    follows from the classes it was *assigned*, so the derivation lives above
+    both in `storebinding.EngineReservedPrefixes` -- one function, so two
+    providers cannot answer it differently for the same assignment, and a
+    third inherits the rule by calling it.
+
+17. **ParentID is a weak, city-scoped reference -- except on the bd-CLI
+    provider.** A split city routes by class, so a parent and its child are
+    co-resident only when they classify the same way. A store therefore
+    persists and filters `ParentID` verbatim and never resolves, validates,
+    rewrites or places by an id in a namespace it does not serve;
+    `beadstest.RunStoreTests` pins that as
+    `ParentIDNamesARowThisStoreDoesNotHave`. MemStore, FileStore, SQLiteStore
+    and the exec provider carry every parent. NativeDoltStore carries a
+    foreign one and refuses a dangling id inside the namespace it serves,
+    before writing -- the strong reading its library forces.
+
+    `BdStore` does not comply. It passes `--parent` through to bd, which
+    resolves the id unconditionally and derives the child's id from it, so a
+    cross-store parent is refused and, when it does resolve, placement
+    follows the parent instead of the child's class. The divergence is
+    invisible to CI because the only conformance run over a real bd is
+    skipped (ga-e7z613). Tracked in ga-6od57.
+
+## Metadata vocabulary (gc.*)
+
+`bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the
+reserved namespace for engine-minted keys. The vocabulary of engine-owned
+keys -- every `gc.*` key read or written by non-test Go -- is declared once
+in `internal/beadmeta` (`beadmeta.KnownMetadataKeys`), which is the
+authoritative contract for the workflow engine, role workers, CLI, and API.
+Non-test Go must reference the `beadmeta` constants rather than spelling
+out raw key literals; `TestNoUndeclaredMetadataKeys` in
+`internal/beadmeta/guard_test.go` enforces this by scanning source for
+whole `gc.*`-key-shaped string literals.
+
+Value vocabularies live alongside the keys: `values.go` declares the
+closed value domains (kind, outcome, failure class, scope role, drain /
+retry / fanout state machines, dispositions, modes, scope kind), and
+`kindsets.go` declares the named subsets of the kind vocabulary with
+their relationships — `ControlKinds` (authoritative; the ProcessControl
+switch in `internal/dispatch/runtime.go` is its behavior owner),
+`StructuralGraphKinds`, `WorkflowTopologyKinds`, and
+`GraphContractMetadataKinds`. Every routing predicate is exactly equal
+to `ControlKinds`; `TestKindSetRelationships` and the dispatch lockstep
+tests pin the compositions and the equalities.
+
+The namespace is deliberately open-world at the edges:
+
+- **Dynamic keys.** Formula input vars are stamped as `gc.var.<name>`
+  (`beadmeta.FormulaVarPrefix`); the suffix is user-authored and not
+  enumerable.
+- **Pack-private keys.** Packs and prompts may mint `gc.*` keys the engine
+  never reads (e.g. `gc.reviewer_model`). These never appear as Go
+  literals, so the guard does not constrain them and they are
+  intentionally NOT declared in `beadmeta`.
+- **Sibling namespaces.** `gc.*` event-type names belong to
+  `events.KnownEventTypes`, telemetry metric names to
+  `internal/telemetry`, and t3bridge UI thread-metadata keys to
+  `internal/runtime/t3bridge` -- each a separate owner, none of them bead
+  metadata. The non-`gc.`-prefixed directory keys (`worker_dir`,
+  `artifact_dir`, legacy `work_dir`) are also declared in `beadmeta`, with
+  their read/write helper behavior remaining in
+  `internal/beads/contract/metadata.go`.
+
+Keys embedded inside larger strings are outside the guard's key-shape
+rule, but the two such surfaces are constructed from the constants rather
+than spelled raw: the jq/bd shell builders in `internal/config/config.go`
+(via the local `jqMeta` helper and direct constant concatenation) and the
+SQL JSON paths in `internal/api/convoy_sql.go` (via `beadmeta.JSONPath`).
 
 ## Interactions
 
@@ -202,7 +302,7 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
 | `cmd/gc/` (CLI commands) | `openCityStore` creates the appropriate Store; used by convoy, sling, order, handoff, and hook commands |
 | `internal/mail/beadmail` | Implements mail.Provider backed by beads.Store -- mail messages are beads with type `"message"` |
 | Formula-aware backends | Molecule creation and step materialization are delegated to the configured store backend |
-| `internal/orders` | Order dispatch uses Store for cooldown tracking (`ListByLabel` with `order-run:` labels) and cursor-based event gates |
+| `internal/orders` | Order dispatch uses Store for cooldown tracking (`ListByLabel` with `order-run:` labels) and cursor-based event triggers |
 | `internal/doctor` | Health checks verify Store accessibility for both city-level and per-rig bead databases |
 | `cmd/gc/cmd_convoy.go` | Convoy operations (create, list, status, add, close, check, stranded) all operate through Store |
 | `cmd/gc/cmd_handoff.go` | Work handoff between agents reads and writes beads through Store |
@@ -315,7 +415,7 @@ beads_rust (br) binary as a real external provider (build tag:
 
 - [Architecture glossary](glossary.md) -- authoritative definitions of
   bead, molecule, convoy, label, and other terms used in this document
-- [Formula file reference](../../docs/reference/formula.md) -- formula file layout,
+- [Formula spec (v2)](../../docs/reference/specs/formula-spec-v2.md) -- formula file layout,
   layer resolution, and how stores instantiate molecules from formulas
 - [Beadmail provider](https://github.com/gastownhall/gascity/tree/main/internal/mail/beadmail/) -- how inter-agent
   messaging composes on top of bead store (mail = beads with type

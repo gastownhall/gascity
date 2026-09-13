@@ -4,25 +4,68 @@
 // names with a "gctest-" prefix, tracks created sessions, and guarantees
 // cleanup even on test failures. Three layers prevent orphan sessions:
 //
-//  1. Pre-sweep (TestMain): kill all gc-gctest-* sessions from prior crashes.
+//  1. Pre-sweep (TestMain): kill all gctest-* socket servers from prior crashes.
 //  2. Per-test (t.Cleanup): kill sessions created by this guard.
 //  3. Post-sweep (TestMain defer): final sweep after all tests complete.
 //
-// All operations use an isolated tmux socket ("gc-test" by default) so tests
-// never interfere with the user's running tmux server.
+// All operations use isolated tmux socket roots and named gctest-* sockets so
+// tests never interfere with the user's running tmux server.
 package tmuxtest
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-// DefaultSocketName is the tmux socket used by test infrastructure.
-// Using a dedicated socket isolates tests from the user's tmux server.
-const DefaultSocketName = "gc-test"
+// tmuxGuardCommandTimeout bounds every tmux client invocation this package
+// aims at a server it may already have wedged -- the Guard's own kill-server
+// calls, the orphan sweep's query/kill pair, and the sweep regression test's
+// cleanup -- so a wedged-but-accepting server cannot hang a suite that is
+// only trying to clean up after itself. TestEveryKillServerCallIsBounded
+// enforces that for kill-server. Guard.HasSession is deliberately outside
+// this rule: it queries a server the caller believes is healthy, and its
+// timeout is the caller's own test deadline. cmd/gc's leak guard bounds the
+// identical kill-server call for the same stated reason
+// (cmd/gc/tmux_leak_guard_test.go, tmuxGuardKillTimeout).
+const tmuxGuardCommandTimeout = 2 * time.Second
+
+const tmuxSiblingSocketStaleAfter = 24 * time.Hour
+
+const (
+	tmuxEnv     = "TMUX"
+	tmuxPaneEnv = "TMUX_PANE"
+	tmuxTmpEnv  = "TMUX_TMPDIR"
+)
+
+// ConfigureProcessEnv points all tmux commands in the current process tree at
+// socketRoot and removes inherited client bindings from an outer tmux session.
+func ConfigureProcessEnv(socketRoot string) error {
+	socketRoot = strings.TrimSpace(socketRoot)
+	if socketRoot == "" {
+		return fmt.Errorf("tmux socket root is empty")
+	}
+	if err := os.MkdirAll(socketRoot, 0o700); err != nil {
+		return fmt.Errorf("creating tmux socket root %q: %w", socketRoot, err)
+	}
+	if err := os.Unsetenv(tmuxEnv); err != nil {
+		return fmt.Errorf("unsetting %s: %w", tmuxEnv, err)
+	}
+	if err := os.Unsetenv(tmuxPaneEnv); err != nil {
+		return fmt.Errorf("unsetting %s: %w", tmuxPaneEnv, err)
+	}
+	if err := os.Setenv(tmuxTmpEnv, socketRoot); err != nil {
+		return fmt.Errorf("setting %s: %w", tmuxTmpEnv, err)
+	}
+	return nil
+}
 
 // RequireTmux skips the test if tmux is not installed.
 func RequireTmux(t testing.TB) {
@@ -37,14 +80,14 @@ func RequireTmux(t testing.TB) {
 // sessions matching that city via t.Cleanup.
 type Guard struct {
 	t          testing.TB
-	cityName   string // "gctest-<nibble>-<nibble>-..."
-	socketName string // tmux socket for isolation
+	cityName   string // "gctest-<8hex>"
+	socketName string // tmux socket for isolation (defaults to cityName)
 }
 
 // NewGuard creates a guard with a unique city name. Registers t.Cleanup
 // to kill all sessions created under this guard's city name.
 func NewGuard(t testing.TB) *Guard {
-	return NewGuardWithSocket(t, DefaultSocketName)
+	return NewGuardWithSocket(t, "")
 }
 
 // NewGuardWithSocket creates a guard using the specified tmux socket.
@@ -56,13 +99,10 @@ func NewGuardWithSocket(t testing.TB, socketName string) *Guard {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("tmuxtest: generating random city name: %v", err)
 	}
-	hex := fmt.Sprintf("%x", b)
-	parts := make([]string, 0, len(hex)+1)
-	parts = append(parts, "gctest")
-	for _, r := range hex {
-		parts = append(parts, string(r))
+	cityName := fmt.Sprintf("gctest-%x", b)
+	if socketName == "" {
+		socketName = cityName
 	}
-	cityName := strings.Join(parts, "-")
 
 	g := &Guard{t: t, cityName: cityName, socketName: socketName}
 	t.Cleanup(func() {
@@ -71,7 +111,7 @@ func NewGuardWithSocket(t testing.TB, socketName string) *Guard {
 	return g
 }
 
-// CityName returns the unique city name (e.g., "gctest-a-1-b-2-c-3-d-4").
+// CityName returns the unique city name (e.g., "gctest-<8hex>").
 func (g *Guard) CityName() string {
 	return g.cityName
 }
@@ -82,9 +122,10 @@ func (g *Guard) SocketName() string {
 }
 
 // SessionName returns the expected tmux session name for an agent.
-// Mirrors cmd/gc/main.go:sessionName() — format is "gc-<cityName>-<agentName>".
+// Default session naming is just the sanitized agent name because per-city
+// tmux socket isolation makes a city prefix unnecessary.
 func (g *Guard) SessionName(agentName string) string {
-	return "gc-" + g.cityName + "-" + agentName
+	return strings.ReplaceAll(agentName, "/", "--")
 }
 
 // HasSession checks if a specific tmux session exists.
@@ -102,33 +143,25 @@ func (g *Guard) HasSession(name string) bool {
 }
 
 // killGuardSessions kills all tmux sessions matching this guard's city
-// name pattern: "gc-gctest-XXXX-*".
+// socket. One city maps to one socket, so all sessions on that socket
+// belong to this guard.
 func (g *Guard) killGuardSessions() {
 	g.t.Helper()
-	prefix := "gc-" + g.cityName + "-"
-	sessions := listSessionsWithPrefix(g.socketName, prefix)
-	for _, s := range sessions {
-		args := tmuxArgs(g.socketName, "kill-session", "-t", s)
-		_ = exec.Command("tmux", args...).Run()
-	}
+	_ = killTestSocketServer(g.socketName)
 }
 
-// KillAllTestSessions kills all tmux sessions matching "gc-gctest-*".
+// KillAllTestSessions kills tmux sessions for all orphaned gctest-* sockets.
 // Call from TestMain before and after test runs to clean up orphans.
 func KillAllTestSessions(t testing.TB) {
-	KillAllTestSessionsOnSocket(t, DefaultSocketName)
-}
-
-// KillAllTestSessionsOnSocket kills orphaned test sessions on the given socket.
-func KillAllTestSessionsOnSocket(t testing.TB, socketName string) {
 	t.Helper()
-	sessions := listSessionsWithPrefix(socketName, "gc-gctest-")
-	for _, s := range sessions {
-		args := tmuxArgs(socketName, "kill-session", "-t", s)
-		_ = exec.Command("tmux", args...).Run()
+	var cleaned int
+	for _, socketPath := range listTestSocketPaths() {
+		if err := killTmuxServerAtSocket(socketPath); err == nil {
+			cleaned++
+		}
 	}
-	if len(sessions) > 0 {
-		t.Logf("tmuxtest: cleaned up %d orphaned test session(s)", len(sessions))
+	if cleaned > 0 {
+		t.Logf("tmuxtest: cleaned up %d orphaned test socket(s)", cleaned)
 	}
 }
 
@@ -142,18 +175,133 @@ func tmuxArgs(socketName string, args ...string) []string {
 }
 
 // listSessionsWithPrefix returns all tmux session names starting with prefix.
-func listSessionsWithPrefix(socketName, prefix string) []string {
-	args := tmuxArgs(socketName, "list-sessions", "-F", "#{session_name}")
-	out, err := exec.Command("tmux", args...).Output()
-	if err != nil {
-		// No tmux server running means no sessions to clean.
+func killTestSocketServer(socketName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxGuardCommandTimeout)
+	defer cancel()
+	args := tmuxArgs(socketName, "kill-server")
+	return exec.CommandContext(ctx, "tmux", args...).Run()
+}
+
+// killTmuxServerAtSocket issues a bounded "tmux -S <socketPath> kill-server"
+// and reports why it failed, so a caller that surfaces the failure can name
+// the server it could not shut down. The server exiting is asynchronous and
+// is not waited for here; see the orphan sweep's reaper for that.
+func killTmuxServerAtSocket(socketPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxGuardCommandTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").CombinedOutput()
+	if err == nil {
 		return nil
 	}
-	var matches []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line != "" && strings.HasPrefix(line, prefix) {
-			matches = append(matches, line)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("tmux -S %s kill-server: %w", socketPath, ctxErr)
+	}
+	return fmt.Errorf("tmux -S %s kill-server: %w (%s)", socketPath, err, strings.TrimSpace(string(out)))
+}
+
+// listTestSocketPaths returns tmux socket paths for orphaned gctest cities.
+func listTestSocketPaths() []string {
+	activeRoot := strings.TrimSpace(os.Getenv(tmuxTmpEnv))
+	if activeRoot != "" {
+		activeRoot = filepath.Clean(activeRoot)
+	}
+	now := time.Now()
+	uid := strconv.Itoa(os.Getuid())
+	var sockets []string
+	for _, root := range tmuxSocketSearchRoots() {
+		entries, err := filepath.Glob(filepath.Join(root, "tmux-"+uid, "gctest-*"))
+		if err != nil {
+			continue
+		}
+		for _, socketPath := range entries {
+			if root == activeRoot || testSocketPathIsStale(socketPath, now) {
+				sockets = append(sockets, socketPath)
+			}
 		}
 	}
-	return matches
+	return sockets
+}
+
+func testSocketPathIsStale(socketPath string, now time.Time) bool {
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		return false
+	}
+	return now.Sub(info.ModTime()) >= tmuxSiblingSocketStaleAfter
+}
+
+func tmuxSocketSearchRoots() []string {
+	roots := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	addRoot := func(root string) {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return
+		}
+		root = filepath.Clean(root)
+		if _, ok := seen[root]; ok {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+
+	activeRoot := os.Getenv(tmuxTmpEnv)
+	addRoot(activeRoot)
+	for _, pattern := range tmuxSocketRootPatterns(activeRoot) {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			addRoot(match)
+		}
+	}
+	return roots
+}
+
+func tmuxSocketRootPatterns(activeRoot string) []string {
+	activeRoot = strings.TrimSpace(activeRoot)
+	if activeRoot == "" || filepath.Base(activeRoot) != "tmux" {
+		return nil
+	}
+	activeRoot = filepath.Clean(activeRoot)
+	runRoot := filepath.Dir(activeRoot)
+	runName := filepath.Base(runRoot)
+	namespace := filepath.Dir(runRoot)
+	if runName == "runtime" {
+		runRoot = filepath.Dir(runRoot)
+		runName = filepath.Base(runRoot)
+		namespace = filepath.Dir(runRoot)
+		return runtimeTmuxSocketRootPatterns(namespace, runName)
+	}
+	return directTmuxSocketRootPatterns(namespace, runName)
+}
+
+func directTmuxSocketRootPatterns(namespace, runName string) []string {
+	switch {
+	case strings.HasPrefix(runName, "gc-integration-"):
+		return []string{filepath.Join(namespace, "gc-integration-*", "tmux")}
+	case strings.HasPrefix(runName, "gctutorial-"):
+		return []string{filepath.Join(namespace, "gctutorial-*", "tmux")}
+	case strings.HasPrefix(runName, "gct"):
+		return []string{filepath.Join(namespace, "gct*", "tmux")}
+	default:
+		return nil
+	}
+}
+
+func runtimeTmuxSocketRootPatterns(namespace, runName string) []string {
+	switch {
+	case strings.HasPrefix(runName, "gcac-"):
+		return []string{filepath.Join(namespace, "gcac-*", "runtime", "tmux")}
+	case strings.HasPrefix(runName, "gcwi-"):
+		return []string{filepath.Join(namespace, "gcwi-*", "runtime", "tmux")}
+	case strings.HasPrefix(runName, "gc-acceptance-b-"):
+		return []string{filepath.Join(namespace, "gc-acceptance-b-*", "runtime", "tmux")}
+	case strings.HasPrefix(runName, "gc-acceptance-"):
+		return []string{filepath.Join(namespace, "gc-acceptance-*", "runtime", "tmux")}
+	default:
+		return nil
+	}
 }

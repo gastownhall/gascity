@@ -3,27 +3,63 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// drainOpsWithCountdown wraps fakeDrainOps and returns false for isRestartRequested
+// after N calls, simulating the reconciler clearing the flag without concurrent map access.
+type drainOpsWithCountdown struct {
+	*fakeDrainOps
+	remaining int
+	cleared   bool
+}
+
+func (c *drainOpsWithCountdown) isRestartRequested(sessionName string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return false, c.err
+	}
+	if !c.restartRequested[sessionName] {
+		if c.cleared {
+			return false, nil
+		}
+		return false, errors.New("restart flag was not set before polling")
+	}
+	if c.remaining <= 0 {
+		delete(c.restartRequested, sessionName)
+		c.cleared = true
+		return false, nil
+	}
+	c.remaining--
+	return true, nil
+}
+
 // fakeDrainOps is a test double for drainOps.
 type fakeDrainOps struct {
+	mu               sync.Mutex
 	draining         map[string]bool
 	drainTimes       map[string]time.Time // when drain was set
 	acked            map[string]bool
 	restartRequested map[string]bool
 	driftRestart     map[string]bool
 	err              error // injected error for all ops
+	restartReadErr   error
 	setDrainCalls    []string
 	clearDrainCalls  []string
 }
@@ -38,7 +74,255 @@ func newFakeDrainOps() *fakeDrainOps {
 	}
 }
 
+func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
+	const socket = "bright-lights"
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`)
+	t.Setenv("FAKE_TMUX_ARGS", argsFile)
+
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"tmux",
+		config.SessionConfig{Socket: socket},
+		"city",
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	if err := newDrainOps(sp).clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake tmux args: %v", err)
+	}
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\nworker\n-u\nGC_RESTART_REQUESTED\n"
+	if string(got) != want {
+		t.Fatalf("tmux args = %q, want %q", got, want)
+	}
+}
+
+func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
+	if cityPath, sessionID, markerPath, ok := e2b2ProviderFailureHelperArgs(os.Args); ok {
+		runE2b2ProviderFailureHelper(t, cityPath, sessionID, markerPath)
+		return
+	}
+
+	cityPath, sessionID := writeE2b2ProviderFailureCity(t)
+	markerPath := filepath.Join(t.TempDir(), "returned-through-run")
+	cmd := exec.Command(
+		os.Args[0],
+		"-test.run=^TestE2b2ProviderConstructionFailuresReturnThroughRun$",
+		"--",
+		"e2b2-provider-failure-helper",
+		cityPath,
+		sessionID,
+		markerPath,
+	)
+	cmd.Dir = cityPath
+	cmd.Env = e2b2ProviderFailureChildEnv(
+		"GC_BEADS=file",
+		"GC_BEADS_SCOPE_ROOT=",
+		"GC_CITY="+cityPath,
+		"GC_CITY_PATH="+cityPath,
+		"GC_CEILING_DIRECTORIES="+filepath.Dir(cityPath),
+		"GC_HOME="+filepath.Join(filepath.Dir(cityPath), "gc-home"),
+		"GC_SESSION=broken",
+		"GC_ALIAS=worker",
+		"GC_AGENT=worker",
+		"GC_SESSION_ID="+sessionID,
+		"GC_SESSION_NAME=test-city--frontend--worker",
+		"GC_TMUX_SESSION=test-city--frontend--worker",
+	)
+	var processStdout, processStderr bytes.Buffer
+	cmd.Stdout = &processStdout
+	cmd.Stderr = &processStderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("provider failure helper did not return through run: %v; stdout=%q stderr=%q", err, processStdout.String(), processStderr.String())
+	}
+	marker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("run-return marker missing: %v", err)
+	}
+	if got, want := string(marker), "returned\n"; got != want {
+		t.Fatalf("run-return marker = %q, want %q", got, want)
+	}
+}
+
+func e2b2ProviderFailureHelperArgs(args []string) (string, string, string, bool) {
+	for index, arg := range args {
+		if arg == "--" && index+5 == len(args) && args[index+1] == "e2b2-provider-failure-helper" {
+			return args[index+2], args[index+3], args[index+4], true
+		}
+	}
+	return "", "", "", false
+}
+
+func e2b2ProviderFailureChildEnv(extra ...string) []string {
+	base := sanitizedBaseEnv(extra...)
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if strings.HasPrefix(entry, "OTEL_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "OTEL_SDK_DISABLED=true")
+}
+
+func writeE2b2ProviderFailureCity(t *testing.T) (string, string) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("create rig path: %v", err)
+	}
+	cityTOML := `[workspace]
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	writeCatalogFile(t, cityPath, ".gc/site.toml", fmt.Sprintf(`workspace_name = "test-city"
+
+[[rig]]
+name = "frontend"
+path = %q
+`, rigPath))
+	writeBuiltinImportsFixture(t, cityPath, "core")
+	writeCatalogFile(t, cityPath, "agents/worker/agent.toml", "dir = \"frontend\"\n")
+
+	store, err := openScopeLocalFileStore(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "runtime provider failure target",
+		Type:   sessionBeadType,
+		Labels: []string{"gc:session"},
+		Metadata: map[string]string{
+			"alias":        "worker",
+			"agent_name":   "frontend/worker",
+			"template":     "frontend/worker",
+			"session_name": "test-city--frontend--worker",
+			"state":        "awake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return cityPath, created.ID
+}
+
+func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath string) {
+	t.Helper()
+	defer func() {
+		if err := os.WriteFile(markerPath, []byte("returned\n"), 0o600); err != nil {
+			t.Errorf("write run-return marker: %v", err)
+		}
+	}()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+	t.Setenv("GC_CEILING_DIRECTORIES", filepath.Dir(cityPath))
+	t.Setenv("GC_SESSION", "broken")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	t.Setenv("GC_SESSION_NAME", "test-city--frontend--worker")
+	t.Setenv("GC_TMUX_SESSION", "test-city--frontend--worker")
+
+	oldBuild := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return nil, errors.New("injected provider failure")
+	}
+	defer func() { buildSessionProviderByName = oldBuild }()
+
+	const constructionFailure = "constructing session provider: injected provider failure"
+	tests := []struct {
+		name             string
+		args             []string
+		wantCommand      string
+		wantJSONCode     string
+		wantJSONMessage  string
+		wantJSONDiagCode string
+	}{
+		{name: "runtime drain text", args: []string{"--city", cityPath, "runtime", "drain", sessionID}, wantCommand: "gc runtime drain"},
+		{name: "runtime drain json", args: []string{"--city", cityPath, "runtime", "drain", sessionID, "--json"}, wantCommand: "gc runtime drain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime undrain text", args: []string{"--city", cityPath, "runtime", "undrain", sessionID}, wantCommand: "gc runtime undrain"},
+		{name: "runtime undrain json", args: []string{"--city", cityPath, "runtime", "undrain", sessionID, "--json"}, wantCommand: "gc runtime undrain", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check explicit text", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check explicit json", args: []string{"--city", cityPath, "runtime", "drain-check", sessionID, "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-check context text", args: []string{"--city", cityPath, "runtime", "drain-check"}, wantCommand: "gc runtime drain-check"},
+		{name: "runtime drain-check context json", args: []string{"--city", cityPath, "runtime", "drain-check", "--json"}, wantCommand: "gc runtime drain-check", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack explicit text", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
+		{name: "runtime drain-ack context json", args: []string{"--city", cityPath, "runtime", "drain-ack", "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart"},
+		{name: "rig status text", args: []string{"--city", cityPath, "rig", "status", "frontend"}, wantCommand: "gc rig status"},
+		{name: "rig status json", args: []string{"--city", cityPath, "rig", "status", "frontend", "--json"}, wantCommand: "gc rig status", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
+		{name: "city status text", args: []string{"--city", cityPath, "status"}, wantCommand: "gc status"},
+		{name: "city status json flag", args: []string{"--city", cityPath, "status", "--json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+		{name: "city status json format", args: []string{"--city", cityPath, "status", "--format=json"}, wantCommand: "gc status", wantJSONCode: "session_provider_failed", wantJSONMessage: "gc status: " + constructionFailure, wantJSONDiagCode: "session_provider_failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code != 1 {
+				t.Fatalf("run(%v) = %d, want 1; stdout=%q stderr=%q", tc.args, code, stdout.String(), stderr.String())
+			}
+
+			wantMessage := tc.wantCommand + ": " + constructionFailure
+			if tc.wantJSONCode == "" {
+				if got := stdout.String(); got != "" {
+					t.Fatalf("stdout = %q, want empty", got)
+				}
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+
+			var output cliJSONErrorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatalf("stdout is not a structured JSON failure: %v; stdout=%q", err, stdout.String())
+			}
+			if output.OK || output.Error.Code != tc.wantJSONCode || output.Error.ExitCode != 1 || output.Error.Message != tc.wantJSONMessage {
+				t.Fatalf("JSON failure = %#v, want code=%q message=%q exit_code=1", output, tc.wantJSONCode, tc.wantJSONMessage)
+			}
+			if tc.wantJSONDiagCode == "" {
+				if got, want := stderr.String(), wantMessage+"\n"; got != want {
+					t.Fatalf("stderr = %q, want %q", got, want)
+				}
+				return
+			}
+			var diagnostic cliJSONDiagnostic
+			if err := json.Unmarshal(stderr.Bytes(), &diagnostic); err != nil {
+				t.Fatalf("stderr is not a structured JSON diagnostic: %v; stderr=%q", err, stderr.String())
+			}
+			if diagnostic.Code != tc.wantJSONDiagCode || diagnostic.Message != tc.wantJSONMessage || diagnostic.ExitCode != 1 {
+				t.Fatalf("JSON diagnostic = %#v, want code=%q message=%q exit_code=1", diagnostic, tc.wantJSONDiagCode, tc.wantJSONMessage)
+			}
+		})
+	}
+}
+
 func (f *fakeDrainOps) setDrain(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setDrainCalls = append(f.setDrainCalls, sessionName)
 	if f.err != nil {
 		return f.err
@@ -49,6 +333,8 @@ func (f *fakeDrainOps) setDrain(sessionName string) error {
 }
 
 func (f *fakeDrainOps) clearDrain(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.clearDrainCalls = append(f.clearDrainCalls, sessionName)
 	if f.err != nil {
 		return f.err
@@ -59,6 +345,8 @@ func (f *fakeDrainOps) clearDrain(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDraining(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -66,6 +354,8 @@ func (f *fakeDrainOps) isDraining(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) drainStartTime(sessionName string) (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return time.Time{}, f.err
 	}
@@ -77,6 +367,8 @@ func (f *fakeDrainOps) drainStartTime(sessionName string) (time.Time, error) {
 }
 
 func (f *fakeDrainOps) setDrainAck(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -85,6 +377,8 @@ func (f *fakeDrainOps) setDrainAck(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDrainAcked(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -92,6 +386,8 @@ func (f *fakeDrainOps) isDrainAcked(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) setRestartRequested(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -100,13 +396,20 @@ func (f *fakeDrainOps) setRestartRequested(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isRestartRequested(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
+	}
+	if f.restartReadErr != nil {
+		return false, f.restartReadErr
 	}
 	return f.restartRequested[sessionName], nil
 }
 
 func (f *fakeDrainOps) clearRestartRequested(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -115,6 +418,8 @@ func (f *fakeDrainOps) clearRestartRequested(sessionName string) error {
 }
 
 func (f *fakeDrainOps) setDriftRestart(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -123,6 +428,8 @@ func (f *fakeDrainOps) setDriftRestart(sessionName string) error {
 }
 
 func (f *fakeDrainOps) isDriftRestart(sessionName string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return false, f.err
 	}
@@ -130,6 +437,8 @@ func (f *fakeDrainOps) isDriftRestart(sessionName string) (bool, error) {
 }
 
 func (f *fakeDrainOps) clearDriftRestart(sessionName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
 	}
@@ -150,7 +459,7 @@ func TestDoRuntimeDrain(t *testing.T) {
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, rec, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -173,7 +482,7 @@ func TestDoRuntimeDrainNotRunning(t *testing.T) {
 	sp := runtime.NewFake() // no sessions started
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
@@ -191,12 +500,36 @@ func TestDoRuntimeDrainSetError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeDrainJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrain(dops, sp, events.Discard, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime drain" || result.Session != "worker" || result.Status != "draining" {
+		t.Fatalf("unexpected JSON result: %+v", result)
 	}
 }
 
@@ -214,7 +547,7 @@ func TestDoRuntimeUndrain(t *testing.T) {
 
 	rec := events.NewFake()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeUndrain(dops, sp, rec, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeUndrain(dops, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -234,12 +567,37 @@ func TestDoRuntimeUndrainNotRunning(t *testing.T) {
 	sp := runtime.NewFake()
 
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime undrain: session \"worker\" is not running\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestDoRuntimeUndrainJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["worker"] = true
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeUndrain(dops, sp, events.Discard, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime undrain" || result.Session != "worker" || result.Status != "undrained" {
+		t.Fatalf("unexpected JSON result: %+v", result)
 	}
 }
 
@@ -251,7 +609,7 @@ func TestDoRuntimeDrainCheck(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.draining["worker"] = true
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 0 {
 		t.Errorf("code = %d, want 0 (draining)", code)
 	}
@@ -260,7 +618,7 @@ func TestDoRuntimeDrainCheck(t *testing.T) {
 func TestDoRuntimeDrainCheckNotDraining(t *testing.T) {
 	dops := newFakeDrainOps()
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 1 {
 		t.Errorf("code = %d, want 1 (not draining)", code)
 	}
@@ -270,10 +628,61 @@ func TestDoRuntimeDrainCheckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux gone")
 
-	code := doRuntimeDrainCheck(dops, "worker")
+	code := doRuntimeDrainCheck(dops, "worker", "worker", false, &bytes.Buffer{}, &bytes.Buffer{})
 	if code != 1 {
 		t.Errorf("code = %d, want 1 (error → not draining)", code)
 	}
+}
+
+func TestDoRuntimeDrainCheckJSON(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.draining["worker"] = true
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		!result.Draining ||
+		result.Session != "worker" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
+}
+
+func TestDoRuntimeDrainCheckJSONNotDrainingWritesFalseResult(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainCheck(dops, "worker", "worker", true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 for shell-condition false; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeDrainCheckJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" ||
+		!result.OK ||
+		result.Command != "runtime drain-check" ||
+		result.Draining ||
+		result.Session != "worker" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+	validateJSONAgainstResultSchema(t, []string{"runtime", "drain-check"}, stdout.Bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -281,16 +690,20 @@ func TestDoRuntimeDrainCheckError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDoRuntimeDrainAck(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if !dops.acked["worker"] {
 		t.Error("drain ack flag not set")
 	}
-	if got := stdout.String(); got != "Drain acknowledged. Controller will stop this session.\n" {
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
 		t.Errorf("stdout = %q", got)
 	}
 }
@@ -299,12 +712,115 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeDrainAck(dops, "worker", &stdout, &stderr)
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime drain-ack: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) {
+	err := joinDrainAckMutationErrors(
+		fmt.Errorf("setting metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+		fmt.Errorf("removing metadata on %q: %w", "gc-missing", beads.ErrNotFound),
+	)
+	if err != nil {
+		t.Fatalf("joinDrainAckMutationErrors(...) = %v, want nil for missing session bead", err)
+	}
+}
+
+func TestDoRuntimeDrainAckJSON(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "", "worker", "worker", true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var result runtimeActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if result.SchemaVersion != "1" || result.Command != "runtime drain-ack" || result.Session != "worker" || result.Status != "acknowledged" {
+		t.Fatalf("unexpected JSON result: %+v", result)
+	}
+}
+
+func TestDoRuntimeDrainAckPokesController(t *testing.T) {
+	var gotCityPath string
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(cityPath string) error {
+		calls++
+		gotCityPath = cityPath
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	// Distinct, non-overlapping cityPath/targetName/sn catch a transposition
+	// of the three adjacent string params in the new signature.
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "display-name", "session-name", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("poke called %d times, want 1", calls)
+	}
+	if gotCityPath != "/city/path" {
+		t.Errorf("poke cityPath = %q, want %q", gotCityPath, "/city/path")
+	}
+	if !dops.acked["session-name"] {
+		t.Error("drain ack flag not set")
+	}
+}
+
+func TestDoRuntimeDrainAckErrorDoesNotPoke(t *testing.T) {
+	calls := 0
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	dops.err = errors.New("tmux borked")
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if calls != 0 {
+		t.Fatalf("poke called %d times, want 0 (setDrainAck failed)", calls)
+	}
+}
+
+func TestDoRuntimeDrainAckPokeFailureWarns(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return errors.New("dial failed") }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	dops := newFakeDrainOps()
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, "/city/path", "worker", "worker", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (poke failure is best-effort)", code)
+	}
+	if got, want := stderr.String(), "gc runtime drain-ack: warning: poke failed: dial failed\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if !strings.Contains(stdout.String(), "Drain acknowledged.") {
+		t.Errorf("stdout = %q, want it to contain %q", stdout.String(), "Drain acknowledged.")
 	}
 }
 
@@ -377,6 +893,98 @@ func TestProviderDrainOpsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProviderDrainOpsReportsMetadataErrors(t *testing.T) {
+	sp := runtime.NewFailFake()
+	dops := newDrainOps(sp)
+
+	if _, err := dops.isDraining("worker"); err == nil {
+		t.Fatal("isDraining should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDrainAcked("worker"); err == nil {
+		t.Fatal("isDrainAcked should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isRestartRequested("worker"); err == nil {
+		t.Fatal("isRestartRequested should return an error when metadata lookup fails")
+	}
+	if _, err := dops.isDriftRestart("worker"); err == nil {
+		t.Fatal("isDriftRestart should return an error when metadata lookup fails")
+	}
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should return an error when metadata removal fails")
+	}
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should return an error when metadata removal fails")
+	}
+}
+
+type recordingMetaProvider struct {
+	*runtime.Fake
+	removeErr  error
+	removeKeys []string
+	setKeys    []string
+}
+
+func (p *recordingMetaProvider) RemoveMeta(name, key string) error {
+	p.removeKeys = append(p.removeKeys, key)
+	if p.removeErr != nil {
+		return p.removeErr
+	}
+	return p.Fake.RemoveMeta(name, key)
+}
+
+func (p *recordingMetaProvider) SetMeta(name, key, value string) error {
+	p.setKeys = append(p.setKeys, key)
+	return p.Fake.SetMeta(name, key, value)
+}
+
+func TestProviderDrainOpsClearDrainAttemptsAllMetadataRemovals(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.clearDrain("worker"); err == nil {
+		t.Fatal("clearDrain should report metadata removal errors")
+	}
+	want := []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+		"GC_DRAIN",
+	}
+	if !slices.Equal(sp.removeKeys, want) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, want)
+	}
+}
+
+func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) {
+	sp := &recordingMetaProvider{
+		Fake:      runtime.NewFake(),
+		removeErr: errors.New("metadata removal unavailable"),
+	}
+	dops := newDrainOps(sp)
+
+	if err := dops.setDrainAck("worker"); err == nil {
+		t.Fatal("setDrainAck should report metadata cleanup errors")
+	}
+	wantRemove := []string{
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	}
+	if !slices.Equal(sp.removeKeys, wantRemove) {
+		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
+	}
+	wantSet := []string{
+		reconcilerDrainAckSourceKey,
+		"GC_DRAIN_ACK",
+	}
+	if !slices.Equal(sp.setKeys, wantSet) {
+		t.Fatalf("set keys = %v, want %v", sp.setKeys, wantSet)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // doRuntimeRequestRestart tests
 // ---------------------------------------------------------------------------
@@ -385,12 +993,175 @@ func TestDoRuntimeRequestRestartError(t *testing.T) {
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, events.Discard, "worker", "worker", &stdout, &stderr)
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
+		time.Millisecond, time.Second, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if got := stderr.String(); got != "gc runtime request-restart: tmux borked\n" {
 		t.Errorf("stderr = %q", got)
+	}
+}
+
+// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
+// the gc runtime request-restart path: a pinned session (pin_awake ==
+// "true") is kill-protected by the reconciler unless an explicit controller
+// reset is persisted, so persistRestart is mandatory rather than best-effort
+// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
+func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		persistRestart func() error
+	}{
+		{name: "nil persistRestart"},
+		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dops := newFakeDrainOps()
+			rec := events.NewFake()
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), tc.persistRestart, true, rec, "mayor", "mayor",
+				10*time.Millisecond, time.Second, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Restart requested") {
+				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+			}
+		})
+	}
+}
+
+func TestDoRuntimeRequestRestartFlagCleared(t *testing.T) {
+	dops := &drainOpsWithCountdown{fakeDrainOps: newFakeDrainOps(), remaining: 2}
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
+		10*time.Millisecond, 5*time.Second, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Waiting up to 5s") {
+		t.Errorf("stdout = %q, want bounded wait banner", got)
+	}
+	if dops.restartRequested["worker"] {
+		t.Error("restart flag should be cleared by the simulated reconciler")
+	}
+}
+
+func TestDoRuntimeRequestRestartTimeout(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
+		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "controller did not act within") {
+		t.Errorf("stderr = %q, want timeout diagnostic", got)
+	}
+	if !strings.Contains(stderr.String(), "gc dashboard") {
+		t.Errorf("stderr = %q, want gc dashboard hint", stderr.String())
+	}
+}
+
+func TestDoRuntimeRequestRestartTimeoutReportsLastPollError(t *testing.T) {
+	dops := newFakeDrainOps()
+	dops.restartReadErr = errors.New("metadata read failed")
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeRequestRestart(context.Background(), dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
+		10*time.Millisecond, 25*time.Millisecond, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 on timeout", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "last poll error: metadata read failed") {
+		t.Errorf("stderr = %q, want last poll error", got)
+	}
+}
+
+func TestDoRuntimeRequestRestartContextCancel(t *testing.T) {
+	dops := newFakeDrainOps()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var stdout, stderr bytes.Buffer
+
+	done := make(chan int, 1)
+	go func() {
+		done <- doRuntimeRequestRestart(ctx, dops, runtime.NewFake(), nil, false, events.Discard, "worker", "worker",
+			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 on context cancel", code)
+		}
+		// Flag must remain set so the controller can still act on its next tick.
+		if !dops.restartRequested["worker"] {
+			t.Error("restart flag should remain set after context cancel")
+		}
+		if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
+			t.Errorf("stderr = %q, want pending restart warning", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+	}
+}
+
+func TestControllerRestartTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{name: "nil config uses floor", cfg: nil, want: 5 * time.Minute},
+		{name: "empty interval uses floor", cfg: &config.City{}, want: 5 * time.Minute},
+		{name: "below floor clamps up", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "15s"}}, want: 5 * time.Minute},
+		{name: "middle range uses multiplier", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "2m"}}, want: 10 * time.Minute},
+		{name: "ceiling edge", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "6m"}}, want: 30 * time.Minute},
+		{name: "above ceiling clamps down", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "10m"}}, want: 30 * time.Minute},
+		{name: "invalid duration uses default floor", cfg: &config.City{Daemon: config.DaemonConfig{PatrolInterval: "later"}}, want: 5 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := controllerRestartTimeout(tt.cfg); got != tt.want {
+				t.Fatalf("controllerRestartTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+type getMetaErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *getMetaErrorProvider) GetMeta(_, _ string) (string, error) {
+	return "", p.err
+}
+
+func TestProviderDrainOpsIsRestartRequestedTreatsGoneSessionAsCleared(t *testing.T) {
+	dops := newDrainOps(&getMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  runtime.ErrSessionNotFound,
+	})
+	requested, err := dops.isRestartRequested("worker")
+	if err != nil {
+		t.Fatalf("isRestartRequested returned gone-session error: %v", err)
+	}
+	if requested {
+		t.Fatal("isRestartRequested = true, want false for gone session")
 	}
 }
 
@@ -410,6 +1181,58 @@ func TestRequestRestartAcceptsNoArgs(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not in session context") {
 		t.Errorf("stderr = %q, want 'not in session context' error", stderr.String())
+	}
+}
+
+// TestDoRuntimeRequestRestartProceedsAndPendsOnCancel pins the restart-request
+// helper flow that every session — including named on-demand sessions — now
+// takes. PR #3994 removed the early "restart skipped for named session" gate
+// from cmdRuntimeRequestRestart, so doRuntimeRequestRestart is always reached:
+// it sets the restart flag, persists it through the worker boundary, and on a
+// context cancel exits 0 while leaving the request pending (never reporting a
+// skipped restart). The on-demand session's reconciler-side restart handling is
+// covered by session_reconciler_restart_request_test.go; this test exercises
+// the generic helper, not a configured named on-demand session fixture.
+func TestDoRuntimeRequestRestartProceedsAndPendsOnCancel(t *testing.T) {
+	dops := newFakeDrainOps()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var persistCalled bool
+	persistRestart := func() error { //nolint:unparam // test double must satisfy doRuntimeRequestRestart's func() error param; the spy never fails.
+		persistCalled = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- doRuntimeRequestRestart(ctx, dops, runtime.NewFake(), persistRestart, false, events.Discard, "mayor", "mayor",
+			10*time.Millisecond, 30*time.Second, &stdout, &stderr)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code = %d, want 0 on context cancel; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("doRuntimeRequestRestart did not exit on context cancel")
+	}
+	if !persistCalled {
+		t.Fatal("persistRestart was not called")
+	}
+	if !dops.restartRequested["mayor"] {
+		t.Fatal("restart request was not left set for named on-demand session")
+	}
+	if strings.Contains(stdout.String(), "Restart skipped for named session") {
+		t.Fatalf("stdout = %q, must not report a skipped restart", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "restart request remains set") {
+		t.Fatalf("stderr = %q, want pending restart warning", got)
 	}
 }
 
@@ -440,6 +1263,35 @@ func TestProviderDrainOpsRestartRequestedRoundTrip(t *testing.T) {
 	requested, _ = dops.isRestartRequested("worker")
 	if requested {
 		t.Error("should not be restart-requested after clear")
+	}
+}
+
+type removeMetaErrorProvider struct {
+	*runtime.Fake
+	err error
+}
+
+func (p *removeMetaErrorProvider) RemoveMeta(_, _ string) error {
+	return p.err
+}
+
+func TestProviderDrainOpsClearRestartRequestedTreatsSessionGoneAsBenign(t *testing.T) {
+	dops := newDrainOps(&removeMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  errors.New("no tmux server running"),
+	})
+	if err := dops.clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested returned gone-session error: %v", err)
+	}
+}
+
+func TestProviderDrainOpsClearRestartRequestedReturnsCleanupErrors(t *testing.T) {
+	dops := newDrainOps(&removeMetaErrorProvider{
+		Fake: runtime.NewFake(),
+		err:  errors.New("permission denied"),
+	})
+	if err := dops.clearRestartRequested("worker"); err == nil {
+		t.Fatal("clearRestartRequested should return non-gone cleanup errors")
 	}
 }
 
@@ -553,6 +1405,18 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 }
 
 func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
+	old := drainAckPokeController
+	drainAckPokeController = func(string) error { return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	// drain-ack now reads the city store to release any in_progress claim the
+	// session is still holding, so this bare temp city needs the same store
+	// guards its siblings in this file use — otherwise the read provisions a
+	// managed Dolt server the test never tears down.
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -622,8 +1486,10 @@ func TestResolveAgentIdentity(t *testing.T) {
 		// Pool instance negative (parsed as non-numeric due to dash).
 		{"pool instance worker--1", "worker--1", false, "", false, ""},
 
-		// Max=1 pool: the guard requires Max > 1, so {name}-1 does NOT match.
-		{"singleton-1 no match", "singleton-1", false, "", false, ""},
+		// Max=1 pool-shaped agents still run through pool reconciliation, but
+		// non-namepool singleton pools use the canonical configured identity.
+		// A numeric suffix would materialize a phantom concrete agent.
+		{"singleton-1 rejected for canonical max=1 pool", "singleton-1", false, "", false, ""},
 
 		// Nonexistent agent.
 		{"nonexistent", "nobody", false, "", false, ""},
@@ -641,9 +1507,9 @@ func TestResolveAgentIdentity(t *testing.T) {
 			if got.Name != tt.wantName {
 				t.Errorf("agent.Name = %q, want %q", got.Name, tt.wantName)
 			}
-			gotIsMulti := isMultiSessionCfgAgent(&got)
+			gotIsMulti := got.SupportsInstanceExpansion()
 			if gotIsMulti != tt.wantPool {
-				t.Errorf("isMultiSession = %v, want %v", gotIsMulti, tt.wantPool)
+				t.Errorf("supportsInstanceExpansion = %v, want %v", gotIsMulti, tt.wantPool)
 			}
 			if got.PoolName != tt.wantLabel {
 				t.Errorf("agent.PoolName = %q, want %q", got.PoolName, tt.wantLabel)
@@ -827,16 +1693,14 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 	}
 }
 
-func TestFindAgentByNameSingletonPoolNoMatch(t *testing.T) {
+func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
-	// Max=1 pools don't get instance suffixes.
-	_, ok := findAgentByName(cfg, "singleton-1")
-	if ok {
-		t.Error("singleton-1 should not match pool with max=1")
+	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
+		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
 	}
 }
 

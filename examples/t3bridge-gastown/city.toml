@@ -1,0 +1,42 @@
+# Minimal Gas Town city for testing the native T3 bridge provider.
+
+[workspace]
+name = "t3bridge-gastown"
+provider = "codex"
+
+[providers.codex]
+base = "builtin:codex"
+
+[session]
+provider = "t3bridge"
+startup_timeout = "2m"
+nudge_ready_timeout = "30s"
+
+[imports.t3demo]
+source = "packs/t3demo"
+
+[daemon]
+patrol_interval = "30s"
+max_restarts = 3
+restart_window = "1h"
+shutdown_timeout = "5s"
+formula_v2 = true
+
+[[rigs]]
+name = "example"
+path = "."
+
+[rigs.imports.t3demo]
+source = "packs/t3demo"
+
+# Builtin packs compose through explicit imports; the gc binary pre-seeds
+# these pinned versions offline from its embedded content. Pinning a
+# different commit fetches that commit from git like any remote import.
+# The builtin-pack-imports doctor check repairs missing entries.
+[imports.core]
+source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+
+[imports.bd]
+source = "https://github.com/gastownhall/gascity.git//examples/bd"
+version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,12 +13,14 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +35,125 @@ const (
 	waitStateExpired  = "expired"
 	waitStateFailed   = "failed"
 )
+
+type waitSetStateResult struct {
+	WaitID      string
+	ReadyWaitID string
+	Retried     bool
+	RetriedFrom string
+}
+
+type sessionWaitDeps struct {
+	sessions         *sessionpkg.Store
+	dependencies     waitDependencyReader
+	now              func() time.Time
+	createdBySession string
+	pokeController   func() error
+}
+
+type waitDependencyReader interface {
+	Get(string) (beads.Bead, error)
+}
+
+type waitDependencyReaderFunc func(string) (beads.Bead, error)
+
+func (f waitDependencyReaderFunc) Get(id string) (beads.Bead, error) {
+	return f(id)
+}
+
+// errWaitDependencyUnproven marks a dependency lookup that found nothing over a
+// frame narrower than the city. It is deliberately NOT beads.ErrNotFound:
+// prepareWaitWakeStateWithSnapshot FAILS a wait on a proved absence, which is
+// terminal and destructive, so "no leg could answer" must never arrive wearing
+// the same error as "this bead does not exist".
+var errWaitDependencyUnproven = errors.New("wait dependency absence not proved: no leg could answer")
+
+// waitDependencyPlanReader resolves a wait's dependency beads through the
+// residency resolver's BY-ID door, over a topology the caller captured once,
+// instead of over a store list assembled here.
+//
+// # Why ByID and not the work federation
+//
+// A wait dependency is read BY ID, and the binding leads for an id inside a
+// relocated class's reserved namespace: that is what makes a graph-class step a
+// wait can watch visible at all (#5488), and it is what stops the read landing
+// on the frozen pre-migration twin `gc storage migrate` left in the work ledger
+// when the id was minted before the cutover and preserved across it (ga-cu12x).
+// The list this replaced went through storeref.Resolve, whose PrefixOwner fast
+// path routes on the id's own prefix and therefore answered every such id from
+// the retained copy no matter which store the caller put first.
+//
+// Outside every reserved namespace the plan is the house by-id order — the
+// unretired binding residence probes, then the city work ledger, then the rig
+// legs whose configured prefix covers the id — so a co-resident id still answers
+// from the copy `gc ready` serves and the claim lands on.
+//
+// # The topology is captured, not re-derived
+//
+// Re-planning per dependency from a city path could open a second engine on a
+// binding root and answer from a different handle than the one the tick's other
+// reads used. The plan itself is per-id (a ByID plan is id-specific), but every
+// plan is cut from the one captured frame.
+type waitDependencyPlanReader struct {
+	topo storeref.Topology
+	// outOfFrame says what this frame leaves out of the city, or is empty when
+	// it leaves out nothing. A bead the frame cannot reach is out of FRAME, not
+	// out of the city, so a miss over it is not proof and must not fail a wait
+	// the whole city would satisfy.
+	outOfFrame string
+}
+
+// newWaitDependencyPlanReader captures the frame the dependency reads plan over,
+// and what that frame leaves out.
+func newWaitDependencyPlanReader(topo storeref.Topology, narrowedBySuspension bool) waitDependencyPlanReader {
+	return waitDependencyPlanReader{topo: topo, outOfFrame: waitFrameGap(topo, narrowedBySuspension)}
+}
+
+// waitFrameGap names every part of the city this frame cannot answer for.
+//
+// Two things put a store out of frame, and they arrive from opposite
+// directions. Suspension is TOLD to the constructor: the caller already dropped
+// the rig from the serving set, so the leg is simply not there. A prefix fault
+// is READ off the frame itself: the leg is there, and the by-id plan declines
+// to reach it because the prefix the city configured for that rig is not the
+// prefix its store declares (storeref.Topology.PrefixFaults).
+//
+// A rig leg the plan gates out on an AGREEING prefix is neither, and must not
+// be listed here. Gating on the configured prefix is how absence stays provable
+// at all: on any multi-rig city most legs are gated out of most by-id plans, so
+// a rule that called every one of them a gap would make "this dependency is
+// gone" unprovable and a wait on a genuinely deleted dependency would pend
+// forever.
+func waitFrameGap(topo storeref.Topology, narrowedBySuspension bool) string {
+	var gaps []string
+	if narrowedBySuspension {
+		gaps = append(gaps, "a suspended rig is out of frame")
+	}
+	for _, fault := range topo.PrefixFaults() {
+		gaps = append(gaps, fault.String())
+	}
+	return strings.Join(gaps, "; ")
+}
+
+// Get answers three ways, and keeping them distinct is the point of the type: a
+// hit, a PROVED absence (beads.ErrNotFound, which fails the wait), and an
+// unproved one (errWaitDependencyUnproven, which retains it).
+//
+// A read that FAILED is neither: it surfaces as itself. The resolver's by-id
+// plan makes every leg fatal, and a fault is never flattened into absence here
+// — the pass reports it and retries on the next tick rather than reaping a
+// waiter over a store it could not read.
+func (r waitDependencyPlanReader) Get(id string) (beads.Bead, error) {
+	bead, err := byIDBeadForTopology(r.topo, id)
+	switch {
+	case err == nil:
+		return bead, nil
+	case errors.Is(err, beads.ErrNotFound) && r.outOfFrame != "":
+		return beads.Bead{}, fmt.Errorf("%w: %s", errWaitDependencyUnproven, r.outOfFrame)
+	default:
+		return beads.Bead{}, err
+	}
+}
 
 func newWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -62,6 +184,7 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 			}
 			return nil
 		},
+		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringSliceVar(&depIDs, "on-beads", nil, "bead IDs to watch")
 	cmd.Flags().BoolVar(&matchAny, "any", false, "wake when any watched bead closes (default: all)")
@@ -73,11 +196,12 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 func newWaitListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var stateFilter string
 	var sessionFilter string
+	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List durable waits",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdWaitList(stateFilter, sessionFilter, stdout, stderr) != 0 {
+			if cmdWaitList(stateFilter, sessionFilter, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -85,49 +209,89 @@ func newWaitListCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&stateFilter, "state", "", "filter by wait state")
 	cmd.Flags().StringVar(&sessionFilter, "session", "", "filter by session ID")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
 	return cmd
 }
 
 func newWaitInspectCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "inspect <wait-id>",
 		Short: "Show details for a wait",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdWaitInspect(args[0], stdout, stderr) != 0 {
+			if cmdWaitInspect(args[0], jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	return cmd
 }
 
 func newWaitCancelCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "cancel <wait-id>",
 		Short: "Cancel a wait",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				result, code := cmdWaitSetStateResult(args[0], waitStateCanceled, io.Discard, stderr)
+				if code != 0 {
+					return errExit
+				}
+				return writeManagementActionJSON(stdout, managementActionResult{
+					Command: commandName("wait", "cancel"),
+					Action:  "cancel",
+					Name:    result.WaitID,
+					State:   waitStateCanceled,
+				})
+			}
 			if cmdWaitSetState(args[0], waitStateCanceled, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func newWaitReadyCmd(stdout, stderr io.Writer) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "ready <wait-id>",
 		Short: "Manually mark a wait ready",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
+			if jsonOutput {
+				result, code := cmdWaitSetStateResult(args[0], waitStateReady, io.Discard, stderr)
+				if code != 0 {
+					return errExit
+				}
+				payload := managementActionResult{
+					Command: commandName("wait", "ready"),
+					Action:  "ready",
+					Name:    result.WaitID,
+					State:   waitStateReady,
+				}
+				if result.Retried {
+					payload.Retried = managementBoolPtr(true)
+					payload.RetriedFrom = result.RetriedFrom
+					payload.ReadyWaitID = result.ReadyWaitID
+				}
+				return writeManagementActionJSON(stdout, payload)
+			}
 			if cmdWaitSetState(args[0], waitStateReady, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSONL format")
+	return cmd
 }
 
 func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer) int {
@@ -167,285 +331,669 @@ func cmdSessionWait(args, depIDs []string, matchAny bool, note string, sleep boo
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath)
+		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
+	// Route SESSION/wait access to the session coordination-class store; identity
+	// today (cfg nil / cityPath "" on resolve failure -> identity).
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessFront := sessionFrontDoor(sessStore)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	sb, err := store.Get(sessionID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session wait: %v\n", err) //nolint:errcheck
-		return 1
-	}
+	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, store, depID)
+	})
+	return doSessionWait(sessionID, depIDs, matchAny, note, sleep, stdout, stderr, sessionWaitDeps{
+		sessions:         sessFront,
+		dependencies:     dependencies,
+		now:              time.Now,
+		createdBySession: os.Getenv("GC_SESSION_ID"),
+		pokeController: func() error {
+			resolvedCityPath, err := resolveCity()
+			if err != nil {
+				return nil
+			}
+			return pokeController(resolvedCityPath)
+		},
+	})
+}
+
+func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string, sleep bool, stdout, stderr io.Writer, deps sessionWaitDeps) int {
 	for _, depID := range depIDs {
-		if _, err := store.Get(depID); err != nil {
+		if _, err := deps.dependencies.Get(depID); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: dependency %s: %v\n", depID, err) //nolint:errcheck
 			return 1
 		}
 	}
-	state := waitStatePending
-	now := time.Now().UTC()
-	meta := map[string]string{
-		"session_id":         sessionID,
-		"session_name":       sb.Metadata["session_name"],
-		"kind":               "deps",
-		"state":              state,
-		"dep_ids":            strings.Join(depIDs, ","),
-		"dep_mode":           "all",
-		"registered_epoch":   sb.Metadata["continuation_epoch"],
-		"delivery_attempt":   "1",
-		"created_by_session": os.Getenv("GC_SESSION_ID"),
-		"created_at":         now.Format(time.RFC3339),
-	}
+	depMode := "all"
 	if matchAny {
-		meta["dep_mode"] = "any"
+		depMode = "any"
 	}
-	waitBead, err := store.Create(beads.Bead{
-		Title:       "wait:" + sb.Title,
-		Type:        waitBeadType,
-		Description: note,
-		Labels: []string{
-			waitBeadLabel,
-			"session:" + sessionID,
-		},
-		Metadata: meta,
+	now := deps.now().UTC()
+	wait, err := deps.sessions.CreateWait(sessionpkg.WaitSpec{
+		SessionID:        sessionID,
+		Kind:             "deps",
+		DepIDs:           depIDs,
+		DepMode:          depMode,
+		Note:             note,
+		CreatedBySession: deps.createdBySession,
+		Now:              now,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wait: creating wait: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	ready, depErr := depsWaitReadyDetailed(store, waitBead)
+	ready, depErr := depsWaitReadyDetailedFrom(deps.dependencies, wait)
 	if depErr != nil {
-		_ = setWaitTerminalState(store, waitBead.ID, map[string]string{
-			"state":      waitStateFailed,
-			"failed_at":  now.Format(time.RFC3339),
-			"last_error": depErr.Error(),
-		})
+		if err := deps.sessions.FailWait(wait.ID, now, depErr.Error()); err != nil {
+			fmt.Fprintf(stderr, "gc session wait: setting failed state: %v\n", err) //nolint:errcheck
+		}
 		fmt.Fprintf(stderr, "gc session wait: dependency state check: %v\n", depErr) //nolint:errcheck
 		return 1
 	}
 	if ready {
-		if err := store.SetMetadataBatch(waitBead.ID, map[string]string{
-			"state":    waitStateReady,
-			"ready_at": now.Format(time.RFC3339),
-		}); err != nil {
+		if err := deps.sessions.MarkWaitReady(wait.ID, now); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting ready state: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		fmt.Fprintf(stdout, "Registered wait %s for session %s (already ready).\n", waitBead.ID, sessionID) //nolint:errcheck
+		fmt.Fprintf(stdout, "Registered wait %s for session %s (already ready).\n", wait.ID, sessionID) //nolint:errcheck
 		return 0
 	}
 	if sleep {
-		if err := store.SetMetadataBatch(sessionID, map[string]string{
+		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
 			"wait_hold":    "true",
 			"sleep_intent": "wait-hold",
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		if cityPath, err := resolveCity(); err == nil {
-			_ = pokeController(cityPath)
+		if err := deps.pokeController(); err != nil {
+			fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
+			return 1
 		}
-		fmt.Fprintf(stdout, "Registered wait %s for session %s.\nSession %s draining to sleep.\n", waitBead.ID, sessionID, sessionID) //nolint:errcheck
+		fmt.Fprintf(stdout, "Registered wait %s for session %s.\nSession %s draining to sleep.\n", wait.ID, sessionID, sessionID) //nolint:errcheck
 		return 0
 	}
-	fmt.Fprintf(stdout, "Registered wait %s for session %s.\n", waitBead.ID, sessionID) //nolint:errcheck
+	fmt.Fprintf(stdout, "Registered wait %s for session %s.\n", wait.ID, sessionID) //nolint:errcheck
 	return 0
 }
 
-func cmdWaitList(stateFilter, sessionFilter string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait list")
-	if store == nil {
-		return code
+func cmdWaitList(stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	return routeReadCmd("wait list", stderr, waitListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitList(cityPath, c, nilReason, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+	})
+}
+
+// waitListAPIClient is indirected so tests inject a client pointed at
+// httptest.Server (or force a specific fallback reason) without spinning
+// up a real controller.
+var waitListAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
 	}
-	items, err := loadWaitBeads(store)
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeWaitList dispatches `gc wait list` through the supervisor API when a
+// controller is up; otherwise falls back to the local store iterator. It is a
+// three-rung ladder: the typed /v0/waits endpoint (rung 1), the legacy
+// generic-beads leg when an old server lacks that route (rung 2), and the local
+// store leg for connection/cache errors (rung 3). Exactly one route=... line per
+// exit path (gated on GC_DEBUG).
+func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "wait list"
+	if c != nil {
+		cr, err := c.ListWaits(stateFilter, sessionFilter)
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			emitWaitListPartialNotice(stderr, cr.Body)
+			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+		}
+		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
+		// serve via the generic gc:wait beads endpoint instead.
+		if api.IsRouteMissing(err) {
+			lr, lerr := c.ListWaitsViaBeads()
+			if lerr == nil {
+				logRoute(stderr, cmdName, "api-legacy", "route-missing")
+				emitWaitListPartialNotice(stderr, lr.Body)
+				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+			}
+			err = lerr
+		}
+		if !api.ShouldFallbackForRead(c, err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+// emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr
+// without failing the command, matching the generic /beads partial contract: the
+// surviving rows still render, and the operator sees the degradation. The typed
+// /waits rung carries Partial/PartialErrors; the legacy generic-beads rung never
+// sets them, so this is a no-op there.
+func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
+	if !wl.Partial {
+		return
+	}
+	detail := strings.Join(wl.PartialErrors, "; ")
+	if detail == "" {
+		detail = "partial wait read"
+	}
+	fmt.Fprintf(stderr, "gc wait list: %s; showing partial results\n", detail) //nolint:errcheck
+}
+
+// renderWaitList applies the idempotent client-side stable ascending sort and
+// state/session filter over already-projected WaitInfo, so the typed rung, the
+// legacy rung, and the local fallback produce byte-identical output.
+func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	items := append([]sessionpkg.WaitInfo(nil), waits...)
+	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	filtered := filterWaitListItems(items, stateFilter, sessionFilter)
+	if jsonOutput {
+		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
+	}
+	writeWaitListTable(filtered, stdout)
+	if ageSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
+	}
+	return 0
+}
+
+func doWaitListFallback(cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait list: %v", err), 1)
+		}
+		fmt.Fprintf(stderr, "gc wait list: %v\n", err)                  //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
 		return 1
 	}
+	// Route SESSION/wait access to the session coordination-class store; identity today.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+	return doWaitListFromSessionStore(sessFront, cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+}
+
+func doWaitListFromSessionStore(sessFront *sessionpkg.Store, cityPath, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+	var (
+		items []sessionpkg.WaitInfo
+		err   error
+	)
+	if sessionFilter != "" {
+		items, err = sessFront.WaitsForSession(sessionFilter)
+	} else {
+		items, err = sessFront.ListWaits("", "")
+	}
+	if err != nil {
+		switch {
+		case isWaitLookupLimitError(err):
+			fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", err) //nolint:errcheck
+		case beads.IsPartialResult(err):
+			// The typed store folded the surviving rows through with a
+			// PartialResultError (mirrors the /waits handler and the generic /beads
+			// contract): show them and flag the degradation instead of dying.
+			fmt.Fprintf(stderr, "gc wait list: %v; showing partial results\n", err) //nolint:errcheck
+		default:
+			fmt.Fprintf(stderr, "gc wait list: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
+	filtered := filterWaitListItems(items, stateFilter, "")
+	if jsonOutput {
+		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
+	}
+	writeWaitListTable(filtered, stdout)
+	return 0
+}
+
+func filterWaitListItems(items []sessionpkg.WaitInfo, stateFilter, sessionFilter string) []sessionpkg.WaitInfo {
+	filtered := make([]sessionpkg.WaitInfo, 0, len(items))
+	for _, item := range items {
+		if stateFilter != "" && item.State != stateFilter {
+			continue
+		}
+		if sessionFilter != "" && item.SessionID != sessionFilter {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func writeWaitListTable(items []sessionpkg.WaitInfo, stdout io.Writer) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "WAIT\tSESSION\tSTATE\tKIND\tNOTE") //nolint:errcheck
 	for _, item := range items {
-		if stateFilter != "" && item.Metadata["state"] != stateFilter {
-			continue
-		}
-		if sessionFilter != "" && item.Metadata["session_id"] != sessionFilter {
-			continue
-		}
-		note := item.Description
+		note := item.Note
 		if note == "" {
 			note = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.ID, item.Metadata["session_id"], item.Metadata["state"], item.Metadata["kind"], note) //nolint:errcheck
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", item.ID, item.SessionID, item.State, item.Kind, note) //nolint:errcheck
 	}
 	_ = tw.Flush()
+}
+
+func cmdWaitInspect(waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	return routeReadCmd("wait inspect", stderr, waitInspectAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
+		return routeWaitInspect(cityPath, c, nilReason, waitID, jsonOutput, stdout, stderr)
+	})
+}
+
+var waitInspectAPIClient = func(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
+// routeWaitInspect dispatches `gc wait inspect <id>` through the supervisor
+// API and falls back to a direct store lookup otherwise. Three-rung ladder like
+// routeWaitList; a not-a-wait answer (from either the typed not_a_wait 404 or a
+// legacy IsWaitBead rejection) is definitive and never triggers a fallback.
+func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	const cmdName = "wait inspect"
+	if c != nil {
+		cr, err := c.GetWait(waitID)
+		if err == nil {
+			logRoute(stderr, cmdName, "api", "")
+			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, jsonOutput, stdout, stderr)
+		}
+		var naw *api.NotAWaitError
+		if errors.As(err, &naw) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+			return 1
+		}
+		if api.IsRouteMissing(err) {
+			lr, lerr := c.GetWaitViaBead(waitID)
+			if lerr == nil {
+				logRoute(stderr, cmdName, "api-legacy", "route-missing")
+				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, jsonOutput, stdout, stderr)
+			}
+			if errors.As(lerr, &naw) {
+				logRoute(stderr, cmdName, "api-legacy", "error")
+				fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+				return 1
+			}
+			err = lerr
+		}
+		if !api.ShouldFallbackForRead(c, err) {
+			logRoute(stderr, cmdName, "api", "error")
+			fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
+			return 1
+		}
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
+	} else {
+		logRoute(stderr, cmdName, "fallback", nilReason)
+	}
+	return doWaitInspectFallback(cityPath, waitID, jsonOutput, stdout, stderr)
+}
+
+func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
+	}
+	writeWaitDetail(wait, stdout)
+	if ageSeconds > cacheAgeBannerThresholdSeconds {
+		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
+	}
 	return 0
 }
 
-func cmdWaitInspect(waitID string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait inspect")
-	if store == nil {
-		return code
-	}
-	b, err := store.Get(waitID)
+func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, stderr io.Writer) int {
+	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
+		if jsonOutput {
+			return writeJSONError(stdout, stderr, "store_open_failed", fmt.Sprintf("gc wait inspect: %v", err), 1)
+		}
+		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err)               //nolint:errcheck
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck
+		return 1
+	}
+	// Route SESSION/wait access to the session coordination-class store; identity today.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+	wait, err := sessFront.GetWait(waitID)
+	if err != nil {
+		if errors.Is(err, sessionpkg.ErrNotAWait) {
+			fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc wait inspect: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait inspect: %s is not a wait\n", waitID) //nolint:errcheck
+	if jsonOutput {
+		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
+	}
+	writeWaitDetail(wait, stdout)
+	return 0
+}
+
+func writeWaitDetail(w sessionpkg.WaitInfo, stdout io.Writer) {
+	fmt.Fprintf(stdout, "Wait:       %s\n", w.ID)                                        //nolint:errcheck
+	fmt.Fprintf(stdout, "Session:    %s\n", w.SessionID)                                 //nolint:errcheck
+	fmt.Fprintf(stdout, "State:      %s\n", w.State)                                     //nolint:errcheck
+	fmt.Fprintf(stdout, "Kind:       %s\n", w.Kind)                                      //nolint:errcheck
+	fmt.Fprintf(stdout, "Deps:       %s (%s)\n", strings.Join(w.DepIDs, ","), w.DepMode) //nolint:errcheck
+	fmt.Fprintf(stdout, "Epoch:      %s\n", w.RegisteredEpoch)                           //nolint:errcheck
+	fmt.Fprintf(stdout, "Attempt:    %s\n", w.DeliveryAttempt)                           //nolint:errcheck
+	fmt.Fprintf(stdout, "Nudge:      %s\n", w.NudgeID)                                   //nolint:errcheck
+	fmt.Fprintf(stdout, "Note:       %s\n", w.Note)                                      //nolint:errcheck
+}
+
+type waitJSON struct {
+	ID              string   `json:"id"`
+	SessionID       string   `json:"session_id"`
+	SessionName     string   `json:"session_name,omitempty"`
+	State           string   `json:"state"`
+	Kind            string   `json:"kind"`
+	DepIDs          []string `json:"dep_ids,omitempty"`
+	DepMode         string   `json:"dep_mode,omitempty"`
+	RegisteredEpoch string   `json:"registered_epoch,omitempty"`
+	DeliveryAttempt string   `json:"delivery_attempt,omitempty"`
+	NudgeID         string   `json:"nudge_id,omitempty"`
+	Note            string   `json:"note,omitempty"`
+	Status          string   `json:"status"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+}
+
+type waitListJSONEnvelope struct {
+	SchemaVersion string     `json:"schema_version"`
+	CityPath      string     `json:"city_path"`
+	Waits         []waitJSON `json:"waits"`
+}
+
+type waitInspectJSONEnvelope struct {
+	SchemaVersion string   `json:"schema_version"`
+	CityPath      string   `json:"city_path"`
+	Wait          waitJSON `json:"wait"`
+}
+
+func waitJSONFromInfo(w sessionpkg.WaitInfo) waitJSON {
+	return waitJSON{
+		ID:              w.ID,
+		SessionID:       w.SessionID,
+		SessionName:     w.SessionName,
+		State:           w.State,
+		Kind:            w.Kind,
+		DepIDs:          w.DepIDs,
+		DepMode:         w.DepMode,
+		RegisteredEpoch: w.RegisteredEpoch,
+		DeliveryAttempt: w.DeliveryAttempt,
+		NudgeID:         w.NudgeID,
+		Note:            w.Note,
+		Status:          w.Status,
+		CreatedAt:       formatOptionalTime(w.CreatedAt),
+	}
+}
+
+func writeWaitListJSON(stdout, stderr io.Writer, cityPath string, waits []sessionpkg.WaitInfo) int {
+	rows := make([]waitJSON, 0, len(waits))
+	for _, wait := range waits {
+		rows = append(rows, waitJSONFromInfo(wait))
+	}
+	payload := waitListJSONEnvelope{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		Waits:         rows,
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		fmt.Fprintf(stderr, "gc wait list: encode JSON: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	fmt.Fprintf(stdout, "Wait:       %s\n", b.ID)                                               //nolint:errcheck
-	fmt.Fprintf(stdout, "Session:    %s\n", b.Metadata["session_id"])                           //nolint:errcheck
-	fmt.Fprintf(stdout, "State:      %s\n", b.Metadata["state"])                                //nolint:errcheck
-	fmt.Fprintf(stdout, "Kind:       %s\n", b.Metadata["kind"])                                 //nolint:errcheck
-	fmt.Fprintf(stdout, "Deps:       %s (%s)\n", b.Metadata["dep_ids"], b.Metadata["dep_mode"]) //nolint:errcheck
-	fmt.Fprintf(stdout, "Epoch:      %s\n", b.Metadata["registered_epoch"])                     //nolint:errcheck
-	fmt.Fprintf(stdout, "Attempt:    %s\n", b.Metadata["delivery_attempt"])                     //nolint:errcheck
-	fmt.Fprintf(stdout, "Nudge:      %s\n", b.Metadata["nudge_id"])                             //nolint:errcheck
-	fmt.Fprintf(stdout, "Note:       %s\n", b.Description)                                      //nolint:errcheck
+	return 0
+}
+
+func writeWaitInspectJSON(stdout, stderr io.Writer, cityPath string, wait sessionpkg.WaitInfo) int {
+	payload := waitInspectJSONEnvelope{
+		SchemaVersion: "1",
+		CityPath:      cityPath,
+		Wait:          waitJSONFromInfo(wait),
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		fmt.Fprintf(stderr, "gc wait inspect: encode JSON: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	return 0
 }
 
 func cmdWaitSetState(waitID, state string, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc wait")
+	_, code := cmdWaitSetStateResult(waitID, state, stdout, stderr)
+	return code
+}
+
+func cmdWaitSetStateResult(waitID, state string, stdout, stderr io.Writer) (waitSetStateResult, int) {
+	result := waitSetStateResult{WaitID: waitID}
+	store, cityPath, code := openCityStoreWithPath(stderr, "gc wait")
 	if store == nil {
-		return code
+		return result, code
 	}
-	b, err := store.Get(waitID)
+	// Route SESSION/wait access to the session coordination-class store and the
+	// nudge lookup to the nudges class store. Identity today; on a relocated city
+	// an unrouted nudge read is silent-empty, which re-delivers a nudge that was
+	// already delivered.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+	nudges := cliNudgesStore(store, cfg, cityPath)
+	w, err := sessFront.GetWait(waitID)
 	if err != nil {
+		if errors.Is(err, sessionpkg.ErrNotAWait) {
+			fmt.Fprintf(stderr, "gc wait: %s is not a wait\n", waitID) //nolint:errcheck
+			return result, 1
+		}
 		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-		return 1
-	}
-	if !sessionpkg.IsWaitBead(b) {
-		fmt.Fprintf(stderr, "gc wait: %s is not a wait\n", waitID) //nolint:errcheck
-		return 1
+		return result, 1
 	}
 	if state == waitStateReady {
 		if err := waitLifecycleEnabled(); err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if state == waitStateReady && b.Status == "closed" {
-		retried, err := retryClosedWait(store, b, now)
+	now := time.Now().UTC()
+	if state == waitStateReady && w.Status == "closed" {
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
+		}
+		retried, err := sessFront.RetryClosedWait(waitID, nextAttempt, now)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			return result, 1
 		}
 		fmt.Fprintf(stdout, "Retried wait %s as %s.\n", waitID, retried.ID) //nolint:errcheck
-		return 0
+		result.WaitID = retried.ID
+		result.ReadyWaitID = retried.ID
+		result.Retried = true
+		result.RetriedFrom = waitID
+		return result, 0
 	}
-	batch := map[string]string{"state": state}
 	switch state {
 	case waitStateReady:
-		batch["ready_at"] = now
-		nextAttempt, err := nextWaitDeliveryAttempt(store, b)
+		nextAttempt, err := nextWaitDeliveryAttempt(nudgeFrontDoor(nudges), w)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-			return 1
+			return result, 1
 		}
-		if nextAttempt != "" {
-			batch["delivery_attempt"] = nextAttempt
-			batch["nudge_id"] = ""
-			batch["commit_boundary"] = ""
-			batch["last_error"] = ""
-			batch["closed_at"] = ""
-			batch["failed_at"] = ""
-			batch["expired_at"] = ""
-			batch["canceled_at"] = ""
+		if err := sessFront.MarkWaitReadyForRedelivery(waitID, nextAttempt, now); err != nil {
+			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			return result, 1
 		}
 	case waitStateCanceled:
-		batch["canceled_at"] = now
-	}
-	apply := store.SetMetadataBatch
-	if state == waitStateCanceled {
-		apply = func(id string, kv map[string]string) error {
-			return setWaitTerminalState(store, id, kv)
+		if err := sessFront.CancelWait(waitID, now, ""); err != nil {
+			fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
+			return result, 1
 		}
-	}
-	if err := apply(waitID, batch); err != nil {
-		fmt.Fprintf(stderr, "gc wait: %v\n", err) //nolint:errcheck
-		return 1
 	}
 	if state == waitStateCanceled {
 		if cityPath, err := resolveCity(); err == nil {
-			if err := withdrawQueuedWaitNudges(cityPath, []string{b.Metadata["nudge_id"]}); err != nil {
+			if err := withdrawQueuedWaitNudges(cityPath, []string{w.NudgeID}); err != nil {
 				fmt.Fprintf(stderr, "gc wait: withdrawing queued nudge: %v\n", err) //nolint:errcheck
-				return 1
+				return result, 1
 			}
 		}
-		_ = clearSessionWaitHoldIfIdle(store, b.Metadata["session_id"])
+		if err := clearSessionWaitHoldIfIdle(sessFront, w.SessionID); err != nil {
+			fmt.Fprintf(stderr, "gc wait: clearing session wait hold: %v\n", err) //nolint:errcheck
+			return result, 1
+		}
 	}
 	fmt.Fprintf(stdout, "Updated wait %s to %s.\n", waitID, state) //nolint:errcheck
-	return 0
+	return result, 0
 }
 
-func loadWaitBeads(store beads.Store) ([]beads.Bead, error) {
-	if store == nil {
-		return nil, nil
+// readyWaitSetForList returns the set of session IDs that have a ready wait
+// nudge, keyed by session_id. It reads WAIT beads, which are session
+// coordination-class: gc:wait maps to coordclass.ClassSessions alongside the
+// session lifecycle beads (see internal/coordclass), so under a
+// [beads.classes.sessions] relocation `gc session list` reads them from the
+// session-class store. `gc session list` consumes it to surface a
+// "wait" wake reason.
+func readyWaitSetForList(sessFront *sessionpkg.Store) (map[string]bool, error) {
+	items, err := sessFront.ListWaits("", "")
+	ready := make(map[string]bool)
+	for _, item := range items {
+		if item.State != waitStateReady {
+			continue
+		}
+		if item.SessionID != "" {
+			ready[item.SessionID] = true
+		}
 	}
-	return loadWaitBeadsByLabel(store, waitBeadLabel)
+	return ready, err
 }
 
-func loadSessionWaitBeads(store beads.Store, sessionID string) ([]beads.Bead, error) {
-	if store == nil || sessionID == "" {
-		return nil, nil
+const waitLookupLimit = sessionpkg.SessionWaitLookupLimit
+
+func isWaitLookupLimitError(err error) bool {
+	return beads.IsLookupLimitError(err)
+}
+
+func stampWaitLookupCapDiagnostic(sessFront *sessionpkg.Store, sessionID string, err error, now time.Time, source string) {
+	if sessFront == nil || strings.TrimSpace(sessionID) == "" {
+		return
 	}
-	return loadWaitBeadsByLabel(store, "session:"+sessionID)
+	var limitErr beads.LookupLimitError
+	if !errors.As(err, &limitErr) {
+		return
+	}
+	label := limitErr.Label
+	if label == "" {
+		label = "session:" + sessionID
+	}
+	if source == "" {
+		source = "wait-lookup"
+	}
+	batch := map[string]string{}
+	sessionpkg.StampWaitLookupCapMetadata(batch, label, limitErr.Limit, now, source)
+	if err := sessFront.ApplyPatch(sessionID, batch); err != nil {
+		log.Printf("gc wait: recording lookup cap diagnostic for session %s failed: %v", sessionID, err)
+	}
 }
 
-func waitNudgeIDsForSession(store beads.Store, sessionID string) ([]string, error) {
-	return sessionpkg.WaitNudgeIDs(store, sessionID)
+func stampGlobalWaitLookupCapDiagnostics(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot, err error, now time.Time) {
+	for _, sessionInfo := range sessionBeads.OpenInfos() {
+		stampWaitLookupCapDiagnostic(sessFront, sessionInfo.ID, err, now, "wake-state-global")
+	}
 }
 
-func loadWaitBeadsByLabel(store beads.Store, label string) ([]beads.Bead, error) {
-	all, err := store.List(beads.ListQuery{Label: label})
+func loadWaitsForWakeState(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot) ([]sessionpkg.WaitInfo, error) {
+	// Open sessions get per-session coverage; waits tied only to closed
+	// sessions can fall outside the newest global capped window under
+	// saturation, with cap diagnostics as the operator signal.
+	waits, seen, err := loadWaitsForOpenSessionsWithSeen(sessFront, sessionBeads)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]beads.Bead, 0, len(all))
-	for _, item := range all {
-		if item.Status == "closed" {
-			continue
+	globalWaits, err := sessFront.ListWaits("", "")
+	if err != nil {
+		if !isWaitLookupLimitError(err) {
+			return nil, err
 		}
-		if !sessionpkg.IsWaitBead(item) {
-			continue
-		}
-		result = append(result, item)
+		stampGlobalWaitLookupCapDiagnostics(sessFront, sessionBeads, err, time.Now().UTC())
+		log.Printf("gc wait: global wake-state wait lookup failed; continuing with open-session waits: %v", err)
 	}
-	return result, nil
+	for _, wait := range globalWaits {
+		if seen[wait.ID] {
+			continue
+		}
+		seen[wait.ID] = true
+		waits = append(waits, wait)
+	}
+	return waits, nil
 }
 
-func depsWaitReady(store beads.Store, wait beads.Bead) bool {
+func loadWaitsForOpenSessions(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot) ([]sessionpkg.WaitInfo, error) {
+	waits, _, err := loadWaitsForOpenSessionsWithSeen(sessFront, sessionBeads)
+	return waits, err
+}
+
+func loadWaitsForOpenSessionsWithSeen(sessFront *sessionpkg.Store, sessionBeads *sessionBeadSnapshot) ([]sessionpkg.WaitInfo, map[string]bool, error) {
+	seen := map[string]bool{}
+	if !sessFront.Backed() || sessionBeads == nil {
+		return nil, seen, nil
+	}
+	waits := []sessionpkg.WaitInfo(nil)
+	for _, sessionInfo := range sessionBeads.OpenInfos() {
+		sessionWaits, err := sessFront.WaitsForSession(sessionInfo.ID)
+		if err != nil {
+			if !isWaitLookupLimitError(err) {
+				return nil, seen, err
+			}
+			stampWaitLookupCapDiagnostic(sessFront, sessionInfo.ID, err, time.Now().UTC(), "wake-state-session")
+			log.Printf("gc wait: session %s wait lookup capped; continuing with filtered partial waits: %v", sessionInfo.ID, err)
+		}
+		for _, wait := range sessionWaits {
+			if seen[wait.ID] {
+				continue
+			}
+			seen[wait.ID] = true
+			waits = append(waits, wait)
+		}
+	}
+	return waits, seen, nil
+}
+
+func depsWaitReady(store beads.Store, wait sessionpkg.WaitInfo) bool {
 	ready, err := depsWaitReadyDetailed(store, wait)
 	return err == nil && ready
 }
 
-func depsWaitReadyDetailed(store beads.Store, wait beads.Bead) (bool, error) {
-	rawDepIDs := strings.Split(wait.Metadata["dep_ids"], ",")
-	depIDs := make([]string, 0, len(rawDepIDs))
-	for _, depID := range rawDepIDs {
-		depID = strings.TrimSpace(depID)
-		if depID != "" {
-			depIDs = append(depIDs, depID)
-		}
-	}
+func depsWaitReadyDetailed(store beads.Store, wait sessionpkg.WaitInfo) (bool, error) {
+	return depsWaitReadyDetailedFrom(store, wait)
+}
+
+func depsWaitReadyDetailedFrom(dependencies waitDependencyReader, wait sessionpkg.WaitInfo) (bool, error) {
+	depIDs := wait.DepIDs
 	if len(depIDs) == 0 {
 		return false, nil
 	}
-	mode := wait.Metadata["dep_mode"]
+	mode := wait.DepMode
 	closedCount := 0
 	foundAny := false
 	var missingErr error
+	// An unproved absence can neither ready a wait nor fail one, so it is carried
+	// to the end: a later dependency may still answer the question outright.
+	var unprovenErr error
 	for _, depID := range depIDs {
-		dep, err := store.Get(depID)
+		dep, err := dependencies.Get(depID)
 		if err != nil {
+			if errors.Is(err, errWaitDependencyUnproven) {
+				if unprovenErr == nil {
+					unprovenErr = fmt.Errorf("dependency %s: %w", depID, err)
+				}
+				continue
+			}
 			if errors.Is(err, beads.ErrNotFound) {
 				if mode != "any" {
 					return false, fmt.Errorf("dependency %s: %w", depID, err)
@@ -465,6 +1013,12 @@ func depsWaitReadyDetailed(store beads.Store, wait beads.Bead) (bool, error) {
 			}
 		}
 	}
+	if unprovenErr != nil {
+		// Reported ahead of missingErr on purpose: if one dependency could not be
+		// read, "every dependency is missing" is not proved either, so the wait
+		// must pend rather than fail.
+		return false, unprovenErr
+	}
 	if mode == "any" {
 		if !foundAny && missingErr != nil {
 			return false, missingErr
@@ -474,89 +1028,167 @@ func depsWaitReadyDetailed(store beads.Store, wait beads.Bead) (bool, error) {
 	return closedCount == len(depIDs), nil
 }
 
-func retryableWaitMetadata(src map[string]string) map[string]string {
-	if src["kind"] != "deps" {
-		meta := make(map[string]string, len(src))
-		for key, value := range src {
-			if value == "" {
-				continue
+// loadWaitDependencyBead reads a wait's dependency on the ONE-SHOT plane.
+//
+// The binding is resolved FIRST, and the scan below is only what answers for an
+// id no binding holds. The scan's work axis is the city's store DIRECTORIES, and
+// a relocated class binding is not one of them — so before this leg went in
+// front, a dependency `gc storage migrate` had moved was not merely unrouted. The
+// scan answered, successfully, with the permanently-open copy the migration
+// retained in the city store, and a waiter on that dependency slept forever.
+//
+// Same defect the controller arm carried (waitDependencyPlanReader's
+// predecessor, ga-qdt5y.16), reached by a different code path; both arms now end
+// on the resolver.
+//
+// #5488 put a classBindingForID probe here first, which closed the blindness but
+// restated the judgement: its own class-leads rule, its own refusal arm, and a
+// second Get of a row the probe had already read. cliByIDBindingOwner is the
+// same question asked of storeref — the binding leads for an id inside its
+// reserved namespace, every unretired binding is a residence probe for an id
+// inside none, a refusal is classified by the leg's role, and beadForOwner
+// consumes the row the winning probe already paid for.
+func loadWaitDependencyBead(cityPath string, cityStore beads.Store, depID string) (beads.Bead, error) {
+	if strings.TrimSpace(cityPath) == "" {
+		if cityStore == nil {
+			return beads.Bead{}, beads.ErrNotFound
+		}
+		return cityStore.Get(depID)
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, depID)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if ownedByBinding {
+		return beadForOwner(owner, depID)
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	cityRoot := filepath.Clean(cityPath)
+	for _, scopeRoot := range convoyStoreCandidates(cfg, cityPath, depID) {
+		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
+		if scopeRoot == cityRoot && cityStore != nil {
+			dep, err := cityStore.Get(depID)
+			if err == nil {
+				return dep, nil
 			}
-			meta[key] = value
+			if !errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, err
+			}
+			continue
 		}
-		return meta
-	}
-	keys := []string{
-		"session_id",
-		"session_name",
-		"kind",
-		"dep_ids",
-		"dep_mode",
-		"registered_epoch",
-		"created_by_session",
-		"expires_at",
-	}
-	meta := make(map[string]string, len(keys)+8)
-	for _, key := range keys {
-		if value := src[key]; value != "" {
-			meta[key] = value
+		scopeStore, err := openStoreAtForCity(scopeRoot, cityPath)
+		if err != nil {
+			continue
+		}
+		dep, err := scopeStore.Get(depID)
+		if err == nil {
+			return dep, nil
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, err
 		}
 	}
-	return meta
+	return beads.Bead{}, beads.ErrNotFound
 }
 
 func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, error) {
-	waits, err := loadWaitBeads(store)
+	return prepareWaitWakeStateForCity("", store, now)
+}
+
+func prepareWaitWakeStateForCity(cityPath string, store beads.Store, now time.Time) (map[string]bool, error) {
+	// Single-store wrapper: fan the one work store into every class param so the
+	// ~22 existing test call sites stay untouched. Route the session arm through
+	// the session coordination-class store (via cliSessionFrontDoor) so a
+	// [beads.classes.sessions] relocation reaches it; identity to the work store
+	// today.
+	var cfg *config.City
+	if strings.TrimSpace(cityPath) != "" {
+		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	}
+	dependencies := waitDependencyReaderFunc(func(depID string) (beads.Bead, error) {
+		return loadWaitDependencyBead(cityPath, store, depID)
+	})
+	return prepareWaitWakeStateWithSnapshot(cliSessionFrontDoor(store, cfg, cityPath), dependencies, cliNudgesStore(store, cfg, cityPath), now, nil)
+}
+
+func prepareWaitWakeStateWithSnapshot(sessFront *sessionpkg.Store, dependencies waitDependencyReader, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) (map[string]bool, error) {
+	if sessionBeads == nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
+		if err != nil {
+			return nil, err
+		}
+	}
+	waits, err := loadWaitsForWakeState(sessFront, sessionBeads)
 	if err != nil {
 		return nil, err
 	}
 	readyWaitSet := make(map[string]bool)
 	for _, wait := range waits {
-		state := wait.Metadata["state"]
-		sessionID := wait.Metadata["session_id"]
+		state := wait.State
+		sessionID := wait.SessionID
 		if sessionID == "" {
 			continue
 		}
 		if isWaitTerminal(state) {
 			continue
 		}
-		sessionBead, err := store.Get(sessionID)
-		if err != nil {
-			continue
-		}
-		if epoch := wait.Metadata["registered_epoch"]; epoch != "" && sessionBead.Metadata["continuation_epoch"] != "" && epoch != sessionBead.Metadata["continuation_epoch"] {
-			if err := setWaitTerminalState(store, wait.ID, map[string]string{
-				"state":       waitStateCanceled,
-				"canceled_at": now.UTC().Format(time.RFC3339),
-				"last_error":  "continuation-stale",
-			}); err != nil {
-				return nil, err
-			}
-			if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if expiresAt := wait.Metadata["expires_at"]; expiresAt != "" {
-			if ts, err := time.Parse(time.RFC3339, expiresAt); err == nil && !ts.After(now) {
-				if err := setWaitTerminalState(store, wait.ID, map[string]string{
-					"state":      waitStateExpired,
-					"expired_at": now.UTC().Format(time.RFC3339),
-				}); err != nil {
+		sessionInfo, ok := sessionBeads.FindInfoByID(sessionID)
+		if !ok {
+			if wait.RegisteredEpoch != "" {
+				var found bool
+				sessionInfo, found, err = lookupSessionBeadByIDInfo(sessFront, sessionID)
+				if err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
+				if !found {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if epoch := wait.RegisteredEpoch; epoch != "" && sessionInfo.ContinuationEpoch != "" && epoch != sessionInfo.ContinuationEpoch {
+			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
+				return nil, err
+			}
+			if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if sessionInfo.Closed {
+			if err := sessFront.CancelWait(wait.ID, now, "session-closed"); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if expiresAt := wait.ExpiresAt; expiresAt != "" {
+			if ts, err := time.Parse(time.RFC3339, expiresAt); err == nil && !ts.After(now) {
+				if err := sessFront.ExpireWait(wait.ID, now); err != nil {
+					return nil, err
+				}
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
 			}
 		}
 		if state == waitStateReady {
-			done, err := finalizeReadyWaitFromNudge(store, wait, now)
+			// Wait-nudge shadow lookup rides the nudges class; the wait bead
+			// itself is session-class. Route each to its own store; identity today.
+			done, err := finalizeReadyWaitFromNudge(sessFront, nudges, wait, now)
 			if err != nil {
 				return nil, err
 			}
 			if done {
-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
@@ -564,20 +1196,26 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 			readyWaitSet[sessionID] = true
 			continue
 		}
-		if wait.Metadata["kind"] != "deps" {
+		if wait.Kind != "deps" {
 			continue
 		}
-		ready, depErr := depsWaitReadyDetailed(store, wait)
+		// The wait bead is session-class; its dependencies can be any class or
+		// scope, so resolution is the caller's, through the legs it assembled.
+		ready, depErr := depsWaitReadyDetailedFrom(dependencies, wait)
 		if depErr != nil {
+			if errors.Is(depErr, errWaitDependencyUnproven) {
+				// Retain THIS wait and keep going. The frame is narrower than the
+				// city — a suspended rig is out of it, and so is a rig whose store
+				// declares a prefix its config does not — so a miss over that frame
+				// is not the proof this pass reaps a waiter on.
+				log.Printf("gc wait: wait %s: %v; retaining the wait for the next pass", wait.ID, depErr)
+				continue
+			}
 			if errors.Is(depErr, beads.ErrNotFound) {
-				if err := setWaitTerminalState(store, wait.ID, map[string]string{
-					"state":      waitStateFailed,
-					"failed_at":  now.UTC().Format(time.RFC3339),
-					"last_error": depErr.Error(),
-				}); err != nil {
+				if err := sessFront.FailWait(wait.ID, now, depErr.Error()); err != nil {
 					return nil, err
 				}
-				if err := clearSessionWaitHoldIfIdle(store, sessionID); err != nil {
+				if err := clearSessionWaitHoldIfIdle(sessFront, sessionID); err != nil {
 					return nil, err
 				}
 				continue
@@ -585,10 +1223,7 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 			return nil, depErr
 		}
 		if ready {
-			if err := store.SetMetadataBatch(wait.ID, map[string]string{
-				"state":    waitStateReady,
-				"ready_at": now.UTC().Format(time.RFC3339),
-			}); err != nil {
+			if err := sessFront.MarkWaitReady(wait.ID, now); err != nil {
 				return nil, err
 			}
 			readyWaitSet[sessionID] = true
@@ -597,124 +1232,180 @@ func prepareWaitWakeState(store beads.Store, now time.Time) (map[string]bool, er
 	return readyWaitSet, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
-	waits, err := loadWaitBeads(store)
+// lookupSessionBeadByIDInfo is the wait-diagnostic fallback that reads a single
+// session bead by ID (when it is absent from the snapshot) through the typed
+// session front door. It preserves the pre-front-door (Info{}, false, nil)
+// not-found contract: a missing bead or a non-session bead is reported as
+// "not found, no error", and only a genuine store failure surfaces as an error.
+func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionpkg.Info, bool, error) {
+	if sessFront == nil || strings.TrimSpace(id) == "" {
+		return sessionpkg.Info{}, false, nil
+	}
+	info, err := sessFront.Get(id)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) || errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return sessionpkg.Info{}, false, nil
+		}
+		return sessionpkg.Info{}, false, err
+	}
+	return info, true, nil
+}
+
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
+	// Single-store wrapper: fan the one work store into the session and nudges
+	// class params so existing test call sites stay untouched. Both arms route
+	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
+	// so a [beads.classes.*] relocation reaches them; identity to the work store
+	// today.
+	var cfg *config.City
+	if strings.TrimSpace(cityPath) != "" {
+		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	}
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
+}
+
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+	if sessionBeads == nil {
+		var err error
+		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
+		if err != nil {
+			return err
+		}
+	}
+	waits, err := loadWaitsForOpenSessions(sessFront, sessionBeads)
 	if err != nil {
 		return err
 	}
 	for _, wait := range waits {
-		if wait.Metadata["state"] != waitStateReady {
+		if wait.State != waitStateReady {
 			continue
 		}
-		sessionID := wait.Metadata["session_id"]
+		sessionID := wait.SessionID
 		if sessionID == "" {
 			continue
 		}
-		sessionBead, err := store.Get(sessionID)
-		if err != nil {
+		sessionInfo, ok := sessionBeads.FindInfoByID(sessionID)
+		if !ok {
 			continue
 		}
-		if !sp.IsRunning(sessionBead.Metadata["session_name"]) {
+		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
 			continue
 		}
-		if _, ok, err := findQueuedNudgeBead(store, nudgeID); err == nil && ok {
+		_, ok, err := nudgeFrontDoor(nudges).Find(nudgeID)
+		if err != nil {
+			if beads.IsLookupLimitError(err) {
+				stampWaitLookupCapDiagnostic(sessFront, sessionID, err, now, "ready-wait-nudge")
+				continue
+			}
+			return err
+		}
+		if ok {
 			continue
 		}
-		message := strings.TrimSpace(wait.Description)
+		message := strings.TrimSpace(wait.Note)
 		if message == "" {
 			message = "Wait satisfied."
 		}
 		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
-		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionBead), message, "wait", now, queuedNudgeOptions{
+		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
 			ID:                nudgeID,
 			SessionID:         sessionID,
-			ContinuationEpoch: wait.Metadata["registered_epoch"],
+			ContinuationEpoch: wait.RegisteredEpoch,
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
 		})
-		if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {
 			return err
 		}
-		_ = store.SetMetadata(wait.ID, "nudge_id", nudgeID)
-		kind := sessionBead.Metadata["provider_kind"]
-		if kind == "" {
-			kind = sessionBead.Metadata["provider"]
+		if err := sessFront.SetWaitNudgeID(wait.ID, nudgeID); err != nil {
+			return fmt.Errorf("setting wait nudge_id: %w", err)
 		}
-		if kind == "codex" {
-			_ = startNudgePoller(cityPath, waitNudgeAgent(sessionBead), sessionBead.Metadata["session_name"])
+		// provider_kind is stamped from ResolvedProvider.Kind /
+		// BuiltinAncestor at session-bead creation, so wrapped aliases
+		// already surface as their built-in family here. The provider
+		// fallback covers sessions created before provider_kind was stamped.
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) {
+			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
+				return fmt.Errorf("starting wait nudge poller: %w", err)
+			}
 		}
 	}
 	return nil
 }
 
-func finalizeReadyWaitFromNudge(store beads.Store, wait beads.Bead, now time.Time) (bool, error) {
-	nudgeID := wait.Metadata["nudge_id"]
+func waitNudgeProviderNeedsPoller(info sessionpkg.Info) bool {
+	switch sessionProviderFamily(info) {
+	case "codex", "pi":
+		return true
+	default:
+		return false
+	}
+}
+
+func cachedSessionCanReceiveWaitNudge(info sessionpkg.Info) bool {
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case "", sessionpkg.StateActive, sessionpkg.StateAwake:
+		return true
+	default:
+		return false
+	}
+}
+
+// finalizeReadyWaitFromNudge closes a ready wait once its shadow nudge reaches a
+// terminal state. sessFront is the session coordination-class front door for the
+// wait bead and cap-diagnostic stamp; nudges is the nudges-class store for the
+// shadow nudge lookup. Identity today (both wrap the same work store).
+func finalizeReadyWaitFromNudge(sessFront *sessionpkg.Store, nudges beads.NudgesStore, wait sessionpkg.WaitInfo, now time.Time) (bool, error) {
+	nudgeID := wait.NudgeID
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
 	if nudgeID == "" {
 		return false, nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
-	if err != nil || !ok {
+	nudge, ok, err := nudgeFrontDoor(nudges).FindIncludingTerminal(nudgeID)
+	if err != nil {
+		if beads.IsLookupLimitError(err) {
+			stampWaitLookupCapDiagnostic(sessFront, wait.SessionID, err, now, "ready-wait-finalize-nudge")
+			return false, nil
+		}
 		return false, err
 	}
-	switch nudge.Metadata["state"] {
+	if !ok {
+		return false, err
+	}
+	switch nudge.State {
 	case "injected", "accepted_for_injection":
-		return true, setWaitTerminalState(store, wait.ID, map[string]string{
-			"state":           waitStateClosed,
-			"closed_at":       now.UTC().Format(time.RFC3339),
-			"nudge_id":        nudgeID,
-			"commit_boundary": nudge.Metadata["commit_boundary"],
-		})
+		return true, sessFront.CloseWaitFromNudge(wait.ID, now, nudgeID, nudge.CommitBoundary)
 	case "expired", "failed":
-		return true, setWaitTerminalState(store, wait.ID, map[string]string{
-			"state":           waitStateFailed,
-			"failed_at":       now.UTC().Format(time.RFC3339),
-			"nudge_id":        nudgeID,
-			"last_error":      nudge.Metadata["terminal_reason"],
-			"commit_boundary": nudge.Metadata["commit_boundary"],
-		})
+		return true, sessFront.FailWaitFromNudge(wait.ID, now, nudgeID, nudge.TerminalReason, nudge.CommitBoundary)
 	default:
 		return false, nil
 	}
 }
 
-func cancelWaitsForSession(store beads.Store, sessionID string) error {
-	if store == nil || sessionID == "" {
+func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error {
+	if !sessFront.Backed() || sessionID == "" {
 		return nil
 	}
-	waits, err := loadSessionWaitBeads(store, sessionID)
+	nudgeIDs, _, err := sessFront.CancelWaits(sessionID, time.Now().UTC())
 	if err != nil {
-		return err
-	}
-	nudgeIDs := make([]string, 0, len(waits))
-	for _, wait := range waits {
-		if wait.Metadata["session_id"] != sessionID {
-			continue
+		if !isWaitLookupLimitError(err) {
+			return err
 		}
-		if isWaitTerminal(wait.Metadata["state"]) {
-			continue
-		}
-		if nudgeID := wait.Metadata["nudge_id"]; nudgeID != "" {
-			nudgeIDs = append(nudgeIDs, nudgeID)
-		}
-	}
-	if err := sessionpkg.CancelWaits(store, sessionID, time.Now().UTC()); err != nil {
-		return err
 	}
 	if cityPath, err := resolveCity(); err == nil {
 		if err := withdrawQueuedWaitNudges(cityPath, nudgeIDs); err != nil {
 			return err
 		}
 	}
-	return nil
+	return err
 }
 
-func clearSessionWaitHold(store beads.Store, sessionID string) error {
+func clearSessionWaitHold(sessFront *sessionpkg.Store, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -722,37 +1413,39 @@ func clearSessionWaitHold(store beads.Store, sessionID string) error {
 		"wait_hold":    "",
 		"sleep_intent": "",
 	}
-	if store != nil {
-		if sessionBead, err := store.Get(sessionID); err == nil && sessionBead.Metadata["sleep_reason"] == "wait-hold" {
+	if sessFront != nil {
+		if markers, err := sessFront.PersistedMarkers(sessionID); err == nil && markers.SleepReason == string(sessionpkg.SleepReasonWaitHold) {
 			batch["sleep_reason"] = ""
 		}
 	}
-	return store.SetMetadataBatch(sessionID, batch)
+	return sessFront.ApplyPatch(sessionID, batch)
 }
 
-func clearSessionWaitHoldIfIdle(store beads.Store, sessionID string) error {
-	hasWaits, err := hasNonTerminalWaits(store, sessionID)
+func clearSessionWaitHoldIfIdle(sessFront *sessionpkg.Store, sessionID string) error {
+	hasWaits, err := hasNonTerminalWaits(sessFront, sessionID)
 	if err != nil {
 		return err
 	}
 	if hasWaits {
 		return nil
 	}
-	return clearSessionWaitHold(store, sessionID)
+	return clearSessionWaitHold(sessFront, sessionID)
 }
 
-func hasNonTerminalWaits(store beads.Store, sessionID string) (bool, error) {
-	waits, err := loadWaitBeads(store)
-	if err != nil {
+func hasNonTerminalWaits(sessFront *sessionpkg.Store, sessionID string) (bool, error) {
+	waits, err := sessFront.WaitsForSession(sessionID)
+	if err != nil && !isWaitLookupLimitError(err) {
 		return false, err
 	}
+	capped := err != nil
 	for _, wait := range waits {
-		if wait.Metadata["session_id"] != sessionID {
-			continue
-		}
-		if !isWaitTerminal(wait.Metadata["state"]) {
+		if !isWaitTerminal(wait.State) {
 			return true, nil
 		}
+	}
+	if capped {
+		log.Printf("gc wait: session %s wait-hold lookup capped; preserving wait hold: %v", sessionID, err)
+		return true, nil
 	}
 	return false, nil
 }
@@ -761,112 +1454,64 @@ func isWaitTerminal(state string) bool {
 	return sessionpkg.IsWaitTerminalState(state)
 }
 
-func waitNudgeID(wait beads.Bead) string {
-	attempt := wait.Metadata["delivery_attempt"]
+func waitNudgeID(wait sessionpkg.WaitInfo) string {
+	attempt := wait.DeliveryAttempt
 	if attempt == "" {
 		attempt = "1"
 	}
-	epoch := wait.Metadata["registered_epoch"]
+	epoch := wait.RegisteredEpoch
 	if epoch == "" {
 		epoch = "0"
 	}
 	return "wait-" + strings.ReplaceAll(wait.ID, "/", "-") + "-" + epoch + "-" + attempt
 }
 
-func waitNudgeAgent(sessionBead beads.Bead) string {
-	if agent := sessionBead.Metadata["agent_name"]; agent != "" {
-		return agent
+func waitNudgeAgent(info sessionpkg.Info) string {
+	if info.AgentName != "" {
+		return info.AgentName
 	}
-	return sessionBead.Metadata["template"]
+	return info.Template
 }
 
-func setWaitTerminalState(store beads.Store, waitID string, batch map[string]string) error {
-	if err := store.SetMetadataBatch(waitID, batch); err != nil {
-		return err
-	}
-	return store.Close(waitID)
+func waitNudgePollerKey(info sessionpkg.Info) string {
+	return sessionpkg.PollerKeyFromInfo(info)
 }
 
-func retryClosedWait(store beads.Store, wait beads.Bead, now string) (beads.Bead, error) {
-	nextAttempt, err := nextWaitDeliveryAttempt(store, wait)
-	if err != nil {
-		return beads.Bead{}, err
-	}
-	if nextAttempt == "" {
-		nextAttempt = wait.Metadata["delivery_attempt"]
-		if nextAttempt == "" {
-			nextAttempt = "1"
-		}
-	}
-	meta := retryableWaitMetadata(wait.Metadata)
-	meta["state"] = waitStateReady
-	meta["ready_at"] = now
-	meta["delivery_attempt"] = nextAttempt
-	meta["nudge_id"] = ""
-	meta["commit_boundary"] = ""
-	meta["last_error"] = ""
-	meta["closed_at"] = ""
-	meta["failed_at"] = ""
-	meta["expired_at"] = ""
-	meta["canceled_at"] = ""
-	meta["created_at"] = now
-	meta["retried_from_wait"] = wait.ID
-	if sessionID := wait.Metadata["session_id"]; sessionID != "" && store != nil {
-		if sessionBead, err := store.Get(sessionID); err == nil {
-			if epoch := sessionBead.Metadata["continuation_epoch"]; epoch != "" {
-				meta["registered_epoch"] = epoch
-			}
-			if meta["session_name"] == "" {
-				meta["session_name"] = sessionBead.Metadata["session_name"]
-			}
-		}
-	}
-	return store.Create(beads.Bead{
-		Title:       wait.Title,
-		Type:        wait.Type,
-		Description: wait.Description,
-		Labels:      append([]string(nil), wait.Labels...),
-		Metadata:    meta,
-	})
+// sessionProviderFamily returns the built-in provider family for a session,
+// resolving the precedence ladder (builtin_ancestor → provider_kind → provider)
+// off the typed Info.
+func sessionProviderFamily(info sessionpkg.Info) string {
+	return sessionpkg.ProviderFamilyFromInfo(info, "")
 }
 
-func nextWaitDeliveryAttempt(store beads.Store, wait beads.Bead) (string, error) {
-	state := wait.Metadata["state"]
+func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) (string, error) {
+	state := wait.State
 	if state == waitStatePending || state == waitStateReady {
 		return "", nil
 	}
-	attempt, err := strconv.Atoi(wait.Metadata["delivery_attempt"])
+	attempt, err := strconv.Atoi(wait.DeliveryAttempt)
 	if err != nil || attempt <= 0 {
 		attempt = 1
 	}
-	nudgeID := wait.Metadata["nudge_id"]
+	nudgeID := wait.NudgeID
 	if nudgeID == "" {
 		nudgeID = waitNudgeID(wait)
 	}
-	if nudgeID == "" || store == nil {
+	if nudgeID == "" || front == nil {
 		return strconv.Itoa(attempt + 1), nil
 	}
-	nudge, ok, err := findAnyQueuedNudgeBead(store, nudgeID)
+	nudge, ok, err := front.FindIncludingTerminal(nudgeID)
 	if err != nil {
 		return "", err
 	}
-	if !ok || isTerminalNudgeState(nudge.Metadata["state"]) {
+	if !ok || nudgequeue.IsTerminalState(nudge.State) {
 		return strconv.Itoa(attempt + 1), nil
 	}
 	return "", nil
 }
 
-func isTerminalNudgeState(state string) bool {
-	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed":
-		return true
-	default:
-		return false
-	}
-}
-
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath), cityPath, nudgeIDs)
+	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

@@ -7,10 +7,15 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // through to runtime.Config. All fields are optional — zero values mean
 // no special startup handling (fire-and-forget).
 type StartupHints struct {
+	// Lifecycle describes whether the command is long-lived or expected to exit.
+	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
+	// MouseOn reports whether tmux mouse mode should be preserved for this session.
+	MouseOn bool
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string
@@ -25,6 +30,18 @@ type StartupHints struct {
 	// SessionLive is a list of idempotent commands run after session_setup
 	// and re-applied on config change without restart.
 	SessionLive []string
+	// ProviderName is the resolved provider name (e.g., "claude", "codex").
+	// Used for per-provider overlay filtering in V2.
+	ProviderName string
+	// ProviderOverlayName is the concrete provider whose per-provider overlay
+	// should be staged. It differs from ProviderName when a provider inherits
+	// launch behavior from another built-in family.
+	ProviderOverlayName string
+	// InstallAgentHooks lists additional provider slots whose
+	// per-provider/<slot>/ overlay content should be staged alongside
+	// ProviderOverlayName's. Populated from the agent's install_agent_hooks
+	// config (or the workspace default).
+	InstallAgentHooks []string
 	// PackOverlayDirs lists overlay directories from packs. Copied to
 	// the session workdir before the agent's own OverlayDir.
 	PackOverlayDirs []string
@@ -34,4 +51,35 @@ type StartupHints struct {
 	// CopyFiles lists files/directories to stage in the session's working
 	// directory before the agent command starts.
 	CopyFiles []runtime.CopyEntry
+}
+
+// ToRuntimeConfig projects the startup hints onto a runtime.Config. It is the
+// single source for the StartupHints → runtime.Config field mapping: every
+// consumer that builds a runtime.Config from agent-level hints (the reconciler
+// create path and the CLI worker-handle paths) routes through here, so a hint
+// field added above propagates everywhere instead of being threaded one call
+// site at a time. Caller-owned, non-hint fields (Command, Env, MCPServers,
+// WorkDir, PromptSuffix/PromptFlag, FingerprintExtra) are left zero for the
+// caller to populate.
+func (h StartupHints) ToRuntimeConfig() runtime.Config {
+	return runtime.Config{
+		Lifecycle:              h.Lifecycle,
+		ReadyPromptPrefix:      h.ReadyPromptPrefix,
+		ReadyDelayMs:           h.ReadyDelayMs,
+		ProcessNames:           h.ProcessNames,
+		EmitsPermissionWarning: h.EmitsPermissionWarning,
+		AcceptStartupDialogs:   h.AcceptStartupDialogs,
+		MouseOn:                h.MouseOn,
+		Nudge:                  h.Nudge,
+		PreStart:               h.PreStart,
+		SessionSetup:           h.SessionSetup,
+		SessionSetupScript:     h.SessionSetupScript,
+		SessionLive:            h.SessionLive,
+		ProviderName:           h.ProviderName,
+		ProviderOverlayName:    h.ProviderOverlayName,
+		InstallAgentHooks:      h.InstallAgentHooks,
+		PackOverlayDirs:        h.PackOverlayDirs,
+		OverlayDir:             h.OverlayDir,
+		CopyFiles:              h.CopyFiles,
+	}
 }

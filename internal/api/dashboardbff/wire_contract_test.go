@@ -1,0 +1,240 @@
+package dashboardbff
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// The hand-typed Go /api structs are coupled to the SPA's response decoders in
+// frontend/src/api/client.ts only by "// must match" comments. These tests are
+// the cross-boundary guard: they assert each endpoint's JSON satisfies exactly
+// the field+type contract the matching decoder enforces, so a Go struct that
+// drifts from the TS decoder fails here instead of at runtime in the browser.
+// (The complementary half — running these shapes through the real TS decoders —
+// is a frontend Vitest follow-up.)
+
+func wireGet(t *testing.T, p *Plane, path string) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s: status %d, want 200 (body %s)", path, rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("GET %s: decode: %v", path, err)
+	}
+	return m
+}
+
+func mustString(t *testing.T, m map[string]any, field string) {
+	t.Helper()
+	if _, ok := m[field].(string); !ok {
+		t.Errorf("field %q must be a string, got %T", field, m[field])
+	}
+}
+
+func mustBool(t *testing.T, m map[string]any, field string) {
+	t.Helper()
+	if _, ok := m[field].(bool); !ok {
+		t.Errorf("field %q must be a bool, got %T", field, m[field])
+	}
+}
+
+func mustArray(t *testing.T, m map[string]any, field string) {
+	t.Helper()
+	if _, ok := m[field].([]any); !ok {
+		t.Errorf("field %q must be an array (never null), got %T", field, m[field])
+	}
+}
+
+func mustObject(t *testing.T, m map[string]any, field string) {
+	t.Helper()
+	if _, ok := m[field].(map[string]any); !ok {
+		t.Errorf("field %q must be an object, got %T", field, m[field])
+	}
+}
+
+func mustStringOrNull(t *testing.T, m map[string]any, field string) {
+	t.Helper()
+	if v, present := m[field]; !present {
+		t.Errorf("field %q must be present (string|null)", field)
+	} else if _, isStr := v.(string); v != nil && !isStr {
+		t.Errorf("field %q must be string or null, got %T", field, v)
+	}
+}
+
+func contractPlane() *Plane {
+	return New(Deps{Resolver: mapResolver{"alpha": "/srv/alpha"}})
+}
+
+func TestWireContractConfig(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/city/alpha/config")
+	for _, f := range []string{"cityName", "cityRoot", "operatorAlias", "operatorWireAlias", "decisionLabel"} {
+		mustString(t, m, f)
+	}
+	mustBool(t, m, "useFixtures")
+	mustBool(t, m, "readOnly")
+	mustArray(t, m, "enabledModules") // explicit [] for core-only, never null
+	mustStringOrNull(t, m, "defaultView")
+}
+
+func TestWireContractHealth(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/health")
+	mustBool(t, m, "ok")
+	mustString(t, m, "ts")
+}
+
+func TestWireContractSystemHealth(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/health/system")
+	mustObject(t, m, "admin")
+	mustObject(t, m, "host")
+	admin := m["admin"].(map[string]any)
+	host := m["host"].(map[string]any)
+	for _, field := range []string{"rss"} {
+		mustObject(t, admin, field)
+		mustString(t, admin[field].(map[string]any), "status")
+	}
+	for _, field := range []string{"load", "memory", "uptime"} {
+		mustObject(t, host, field)
+		mustString(t, host[field].(map[string]any), "status")
+	}
+}
+
+func TestWireContractLocalTools(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/health/local-tools")
+	for _, tool := range []string{"dolt", "beads", "gc"} {
+		mustObject(t, m, tool)
+		mustString(t, m[tool].(map[string]any), "status")
+	}
+}
+
+func TestWireContractGitCommits(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/git/commits?view=recent-main")
+	mustString(t, m, "view")
+	mustArray(t, m, "items")
+}
+
+func TestWireContractBuilds(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/builds")
+	mustArray(t, m, "items")
+	mustStringOrNull(t, m, "source")
+	mustBool(t, m, "failed_marker")
+}
+
+func TestWireContractSupervisorStatus(t *testing.T) {
+	// No Start()/SupervisorBaseURL -> deterministic not-sampled-yet shape.
+	m := wireGet(t, contractPlane(), "/api/city/alpha/supervisor-status")
+	mustBool(t, m, "available")
+	if _, present := m["status"]; !present {
+		t.Error("supervisor-status must always carry a status field (object|null)")
+	}
+	if m["available"] == false {
+		mustString(t, m, "reason")
+	}
+}
+
+func TestWireContractDoltTrend(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/city/alpha/dolt-noms/trend")
+	mustBool(t, m, "available")
+	mustArray(t, m, "samples")
+}
+
+func TestWireContractRigStoreHealth(t *testing.T) {
+	m := wireGet(t, contractPlane(), "/api/city/alpha/rig-store-health")
+	mustBool(t, m, "available")
+	mustArray(t, m, "rigs")
+}
+
+// TestWireContractRunDetailProgressTerminal guards the Go-derived
+// progress.terminal flag on the run-detail wire: the SPA reads it (in place of
+// the retired isTerminalProgress client fold) to drive ambient-event
+// suppression, so the field must always be present and a bool.
+func TestWireContractRunDetailProgressTerminal(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"),
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	m := wireGet(t, p, "/api/city/alpha/runs/run1/detail")
+	progress, ok := m["progress"].(map[string]any)
+	if !ok {
+		t.Fatalf("progress must be an object, got %T", m["progress"])
+	}
+	mustBool(t, progress, "terminal")
+}
+
+// TestWireContractRunDetailStreamFrame is the cross-boundary guard for the P4
+// SSE detail stream: the pushed frame body is the SAME FormulaRunDetail struct
+// the GET serves, so a captured `data:` frame must satisfy the same field+type
+// contract the TS decodeFormulaRunDetail enforces. It parses the first SSE frame
+// off a real streaming connection and asserts the load-bearing fields the SPA
+// hard-derefs, so a Go struct that drifts from the TS decoder fails here.
+func TestWireContractRunDetailStreamFrame(t *testing.T) {
+	dir := t.TempDir()
+	writeEventLog(t, filepath.Join(dir, ".gc", "events.jsonl"),
+		runDetailRootEvent(),
+		runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"),
+	)
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	defer p.Stop()
+
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, sc, closeStream := startDetailStream(t, srv)
+	defer closeStream()
+	_ = resp
+
+	frame, ok := readSSEFrame(t, sc)
+	if !ok {
+		t.Fatal("no SSE frame to assert the wire contract against")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(frame.data), &m); err != nil {
+		t.Fatalf("decode SSE frame body: %v; data=%q", err, frame.data)
+	}
+	// The same fields decodeFormulaRunDetail requires on the GET body.
+	mustString(t, m, "runId")
+	mustObject(t, m, "formula")
+	mustObject(t, m, "formulaDetail")
+	mustObject(t, m, "executionPath")
+	mustObject(t, m, "snapshotEventSeq")
+	mustObject(t, m, "completeness")
+	mustArray(t, m, "stages")
+	mustArray(t, m, "nodes")
+	mustArray(t, m, "edges")
+	mustArray(t, m, "lanes")
+	progress, isObj := m["progress"].(map[string]any)
+	if !isObj {
+		t.Fatalf("progress must be an object, got %T", m["progress"])
+	}
+	mustObject(t, progress, "statusCounts")
+	mustBool(t, progress, "terminal")
+}
+
+// TestSanitizeTerminalOutputStripsCSIAndControls is the regression guard for the
+// broadened CSI grammar: SGR, intermediate-byte, and private CSI sequences are
+// all removed whole, leaving no introducer/param/intermediate residue, and no
+// ESC/control or bidi bytes survive.
+func TestSanitizeTerminalOutputStripsCSIAndControls(t *testing.T) {
+	in := "a\x1b[31mred\x1b[0m b\x1b[1$rc\x1b[>0cd\x07\u202ee"
+	got := sanitizeTerminalOutput(in)
+	for _, bad := range []string{"\x1b", "[31m", "[1$r", "[>0c", "$", ">", "\x07", "\u202e"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("sanitized output retains %q: %q", bad, got)
+		}
+	}
+	if got != "ared bcde" { // the literal space in " b" survives; only escapes/controls are stripped
+		t.Errorf("sanitized = %q, want %q", got, "ared bcde")
+	}
+}

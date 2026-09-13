@@ -25,6 +25,8 @@ import (
 // generation. The limit applies to template children, not to expansion rules.
 const DefaultMaxExpansionDepth = 5
 
+type formulaRequirementCollector func(*Formula) error
+
 // ApplyExpansions applies all expand and map rules to a formula's steps.
 // Returns a new steps slice with expansions applied.
 // The original steps slice is not modified.
@@ -39,6 +41,10 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 // steps, resolving any override values against the provided parent vars before
 // merging them into the expansion formula's own defaults.
 func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parser, parentVars map[string]string) ([]*Step, error) {
+	return applyExpansionsWithVars(steps, compose, parser, parentVars, nil)
+}
+
+func applyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parser, parentVars map[string]string, collectRequirements formulaRequirementCollector) ([]*Step, error) {
 	if compose == nil || parser == nil {
 		return steps, nil
 	}
@@ -65,18 +71,9 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 			continue // Already expanded
 		}
 
-		// Load the expansion formula
-		expFormula, err := parser.LoadByName(rule.With)
+		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "expand", collectRequirements)
 		if err != nil {
-			return nil, fmt.Errorf("expand: loading %q: %w", rule.With, err)
-		}
-
-		if expFormula.Type != TypeExpansion {
-			return nil, fmt.Errorf("expand: %q is not an expansion formula (type=%s)", rule.With, expFormula.Type)
-		}
-
-		if len(expFormula.Template) == 0 {
-			return nil, fmt.Errorf("expand: %q has no template steps", rule.With)
+			return nil, err
 		}
 
 		// Merge formula default vars with rule overrides
@@ -86,6 +83,13 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 		expandedSteps, err := expandStep(targetStep, expFormula.Template, 0, vars)
 		if err != nil {
 			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
+		}
+		expandedSteps, err = materializeExpandedStepConditions(expandedSteps, mergeConditionVars(parentVars, vars))
+		if err != nil {
+			return nil, fmt.Errorf("expand %q: %w", rule.Target, err)
+		}
+		if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("expand %q", rule.Target)); err != nil {
+			return nil, err
 		}
 
 		// Propagate target step's dependencies to root steps of the expansion.
@@ -110,18 +114,9 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 
 	// Apply map rules (pattern matching)
 	for _, rule := range compose.Map {
-		// Load the expansion formula
-		expFormula, err := parser.LoadByName(rule.With)
+		expFormula, err := loadResolvedExpansionFormula(parser, rule.With, "map", collectRequirements)
 		if err != nil {
-			return nil, fmt.Errorf("map: loading %q: %w", rule.With, err)
-		}
-
-		if expFormula.Type != TypeExpansion {
-			return nil, fmt.Errorf("map: %q is not an expansion formula (type=%s)", rule.With, expFormula.Type)
-		}
-
-		if len(expFormula.Template) == 0 {
-			return nil, fmt.Errorf("map: %q has no template steps", rule.With)
+			return nil, err
 		}
 
 		// Merge formula default vars with rule overrides
@@ -143,6 +138,13 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 			if err != nil {
 				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
 			}
+			expandedSteps, err = materializeExpandedStepConditions(expandedSteps, mergeConditionVars(parentVars, vars))
+			if err != nil {
+				return nil, fmt.Errorf("map %q -> %q: %w", rule.Select, targetStep.ID, err)
+			}
+			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("map %q -> %q", rule.Select, targetStep.ID)); err != nil {
+				return nil, err
+			}
 
 			// Propagate target step's dependencies to root steps of the expansion
 			propagateTargetDeps(targetStep, expandedSteps)
@@ -161,12 +163,48 @@ func ApplyExpansionsWithVars(steps []*Step, compose *ComposeRules, parser *Parse
 		}
 	}
 
-	// Validate no duplicate step IDs after expansion
-	if dups := findDuplicateStepIDs(result); len(dups) > 0 {
+	validationSteps := result
+	if parentVars != nil {
+		filteredSteps, err := FilterStepsByCondition(result, parentVars)
+		if err != nil {
+			return nil, fmt.Errorf("filtering conditioned steps after expansion: %w", err)
+		}
+		validationSteps = filteredSteps
+	}
+
+	// Validate no duplicate step IDs after expansion.
+	if dups := findDuplicateStepIDs(validationSteps); len(dups) > 0 {
 		return nil, fmt.Errorf("duplicate step IDs after expansion: %v", dups)
 	}
 
 	return result, nil
+}
+
+func loadResolvedExpansionFormula(parser *Parser, name, context string, collectRequirements formulaRequirementCollector) (*Formula, error) {
+	expFormula, err := parser.LoadByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: loading %q: %w", context, name, err)
+	}
+
+	resolved, err := parser.Resolve(expFormula)
+	if err != nil {
+		return nil, fmt.Errorf("%s: resolving %q: %w", context, name, err)
+	}
+
+	if resolved.Type != TypeExpansion {
+		return nil, fmt.Errorf("%s: %q is not an expansion formula (type=%s)", context, name, resolved.Type)
+	}
+
+	if len(resolved.Template) == 0 {
+		return nil, fmt.Errorf("%s: %q has no template steps", context, name)
+	}
+	if collectRequirements != nil {
+		if err := collectRequirements(resolved); err != nil {
+			return nil, fmt.Errorf("%s: collecting requirements for %q: %w", context, name, err)
+		}
+	}
+
+	return resolved, nil
 }
 
 func resolveOverrideVars(overrides map[string]string, parentVars map[string]string) map[string]string {
@@ -179,7 +217,7 @@ func resolveOverrideVars(overrides map[string]string, parentVars map[string]stri
 			resolved[name] = value
 			continue
 		}
-		resolved[name] = substituteVars(value, parentVars)
+		resolved[name] = substituteVars(Substitute(value, parentVars), parentVars)
 	}
 	return resolved
 }
@@ -209,6 +247,78 @@ func countStepIDs(steps []*Step, counts map[string]int) {
 	}
 }
 
+// substituteDescriptionPreservingPath applies substitute to every description
+// segment except the already-resolved oversized description_file path.
+func substituteDescriptionPreservingPath(description, resolvedPath string, substitute func(string) string) string {
+	if resolvedPath == "" {
+		return substitute(description)
+	}
+
+	const token = "\x00gc-description-file-resolved-path\x00"
+	protected := strings.ReplaceAll(description, resolvedPath, token)
+	return strings.ReplaceAll(substitute(protected), token, resolvedPath)
+}
+
+// substituteResolvedStubVars resolves both {{name}} values in the generated
+// Formula Variables block and ordinary {name} expansion placeholders without
+// recursively substituting inside the resolved values themselves.
+func substituteResolvedStubVars(value string, vars map[string]string) string {
+	var replacements []string
+	protected := varPattern.ReplaceAllStringFunc(value, func(match string) string {
+		name := match[2 : len(match)-2]
+		replacement := match
+		if resolved, ok := vars[name]; ok {
+			replacement = resolved
+		}
+		token := fmt.Sprintf("\x00gc-description-formula-var-%d\x00", len(replacements))
+		replacements = append(replacements, replacement)
+		return token
+	})
+	protected = substituteVars(protected, vars)
+	for i, replacement := range replacements {
+		token := fmt.Sprintf("\x00gc-description-formula-var-%d\x00", i)
+		protected = strings.ReplaceAll(protected, token, replacement)
+	}
+	return protected
+}
+
+// substituteExpandedDescription expands all non-path portions of a template
+// description and carries the protected path through target-description
+// composition so a later expansion can protect it again.
+func substituteExpandedDescription(tmpl, target *Step, vars map[string]string) (string, string) {
+	const targetPathToken = "\x00gc-target-description-file-resolved-path\x00"
+	carriesResolvedTargetDescription := target.DescriptionFileResolvedPath != "" &&
+		strings.Contains(tmpl.Description, "{target.description}")
+
+	targetForSubstitution := *target
+	if target.DescriptionFileResolvedPath != "" {
+		targetForSubstitution.Description = strings.ReplaceAll(
+			target.Description,
+			target.DescriptionFileResolvedPath,
+			targetPathToken,
+		)
+	}
+
+	description := substituteDescriptionPreservingPath(
+		tmpl.Description,
+		tmpl.DescriptionFileResolvedPath,
+		func(value string) string {
+			value = substituteTargetPlaceholders(value, &targetForSubstitution)
+			if tmpl.DescriptionFileResolvedPath != "" || carriesResolvedTargetDescription {
+				return substituteResolvedStubVars(value, vars)
+			}
+			return substituteVars(value, vars)
+		},
+	)
+	description = strings.ReplaceAll(description, targetPathToken, target.DescriptionFileResolvedPath)
+
+	resolvedPath := tmpl.DescriptionFileResolvedPath
+	if resolvedPath == "" && carriesResolvedTargetDescription {
+		resolvedPath = target.DescriptionFileResolvedPath
+	}
+	return description, resolvedPath
+}
+
 // expandStep expands a target step using the given template.
 // Returns the expanded steps with placeholders substituted.
 // The depth parameter tracks recursion depth for children; if it exceeds
@@ -226,7 +336,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		expanded := cloneStep(tmpl)
 		expanded.ID = substituteVars(substituteTargetPlaceholders(tmpl.ID, target), vars)
 		expanded.Title = substituteVars(substituteTargetPlaceholders(tmpl.Title, target), vars)
-		expanded.Description = substituteVars(substituteTargetPlaceholders(tmpl.Description, target), vars)
+		expanded.Description, expanded.DescriptionFileResolvedPath = substituteExpandedDescription(tmpl, target, vars)
 		expanded.Notes = substituteVars(substituteTargetPlaceholders(tmpl.Notes, target), vars)
 		expanded.Assignee = substituteVars(tmpl.Assignee, vars)
 		// Keep condition expressions intact for the normal condition-filtering
@@ -235,6 +345,7 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 		expanded.Condition = substituteTargetPlaceholders(tmpl.Condition, target)
 		expanded.Expand = substituteVars(substituteTargetPlaceholders(tmpl.Expand, target), vars)
 		expanded.WaitsFor = substituteVars(substituteTargetPlaceholders(tmpl.WaitsFor, target), vars)
+		expanded.Timeout = substituteVars(substituteTargetPlaceholders(tmpl.Timeout, target), vars)
 
 		// Substitute placeholders in labels
 		if len(expanded.Labels) > 0 {
@@ -316,6 +427,91 @@ func expandStep(target *Step, template []*Step, depth int, vars map[string]strin
 	}
 
 	return result, nil
+}
+
+func validateExpandedStepTimeouts(steps []*Step, context string) error {
+	var errs []string
+	validateNestedStepTimeoutsWithOptions(steps, &errs, context, nil, true)
+	if len(errs) > 0 {
+		return fmt.Errorf("%s: timeout validation failed:\n  - %s", context, strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
+func mergeConditionVars(base map[string]string, overrides map[string]string) map[string]string {
+	if base == nil && overrides == nil {
+		return nil
+	}
+
+	merged := make(map[string]string)
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range overrides {
+		merged[k] = v
+	}
+	return merged
+}
+
+func materializeExpandedStepConditions(steps []*Step, vars map[string]string) ([]*Step, error) {
+	if vars == nil {
+		return steps, nil
+	}
+
+	result := make([]*Step, 0, len(steps))
+	for _, step := range steps {
+		resolvable, err := canResolveStepCondition(step.Condition, vars)
+		if err != nil {
+			return nil, fmt.Errorf("step %q: %w", step.ID, err)
+		}
+
+		if resolvable {
+			include, err := EvaluateStepCondition(step.Condition, vars)
+			if err != nil {
+				return nil, fmt.Errorf("step %q: %w", step.ID, err)
+			}
+			if !include {
+				continue
+			}
+		}
+
+		clone := cloneStep(step)
+		if resolvable {
+			clone.Condition = ""
+		}
+		if len(step.Children) > 0 {
+			children, err := materializeExpandedStepConditions(step.Children, vars)
+			if err != nil {
+				return nil, err
+			}
+			clone.Children = children
+		}
+		result = append(result, clone)
+	}
+
+	return result, nil
+}
+
+func canResolveStepCondition(condition string, vars map[string]string) (bool, error) {
+	condition = strings.TrimSpace(condition)
+	if condition == "" {
+		return true, nil
+	}
+
+	if m := stepCondVarPattern.FindStringSubmatch(condition); m != nil {
+		_, ok := vars[m[1]]
+		return ok, nil
+	}
+	if m := stepCondNegatedVarPattern.FindStringSubmatch(condition); m != nil {
+		_, ok := vars[m[1]]
+		return ok, nil
+	}
+	if m := stepCondComparePattern.FindStringSubmatch(condition); m != nil {
+		_, ok := vars[m[1]]
+		return ok, nil
+	}
+
+	return false, fmt.Errorf("invalid step condition format: %q (expected {{var}} or {{var}} == value)", condition)
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.
@@ -499,6 +695,16 @@ func MaterializeExpansion(f *Formula, targetID string, vars map[string]string) e
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
+	validationSteps, err := FilterStepsByCondition(expandedSteps, vars)
+	if err != nil {
+		return fmt.Errorf("materializing expansion %q: filtering conditioned steps: %w", f.Formula, err)
+	}
+	if err := validateExpandedStepTimeouts(validationSteps, fmt.Sprintf("materializing expansion %q", f.Formula)); err != nil {
+		return err
+	}
+	if dups := findDuplicateStepIDs(validationSteps); len(dups) > 0 {
+		return fmt.Errorf("materializing expansion %q: duplicate step IDs after expansion: %v", f.Formula, dups)
+	}
 
 	f.Steps = expandedSteps
 	return nil
@@ -519,6 +725,16 @@ func MaterializeExpansionForTarget(f *Formula, target *Step, vars map[string]str
 	if err != nil {
 		return fmt.Errorf("materializing expansion %q: %w", f.Formula, err)
 	}
+	validationSteps, err := FilterStepsByCondition(expandedSteps, vars)
+	if err != nil {
+		return fmt.Errorf("materializing expansion %q: filtering conditioned steps: %w", f.Formula, err)
+	}
+	if err := validateExpandedStepTimeouts(validationSteps, fmt.Sprintf("materializing expansion %q", f.Formula)); err != nil {
+		return err
+	}
+	if dups := findDuplicateStepIDs(validationSteps); len(dups) > 0 {
+		return fmt.Errorf("materializing expansion %q: duplicate step IDs after expansion: %v", f.Formula, dups)
+	}
 
 	f.Steps = expandedSteps
 	return nil
@@ -534,16 +750,26 @@ func MaterializeExpansionForTarget(f *Formula, target *Step, vars map[string]str
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
+	return ApplyInlineExpansionsWithVars(steps, parser, nil)
+}
+
+// ApplyInlineExpansionsWithVars applies Step.Expand fields to inline expansions
+// using vars for condition filtering during expansion-time validation.
+func ApplyInlineExpansionsWithVars(steps []*Step, parser *Parser, vars map[string]string) ([]*Step, error) {
+	return applyInlineExpansionsWithVars(steps, parser, vars, nil)
+}
+
+func applyInlineExpansionsWithVars(steps []*Step, parser *Parser, vars map[string]string, collectRequirements formulaRequirementCollector) ([]*Step, error) {
 	if parser == nil {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	return applyInlineExpansionsRecursive(steps, parser, vars, collectRequirements, 0)
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, vars map[string]string, collectRequirements formulaRequirementCollector, depth int) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -553,35 +779,34 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 	for _, step := range steps {
 		// Check if this step has an inline expansion
 		if step.Expand != "" {
-			// Load the expansion formula
-			expFormula, err := parser.LoadByName(step.Expand)
+			expFormula, err := loadResolvedExpansionFormula(parser, step.Expand, fmt.Sprintf("inline expand on step %q", step.ID), collectRequirements)
 			if err != nil {
-				return nil, fmt.Errorf("inline expand on step %q: loading %q: %w", step.ID, step.Expand, err)
-			}
-
-			if expFormula.Type != TypeExpansion {
-				return nil, fmt.Errorf("inline expand on step %q: %q is not an expansion formula (type=%s)",
-					step.ID, step.Expand, expFormula.Type)
-			}
-
-			if len(expFormula.Template) == 0 {
-				return nil, fmt.Errorf("inline expand on step %q: %q has no template steps", step.ID, step.Expand)
+				return nil, err
 			}
 
 			// Merge formula default vars with step's ExpandVars overrides
-			vars := mergeVars(expFormula, step.ExpandVars)
+			// resolved against the parent invocation vars.
+			expansionVars := mergeVars(expFormula, resolveOverrideVars(step.ExpandVars, vars))
 
 			// Expand the step using the template (reuse existing expandStep)
-			expandedSteps, err := expandStep(step, expFormula.Template, 0, vars)
+			expandedSteps, err := expandStep(step, expFormula.Template, 0, expansionVars)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+			conditionVars := mergeConditionVars(vars, expansionVars)
+			expandedSteps, err = materializeExpandedStepConditions(expandedSteps, conditionVars)
+			if err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+			if err := validateExpandedStepTimeouts(expandedSteps, fmt.Sprintf("inline expand on step %q", step.ID)); err != nil {
+				return nil, err
 			}
 
 			// Propagate the original step's dependencies to root steps of the expansion
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, conditionVars, collectRequirements, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -592,7 +817,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, vars, collectRequirements, depth)
 				if err != nil {
 					return nil, err
 				}
@@ -601,6 +826,19 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 
 			result = append(result, clone)
 		}
+	}
+
+	validationSteps := result
+	if vars != nil {
+		filteredSteps, err := FilterStepsByCondition(result, vars)
+		if err != nil {
+			return nil, fmt.Errorf("filtering conditioned steps after inline expansion: %w", err)
+		}
+		validationSteps = filteredSteps
+	}
+
+	if dups := findDuplicateStepIDs(validationSteps); len(dups) > 0 {
+		return nil, fmt.Errorf("duplicate step IDs after inline expansion: %v", dups)
 	}
 
 	return result, nil

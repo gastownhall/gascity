@@ -1,0 +1,20 @@
+formula = "ralph-demo"
+description = "Minimal inline Check demo"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "implement"
+title = "Write demo output"
+description = """
+Create the Check demo output artifact.
+"""
+
+[steps.check]
+max_attempts = 2
+
+[steps.check.check]
+mode = "exec"
+path = ".gc/scripts/ralph-check.sh"
+timeout = "30s"

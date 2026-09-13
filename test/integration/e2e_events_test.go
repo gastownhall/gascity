@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,13 +52,13 @@ func TestE2E_EventsQuery(t *testing.T) {
 		t.Errorf("filtered output should not contain e2e.beta:\n%s", out)
 	}
 
-	// Unknown type should show "No events."
+	// Unknown type should produce empty JSONL output.
 	out, err = gc(cityDir, "events", "--type", "e2e.nonexistent")
 	if err != nil {
 		t.Fatalf("gc events for unknown type failed: %v\noutput: %s", err, out)
 	}
-	if !strings.Contains(out, "No events.") {
-		t.Errorf("expected 'No events.' for unknown type:\n%s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("expected empty output for unknown type:\n%s", out)
 	}
 }
 
@@ -77,7 +79,7 @@ func TestE2E_EventsSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc events --since failed: %v\noutput: %s", err, out)
 	}
-	if strings.Contains(out, "No events.") {
+	if strings.TrimSpace(out) == "" {
 		t.Errorf("expected recent event to appear with --since=1m:\n%s", out)
 	}
 
@@ -87,7 +89,7 @@ func TestE2E_EventsSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gc events --since=30s failed: %v\noutput: %s", err, out)
 	}
-	if strings.Contains(out, "No events.") {
+	if strings.TrimSpace(out) == "" {
 		t.Errorf("expected recent event to appear with --since=30s:\n%s", out)
 	}
 }
@@ -102,18 +104,42 @@ func TestE2E_AgentLifecycleEvents(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	// Verify session.woke event exists.
-	verifyEvents(t, cityDir, "session.woke")
+	// Session activation becomes visible before its wake event is durably
+	// appended, so wait on the event-log fact rather than racing an immediate
+	// API query. Event query behavior is covered independently above.
+	verifyEventLogEventually(t, cityDir, "session.woke")
 
-	// Stop the agent.
-	out, err := gc("", "stop", cityDir)
+	// Restart the city so we observe a session stop event without tearing the
+	// city out of supervisor scope before querying the API.
+	out, err := gc("", "restart", cityDir)
 	if err != nil {
-		t.Fatalf("gc stop failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc restart failed: %v\noutput: %s", err, out)
 	}
 
 	// Give the event log a moment.
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify session.stopped event exists.
-	verifyEvents(t, cityDir, "session.stopped")
+	// The city API is gone after gc stop, but the event log is persistent.
+	verifyEventLogEventually(t, cityDir, "session.stopped")
+}
+
+func verifyEventLogEventually(t *testing.T, cityDir, eventType string) {
+	t.Helper()
+
+	eventLog := filepath.Join(cityDir, ".gc", "events.jsonl")
+	deadline := time.Now().Add(30 * time.Second)
+	needle := `"type":"` + eventType + `"`
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(eventLog)
+		if err == nil && strings.Contains(string(data), needle) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	data, err := os.ReadFile(eventLog)
+	if err != nil {
+		t.Fatalf("reading event log: %v", err)
+	}
+	t.Fatalf("event log missing %s:\n%s", eventType, string(data))
 }

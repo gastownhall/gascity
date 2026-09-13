@@ -1,0 +1,197 @@
+description = """
+Simple work formula — read the bead, do what it says, close it.
+
+This is the minimal work lifecycle for coding agents. No git branching,
+no worktree isolation, no refinery handoff. The agent reads the bead's
+description, implements the solution in the current working directory,
+and closes the bead when done.
+
+Use this for demos and simple single-agent workflows. For production
+multi-agent setups with worktree isolation, use mol-polecat-commit
+instead (or mol-polecat-work from the gastown pack for full refinery
+review).
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| convoy_id | runtime | Input convoy tracking the single work bead |
+| escalation_target | caller / rig `formula_vars` | Mail recipient for blocked work (default: `human`) |
+"""
+formula = "mol-do-work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.escalation_target]
+description = """
+Mail recipient for escalations when work cannot be completed. Defaults to the
+reserved `human` alias, which resolves in every city. Cities that staff a
+work-health role (e.g. the gastown pack's witness) can point this at it, for
+example `escalation_target = "<rig>/witness"`.
+"""
+default = "human"
+
+[[steps]]
+id = "do-work"
+title = "Read assignment, implement, verify, commit, and close"
+description = """
+You have been assigned a work bead. Read it, do the work, verify it,
+commit relevant changes, and close it.
+
+**1. Read your assignment:**
+
+Derive the work bead from the input convoy, then read it:
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-do-work requires an input convoy with exactly one tracked member" >&2
+  exit 1
+fi
+gc bd show "$WORK_BEAD_ID"
+```
+
+Read the bead's title and description carefully. This is your task.
+
+**Claim it and signal liveness:** the input-convoy child derived above is not
+claimed by the routing step that assigned you — claim it explicitly before your
+first heartbeat:
+```bash
+gc bd update "$WORK_BEAD_ID" --claim
+```
+`--claim` is idempotent and self-assigns regardless of current state, so this is
+safe even if the bead was already claimed some other way. Then run
+`gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any shell command you
+expect to run for many minutes (long builds, test sweeps). It refreshes your
+claim's lease so the dashboard can tell you are alive and working rather than
+wedged. If a heartbeat ever fails, your claim was reclaimed or closed out from
+under you — stop working this bead immediately.
+
+**2. Implement the solution and verify it:**
+
+Do exactly what the bead describes. Follow existing codebase conventions.
+Run the verification commands requested by the bead. If the bead does not
+name verification commands, run the smallest relevant local test/build check
+you can identify.
+
+Before closing, inspect the working tree:
+```bash
+git status --short
+```
+
+If you changed product/source files, documentation, tests, configs, or other
+repo-owned artifacts for the task, commit those changes before closing the bead:
+```bash
+git add <files>
+git commit -m "<type>: <description>"
+```
+
+Do not commit unrelated runtime metadata, local agent directories, caches, or
+bead database churn unless the bead explicitly required those files. If the
+only remaining dirty files are unrelated runtime/bead metadata, leave them
+uncommitted and mention that in your close notes.
+
+**3. Close the target bead when done:**
+
+Record the typed work-record outcome (ADR-0009) on the work bead so eval and
+audit can trace work → artifact → outcome. Choose `gc.work_outcome` from what
+actually happened:
+- `shipped` — you committed a change that satisfies the bead. Supply `gc.work_commit`
+  (the SHA) and `gc.work_branch` (the branch it is on).
+- `no-op` — the bead needed no change (already satisfied / duplicate); omit
+  `gc.work_commit` and `gc.work_branch`.
+- `blocked` / `abandoned` — you could not complete it (also mail `{{escalation_target}}`).
+
+`gc.outcome=pass` stays — it is the control-plane step result and is disjoint
+from `gc.work_outcome`.
+
+**Shipped** (you committed a change):
+```bash
+COMMIT=$(git rev-parse HEAD 2>/dev/null || true)
+WORK_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+[ "$WORK_BRANCH" = "HEAD" ] && WORK_BRANCH=""   # detached HEAD — no stable branch
+gc bd update "$WORK_BEAD_ID" \
+  --set-metadata gc.outcome=pass \
+  --set-metadata gc.work_outcome=shipped \
+  --set-metadata gc.work_commit="$COMMIT" \
+  --set-metadata gc.work_branch="$WORK_BRANCH" \
+  --set-metadata gc.work_verification="<commands you ran>" \
+  --status=closed \
+  --notes "Done: <brief summary of what you did>. Verification: <commands run>. Commit: ${COMMIT:-none}."
+```
+
+**No-op** (the bead needed no change — already satisfied / duplicate):
+```bash
+gc bd update "$WORK_BEAD_ID" \
+  --set-metadata gc.outcome=pass \
+  --set-metadata gc.work_outcome=no-op \
+  --status=closed \
+  --notes "No-op: <why no change was needed>."
+```
+For `blocked` / `abandoned`, use that value for `gc.work_outcome` and also mail
+`{{escalation_target}}`.
+
+**4. Close this formula step:**
+
+If `GC_BEAD_ID` is set and is different from `$WORK_BEAD_ID`, close it too. This
+prevents `mol-do-work` wrapper beads from remaining ready after the real work
+is complete.
+```bash
+if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
+  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}."
+fi
+```
+
+If you get stuck or need clarification, check your inbox:
+```bash
+gc mail inbox
+```
+
+**Exit criteria:** The work described in the bead is complete, relevant changes
+are committed, the target bead is closed, and the claimed formula step is
+closed when `GC_BEAD_ID` is available."""
+
+[[steps]]
+id = "drain"
+title = "Close drain step and signal completion"
+needs = ["do-work"]
+description = """
+Work is done. Close this drain step, then signal the controller to reclaim this
+session:
+
+```bash
+DRAIN_BEAD_ID=""
+ROOT_BEAD_ID=""
+CURRENT_ID=$(gc hook current --id-only 2>/dev/null || true)
+if [ -n "$CURRENT_ID" ]; then
+  CURRENT=$(gc bd show "$CURRENT_ID" --json) || exit 1
+  DRAIN_BEAD_ID=$(printf '%s' "$CURRENT" | jq -r '(if type == "array" then .[0] else . end) | select(.status != "closed") | select(.metadata["gc.step_ref"] == "mol-do-work.drain") | .id // empty')
+  ROOT_BEAD_ID=$(printf '%s' "$CURRENT" | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
+fi
+if [ -z "$DRAIN_BEAD_ID" ]; then
+  if [ -z "$ROOT_BEAD_ID" ]; then
+    STARTUP_BEAD_ID="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-}}"
+    if [ -z "$STARTUP_BEAD_ID" ]; then
+      echo "mol-do-work drain resolved no continuation from the current claim and has no startup bead id to fall back on" >&2
+      exit 1
+    fi
+    STARTUP_BEAD=$(gc bd show "$STARTUP_BEAD_ID" --json) || exit 1
+    ROOT_BEAD_ID=$(printf '%s' "$STARTUP_BEAD" | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
+  fi
+  if [ -z "$ROOT_BEAD_ID" ]; then
+    echo "mol-do-work drain could not resolve its workflow root from the current claim or a startup bead id" >&2
+    exit 1
+  fi
+  READY_BEADS=$(gc ready --json --limit=2 --include-ephemeral --metadata-field "gc.root_bead_id=$ROOT_BEAD_ID" --metadata-field "gc.step_ref=mol-do-work.drain") || exit 1
+  DRAIN_BEAD_ID=$(printf '%s' "$READY_BEADS" | jq -r 'if length == 1 then .[0].id else empty end')
+  if [ -z "$DRAIN_BEAD_ID" ]; then
+    echo "mol-do-work drain could not resolve one ready continuation bead for root $ROOT_BEAD_ID" >&2
+    exit 1
+  fi
+fi
+gc bd update "$DRAIN_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Drain acknowledged." || exit 1
+gc runtime drain-ack
+```
+
+Run exactly these commands and nothing else."""

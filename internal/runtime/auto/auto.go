@@ -7,7 +7,6 @@ package auto
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -26,8 +25,16 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider            = (*Provider)(nil)
-	_ runtime.InteractionProvider = (*Provider)(nil)
+	_ runtime.Provider                      = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
+	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
+	_ runtime.RelaunchProvider              = (*Provider)(nil)
+	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider          = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -66,6 +73,18 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.defaultSP
 }
 
+// SupportsTransport reports whether this provider can route the requested
+// session transport.
+func (p *Provider) SupportsTransport(transport string) bool {
+	if transport != "acp" {
+		return true
+	}
+	if provider, ok := p.acpSP.(runtime.TransportCapabilityProvider); ok {
+		return provider.SupportsTransport(transport)
+	}
+	return false
+}
+
 // DetectTransport reports the backend currently hosting the named session.
 // It returns "acp" for ACP-backed sessions and "" for default or unknown.
 func (p *Provider) DetectTransport(name string) string {
@@ -88,8 +107,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // to handle stale/missing route entries (e.g., after controller restart).
 func (p *Provider) Stop(name string) error {
 	primary := p.route(name)
+	primaryLabel := "default"
+	otherLabel := "acp"
+	primaryRunning := primary.IsRunning(name)
+	p.mu.RLock()
+	primaryExplicitRoute := p.routes[name]
+	p.mu.RUnlock()
 	err := primary.Stop(name)
-	if err == nil {
+	if err == nil && primaryRunning {
 		p.Unroute(name)
 		return nil
 	}
@@ -97,16 +122,41 @@ func (p *Provider) Stop(name string) error {
 	var other runtime.Provider
 	p.mu.RLock()
 	if p.routes[name] {
+		primaryLabel = "acp"
+		otherLabel = "default"
 		other = p.defaultSP
 	} else {
 		other = p.acpSP
 	}
 	p.mu.RUnlock()
-	if otherErr := other.Stop(name); otherErr == nil {
+	otherRunning := other.IsRunning(name)
+	if err == nil {
+		if primaryExplicitRoute {
+			if otherRunning {
+				return fmt.Errorf("%s backend: stop succeeded without liveness confirmation while %s backend still reports the session running", primaryLabel, otherLabel)
+			}
+			p.Unroute(name)
+			return nil
+		}
+		err = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+	}
+	otherErr := other.Stop(name)
+	if otherErr == nil {
+		if !otherRunning {
+			otherErr = fmt.Errorf("%w: %q", runtime.ErrSessionNotFound, name)
+		} else if (primaryRunning || primaryExplicitRoute) && !runtime.IsSessionGone(err) {
+			return fmt.Errorf("%s backend: %w", primaryLabel, err)
+		}
+	}
+	mergedErr := runtime.MergeBackendStopErrors(
+		runtime.BackendError{Label: primaryLabel, Err: err},
+		runtime.BackendError{Label: otherLabel, Err: otherErr},
+	)
+	if mergedErr == nil {
 		p.Unroute(name)
 		return nil
 	}
-	return err // return original error if both fail
+	return mergedErr
 }
 
 // Interrupt delegates to the routed backend.
@@ -130,6 +180,30 @@ func (p *Provider) IsRunning(name string) bool {
 	return p.acpSP.IsRunning(name)
 }
 
+// IsDeadRuntimeSession checks both backends for a positive dead-artifact
+// report because ListRunning is also merged across both backends.
+func (p *Provider) IsDeadRuntimeSession(name string) (bool, error) {
+	primary := p.route(name)
+	if dead, err := providerDeadRuntimeSession(primary, name); dead || err != nil {
+		return dead, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	if isACP {
+		return providerDeadRuntimeSession(p.defaultSP, name)
+	}
+	return providerDeadRuntimeSession(p.acpSP, name)
+}
+
+func providerDeadRuntimeSession(sp runtime.Provider, name string) (bool, error) {
+	checker, ok := sp.(runtime.DeadRuntimeSessionChecker)
+	if !ok {
+		return false, nil
+	}
+	return checker.IsDeadRuntimeSession(name)
+}
+
 // IsAttached delegates to the routed backend.
 func (p *Provider) IsAttached(name string) bool {
 	return p.route(name).IsAttached(name)
@@ -149,6 +223,50 @@ func (p *Provider) Attach(name string) error {
 // ProcessAlive delegates to the routed backend.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	return p.route(name).ProcessAlive(name, processNames)
+}
+
+// ObserveLiveness delegates to the routed backend through runtime.ObserveLiveness
+// so the backend's native LivenessObserver fast-path is preserved — e.g. herdr's
+// agent-status liveness. Without this, wrapping a LivenessObserver backend in an
+// auto router would silently collapse it to the generic IsRunning+ProcessAlive
+// fold (the fragile process-table walk), reintroducing the singleton
+// restart-loop for any city that also routes some sessions to ACP.
+func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
+	primary := runtime.ObserveLiveness(p.route(name), name, processNames)
+	if primary.Running {
+		return primary
+	}
+	// Fall through: check the other backend in case routing is stale
+	// (e.g. after a controller restart clears the in-memory route table),
+	// matching IsRunning's recovery so a live ACP singleton on a
+	// herdr-default city is not misread as dead.
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLiveness(other, name, processNames)
+}
+
+// ObserveLivenessWithError preserves routed-backend observation failures. A
+// confirmed absence still falls through to the other backend so stale route
+// recovery matches IsRunning and ObserveLiveness without collapsing an
+// unavailable primary into absence.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	primary, err := runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+	if err != nil || primary.Running {
+		return primary, err
+	}
+	p.mu.RLock()
+	isACP := p.routes[name]
+	p.mu.RUnlock()
+	other := p.acpSP
+	if isACP {
+		other = p.defaultSP
+	}
+	return runtime.ObserveLivenessWithError(other, name, processNames)
 }
 
 // Nudge delegates to the routed backend.
@@ -172,6 +290,34 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return np.NudgeNow(name, content)
 	}
 	return p.route(name).Nudge(name, content)
+}
+
+// ResetInterruptedTurn delegates to the routed backend when it supports
+// provider-native interrupted-turn discard semantics.
+func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
+		return rp.ResetInterruptedTurn(ctx, name)
+	}
+	return runtime.ErrInteractionUnsupported
+}
+
+// Relaunch forwards a warm-box agent relaunch to the routed backend when it
+// supports one, so the reconciler's RelaunchProvider type-assert is not masked
+// by the auto router.
+func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
+	if rp, ok := p.route(name).(runtime.RelaunchProvider); ok {
+		return rp.Relaunch(ctx, name, cfg)
+	}
+	return runtime.ErrRelaunchUnsupported
+}
+
+// WaitForInterruptBoundary delegates to the routed backend when it can confirm
+// a provider-native interrupt boundary before the next turn is injected.
+func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
+	if wp, ok := p.route(name).(runtime.InterruptBoundaryWaitProvider); ok {
+		return wp.WaitForInterruptBoundary(ctx, name, since, timeout)
+	}
+	return runtime.ErrInteractionUnsupported
 }
 
 // Pending delegates to the routed backend when it supports structured
@@ -212,25 +358,15 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 	return p.route(name).Peek(name, lines)
 }
 
-// ListRunning queries both backends and merges results. If one backend
-// fails, partial results are returned along with the error so callers
-// can distinguish complete vs partial results.
+// ListRunning queries both backends and returns best-effort results plus a
+// partial-list error when one backend fails.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	defaultList, dErr := p.defaultSP.ListRunning(prefix)
 	acpList, aErr := p.acpSP.ListRunning(prefix)
-	var merged []string
-	merged = append(merged, defaultList...)
-	merged = append(merged, acpList...)
-	switch {
-	case dErr != nil && aErr != nil:
-		return nil, errors.Join(fmt.Errorf("default backend: %w", dErr), fmt.Errorf("acp backend: %w", aErr))
-	case dErr != nil:
-		return merged, fmt.Errorf("default backend: %w (acp results included)", dErr)
-	case aErr != nil:
-		return merged, fmt.Errorf("acp backend: %w (default results included)", aErr)
-	default:
-		return merged, nil
-	}
+	return runtime.MergeBackendListResults(
+		runtime.BackendListResult{Label: "default", Names: defaultList, Err: dErr},
+		runtime.BackendListResult{Label: "acp", Names: acpList, Err: aErr},
+	)
 }
 
 // GetLastActivity delegates to the routed backend.
@@ -260,12 +396,17 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 
 // Capabilities returns the intersection of both backends' capabilities.
 // A capability is reported only if both default and ACP support it.
+// NeedsClaimBackstop is a need, not an ability, so it unions instead: if
+// either backend requires the stalled-claim backstop, the composite does too.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	dc := p.defaultSP.Capabilities()
 	ac := p.acpSP.Capabilities()
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: dc.CanReportAttachment && ac.CanReportAttachment,
 		CanReportActivity:   dc.CanReportActivity && ac.CanReportActivity,
+		CanStream:           dc.CanStream && ac.CanStream,
+		CanAttachTTY:        dc.CanAttachTTY && ac.CanAttachTTY,
+		NeedsClaimBackstop:  dc.NeedsClaimBackstop || ac.NeedsClaimBackstop,
 	}
 }
 
@@ -275,4 +416,25 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 		return scp.SleepCapability(name)
 	}
 	return runtime.SessionSleepCapabilityDisabled
+}
+
+// SubscribeSessionEvents forwards the session-event stream of whichever
+// backend implements runtime.SessionEventProvider. Today only herdr does, so
+// without this method, wrapping an event-capable default backend (e.g.
+// herdr) behind auto for ACP routing would fail the
+// runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the whole event-driven
+// reconcile poke, falling back to patrol polling with no underlying
+// capability loss to explain it.
+func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
+	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
+	switch {
+	case dok:
+		return dSEP.SubscribeSessionEvents(ctx)
+	case aok:
+		return aSEP.SubscribeSessionEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+	}
 }

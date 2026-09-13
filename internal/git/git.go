@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -52,19 +53,110 @@ func (g *Git) CurrentBranchCtx(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// DefaultBranch returns the default branch name via the origin HEAD symref.
-// Falls back to "main" if no remote is configured.
+// DefaultBranch returns the default branch name via the origin HEAD symref,
+// with a candidate-ref fallback when origin/HEAD is unset.
+//
+// Resolution order:
+//  1. refs/remotes/origin/HEAD symref (the configured default)
+//  2. refs/remotes/origin/main when it exists locally
+//  3. refs/remotes/origin/master when it exists locally
+//  4. "main" as a last resort
+//
+// The candidate-ref pass at step 2-3 prevents master-default rigs from
+// silently inheriting "main" when origin/HEAD has not been wired by the
+// clone (e.g., rigs added before gc rig add auto-detected the default
+// branch). See gc-8cowk / gc-ao9t.
 func (g *Git) DefaultBranch() (string, error) {
-	out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD")
+	if out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
+		ref := strings.TrimSpace(out)
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != "" {
+			return branch, nil
+		}
+	}
+	for _, candidate := range []string{"main", "master"} {
+		if _, err := g.run("show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "main", nil
+}
+
+// ProbeDefaultBranch returns the repo's mainline branch name. See
+// ProbeDefaultBranchFrom for the fallback chain; this drops the remote the
+// answer came from.
+func (g *Git) ProbeDefaultBranch() string {
+	branch, _ := g.ProbeDefaultBranchFrom()
+	return branch
+}
+
+// ProbeDefaultBranchFrom returns the repo's mainline branch name and the
+// remote whose HEAD supplied it, with a richer fallback chain than
+// DefaultBranch:
+//  1. refs/remotes/origin/HEAD symref (the conventional default)
+//  2. refs/remotes/<remote>/HEAD for every other configured remote, in
+//     `git remote` order — a repo whose remote is named something other than
+//     origin still has a mainline, and guessing from the checked-out branch
+//     instead silently registers a feature branch as the rig's target
+//  3. the currently checked-out branch, reported with an empty remote so
+//     callers can say the mainline was inferred rather than read
+//  4. empty branch and remote (caller decides)
+//
+// Use this at registration time (gc rig add) where we want to record the
+// repo's actual mainline rather than a generic "main" placeholder.
+func (g *Git) ProbeDefaultBranchFrom() (branch, remote string) {
+	for _, name := range g.remoteNamesOriginFirst() {
+		ref := "refs/remotes/" + name + "/HEAD"
+		out, err := g.run("symbolic-ref", ref)
+		if err != nil {
+			continue
+		}
+		if b := strings.TrimPrefix(strings.TrimSpace(out), "refs/remotes/"+name+"/"); b != "" {
+			return b, name
+		}
+	}
+	if b, err := g.CurrentBranch(); err == nil {
+		b = strings.TrimSpace(b)
+		if b != "" && b != "HEAD" {
+			return b, ""
+		}
+	}
+	return "", ""
+}
+
+// remoteNamesOriginFirst lists the repo's configured remotes with "origin"
+// hoisted to the front, so the conventional remote keeps winning when a repo
+// has several. Returns just {"origin"} when the remote list is unreadable, so
+// the probe still behaves like it always has on a broken or bare-ish repo.
+func (g *Git) remoteNamesOriginFirst() []string {
+	out, err := g.run("remote")
 	if err != nil {
-		return "main", nil
+		return []string{"origin"}
 	}
-	// Output is like "refs/remotes/origin/main"
-	ref := strings.TrimSpace(out)
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		return ref[i+1:], nil
+	names := []string{}
+	hasOrigin := false
+	for _, line := range strings.Split(out, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		if name == "origin" {
+			hasOrigin = true
+			continue
+		}
+		names = append(names, name)
 	}
-	return ref, nil
+	if hasOrigin || len(names) == 0 {
+		return append([]string{"origin"}, names...)
+	}
+	return names
+}
+
+// CheckoutDetach switches the working tree to a detached HEAD at ref.
+func (g *Git) CheckoutDetach(ref string) error {
+	if _, err := g.run("checkout", "--detach", ref); err != nil {
+		return fmt.Errorf("checkout --detach %s: %w", ref, err)
+	}
+	return nil
 }
 
 // WorktreeRemove removes a worktree. If force is true, removes even with
@@ -104,21 +196,75 @@ func (g *Git) HasUncommittedWork() bool {
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
 // any remote tracking branch. Used as a safety check before removing a
 // worktree — unpushed commits represent completed work that would be lost.
+// If the probe fails, it returns true to fail closed.
 func (g *Git) HasUnpushedCommits() bool {
+	has, err := g.HasUnpushedCommitsResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasUnpushedCommitsResult is like HasUnpushedCommits but preserves git
+// probe errors for callers that need to expose the precise failure reason.
+func (g *Git) HasUnpushedCommitsResult() (bool, error) {
 	out, err := g.run("log", "HEAD", "--oneline", "--not", "--remotes")
 	if err != nil {
-		return false // can't determine; assume clean
+		return false, fmt.Errorf("checking unpushed commits: %w", err)
 	}
-	return strings.TrimSpace(out) != ""
+	return strings.TrimSpace(out) != "", nil
+}
+
+// HasUnreachableCommits reports whether HEAD has commits that no ref reaches.
+// If the probe fails, it returns true to fail closed.
+func (g *Git) HasUnreachableCommits() bool {
+	has, err := g.HasUnreachableCommitsResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasUnreachableCommitsResult reports whether HEAD has commits reachable from
+// no branch, tag, or remote-tracking ref — that is, commits that removing this
+// worktree would orphan. It is the question a caller deleting a worktree needs
+// answered, and it is deliberately narrower than HasUnpushedCommitsResult:
+// `git worktree remove` deletes the checkout, not refs/heads, so commits a
+// local branch still reaches survive the removal.
+//
+// The distinction is load-bearing for merge workflows that delete the branch
+// from the remote after merging. Once the remote branch is gone — and once a
+// squash-merge has given the merged change a different SHA on the target branch
+// — no remote-tracking ref reaches the worktree's HEAD ever again, so
+// HasUnpushedCommitsResult reports true permanently even though nothing is at
+// risk. Callers gating destructive cleanup on that answer never clean anything
+// up. Probe errors are returned as-is so callers can fail closed with a reason.
+func (g *Git) HasUnreachableCommitsResult() (bool, error) {
+	out, err := g.run("log", "HEAD", "--oneline", "--not", "--branches", "--remotes", "--tags")
+	if err != nil {
+		return false, fmt.Errorf("checking unreachable commits: %w", err)
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 // HasStashes reports whether the repository has stashed work.
+// If the probe fails, it returns true to fail closed.
 func (g *Git) HasStashes() bool {
+	has, err := g.HasStashesResult()
+	if err != nil {
+		return true
+	}
+	return has
+}
+
+// HasStashesResult is like HasStashes but preserves git probe errors for
+// callers that need to expose the precise failure reason.
+func (g *Git) HasStashesResult() (bool, error) {
 	out, err := g.run("stash", "list")
 	if err != nil {
-		return false // can't determine; assume clean
+		return false, fmt.Errorf("checking stashes: %w", err)
 	}
-	return strings.TrimSpace(out) != ""
+	return strings.TrimSpace(out) != "", nil
 }
 
 // SubmoduleInit initializes and updates submodules recursively.
@@ -240,6 +386,106 @@ var gitEnvBlacklist = map[string]bool{
 	"GIT_SHALLOW_FILE":                 true,
 }
 
+// hermeticGitEnvExtra lists git environment variables stripped by HermeticEnv
+// in addition to gitEnvBlacklist. These are repository-discovery,
+// config-location, and pager/exec-path variables that a hermetic cache clone
+// must not inherit from the parent process. They are kept separate from
+// gitEnvBlacklist because SanitizedEnv deliberately preserves some of them: for
+// example GIT_CEILING_DIRECTORIES is required by ordinary repo-discovery checks
+// such as IsRepo, which would climb out of a non-repo directory if it were
+// stripped. Cache clones, by contrast, want maximum isolation.
+var hermeticGitEnvExtra = map[string]bool{
+	"GIT_CEILING_DIRECTORIES":         true,
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM": true,
+	"GIT_NAMESPACE":                   true,
+	"GIT_CONFIG_SYSTEM":               true,
+	"GIT_CONFIG_GLOBAL":               true,
+	"GIT_CONFIG_NOSYSTEM":             true,
+	"GIT_EXEC_PATH":                   true,
+	"GIT_PAGER":                       true,
+}
+
+// SanitizedEnv returns a copy of the current process environment with
+// git-specific variables removed. Subprocess git invocations should run with
+// this environment so they operate on their own working directory instead of a
+// parent repository leaked through GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, and
+// related variables (for example when gc runs inside a pre-commit hook or
+// nested worktree tooling). Callers outside this package that shell out to git
+// directly should assign this to cmd.Env.
+func SanitizedEnv() []string {
+	return sanitizeGitEnv(os.Environ())
+}
+
+// HermeticEnv returns a process environment for git subprocesses that must run
+// hermetically against a cached clone, isolated from ambient system, global,
+// and parent-repository git state. It strips everything SanitizedEnv removes
+// plus the repository-discovery, config-location, and pager/exec-path variables
+// in hermeticGitEnvExtra, then pins GIT_CONFIG_NOSYSTEM=1 and
+// GIT_CONFIG_GLOBAL=/dev/null so the clone reads no system or user git config.
+// Cache and fetch runners that previously maintained their own duplicate
+// blacklists should assign this to cmd.Env instead.
+func HermeticEnv() []string {
+	environ := os.Environ()
+	cleaned := make([]string, 0, len(environ)+2)
+	for _, e := range environ {
+		if k, _, ok := strings.Cut(e, "="); ok && (gitEnvBlacklist[k] || hermeticGitEnvExtra[k]) {
+			continue
+		}
+		cleaned = append(cleaned, e)
+	}
+	cleaned = append(cleaned, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	return cleaned
+}
+
+// UntrustedRemoteGitConfigArgs returns leading `git -c` overrides that harden a
+// network git invocation (ls-remote, fetch, clone) whose remote URL may be
+// attacker-influenced — the pack-import add path, where an API caller supplies
+// the source string. Callers prepend it to the git arguments, before the
+// subcommand.
+//
+// It closes the two classic ways a resolve-then-fetch SSRF host fence is
+// bypassed at the git subprocess:
+//
+//   - http.followRedirects=false stops git from following a 30x redirect, so a
+//     fenced public host cannot bounce the fetch to an internal target (e.g.
+//     169.254.169.254) after the host check has already passed.
+//   - protocol.allow=never plus an explicit allowlist constrains the transports
+//     git will use to the schemes pack sources legitimately need (https, http,
+//     ssh, git, and file for CLI-local packs), so a crafted URL, redirect, or
+//     submodule cannot escalate to a dangerous transport such as ext:: (which
+//     runs an arbitrary command).
+//
+// It does NOT close a DNS-rebinding TOCTOU window: git re-resolves the host at
+// fetch time, so a name that resolved to a public address during the fence can
+// still resolve to an internal one here. That residual is documented at the
+// pack SSRF fence (internal/api/pack_source_policy.go); pinning the resolved IP
+// is out of scope for this hardening.
+func UntrustedRemoteGitConfigArgs() []string {
+	return []string{
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.https.allow=always",
+		"-c", "protocol.http.allow=always",
+		"-c", "protocol.ssh.allow=always",
+		"-c", "protocol.git.allow=always",
+		"-c", "protocol.file.allow=always",
+	}
+}
+
+// sanitizeGitEnv returns environ with git-specific variables removed. It is the
+// single filtering implementation shared by SanitizedEnv and runCtx so the
+// blacklist has exactly one enforcement path.
+func sanitizeGitEnv(environ []string) []string {
+	cleaned := make([]string, 0, len(environ))
+	for _, e := range environ {
+		if k, _, ok := strings.Cut(e, "="); ok && gitEnvBlacklist[k] {
+			continue
+		}
+		cleaned = append(cleaned, e)
+	}
+	return cleaned
+}
+
 // run executes a git command in the working directory. Git environment
 // variables from the parent process are stripped to prevent interference
 // (e.g., when called from a pre-commit hook context).
@@ -252,12 +498,7 @@ func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	// Build clean env: inherit everything except git-specific vars.
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && gitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
+	cmd.Env = sanitizeGitEnv(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
@@ -283,7 +524,7 @@ func parseWorktreeList(output string) []Worktree {
 		}
 		switch {
 		case strings.HasPrefix(line, "worktree "):
-			current.Path = canonicalWorktreePath(strings.TrimPrefix(line, "worktree "))
+			current.Path = canonicalWorktreePath(unquoteGitPath(strings.TrimPrefix(line, "worktree ")))
 		case strings.HasPrefix(line, "HEAD "):
 			current.Head = strings.TrimPrefix(line, "HEAD ")
 		case strings.HasPrefix(line, "branch "):
@@ -297,6 +538,22 @@ func parseWorktreeList(output string) []Worktree {
 		worktrees = append(worktrees, current)
 	}
 	return worktrees
+}
+
+// unquoteGitPath decodes git's C-style quoting, which porcelain output
+// applies to any path containing non-ASCII or control characters. Consuming
+// the quoted text verbatim would canonicalize a registered worktree to a
+// path that matches nothing, and the safety scans built on it would report a
+// live registration as absent.
+func unquoteGitPath(path string) string {
+	if !strings.HasPrefix(path, `"`) {
+		return path
+	}
+	unquoted, err := strconv.Unquote(path)
+	if err != nil {
+		return path
+	}
+	return unquoted
 }
 
 func canonicalWorktreePath(path string) string {

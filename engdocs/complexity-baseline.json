@@ -1,0 +1,2935 @@
+{
+  "schema": "gascity.complexity/v1",
+  "tool": "gocyclo@v0.6.0",
+  "threshold": 20,
+  "items": [
+    {
+      "package": "main",
+      "function": "reconcileSessionBeadsTracedWithNamedDemand",
+      "file": "cmd/gc/session_reconciler.go",
+      "ccn": 461
+    },
+    {
+      "package": "main",
+      "function": "syncSessionBeadsWithSnapshotAndRigStores",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 256
+    },
+    {
+      "package": "main",
+      "function": "ComputeAwakeSet",
+      "file": "cmd/gc/compute_awake_set.go",
+      "ccn": 137
+    },
+    {
+      "package": "config",
+      "function": "LoadWithIncludesOptions",
+      "file": "internal/config/compose.go",
+      "ccn": 136
+    },
+    {
+      "package": "main",
+      "function": "buildDesiredStateWithSessionBeadsAt",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 112
+    },
+    {
+      "package": "config",
+      "function": "expandPacks",
+      "file": "internal/config/pack.go",
+      "ccn": 106
+    },
+    {
+      "package": "main",
+      "function": "doStorageRecoverStranded",
+      "file": "cmd/gc/infra_class_recover.go",
+      "ccn": 95
+    },
+    {
+      "package": "molecule",
+      "function": "Instantiate",
+      "file": "internal/molecule/molecule.go",
+      "ccn": 93
+    },
+    {
+      "package": "config",
+      "function": "expandCityPacks",
+      "file": "internal/config/pack.go",
+      "ccn": 92
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).applyEvent",
+      "file": "internal/beads/caching_store_events.go",
+      "ccn": 87
+    },
+    {
+      "package": "main",
+      "function": "resolveTemplate",
+      "file": "cmd/gc/template_resolve.go",
+      "ccn": 86
+    },
+    {
+      "package": "config",
+      "function": "loadPackWithCacheOptionsLocked",
+      "file": "internal/config/pack.go",
+      "ccn": 81
+    },
+    {
+      "package": "worker",
+      "function": "normalizeStructuredToolInput",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 72
+    },
+    {
+      "package": "main",
+      "function": "lookupPoolSessionNameCandidates",
+      "file": "cmd/gc/session_name_lookup.go",
+      "ccn": 71
+    },
+    {
+      "package": "main",
+      "function": "executePlannedStartsTraced",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 68
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).reloadConfigTraced",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 66
+    },
+    {
+      "package": "main",
+      "function": "cmdSessionNew",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 65
+    },
+    {
+      "package": "main",
+      "function": "discoverSessionBeadsWithRoots",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 63
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).run",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 62
+    },
+    {
+      "package": "molecule",
+      "function": "InstantiateFragment",
+      "file": "internal/molecule/molecule.go",
+      "ccn": 61
+    },
+    {
+      "package": "main",
+      "function": "doStartStandalone",
+      "file": "cmd/gc/cmd_start.go",
+      "ccn": 58
+    },
+    {
+      "package": "main",
+      "function": "runSupervisor",
+      "file": "cmd/gc/cmd_supervisor.go",
+      "ccn": 58
+    },
+    {
+      "package": "main",
+      "function": "startOneCity",
+      "file": "cmd/gc/cmd_supervisor.go",
+      "ccn": 58
+    },
+    {
+      "package": "worker",
+      "function": "inferStructuredToolResult",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 58
+    },
+    {
+      "package": "convergence",
+      "function": "(*Handler).HandleWispClosed",
+      "file": "internal/convergence/handler.go",
+      "ccn": 57
+    },
+    {
+      "package": "molecule",
+      "function": "buildRecipeApplyPlan",
+      "file": "internal/molecule/graph_apply.go",
+      "ccn": 57
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).DisableAndPurge",
+      "file": "internal/productmetrics/control.go",
+      "ccn": 56
+    },
+    {
+      "package": "dispatch",
+      "function": "processRetryEval",
+      "file": "internal/dispatch/retry.go",
+      "ccn": 55
+    },
+    {
+      "package": "main",
+      "function": "buildPreparedStartWithWorkDirResolver",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 55
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleSling",
+      "file": "internal/api/huma_handlers_sling.go",
+      "ccn": 54
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).tick",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 54
+    },
+    {
+      "package": "main",
+      "function": "computePoolDesiredStatesAt",
+      "file": "cmd/gc/pool_desired_state.go",
+      "ccn": 54
+    },
+    {
+      "package": "sling",
+      "function": "DoSlingBatch",
+      "file": "internal/sling/sling_core.go",
+      "ccn": 54
+    },
+    {
+      "package": "main",
+      "function": "newFormulaCookCmd",
+      "file": "cmd/gc/cmd_formula.go",
+      "ccn": 52
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).uploadOneBatchLocked",
+      "file": "internal/productmetrics/uploader.go",
+      "ccn": 51
+    },
+    {
+      "package": "productmetrics",
+      "function": "proveRootTempJournalReadOnlyWithMeter",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 51
+    },
+    {
+      "package": "runtime",
+      "function": "AcceptStartupDialogsFromStreamWithStatus",
+      "file": "internal/runtime/dialog.go",
+      "ccn": 51
+    },
+    {
+      "package": "config",
+      "function": "applyAgentMutation",
+      "file": "internal/config/patch.go",
+      "ccn": 50
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).RecordOnce",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 50
+    },
+    {
+      "package": "commandcensus",
+      "function": "validateCommand",
+      "file": "internal/commandcensus/manifest.go",
+      "ccn": 49
+    },
+    {
+      "package": "main",
+      "function": "doPrimeWithHookFormatOpts",
+      "file": "cmd/gc/cmd_prime.go",
+      "ccn": 49
+    },
+    {
+      "package": "main",
+      "function": "reapClosedBeadWorktrees",
+      "file": "cmd/gc/bead_worktree_reaper.go",
+      "ccn": 49
+    },
+    {
+      "package": "main",
+      "function": "runBdStoreBridge",
+      "file": "cmd/gc/cmd_bd_store_bridge.go",
+      "ccn": 49
+    },
+    {
+      "package": "migrate",
+      "function": "isZeroAgentConfig",
+      "file": "internal/migrate/migrate.go",
+      "ccn": 49
+    },
+    {
+      "package": "productmetrics",
+      "function": "runSpoolSweepWithMeter",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 49
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleAgentList",
+      "file": "internal/api/huma_handlers_agents.go",
+      "ccn": 47
+    },
+    {
+      "package": "main",
+      "function": "(*memoryOrderDispatcher).dispatch",
+      "file": "cmd/gc/order_dispatch.go",
+      "ccn": 47
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).refreshCachedBeads",
+      "file": "internal/beads/caching_store_reads.go",
+      "ccn": 46
+    },
+    {
+      "package": "config",
+      "function": "MergeProviderOverBuiltin",
+      "file": "internal/config/resolve.go",
+      "ccn": 45
+    },
+    {
+      "package": "fake",
+      "function": "(Runner).Run",
+      "file": "internal/worker/fake/run.go",
+      "ccn": 45
+    },
+    {
+      "package": "formula",
+      "function": "(*Formula).Validate",
+      "file": "internal/formula/types.go",
+      "ccn": 45
+    },
+    {
+      "package": "productmetrics",
+      "function": "validatePersistedState",
+      "file": "internal/productmetrics/config.go",
+      "ccn": 45
+    },
+    {
+      "package": "formula",
+      "function": "compileFormula",
+      "file": "internal/formula/compile.go",
+      "ccn": 44
+    },
+    {
+      "package": "main",
+      "function": "doOrderCheckWithStoresResolverScopedJSON",
+      "file": "cmd/gc/cmd_order.go",
+      "ccn": 44
+    },
+    {
+      "package": "main",
+      "function": "materializeSessionForTemplateWithOptions",
+      "file": "cmd/gc/session_template_start.go",
+      "ccn": 44
+    },
+    {
+      "package": "main",
+      "function": "newDoltStateCmd",
+      "file": "cmd/gc/cmd_dolt_state.go",
+      "ccn": 44
+    },
+    {
+      "package": "main",
+      "function": "newFormulaShowCmd",
+      "file": "cmd/gc/cmd_formula.go",
+      "ccn": 44
+    },
+    {
+      "package": "materialize",
+      "function": "Run",
+      "file": "internal/materialize/skills.go",
+      "ccn": 44
+    },
+    {
+      "package": "dispatch",
+      "function": "processFanout",
+      "file": "internal/dispatch/fanout.go",
+      "ccn": 43
+    },
+    {
+      "package": "session",
+      "function": "(*Manager).createStarted",
+      "file": "internal/session/manager.go",
+      "ccn": 43
+    },
+    {
+      "package": "dispatch",
+      "function": "processRalphCheck",
+      "file": "internal/dispatch/ralph.go",
+      "ccn": 42
+    },
+    {
+      "package": "main",
+      "function": "applyReconcileDecision",
+      "file": "cmd/gc/dolt_project_id.go",
+      "ccn": 42
+    },
+    {
+      "package": "main",
+      "function": "normalizeNonExpandingPoolSessionInfo",
+      "file": "cmd/gc/build_desired_state_pool_info.go",
+      "ccn": 42
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).cleanupRootTempJournal",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 42
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).exchangeEnumeratedEntries",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 42
+    },
+    {
+      "package": "api",
+      "function": "(*Server).buildStatusBody",
+      "file": "internal/api/handler_status.go",
+      "ccn": 41
+    },
+    {
+      "package": "main",
+      "function": "buildDoctorChecks",
+      "file": "cmd/gc/cmd_doctor.go",
+      "ccn": 41
+    },
+    {
+      "package": "storebinding",
+      "function": "(GuardReceipt).Validate",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 40
+    },
+    {
+      "package": "api",
+      "function": "(*Server).handleSessionCreate",
+      "file": "internal/api/handler_session_create.go",
+      "ccn": 39
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleSessionCreate",
+      "file": "internal/api/huma_handlers_sessions_command.go",
+      "ccn": 39
+    },
+    {
+      "package": "sessionlog",
+      "function": "ProviderFamily",
+      "file": "internal/sessionlog/reader.go",
+      "ccn": 39
+    },
+    {
+      "package": "storebinding",
+      "function": "(*ActiveManifest).Validate",
+      "file": "internal/storebinding/migration_manifest_attempt.go",
+      "ccn": 39
+    },
+    {
+      "package": "t3bridge",
+      "function": "(*Provider).Start",
+      "file": "internal/runtime/t3bridge/provider.go",
+      "ccn": 39
+    },
+    {
+      "package": "dispatch",
+      "function": "expandDrain",
+      "file": "internal/dispatch/drain.go",
+      "ccn": 38
+    },
+    {
+      "package": "main",
+      "function": "advanceSessionDrainsWithSessionsTraced",
+      "file": "cmd/gc/session_wake.go",
+      "ccn": 38
+    },
+    {
+      "package": "main",
+      "function": "runAdoptionBarrier",
+      "file": "cmd/gc/adoption_barrier.go",
+      "ccn": 38
+    },
+    {
+      "package": "productmetrics",
+      "function": "scanOldestQueuedEventReadOnly",
+      "file": "internal/productmetrics/status.go",
+      "ccn": 38
+    },
+    {
+      "package": "productmetrics",
+      "function": "validateProductionUploadHTTPClient",
+      "file": "internal/productmetrics/upload.go",
+      "ccn": 38
+    },
+    {
+      "package": "session",
+      "function": "(*Manager).ensureRunning",
+      "file": "internal/session/chat.go",
+      "ccn": 38
+    },
+    {
+      "package": "commandcensus",
+      "function": "ValidateManifest",
+      "file": "internal/commandcensus/manifest.go",
+      "ccn": 37
+    },
+    {
+      "package": "extmsg",
+      "function": "(*bindingService).Unbind",
+      "file": "internal/extmsg/binding_service.go",
+      "ccn": 37
+    },
+    {
+      "package": "graphroute",
+      "function": "ResolveGraphStepBindingWithVars",
+      "file": "internal/graphroute/graphroute.go",
+      "ccn": 37
+    },
+    {
+      "package": "main",
+      "function": "doInit",
+      "file": "cmd/gc/cmd_init.go",
+      "ccn": 37
+    },
+    {
+      "package": "main",
+      "function": "recoverManagedDoltProcessWithOps",
+      "file": "cmd/gc/dolt_recover_managed.go",
+      "ccn": 37
+    },
+    {
+      "package": "main",
+      "function": "runPreparedStartCandidate",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 37
+    },
+    {
+      "package": "storebinding",
+      "function": "(IntentSection).Validate",
+      "file": "internal/storebinding/migration_manifest_record.go",
+      "ccn": 37
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleBeadList",
+      "file": "internal/api/huma_handlers_beads.go",
+      "ccn": 36
+    },
+    {
+      "package": "beads",
+      "function": "(*NativeDoltStore).ApplyGraphPlanWithStorage",
+      "file": "internal/beads/native_dolt_store.go",
+      "ccn": 36
+    },
+    {
+      "package": "beads",
+      "function": "(*SQLiteStore).ApplyGraphPlanWithStorage",
+      "file": "internal/beads/sqlite_store_graph_apply.go",
+      "ccn": 36
+    },
+    {
+      "package": "contract",
+      "function": "EnsureCanonicalConfig",
+      "file": "internal/beads/contract/files.go",
+      "ccn": 36
+    },
+    {
+      "package": "convergence",
+      "function": "(*Handler).StopHandler",
+      "file": "internal/convergence/manual.go",
+      "ccn": 36
+    },
+    {
+      "package": "dispatch",
+      "function": "appendRalphRetryLegacy",
+      "file": "internal/dispatch/ralph.go",
+      "ccn": 36
+    },
+    {
+      "package": "main",
+      "function": "initBeadsForDirWithExecutor",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 36
+    },
+    {
+      "package": "main",
+      "function": "resolveGraphStepBindingWithVars",
+      "file": "cmd/gc/cmd_sling.go",
+      "ccn": 36
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).walkTree",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 36
+    },
+    {
+      "package": "api",
+      "function": "(*Client).waitForEventOnce",
+      "file": "internal/api/client.go",
+      "ccn": 35
+    },
+    {
+      "package": "main",
+      "function": "doBeadsCityEndpoint",
+      "file": "cmd/gc/cmd_beads_city.go",
+      "ccn": 35
+    },
+    {
+      "package": "main",
+      "function": "prepareWaitWakeStateWithSnapshot",
+      "file": "cmd/gc/cmd_wait.go",
+      "ccn": 35
+    },
+    {
+      "package": "orders",
+      "function": "Validate",
+      "file": "internal/orders/order.go",
+      "ccn": 35
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).reserveRelocationSlots",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 35
+    },
+    {
+      "package": "api",
+      "function": "(*Server).createProviderSession",
+      "file": "internal/api/handler_session_create.go",
+      "ccn": 34
+    },
+    {
+      "package": "api",
+      "function": "(*logFileWatcher).Run",
+      "file": "internal/api/logwatcher.go",
+      "ccn": 34
+    },
+    {
+      "package": "config",
+      "function": "ValidateSemantics",
+      "file": "internal/config/validate_semantics.go",
+      "ccn": 34
+    },
+    {
+      "package": "main",
+      "function": "cmdHookWithOptions",
+      "file": "cmd/gc/cmd_hook.go",
+      "ccn": 34
+    },
+    {
+      "package": "main",
+      "function": "doBd",
+      "file": "cmd/gc/cmd_bd.go",
+      "ccn": 34
+    },
+    {
+      "package": "main",
+      "function": "realizePoolDesiredSessionsAt",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 34
+    },
+    {
+      "package": "main",
+      "function": "releaseOrphanedPoolAssignments",
+      "file": "cmd/gc/pool_session_name.go",
+      "ccn": 34
+    },
+    {
+      "package": "productmetrics",
+      "function": "proveCleanMetricsTreeWithOptions",
+      "file": "internal/productmetrics/control.go",
+      "ccn": 34
+    },
+    {
+      "package": "acp",
+      "function": "(*Provider).Start",
+      "file": "internal/runtime/acp/acp.go",
+      "ccn": 33
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).prime",
+      "file": "internal/beads/caching_store.go",
+      "ccn": 33
+    },
+    {
+      "package": "config",
+      "function": "applyProviderPatch",
+      "file": "internal/config/patch.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "(*sessionModelDoctorCheck).Run",
+      "file": "cmd/gc/doctor_session_model.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "cmdNudgeDrainWithFormat",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "dispatchAllQueuedNudges",
+      "file": "cmd/gc/nudge_dispatcher.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "doOrderHistoryBounded",
+      "file": "cmd/gc/cmd_order.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "healStatePatchWithRollbackInfo",
+      "file": "cmd/gc/session_reconcile.go",
+      "ccn": 33
+    },
+    {
+      "package": "main",
+      "function": "installSupervisorSystemd",
+      "file": "cmd/gc/cmd_supervisor_lifecycle.go",
+      "ccn": 33
+    },
+    {
+      "package": "productmetrics",
+      "function": "platformOpenStorageRoot",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 33
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleWorkflowDelete",
+      "file": "internal/api/huma_handlers_convoys.go",
+      "ccn": 32
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptHistoryRaw",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 32
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).updateMatchesCached",
+      "file": "internal/beads/caching_store_writes.go",
+      "ccn": 32
+    },
+    {
+      "package": "contract",
+      "function": "ResolveAuthoritativeConfigState",
+      "file": "internal/beads/contract/connection.go",
+      "ccn": 32
+    },
+    {
+      "package": "dispatch",
+      "function": "resolveExistingFragmentInstanceFromBeads",
+      "file": "internal/dispatch/fanout.go",
+      "ccn": 32
+    },
+    {
+      "package": "formula",
+      "function": "CompileExpansionFragment",
+      "file": "internal/formula/fragment.go",
+      "ccn": 32
+    },
+    {
+      "package": "fsys",
+      "function": "ResolveSymlinks",
+      "file": "internal/fsys/resolve_symlinks.go",
+      "ccn": 32
+    },
+    {
+      "package": "main",
+      "function": "cmdMailSendJSON",
+      "file": "cmd/gc/cmd_mail.go",
+      "ccn": 32
+    },
+    {
+      "package": "main",
+      "function": "initWizardConfigFromFlags",
+      "file": "cmd/gc/cmd_init.go",
+      "ccn": 32
+    },
+    {
+      "package": "main",
+      "function": "reapOrphanedClosedWisps",
+      "file": "cmd/gc/wisp_gc.go",
+      "ccn": 32
+    },
+    {
+      "package": "main",
+      "function": "rewriteLegacyPublicPackImportsFS",
+      "file": "cmd/gc/import_state_doctor_check.go",
+      "ccn": 32
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).activateNotice",
+      "file": "internal/productmetrics/notice.go",
+      "ccn": 32
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).writeFileAtomically",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 32
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*uploadTransport).requestDependencies",
+      "file": "internal/productmetrics/upload.go",
+      "ccn": 32
+    },
+    {
+      "package": "api",
+      "function": "(*Server).handleSessionStream",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 31
+    },
+    {
+      "package": "api",
+      "function": "(*Server).handleSessionTranscript",
+      "file": "internal/api/handler_session_transcript.go",
+      "ccn": 31
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaCreateProviderSession",
+      "file": "internal/api/huma_handlers_sessions_command.go",
+      "ccn": 31
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptLogRawHuma",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 31
+    },
+    {
+      "package": "beads",
+      "function": "cacheEventConflictsCurrent",
+      "file": "internal/beads/caching_store_events.go",
+      "ccn": 31
+    },
+    {
+      "package": "config",
+      "function": "resolvedChainToSpec",
+      "file": "internal/config/resolve.go",
+      "ccn": 31
+    },
+    {
+      "package": "herdr",
+      "function": "(*Provider).start",
+      "file": "internal/runtime/herdr/provider.go",
+      "ccn": 31
+    },
+    {
+      "package": "main",
+      "function": "mergeScaleCheckDemand",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 31
+    },
+    {
+      "package": "migrate",
+      "function": "Apply",
+      "file": "internal/migrate/migrate.go",
+      "ccn": 31
+    },
+    {
+      "package": "molecule",
+      "function": "buildFragmentApplyPlan",
+      "file": "internal/molecule/graph_apply.go",
+      "ccn": 31
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).cleanupOneRetiredControlEntryFixed",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 31
+    },
+    {
+      "package": "api",
+      "function": "buildWorkflowRunProjections",
+      "file": "internal/api/orders_feed.go",
+      "ccn": 30
+    },
+    {
+      "package": "beads",
+      "function": "(*BdStore).CreateWithStorage",
+      "file": "internal/beads/bdstore.go",
+      "ccn": 30
+    },
+    {
+      "package": "beads",
+      "function": "(ListQuery).Matches",
+      "file": "internal/beads/query.go",
+      "ccn": 30
+    },
+    {
+      "package": "eventexport",
+      "function": "ValidateEnvelope",
+      "file": "pkg/eventexport/project.go",
+      "ccn": 30
+    },
+    {
+      "package": "extmsg",
+      "function": "ReassignSessionBindings",
+      "file": "internal/extmsg/binding_service.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "bdRigQualifiedMetadataRefusal",
+      "file": "cmd/gc/cmd_bd.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "buildAwakeInputFromReconciler",
+      "file": "cmd/gc/compute_awake_bridge.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "collectCityStatusSnapshotFromStoreSnapshot",
+      "file": "cmd/gc/city_status_snapshot.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "enqueueQueuedNudgeWithStoreAndClock",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "parseBdByIDUpdateArgs",
+      "file": "cmd/gc/cmd_bd_by_id.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "runStartDriftCheck",
+      "file": "cmd/gc/cmd_start_drift.go",
+      "ccn": 30
+    },
+    {
+      "package": "main",
+      "function": "startManagedDoltProcessWithOptions",
+      "file": "cmd/gc/dolt_start_managed.go",
+      "ccn": 30
+    },
+    {
+      "package": "productmetrics",
+      "function": "isClosedProductionTLSConfig",
+      "file": "internal/productmetrics/upload.go",
+      "ccn": 30
+    },
+    {
+      "package": "session",
+      "function": "ensureSessionAliasAvailable",
+      "file": "internal/session/names.go",
+      "ccn": 30
+    },
+    {
+      "package": "sessionlog",
+      "function": "extractFromLines",
+      "file": "internal/sessionlog/tail.go",
+      "ccn": 30
+    },
+    {
+      "package": "worker",
+      "function": "taskResultFieldsDepth",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 30
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptHistoryStructured",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 29
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptLogStructuredHuma",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 29
+    },
+    {
+      "package": "commandcensus",
+      "function": "validateCanonicalGroups",
+      "file": "internal/commandcensus/manifest.go",
+      "ccn": 29
+    },
+    {
+      "package": "contract",
+      "function": "ensureCanonicalConfigFallback",
+      "file": "internal/beads/contract/files.go",
+      "ccn": 29
+    },
+    {
+      "package": "doctor",
+      "function": "(*NestedWorktreePruneCheck).Run",
+      "file": "internal/doctor/checks_semantic.go",
+      "ccn": 29
+    },
+    {
+      "package": "herdr",
+      "function": "(*sessionEventStream).runCycle",
+      "file": "internal/runtime/herdr/events.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "cmdInitFromTOMLFileWithOptionsInternal",
+      "file": "cmd/gc/cmd_init.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "doOrderRunWithJSON",
+      "file": "cmd/gc/cmd_order.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "matchesTraceFilter",
+      "file": "cmd/gc/session_reconciler_trace_types.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "prepareCityForSupervisor",
+      "file": "cmd/gc/cmd_supervisor.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "stopManagedDoltProcessWithOptions",
+      "file": "cmd/gc/dolt_stop_managed.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "syncDesiredPoolSlots",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "validateDeferredProductMetricsResolvers",
+      "file": "cmd/gc/metrics_census.go",
+      "ccn": 29
+    },
+    {
+      "package": "main",
+      "function": "validateProductMetricsCensusEntry",
+      "file": "cmd/gc/metrics_census.go",
+      "ccn": 29
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).acquireLockInternal",
+      "file": "internal/productmetrics/lock_unix.go",
+      "ccn": 29
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).removeFileWithHooks",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 29
+    },
+    {
+      "package": "rollout",
+      "function": "ValidateSpecs",
+      "file": "internal/rollout/spec.go",
+      "ccn": 29
+    },
+    {
+      "package": "runtime",
+      "function": "acceptDialogFromStream",
+      "file": "internal/runtime/dialog.go",
+      "ccn": 29
+    },
+    {
+      "package": "api",
+      "function": "(*Server).execSling",
+      "file": "internal/api/handler_sling.go",
+      "ccn": 28
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleMailList",
+      "file": "internal/api/huma_handlers_mail.go",
+      "ccn": 28
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleSessionTranscript",
+      "file": "internal/api/huma_handlers_sessions_query.go",
+      "ccn": 28
+    },
+    {
+      "package": "api",
+      "function": "buildUsageBody",
+      "file": "internal/api/handler_usage.go",
+      "ccn": 28
+    },
+    {
+      "package": "beads",
+      "function": "OpenSQLiteStore",
+      "file": "internal/beads/sqlite_store.go",
+      "ccn": 28
+    },
+    {
+      "package": "dispatch",
+      "function": "buildAttemptRecipe",
+      "file": "internal/dispatch/control.go",
+      "ccn": 28
+    },
+    {
+      "package": "docgen",
+      "function": "RenderMarkdown",
+      "file": "internal/docgen/markdown.go",
+      "ccn": 28
+    },
+    {
+      "package": "doctor",
+      "function": "(*OrderFiringCurrentCheck).run",
+      "file": "internal/doctor/checks_order_firing.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "defaultScaleCheckCountsAndDemand",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "evaluateWakeReasonsInfo",
+      "file": "cmd/gc/session_reconcile.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "existingPoolSlotWithConfig",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "existingPoolSlotWithConfigInfo",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "packCommandTreeRequest",
+      "file": "cmd/gc/cmd_pack_commands.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "runControlDispatcherWithStoreAndConfig",
+      "file": "cmd/gc/cmd_convoy_dispatch.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "runReapStage",
+      "file": "cmd/gc/cmd_dolt_cleanup.go",
+      "ccn": 28
+    },
+    {
+      "package": "main",
+      "function": "syncConfiguredDoltPortFiles",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 28
+    },
+    {
+      "package": "molecule",
+      "function": "Attach",
+      "file": "internal/molecule/molecule.go",
+      "ccn": 28
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).project",
+      "file": "internal/productmetrics/service.go",
+      "ccn": 28
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).reserveFallbackRelocationBlock",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 28
+    },
+    {
+      "package": "session",
+      "function": "(*Manager).ensureRunningRuntimeOnly",
+      "file": "internal/session/chat.go",
+      "ccn": 28
+    },
+    {
+      "package": "sling",
+      "function": "withSourceWorkflowLaunchLock",
+      "file": "internal/sling/sling_core.go",
+      "ccn": 28
+    },
+    {
+      "package": "worker",
+      "function": "parsePatchHunks",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 28
+    },
+    {
+      "package": "dispatch",
+      "function": "runRalphCheck",
+      "file": "internal/dispatch/ralph.go",
+      "ccn": 27
+    },
+    {
+      "package": "formula",
+      "function": "validateDrain",
+      "file": "internal/formula/types.go",
+      "ccn": 27
+    },
+    {
+      "package": "k8s",
+      "function": "(*Provider).Start",
+      "file": "internal/runtime/k8s/provider.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).beadReconcileTick",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).emitDueComputeFacts",
+      "file": "cmd/gc/usage_compute.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "classificationFromCommandAnnotations",
+      "file": "cmd/gc/metrics_classifier.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "cleanupClosedBeadAgentHomeWorktrees",
+      "file": "cmd/gc/agent_home_worktree_cleanup.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "deepCopyAgent",
+      "file": "cmd/gc/pool.go",
+      "ccn": 27
+    },
+    {
+      "package": "main",
+      "function": "newConvergeListCmd",
+      "file": "cmd/gc/cmd_converge.go",
+      "ccn": 27
+    },
+    {
+      "package": "productmetrics",
+      "function": "claimSpoolBatch",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 27
+    },
+    {
+      "package": "sling",
+      "function": "BeadIDParts",
+      "file": "internal/sling/sling.go",
+      "ccn": 27
+    },
+    {
+      "package": "sling",
+      "function": "preflight",
+      "file": "internal/sling/sling_core.go",
+      "ccn": 27
+    },
+    {
+      "package": "sqlite",
+      "function": "validateSQLiteRollbackJournal",
+      "file": "internal/storebinding/sqlite/sqlite_writer_reservation.go",
+      "ccn": 27
+    },
+    {
+      "package": "worker",
+      "function": "languageForPath",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 27
+    },
+    {
+      "package": "api",
+      "function": "(*Server).resolveStoreByPrefix",
+      "file": "internal/api/handler_beads.go",
+      "ccn": 26
+    },
+    {
+      "package": "api",
+      "function": "buildWorkflowRunProjectionsRootOnly",
+      "file": "internal/api/orders_feed.go",
+      "ccn": 26
+    },
+    {
+      "package": "beads",
+      "function": "classifyTraceScope",
+      "file": "internal/beads/bdtrace.go",
+      "ccn": 26
+    },
+    {
+      "package": "config",
+      "function": "ValidateServices",
+      "file": "internal/config/service.go",
+      "ccn": 26
+    },
+    {
+      "package": "config",
+      "function": "hasDeprecatedAttachmentFields",
+      "file": "internal/config/config.go",
+      "ccn": 26
+    },
+    {
+      "package": "config",
+      "function": "mergeAgentDefaults",
+      "file": "internal/config/config.go",
+      "ccn": 26
+    },
+    {
+      "package": "config",
+      "function": "validateNamedSessions",
+      "file": "internal/config/config.go",
+      "ccn": 26
+    },
+    {
+      "package": "dispatch",
+      "function": "processScopeCheck",
+      "file": "internal/dispatch/runtime.go",
+      "ccn": 26
+    },
+    {
+      "package": "dispatch",
+      "function": "walkSourceBeadChain",
+      "file": "internal/dispatch/runtime.go",
+      "ccn": 26
+    },
+    {
+      "package": "extmsg",
+      "function": "(*groupService).RemoveParticipant",
+      "file": "internal/extmsg/group_service.go",
+      "ccn": 26
+    },
+    {
+      "package": "extmsg",
+      "function": "HandleOutbound",
+      "file": "internal/extmsg/outbound.go",
+      "ccn": 26
+    },
+    {
+      "package": "formula",
+      "function": "(*Condition).evaluateAggregate",
+      "file": "internal/formula/condition.go",
+      "ccn": 26
+    },
+    {
+      "package": "formula",
+      "function": "applyExpansionsWithVars",
+      "file": "internal/formula/expand.go",
+      "ccn": 26
+    },
+    {
+      "package": "hooks",
+      "function": "codexManagedPromptTarget",
+      "file": "internal/hooks/hooks.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "doRigSetEndpoint",
+      "file": "cmd/gc/cmd_rig_endpoint.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "explainAgent",
+      "file": "cmd/gc/cmd_config.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "registerCityWithSupervisorNamed",
+      "file": "cmd/gc/cmd_supervisor_city.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "runController",
+      "file": "cmd/gc/controller.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "streamSupervisorEventsOnce",
+      "file": "cmd/gc/cmd_events.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "validateCanonicalCompatDoltDrift",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 26
+    },
+    {
+      "package": "main",
+      "function": "watchConfigTargets",
+      "file": "cmd/gc/controller.go",
+      "ccn": 26
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).finish",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 26
+    },
+    {
+      "package": "reliability",
+      "function": "Analyze",
+      "file": "internal/reliability/reliability.go",
+      "ccn": 26
+    },
+    {
+      "package": "storebinding",
+      "function": "AttestGuardedActivation",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 26
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptHistory",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 25
+    },
+    {
+      "package": "config",
+      "function": "ValidateGitHubPRMonitors",
+      "file": "internal/config/github_pr_monitor.go",
+      "ccn": 25
+    },
+    {
+      "package": "dispatch",
+      "function": "completeDrain",
+      "file": "internal/dispatch/drain.go",
+      "ccn": 25
+    },
+    {
+      "package": "dispatch",
+      "function": "fragmentInstanceComplete",
+      "file": "internal/dispatch/fanout.go",
+      "ccn": 25
+    },
+    {
+      "package": "dispatch",
+      "function": "latestAttemptFromCandidatesLegacyRefSurgery",
+      "file": "internal/dispatch/control.go",
+      "ccn": 25
+    },
+    {
+      "package": "extmsg",
+      "function": "(*groupService).UpsertParticipant",
+      "file": "internal/extmsg/group_service.go",
+      "ccn": 25
+    },
+    {
+      "package": "hooks",
+      "function": "codexManagedPromptTargetArgs",
+      "file": "internal/hooks/hooks.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "(*SessionReconcilerTraceStore).AppendBatch",
+      "file": "cmd/gc/session_reconciler_trace_store.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "cleanupDeadRuntimeSessionCorpses",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "cmdSlingWithJSON",
+      "file": "cmd/gc/cmd_sling.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "collectAssignedWorkBeadsWithStores",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "computePoolTriggerBindingPatch",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "doAgentAdd",
+      "file": "cmd/gc/cmd_agent.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "doConfigShow",
+      "file": "cmd/gc/cmd_config.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "doInitFromDirWithOptionsFSInternal",
+      "file": "cmd/gc/cmd_init.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "doPackRegistrySearch",
+      "file": "cmd/gc/cmd_pack_registry.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "doPackRegistryShow",
+      "file": "cmd/gc/cmd_pack_registry.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "finalizeDrainAckStoppedSession",
+      "file": "cmd/gc/session_reconciler.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "healthBeadsProviderContext",
+      "file": "cmd/gc/beads_provider_lifecycle.go",
+      "ccn": 25
+    },
+    {
+      "package": "main",
+      "function": "selectOrPlanPoolSessionBead",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 25
+    },
+    {
+      "package": "orderdiscovery",
+      "function": "ScanAll",
+      "file": "internal/orderdiscovery/discovery.go",
+      "ccn": 25
+    },
+    {
+      "package": "reviewquorum",
+      "function": "Finalize",
+      "file": "internal/reviewquorum/finalize.go",
+      "ccn": 25
+    },
+    {
+      "package": "sqlite",
+      "function": "acquireSQLiteWriterReservation",
+      "file": "internal/storebinding/sqlite/sqlite_writer_reservation_linux.go",
+      "ccn": 25
+    },
+    {
+      "package": "storebinding",
+      "function": "OpenBinding",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 25
+    },
+    {
+      "package": "storebinding",
+      "function": "RecoverRetainedGuards",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 25
+    },
+    {
+      "package": "storebinding",
+      "function": "containsCredentialMaterialAtDepth",
+      "file": "internal/storebinding/provider.go",
+      "ccn": 25
+    },
+    {
+      "package": "api",
+      "function": "(*Server).handleSessionPatch",
+      "file": "internal/api/handler_sessions.go",
+      "ccn": 24
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionTranscriptLogHuma",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 24
+    },
+    {
+      "package": "cityinit",
+      "function": "(*scaffoldRollbackState).restore",
+      "file": "internal/cityinit/rollback.go",
+      "ccn": 24
+    },
+    {
+      "package": "commandcensus",
+      "function": "ParseGeneratedAllocationLedger",
+      "file": "internal/commandcensus/generate.go",
+      "ccn": 24
+    },
+    {
+      "package": "convergence",
+      "function": "(*Handler).CreateHandler",
+      "file": "internal/convergence/create.go",
+      "ccn": 24
+    },
+    {
+      "package": "dispatch",
+      "function": "(scopeSnapshot).skipOpenScopeMembers",
+      "file": "internal/dispatch/runtime.go",
+      "ccn": 24
+    },
+    {
+      "package": "dispatch",
+      "function": "orderDrainMembersByDependencies",
+      "file": "internal/dispatch/drain.go",
+      "ccn": 24
+    },
+    {
+      "package": "dispatch",
+      "function": "processAttemptControl",
+      "file": "internal/dispatch/control.go",
+      "ccn": 24
+    },
+    {
+      "package": "dispatch",
+      "function": "spawnNextAttempt",
+      "file": "internal/dispatch/control.go",
+      "ccn": 24
+    },
+    {
+      "package": "formula",
+      "function": "expandStep",
+      "file": "internal/formula/expand.go",
+      "ccn": 24
+    },
+    {
+      "package": "logutil",
+      "function": "FatalCause",
+      "file": "internal/logutil/markers.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "(*cityRegistry).TransientCityEventProviders",
+      "file": "cmd/gc/city_registry.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "chooseManagedDoltPort",
+      "file": "cmd/gc/dolt_port_selection.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "doRegistryPublish",
+      "file": "cmd/gc/cmd_registry.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "doSlingBatchWithJSON",
+      "file": "cmd/gc/cmd_sling.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "finalizeInit",
+      "file": "cmd/gc/init_provider_readiness.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "gracefulStopAllWithForceSignal",
+      "file": "cmd/gc/controller.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "handleControllerConn",
+      "file": "cmd/gc/controller.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "resolveBdScopeTarget",
+      "file": "cmd/gc/cmd_bd.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "retireDuplicateConfiguredNamedSessionBeads",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "staleOrderWispSubtreeBatchCloseIDs",
+      "file": "cmd/gc/order_dispatch.go",
+      "ccn": 24
+    },
+    {
+      "package": "main",
+      "function": "templatedMarkdownPrompts",
+      "file": "cmd/gc/doctor_v2_checks.go",
+      "ccn": 24
+    },
+    {
+      "package": "poolplan",
+      "function": "fairShares",
+      "file": "internal/poolplan/create_budget.go",
+      "ccn": 24
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*uploadTransport).upload",
+      "file": "internal/productmetrics/upload.go",
+      "ccn": 24
+    },
+    {
+      "package": "productmetrics",
+      "function": "retireExactDuplicateSpoolRecord",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 24
+    },
+    {
+      "package": "sling",
+      "function": "attachFormulaToBead",
+      "file": "internal/sling/sling_core.go",
+      "ccn": 24
+    },
+    {
+      "package": "sqlite",
+      "function": "(*GraphInspector).Inspect",
+      "file": "internal/storebinding/sqlite/graph_inspection.go",
+      "ccn": 24
+    },
+    {
+      "package": "sqlite",
+      "function": "(*legacyCombinedFence).openSnapshotHeld",
+      "file": "internal/storebinding/sqlite/legacy_combined.go",
+      "ccn": 24
+    },
+    {
+      "package": "storebinding",
+      "function": "(ParticipantReceipt).Validate",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 24
+    },
+    {
+      "package": "workspacesvc",
+      "function": "(*Manager).Reload",
+      "file": "internal/workspacesvc/manager.go",
+      "ccn": 24
+    },
+    {
+      "package": "workspacesvc",
+      "function": "(*Manager).Tick",
+      "file": "internal/workspacesvc/manager.go",
+      "ccn": 24
+    },
+    {
+      "package": "api",
+      "function": "(*Client).waitForEventReconnecting",
+      "file": "internal/api/rig_create_client.go",
+      "ccn": 23
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionPeekStructured",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 23
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionPeekStructuredHuma",
+      "file": "internal/api/handler_session_stream.go",
+      "ccn": 23
+    },
+    {
+      "package": "beads",
+      "function": "validateGraphApplyPlan",
+      "file": "internal/beads/graph_apply.go",
+      "ccn": 23
+    },
+    {
+      "package": "closeorder",
+      "function": "Order",
+      "file": "internal/beads/closeorder/closeorder.go",
+      "ccn": 23
+    },
+    {
+      "package": "config",
+      "function": "ValidateAgents",
+      "file": "internal/config/config.go",
+      "ccn": 23
+    },
+    {
+      "package": "contract",
+      "function": "deriveLegacyConnectionConfig",
+      "file": "internal/beads/contract/connection.go",
+      "ccn": 23
+    },
+    {
+      "package": "doctor",
+      "function": "managedLocalDoltScanTargetsForScopeRoots",
+      "file": "internal/doctor/checks.go",
+      "ccn": 23
+    },
+    {
+      "package": "extmsg",
+      "function": "ReapStaleParticipantsWithSessionDirectory",
+      "file": "internal/extmsg/binding_reaper.go",
+      "ccn": 23
+    },
+    {
+      "package": "extmsg",
+      "function": "ReassignSessionParticipants",
+      "file": "internal/extmsg/binding_service.go",
+      "ccn": 23
+    },
+    {
+      "package": "formula",
+      "function": "tokenize",
+      "file": "internal/formula/range.go",
+      "ccn": 23
+    },
+    {
+      "package": "gchome",
+      "function": "inspectTrustedProductUsagePathWith",
+      "file": "internal/gchome/trust_unix.go",
+      "ccn": 23
+    },
+    {
+      "package": "graphroute",
+      "function": "DecorateGraphWorkflowRecipeWithDefaultBinding",
+      "file": "internal/graphroute/graphroute.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "(*builtinImportDoctorCheck).Fix",
+      "file": "cmd/gc/builtin_include_doctor_check.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "cmdReload",
+      "file": "cmd/gc/cmd_reload.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "cmdWorkflowDeleteSource",
+      "file": "cmd/gc/cmd_convoy_dispatch.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "decideReconcile",
+      "file": "cmd/gc/dolt_project_id.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "doRigAddWithResult",
+      "file": "cmd/gc/cmd_rig.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "dryRunSingle",
+      "file": "cmd/gc/cmd_sling.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "filterAssignedWorkBeadsForSessionWake",
+      "file": "cmd/gc/assigned_work_scope.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "findSupervisorWorkspaceServiceProcesses",
+      "file": "cmd/gc/cmd_supervisor_lifecycle.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "qualifyPoolInDir",
+      "file": "cmd/gc/order_dispatch.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "resolveSessionIDWithOptions",
+      "file": "cmd/gc/session_resolve.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "runEventsReemitExecution",
+      "file": "cmd/gc/cmd_events_reemit_execution.go",
+      "ccn": 23
+    },
+    {
+      "package": "main",
+      "function": "validateRigEndpointOptions",
+      "file": "cmd/gc/cmd_rig_endpoint.go",
+      "ccn": 23
+    },
+    {
+      "package": "molecule",
+      "function": "findExistingAttach",
+      "file": "internal/molecule/molecule.go",
+      "ccn": 23
+    },
+    {
+      "package": "molecule",
+      "function": "recipeStepsWithNativeStepDependencies",
+      "file": "internal/molecule/native_step_topology.go",
+      "ccn": 23
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).cleanupUnsafeQuota",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 23
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).scanCurrentLeaf",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 23
+    },
+    {
+      "package": "session",
+      "function": "FindCanonicalNamedSessionBead",
+      "file": "internal/session/named_config.go",
+      "ccn": 23
+    },
+    {
+      "package": "session",
+      "function": "FindCanonicalNamedSessionInfo",
+      "file": "internal/session/named_config.go",
+      "ccn": 23
+    },
+    {
+      "package": "sessionlog",
+      "function": "ReadCodexFile",
+      "file": "internal/sessionlog/codex_reader.go",
+      "ccn": 23
+    },
+    {
+      "package": "sqlite",
+      "function": "copyPinnedSQLiteSnapshotFile",
+      "file": "internal/storebinding/sqlite/sqlite_writer_reservation.go",
+      "ccn": 23
+    },
+    {
+      "package": "storebinding",
+      "function": "(*beadsOrdersAdapter).graphHasOpenDescendantsByWalk",
+      "file": "internal/storebinding/beads_adapter.go",
+      "ccn": 23
+    },
+    {
+      "package": "storebinding",
+      "function": "sourceGuardStillMatches",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 23
+    },
+    {
+      "package": "usage",
+      "function": "ReadRecentFacts",
+      "file": "internal/usage/recent_reader.go",
+      "ccn": 23
+    },
+    {
+      "package": "api",
+      "function": "(*Server).materializeNamedSessionWithContext",
+      "file": "internal/api/session_resolution.go",
+      "ccn": 22
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionLog",
+      "file": "internal/api/handler_agent_output_stream.go",
+      "ccn": 22
+    },
+    {
+      "package": "api",
+      "function": "(*Server).tryFullWorkflowSQL",
+      "file": "internal/api/convoy_sql.go",
+      "ccn": 22
+    },
+    {
+      "package": "api",
+      "function": "collectBeadGraph",
+      "file": "internal/api/handler_beads.go",
+      "ccn": 22
+    },
+    {
+      "package": "beads",
+      "function": "updateProjectionMatches",
+      "file": "internal/beads/bdstore.go",
+      "ccn": 22
+    },
+    {
+      "package": "config",
+      "function": "mergeFragment",
+      "file": "internal/config/compose.go",
+      "ccn": 22
+    },
+    {
+      "package": "convergence",
+      "function": "(*Reconciler).reconcileActive",
+      "file": "internal/convergence/reconcile.go",
+      "ccn": 22
+    },
+    {
+      "package": "doctor",
+      "function": "managedDoltDoctorPortHolderFromProc",
+      "file": "internal/doctor/checks.go",
+      "ccn": 22
+    },
+    {
+      "package": "doctor",
+      "function": "scanBrackets",
+      "file": "internal/doctor/autofix_skills.go",
+      "ccn": 22
+    },
+    {
+      "package": "formula",
+      "function": "sortGraphSteps",
+      "file": "internal/formula/graph.go",
+      "ccn": 22
+    },
+    {
+      "package": "graphv2",
+      "function": "PreparePreviewInvocation",
+      "file": "internal/graphv2/invocation.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "(*routeRecoveryLane).backstopLeg",
+      "file": "cmd/gc/route_recovery_lane.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "bdArgsNameClassOwnedBead",
+      "file": "cmd/gc/cmd_bd_by_id.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "bestStoreWithWork",
+      "file": "cmd/gc/hook_cross_store.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "classRoutedHookClaimOps",
+      "file": "cmd/gc/claim_class_route.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "cmdNudgePoll",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "materializeSessionForAgentConfig",
+      "file": "cmd/gc/session_template_start.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "parseProductMetricsLiteralFlagToken",
+      "file": "cmd/gc/metrics_classifier.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "reconcileCities",
+      "file": "cmd/gc/cmd_supervisor.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "resolvedRuntimeCityDoltTargetContext",
+      "file": "cmd/gc/bd_env.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "runManagedDoltTestWatchdog",
+      "file": "cmd/gc/dolt_start_managed.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "streamCityEventsOnce",
+      "file": "cmd/gc/cmd_events.go",
+      "ccn": 22
+    },
+    {
+      "package": "main",
+      "function": "tryDeliverQueuedNudgesByPoller",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 22
+    },
+    {
+      "package": "processenv",
+      "function": "ProviderProcessPassthroughEnv",
+      "file": "internal/processenv/provider.go",
+      "ccn": 22
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).reserveSpawnAttemptAtRoot",
+      "file": "internal/productmetrics/spawn.go",
+      "ccn": 22
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).runPrivateUploader",
+      "file": "internal/productmetrics/spawn.go",
+      "ccn": 22
+    },
+    {
+      "package": "productmetrics",
+      "function": "deleteSpoolClaim",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 22
+    },
+    {
+      "package": "session",
+      "function": "DecideSessionTarget",
+      "file": "internal/session/target_classifier.go",
+      "ccn": 22
+    },
+    {
+      "package": "sessionlog",
+      "function": "BuildDag",
+      "file": "internal/sessionlog/dag.go",
+      "ccn": 22
+    },
+    {
+      "package": "sessionlog",
+      "function": "parseGeminiMessage",
+      "file": "internal/sessionlog/gemini_reader.go",
+      "ccn": 22
+    },
+    {
+      "package": "sling",
+      "function": "finalize",
+      "file": "internal/sling/sling_core.go",
+      "ccn": 22
+    },
+    {
+      "package": "sqlite",
+      "function": "validateSQLiteWALState",
+      "file": "internal/storebinding/sqlite/sqlite_wal_headers.go",
+      "ccn": 22
+    },
+    {
+      "package": "storebinding",
+      "function": "guardTransitionReceiptMatches",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 22
+    },
+    {
+      "package": "storebinding",
+      "function": "sameNoCopyAdoptionDescriptors",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 22
+    },
+    {
+      "package": "worker",
+      "function": "shellDerivedStructuredInput",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 22
+    },
+    {
+      "package": "worktree",
+      "function": "Cleanup",
+      "file": "internal/worktree/worktree.go",
+      "ccn": 22
+    },
+    {
+      "package": "api",
+      "function": "(*Server).agentByName",
+      "file": "internal/api/huma_handlers_agents.go",
+      "ccn": 21
+    },
+    {
+      "package": "api",
+      "function": "(*Server).humaHandleOrderHistory",
+      "file": "internal/api/huma_handlers_orders.go",
+      "ccn": 21
+    },
+    {
+      "package": "api",
+      "function": "(*Server).resolveSessionTargetIDWithContext",
+      "file": "internal/api/session_resolution.go",
+      "ccn": 21
+    },
+    {
+      "package": "api",
+      "function": "apiErrorFromResponse",
+      "file": "internal/api/client.go",
+      "ccn": 21
+    },
+    {
+      "package": "beads",
+      "function": "(*BdStore).listViaBDList",
+      "file": "internal/beads/bdstore.go",
+      "ccn": 21
+    },
+    {
+      "package": "beads",
+      "function": "reconcileMergeDecision",
+      "file": "internal/beads/caching_store_reconcile.go",
+      "ccn": 21
+    },
+    {
+      "package": "beads",
+      "function": "sqliteListSQL",
+      "file": "internal/beads/sqlite_store.go",
+      "ccn": 21
+    },
+    {
+      "package": "cityinit",
+      "function": "(*Service).Scaffold",
+      "file": "internal/cityinit/service.go",
+      "ccn": 21
+    },
+    {
+      "package": "doctor",
+      "function": "(*WorktreeDiskSizeCheck).Run",
+      "file": "internal/doctor/checks_semantic.go",
+      "ccn": 21
+    },
+    {
+      "package": "eventexport",
+      "function": "ProjectEvent",
+      "file": "pkg/eventexport/project.go",
+      "ccn": 21
+    },
+    {
+      "package": "eventexport",
+      "function": "projectExecutionFact",
+      "file": "pkg/eventexport/project.go",
+      "ccn": 21
+    },
+    {
+      "package": "exec",
+      "function": "(*Provider).startStartupWatch",
+      "file": "internal/runtime/exec/exec.go",
+      "ccn": 21
+    },
+    {
+      "package": "extmsg",
+      "function": "(*deliveryContextService).Record",
+      "file": "internal/extmsg/delivery_service.go",
+      "ccn": 21
+    },
+    {
+      "package": "extmsg",
+      "function": "(*transcriptService).listTranscriptLocked",
+      "file": "internal/extmsg/transcript_service.go",
+      "ccn": 21
+    },
+    {
+      "package": "formula",
+      "function": "(*graphV2TransitiveReferenceScanner).scanFormula",
+      "file": "internal/formula/graphv2_validation.go",
+      "ccn": 21
+    },
+    {
+      "package": "formula",
+      "function": "graphSinkStepIDs",
+      "file": "internal/formula/graph.go",
+      "ccn": 21
+    },
+    {
+      "package": "graphv2",
+      "function": "PrepareInvocation",
+      "file": "internal/graphv2/invocation.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).convergenceTickScope",
+      "file": "cmd/gc/convergence_tick.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "(*SessionReconcilerTraceCycle).End",
+      "file": "cmd/gc/session_reconciler_trace_collector.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "(*asyncStartTracker).waitUntil",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "(*doltDriftCheck).Run",
+      "file": "cmd/gc/cmd_doctor_drift.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "(agentScriptExecutor).runAction",
+      "file": "cmd/gc/cmd_agent_script.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "beadUsesACPTransport",
+      "file": "cmd/gc/providers.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "cmdMailReplyJSON",
+      "file": "cmd/gc/cmd_mail.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "decorateDynamicFragmentRecipe",
+      "file": "cmd/gc/cmd_convoy_dispatch.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "doGitHubPRBackfill",
+      "file": "cmd/gc/cmd_github.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "doSessionListFallback",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "doSessionWake",
+      "file": "cmd/gc/cmd_session_wake.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "infoUsesACPTransport",
+      "file": "cmd/gc/providers.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "newPoolContinuationCandidateSnapshot",
+      "file": "cmd/gc/idle_nudge.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "newRigAddCmd",
+      "file": "cmd/gc/cmd_rig.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "reopenClosedConfiguredNamedSessionBead",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "runNudgeBackstop",
+      "file": "cmd/gc/nudge_backstop.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "selectIdleProbeTargets",
+      "file": "cmd/gc/session_reconciler.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "supervisorServiceExtraEnv",
+      "file": "cmd/gc/cmd_supervisor_lifecycle.go",
+      "ccn": 21
+    },
+    {
+      "package": "main",
+      "function": "sweepStaleOrderWispSubtreesMode",
+      "file": "cmd/gc/order_dispatch.go",
+      "ccn": 21
+    },
+    {
+      "package": "materialize",
+      "function": "LoadCityCatalog",
+      "file": "internal/materialize/skills.go",
+      "ccn": 21
+    },
+    {
+      "package": "molecule",
+      "function": "logicalRecipeStepID",
+      "file": "internal/molecule/molecule.go",
+      "ccn": 21
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).openEnumeratedCleanupDirectory",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 21
+    },
+    {
+      "package": "productmetrics",
+      "function": "loadRootTempJournalMarker",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 21
+    },
+    {
+      "package": "productmetrics",
+      "function": "persistSpoolQuotaFromControlWithGate",
+      "file": "internal/productmetrics/quota.go",
+      "ccn": 21
+    },
+    {
+      "package": "runtimecapability",
+      "function": "Run",
+      "file": "internal/runtime/runtimecapability/runner.go",
+      "ccn": 21
+    },
+    {
+      "package": "session",
+      "function": "(*Manager).createBeadOnly",
+      "file": "internal/session/manager.go",
+      "ccn": 21
+    },
+    {
+      "package": "sqlite",
+      "function": "inspectGraphFencedHeld",
+      "file": "internal/storebinding/sqlite/graph_inspection.go",
+      "ccn": 21
+    },
+    {
+      "package": "ssh",
+      "function": "(*Provider).Start",
+      "file": "internal/runtime/ssh/provider.go",
+      "ccn": 21
+    },
+    {
+      "package": "storebinding",
+      "function": "(Descriptor).Validate",
+      "file": "internal/storebinding/provider.go",
+      "ccn": 21
+    },
+    {
+      "package": "tmux",
+      "function": "launchOrchestration",
+      "file": "internal/runtime/tmux/adapter.go",
+      "ccn": 21
+    },
+    {
+      "package": "worker",
+      "function": "bashOutputResultFieldsDepth",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 21
+    },
+    {
+      "package": "worker",
+      "function": "commandResultFieldsDepth",
+      "file": "internal/worker/structured_tool.go",
+      "ccn": 21
+    },
+    {
+      "package": "api",
+      "function": "(*Server).resolveLiveConfiguredNamedMailTarget",
+      "file": "internal/api/handler_mail.go",
+      "ccn": 20
+    },
+    {
+      "package": "api",
+      "function": "(*Server).streamSessionLogHuma",
+      "file": "internal/api/handler_agent_output_stream.go",
+      "ccn": 20
+    },
+    {
+      "package": "api",
+      "function": "(*reauthRoundTripper).RoundTrip",
+      "file": "internal/api/client_remote.go",
+      "ccn": 20
+    },
+    {
+      "package": "api",
+      "function": "formulaDetailPreviewVars",
+      "file": "internal/api/handler_formulas.go",
+      "ccn": 20
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).List",
+      "file": "internal/beads/caching_store_reads.go",
+      "ccn": 20
+    },
+    {
+      "package": "beads",
+      "function": "(*CachingStore).refreshTxTouchedBeads",
+      "file": "internal/beads/caching_store_writes.go",
+      "ccn": 20
+    },
+    {
+      "package": "beads",
+      "function": "applyUpdateOptsToBead",
+      "file": "internal/beads/caching_store_writes.go",
+      "ccn": 20
+    },
+    {
+      "package": "bootstrap",
+      "function": "EnsureBootstrapForCity",
+      "file": "internal/bootstrap/bootstrap.go",
+      "ccn": 20
+    },
+    {
+      "package": "buildimage",
+      "function": "copyDirFiltered",
+      "file": "internal/buildimage/context.go",
+      "ccn": 20
+    },
+    {
+      "package": "clientcontext",
+      "function": "(Context).Validate",
+      "file": "internal/clientcontext/clientcontext.go",
+      "ccn": 20
+    },
+    {
+      "package": "config",
+      "function": "ResolveProvider",
+      "file": "internal/config/resolve.go",
+      "ccn": 20
+    },
+    {
+      "package": "config",
+      "function": "ValidateDurations",
+      "file": "internal/config/validate_durations.go",
+      "ccn": 20
+    },
+    {
+      "package": "contract",
+      "function": "ValidateCanonicalConfigState",
+      "file": "internal/beads/contract/connection.go",
+      "ccn": 20
+    },
+    {
+      "package": "contract",
+      "function": "ValidateConnectionConfigState",
+      "file": "internal/beads/contract/connection.go",
+      "ccn": 20
+    },
+    {
+      "package": "dashboardbff",
+      "function": "(*cityRunTailer).foldNext",
+      "file": "internal/api/dashboardbff/runtailer.go",
+      "ccn": 20
+    },
+    {
+      "package": "dispatch",
+      "function": "advanceSharedDrain",
+      "file": "internal/dispatch/drain.go",
+      "ccn": 20
+    },
+    {
+      "package": "dispatch",
+      "function": "resolveLogicalBeadID",
+      "file": "internal/dispatch/ralph.go",
+      "ccn": 20
+    },
+    {
+      "package": "doctor",
+      "function": "(*DoltNomsSizeCheck).Run",
+      "file": "internal/doctor/checks.go",
+      "ccn": 20
+    },
+    {
+      "package": "doctor",
+      "function": "managedLocalDoltChecksApplicableForScopeRoots",
+      "file": "internal/doctor/checks.go",
+      "ccn": 20
+    },
+    {
+      "package": "doctor",
+      "function": "printResult",
+      "file": "internal/doctor/doctor.go",
+      "ccn": 20
+    },
+    {
+      "package": "extmsg",
+      "function": "(*deliveryContextService).Resolve",
+      "file": "internal/extmsg/delivery_service.go",
+      "ccn": 20
+    },
+    {
+      "package": "extmsg",
+      "function": "(*transcriptService).Append",
+      "file": "internal/extmsg/transcript_service.go",
+      "ccn": 20
+    },
+    {
+      "package": "fsys",
+      "function": "(*Fake).ReadDir",
+      "file": "internal/fsys/fake.go",
+      "ccn": 20
+    },
+    {
+      "package": "graphroute",
+      "function": "ResolveGraphDirectSessionBinding",
+      "file": "internal/graphroute/graphroute.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "(*CityRuntime).shutdown",
+      "file": "cmd/gc/city_runtime.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "(*builtinImportDoctorCheck).Run",
+      "file": "cmd/gc/builtin_include_doctor_check.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "beadCopyDifference",
+      "file": "cmd/gc/infra_class_migrate.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "buildResumeCommand",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "canonicalizeLegacyBoundAssignedWork",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "cmdOrderSweepTrackingWithOptions",
+      "file": "cmd/gc/cmd_order.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "cmdSessionKill",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "cmdWorkflowReopenSource",
+      "file": "cmd/gc/cmd_convoy_dispatch.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "collectExpiredBeadClosure",
+      "file": "cmd/gc/wisp_gc.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "deliverSessionNudgeWithWorker",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "doGraph",
+      "file": "cmd/gc/cmd_graph.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "doMailArchiveSelectedJSON",
+      "file": "cmd/gc/cmd_mail.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "doStartWithNameOverrideJSON",
+      "file": "cmd/gc/cmd_start.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "doStorageStatus",
+      "file": "cmd/gc/cmd_storage.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "fileOpenedByAnyProcessFromProc",
+      "file": "cmd/gc/dolt_preflight_cleanup.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "legacyShimLinksFS",
+      "file": "cmd/gc/script_resolve.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "newAgentBuildParams",
+      "file": "cmd/gc/agent_build_params.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "nudgeTargetLiveGenerationMatches",
+      "file": "cmd/gc/cmd_nudge.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "parseBdDepTreeArgs",
+      "file": "cmd/gc/cmd_bd_by_id.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "providerStatusFixHint",
+      "file": "cmd/gc/init_provider_readiness.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "readTraceRecordsFile",
+      "file": "cmd/gc/session_reconciler_trace_store.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "reapRuntimesBoundToClosedBeads",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "registryDeviceLogin",
+      "file": "cmd/gc/cmd_registry_auth.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "resolveSessionTemplate",
+      "file": "cmd/gc/cmd_session.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "resolveStoredSessionLogSource",
+      "file": "cmd/gc/session_logs_resolve.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "retireDuplicateConfiguredNamedSessionRows",
+      "file": "cmd/gc/session_beads.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "rewriteSupersededBundledPinsFS",
+      "file": "cmd/gc/import_state_doctor_check.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "selectReadyContinuationClaimCandidates",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "stampPackRelease",
+      "file": "cmd/gc/cmd_pack_release.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "stampRunSessionIdentity",
+      "file": "cmd/gc/build_desired_state.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "stopTargetsForNames",
+      "file": "cmd/gc/session_lifecycle_parallel.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "stripDefaultFormulasDirDeclaration",
+      "file": "cmd/gc/doctor_v2_checks.go",
+      "ccn": 20
+    },
+    {
+      "package": "main",
+      "function": "validateProductMetricsCommandCensus",
+      "file": "cmd/gc/metrics_census.go",
+      "ccn": 20
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*Service).bestEffortUpdateDiagnosticStatusLocked",
+      "file": "internal/productmetrics/status.go",
+      "ccn": 20
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*spoolSweepState).cleanupUnsafeFallbackCursor",
+      "file": "internal/productmetrics/spool.go",
+      "ccn": 20
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).openDir",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 20
+    },
+    {
+      "package": "productmetrics",
+      "function": "(*unixStorageDirectory).renameEnumeratedEntry",
+      "file": "internal/productmetrics/storage_unix.go",
+      "ccn": 20
+    },
+    {
+      "package": "productmetrics",
+      "function": "canonicalUUIDv4Bytes",
+      "file": "internal/productmetrics/spawn.go",
+      "ccn": 20
+    },
+    {
+      "package": "rig",
+      "function": "Provision",
+      "file": "internal/rig/provision.go",
+      "ccn": 20
+    },
+    {
+      "package": "runtime",
+      "function": "AcceptStartupDialogsWithTimeout",
+      "file": "internal/runtime/dialog.go",
+      "ccn": 20
+    },
+    {
+      "package": "session",
+      "function": "ensureSessionNameAvailableForSelfAndOwner",
+      "file": "internal/session/names.go",
+      "ccn": 20
+    },
+    {
+      "package": "session",
+      "function": "stripSessionIDFlagArg",
+      "file": "internal/session/chat.go",
+      "ccn": 20
+    },
+    {
+      "package": "sqlite",
+      "function": "legacyCombinedTargetPath",
+      "file": "internal/storebinding/sqlite/legacy_combined.go",
+      "ccn": 20
+    },
+    {
+      "package": "storebinding",
+      "function": "(MigrationIntent).validateDerived",
+      "file": "internal/storebinding/migration_intent.go",
+      "ccn": 20
+    },
+    {
+      "package": "storebinding",
+      "function": "(RetainedSourceRef).Validate",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 20
+    },
+    {
+      "package": "storebinding",
+      "function": "(WorkCommitRequest).validate",
+      "file": "internal/storebinding/provider_lifecycle.go",
+      "ccn": 20
+    },
+    {
+      "package": "storebinding",
+      "function": "pinTargets",
+      "file": "internal/storebinding/migration_intent.go",
+      "ccn": 20
+    },
+    {
+      "package": "transcript",
+      "function": "DiscoverFallbackPath",
+      "file": "internal/worker/transcript/discovery.go",
+      "ccn": 20
+    },
+    {
+      "package": "worker",
+      "function": "(*SessionHandle).State",
+      "file": "internal/worker/handle_lifecycle.go",
+      "ccn": 20
+    }
+  ]
+}

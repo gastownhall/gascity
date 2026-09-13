@@ -58,6 +58,19 @@ func TestExtractTailMetaBasic(t *testing.T) {
 	}
 }
 
+func TestExtractTailMetaFromSearchPathsRejectsEscapedPath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "session.jsonl")
+	writeTailJSONL(t, outside, []map[string]any{{
+		"type":    "assistant",
+		"message": map[string]any{"model": "claude-opus-4-5-20251101"},
+	}})
+
+	if _, err := ExtractTailMetaFromSearchPaths([]string{root}, outside); err == nil {
+		t.Fatal("ExtractTailMetaFromSearchPaths outside root = nil error, want rejection")
+	}
+}
+
 func TestExtractTailMetaWithCompaction(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
@@ -189,10 +202,75 @@ func TestExtractTailMetaUnknownModel(t *testing.T) {
 	}
 }
 
+func TestExtractTailMetaValidUnterminatedTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	content := `{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","usage":{"input_tokens":1000}}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := ExtractTailMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("expected non-nil TailMeta")
+	}
+	if meta.MalformedTail {
+		t.Error("expected valid unterminated JSON line to stay unmarked")
+	}
+}
+
+func TestExtractTailMetaMalformedTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	content := `{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","usage":{"input_tokens":1000}}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-5-20251101"`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	meta, err := ExtractTailMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("expected non-nil TailMeta")
+	}
+	if !meta.MalformedTail {
+		t.Fatal("expected malformed tail to be marked")
+	}
+	if meta.Model != "claude-opus-4-5-20251101" {
+		t.Errorf("Model = %q, want %q", meta.Model, "claude-opus-4-5-20251101")
+	}
+}
+
 func TestExtractTailMetaMissingFile(t *testing.T) {
 	_, err := ExtractTailMeta("/nonexistent/path.jsonl")
 	if err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+func TestExtractTailMetaIgnoresPartialLeadingTailLine(t *testing.T) {
+	lines := [][]byte{
+		[]byte(`{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101"`),
+	}
+
+	meta := extractFromLines(lines, true)
+	if meta != nil {
+		t.Fatalf("expected nil TailMeta for a mid-chunk partial line, got %#v", meta)
+	}
+
+	meta = extractFromLines(lines, false)
+	if meta == nil {
+		t.Fatal("expected malformed first line at file start to be marked")
+	}
+	if !meta.MalformedTail {
+		t.Fatal("expected malformed tail to be marked at file start")
 	}
 }
 

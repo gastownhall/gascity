@@ -3,9 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -35,12 +37,283 @@ name = "mayor"
 	if len(prov.Sources) != 1 {
 		t.Errorf("len(Sources) = %d, want 1", len(prov.Sources))
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 	// Include should be cleared from the result.
 	if cfg.Include != nil {
 		t.Errorf("Include should be nil, got %v", cfg.Include)
+	}
+}
+
+func TestLoadWithIncludesDefaultsFormulaV2Enabled(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if !cfg.Daemon.FormulaV2Enabled() {
+		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
+	}
+}
+
+func TestLoadWithIncludesPreservesExplicitFormulaV2False(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+formula_v2 = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Daemon.FormulaV2Enabled() {
+		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
+	}
+}
+
+func TestLoadWithIncludesPreservesExplicitFormulaV2FalseAcrossDaemonFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+
+[daemon]
+formula_v2 = false
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[daemon]
+patrol_interval = "1m"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Daemon.FormulaV2Enabled() {
+		t.Fatal("Daemon.FormulaV2 = true, want root explicit false to survive daemon fragment")
+	}
+	if cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("Daemon.PatrolInterval = %q, want fragment field", cfg.Daemon.PatrolInterval)
+	}
+}
+
+func TestLoadWithIncludes_InvalidProviderChainFailsLoad(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.bad]
+base = "provider:missing"
+command = "bad"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to fail for invalid provider chain")
+	}
+	if !strings.Contains(err.Error(), `provider cache build failed`) ||
+		!strings.Contains(err.Error(), `provider "bad"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadWithIncludes_MissingExplicitProviderReferenceFails(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+provider = "claude"
+
+[[agent]]
+name = "worker"
+provider = "codex"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("expected LoadWithIncludes to fail for missing explicit provider references")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`provider catalog is missing referenced providers`,
+		`workspace.provider "claude": add [providers.claude] base = "builtin:claude"`,
+		`agent "worker": provider "codex": add [providers.codex] base = "builtin:codex"`,
+		`gc doctor --fix`,
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error = %q, missing %q", msg, want)
+		}
+	}
+}
+
+func TestLoadWithIncludes_ImportedProviderSatisfiesReference(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+provider = "claude"
+
+[imports.local]
+source = "packs/local"
+`)
+	fs.Files["/city/packs/local/pack.toml"] = []byte(`
+[pack]
+name = "local"
+schema = 2
+
+[providers.claude]
+base = "builtin:claude"
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if _, ok := cfg.Providers["claude"]; !ok {
+		t.Fatalf("imported provider missing from composed config: %v", cfg.Providers)
+	}
+}
+
+func TestLoadWithIncludes_RootPackDefaultRigImportsPreserveOrder(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[defaults.rig.imports.z-pack]
+source = "packs/z-pack"
+
+[defaults.rig.imports.a-pack]
+source = "packs/a-pack"
+
+[defaults.rig.imports.city-local]
+source = "packs/city-local"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+`)
+
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if got := cfg.DefaultRigImportOrder; !reflect.DeepEqual(got, []string{"z-pack", "a-pack", "city-local"}) {
+		t.Fatalf("DefaultRigImportOrder = %v, want [z-pack a-pack city-local]", got)
+	}
+	if got := cfg.DefaultRigImports["z-pack"].Source; got != "packs/z-pack" {
+		t.Fatalf("DefaultRigImports[z-pack].Source = %q, want packs/z-pack", got)
+	}
+}
+
+func TestLoadWithIncludes_SkipsSystemPackWhenReachableFromRootImport(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+`)
+	write("pack.toml", `
+[pack]
+name = "test"
+schema = 2
+
+[imports.gs]
+source = "./packs/gastown"
+`)
+	write("packs/gastown/pack.toml", `
+[pack]
+name = "gastown"
+schema = 2
+includes = ["../maintenance"]
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	write("packs/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+	write("system/maintenance/pack.toml", `
+[pack]
+name = "maintenance"
+schema = 2
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"), filepath.Join(dir, "system", "maintenance"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, a := range explicitAgents(cfg.Agents) {
+		found[a.QualifiedName()] = true
+	}
+	if !found["gs.mayor"] {
+		t.Fatalf("missing gs.mayor: %v", found)
+	}
+	if !found["gs.dog"] {
+		t.Fatalf("missing gs.dog from imported maintenance closure: %v", found)
+	}
+	if found["dog"] {
+		t.Fatalf("system maintenance should have been skipped when root import already reaches maintenance: %v", found)
+	}
+}
+
+func TestLoadWithIncludes_CityPackSchema2(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[[agent]]
+name = "mayor"
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	if len(explicit) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(explicit))
+	}
+	if explicit[0].Name != "mayor" {
+		t.Errorf("Agents[0].Name = %q, want %q", explicit[0].Name, "mayor")
+	}
+	if len(prov.Sources) != 2 {
+		t.Errorf("len(Sources) = %d, want 2", len(prov.Sources))
+	}
+	if prov.Agents["mayor"] != "/city/pack.toml" {
+		t.Errorf("mayor source = %q, want /city/pack.toml", prov.Agents["mayor"])
 	}
 }
 
@@ -87,6 +360,125 @@ dir = "project"
 	}
 	if len(prov.Sources) != 2 {
 		t.Errorf("len(Sources) = %d, want 2", len(prov.Sources))
+	}
+}
+
+func TestLoadWithIncludes_AgentDefaultsAliasFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "mayor"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agents]
+default_sling_formula = "mol-focus-review"
+append_fragments = ["command-glossary"]
+skills = ["shared-skill", "common-skill"]
+mcp = ["shared-mcp", "common-mcp"]
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.DefaultSlingFormula != "mol-focus-review" {
+		t.Errorf("AgentDefaults.DefaultSlingFormula = %q, want %q", cfg.AgentDefaults.DefaultSlingFormula, "mol-focus-review")
+	}
+	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "command-glossary" {
+		t.Errorf("AgentDefaults.AppendFragments = %v, want [command-glossary]", got)
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Name == "mayor" {
+			found = true
+			if got := a.EffectiveDefaultSlingFormula(); got != "mol-focus-review" {
+				t.Errorf("mayor EffectiveDefaultSlingFormula = %q, want %q", got, "mol-focus-review")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("agent 'mayor' not found")
+	}
+}
+
+func TestLoadWithIncludesRejectsPackAuthoringSurfaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		packBody string
+		want     string
+	}{
+		{
+			name: "agents_alias",
+			packBody: `
+[agents]
+append_fragments = ["footer"]
+`,
+			want: "[agents] is a city.toml compatibility alias for [agent_defaults], not a pack.toml field",
+		},
+		{
+			name: "default_rig_imports",
+			packBody: `
+[defaults.rig.imports.ops]
+source = "../ops"
+`,
+			want: "[defaults.rig.imports] belongs in city.toml, not pack.toml",
+		},
+		{
+			name: "formulas_dir",
+			packBody: `
+[formulas]
+dir = "legacy-formulas"
+`,
+			want: "[formulas].dir is no longer supported; use the well-known formulas/ directory",
+		},
+		{
+			name: "rig_patches",
+			packBody: `
+[[patches.rigs]]
+name = "app"
+prefix = "ga"
+`,
+			want: "[[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+		},
+		{
+			name: "provider_patches",
+			packBody: `
+[[patches.providers]]
+name = "local"
+command = "false"
+`,
+			want: "[[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+			fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+` + tt.packBody)
+
+			_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err == nil {
+				t.Fatal("expected LoadWithIncludes to reject pack authoring surface")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -160,6 +552,112 @@ name = "beta"
 	}
 	if len(prov.Sources) != 3 {
 		t.Errorf("len(Sources) = %d, want 3", len(prov.Sources))
+	}
+}
+
+func TestLoadWithIncludes_WildcardPatchDeferredForImplicitAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.llama]
+base = "builtin:claude"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[rigs]]
+name = "rig-b"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+provider = "llama"
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if a.Provider != "llama" {
+			t.Fatalf("agent %q provider = %q, want llama", a.QualifiedName(), a.Provider)
+		}
+	}
+	if matched != 3 {
+		t.Fatalf("matched = %d, want 3 implicit agents", matched)
+	}
+}
+
+func TestLoadWithIncludes_WildcardPatchMixedExplicitAndImplicit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.custom]
+base = "builtin:claude"
+
+[[agent]]
+name = "claude"
+provider = "custom"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if !a.Suspended {
+			t.Fatalf("agent %q should be suspended", a.QualifiedName())
+		}
+	}
+	if matched != 2 {
+		t.Fatalf("matched = %d, want 2", matched)
 	}
 }
 
@@ -344,6 +842,113 @@ KEY_C = "3"
 	}
 }
 
+func TestLoadWithIncludes_FragmentUpstreamComposes(t *testing.T) {
+	// A [upstreams.<name>] block declared in a city fragment must compose into
+	// the city's Upstreams map; without it, a valid layered city silently loses
+	// the upstream declaration and later session resolution fails with
+	// "not declared".
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["upstreams.toml"]
+
+[workspace]
+name = "test"
+
+[upstreams.base_only]
+base_url = "https://base.example"
+
+[upstreams.shared]
+base_url = "https://city.example"
+`)
+	fs.Files["/city/upstreams.toml"] = []byte(`
+[upstreams.frag_only]
+base_url = "https://frag.example"
+
+[upstreams.shared]
+base_url = "https://fragment-override.example"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	// Base-only upstream preserved.
+	if got := cfg.Upstreams["base_only"].BaseURL; got != "https://base.example" {
+		t.Errorf("base_only.BaseURL = %q, want %q", got, "https://base.example")
+	}
+	// Fragment-declared upstream composed in (the finding: it must not be dropped).
+	if got := cfg.Upstreams["frag_only"].BaseURL; got != "https://frag.example" {
+		t.Errorf("frag_only.BaseURL = %q, want %q", got, "https://frag.example")
+	}
+	// Collision: the included fragment replaces the base entry and warns,
+	// matching provider/pack merge behavior.
+	if got := cfg.Upstreams["shared"].BaseURL; got != "https://fragment-override.example" {
+		t.Errorf("shared.BaseURL = %q, want fragment override", got)
+	}
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "shared") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected collision warning for upstream %q, got: %v", "shared", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_ProviderUpstreamEnvMerge(t *testing.T) {
+	// A fragment override of a provider's [providers.<name>.upstream_env]
+	// serving-env binding must deep-merge per sub-field: untouched names survive,
+	// defined names override (with a collision warning), new names are added.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["binding.toml"]
+
+[workspace]
+name = "test"
+
+[providers.custom]
+command = "agent"
+
+[providers.custom.upstream_env]
+base_url = "BASE_A"
+api_key = "KEY_A"
+`)
+	fs.Files["/city/binding.toml"] = []byte(`
+[providers.custom.upstream_env]
+api_key = "KEY_OVERRIDE"
+auth_token = "TOKEN_B"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	b := cfg.Providers["custom"].UpstreamEnv
+	// Untouched sub-field preserved.
+	if b.BaseURL != "BASE_A" {
+		t.Errorf("BaseURL = %q, want %q", b.BaseURL, "BASE_A")
+	}
+	// Overridden sub-field.
+	if b.APIKey != "KEY_OVERRIDE" {
+		t.Errorf("APIKey = %q, want %q", b.APIKey, "KEY_OVERRIDE")
+	}
+	// New sub-field added from the fragment.
+	if b.AuthToken != "TOKEN_B" {
+		t.Errorf("AuthToken = %q, want %q", b.AuthToken, "TOKEN_B")
+	}
+	// Collision warning for the overridden api_key binding.
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "upstream_env.api_key") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected api_key collision warning, got: %v", prov.Warnings)
+	}
+}
+
 func TestLoadWithIncludes_WorkspaceMerge(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -352,6 +957,12 @@ include = ["ws.toml"]
 [workspace]
 name = "bright-lights"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.gemini]
+base = "builtin:gemini"
 `)
 	fs.Files["/city/ws.toml"] = []byte(`
 [workspace]
@@ -500,6 +1111,30 @@ provider = "file"
 	}
 }
 
+func TestLoadWithIncludes_UsageSectionFromFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["infra.toml"]
+
+[workspace]
+name = "test"
+`)
+	// The root city does not configure [usage]; an imported fragment does. The
+	// composed config must honor the fragment's sink, not silently fall back to
+	// the default local sink (gastownhall/gascity#3513 review).
+	fs.Files["/city/infra.toml"] = []byte(`
+[usage]
+provider = "discard"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.Usage.Provider != "discard" {
+		t.Errorf("Usage.Provider = %q, want %q (imported [usage] fragment must compose)", cfg.Usage.Provider, "discard")
+	}
+}
+
 func TestResolveConfigPath(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -555,6 +1190,9 @@ func TestLoadWithIncludes_WorkspaceProvenanceTracking(t *testing.T) {
 [workspace]
 name = "test"
 provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
 `)
 	_, prov, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
@@ -602,8 +1240,8 @@ ref = "main"
 	if cfg.Packs["ralph"].Source != "https://github.com/example/ralph" {
 		t.Errorf("ralph source = %q", cfg.Packs["ralph"].Source)
 	}
-	if len(prov.Warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", prov.Warnings)
+	if other := warningsExcludingV1Surfaces(prov.Warnings); len(other) != 0 {
+		t.Errorf("unexpected non-v1-surface warnings: %v", other)
 	}
 }
 
@@ -714,7 +1352,7 @@ func TestAdjustAgentPaths_SourceDirSet(t *testing.T) {
 	}
 }
 
-func TestAdjustAgentPaths_SessionSetupScriptAdjusted(t *testing.T) {
+func TestAdjustAgentPaths_SessionSetupScriptPreserved(t *testing.T) {
 	agents := []Agent{
 		{Name: "worker", SessionSetupScript: "scripts/setup.sh"},
 		{Name: "boss", SessionSetupScript: "//scripts/global.sh"},
@@ -722,17 +1360,377 @@ func TestAdjustAgentPaths_SessionSetupScriptAdjusted(t *testing.T) {
 	}
 	adjustAgentPaths(agents, "/city/fragments", "/city")
 
-	// Relative path: resolved fragment-relative → city-root-relative.
-	if agents[0].SessionSetupScript != "fragments/scripts/setup.sh" {
-		t.Errorf("worker script = %q, want fragments/scripts/setup.sh", agents[0].SessionSetupScript)
+	// Relative path: preserved for runtime SourceDir-based resolution.
+	if agents[0].SessionSetupScript != "scripts/setup.sh" {
+		t.Errorf("worker script = %q, want scripts/setup.sh", agents[0].SessionSetupScript)
 	}
-	// "//" path: resolved to city root.
-	if agents[1].SessionSetupScript != "scripts/global.sh" {
-		t.Errorf("boss script = %q, want scripts/global.sh", agents[1].SessionSetupScript)
+	// "//" path: preserved so runtime can resolve explicitly against city root.
+	if agents[1].SessionSetupScript != "//scripts/global.sh" {
+		t.Errorf("boss script = %q, want //scripts/global.sh", agents[1].SessionSetupScript)
 	}
 	// Empty: unchanged.
 	if agents[2].SessionSetupScript != "" {
 		t.Errorf("plain script = %q, want empty", agents[2].SessionSetupScript)
+	}
+}
+
+func TestLoadWithIncludes_FragmentPatchSessionSetupScriptResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/patch.toml"]
+
+[workspace]
+name = "test"
+includes = ["packs/base"]
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("fragments/patch.toml", `
+[[patches.agent]]
+name = "worker"
+session_setup_script = "scripts/theme.sh"
+`)
+	writeFile("fragments/scripts/theme.sh", "#!/bin/sh\necho themed\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
+	}
+	want := filepath.Join(dir, "fragments/scripts/theme.sh")
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_FragmentPatchPromptTemplateAndOverlayDirResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/patch.toml"]
+
+[workspace]
+name = "test"
+includes = ["packs/base"]
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("fragments/patch.toml", `
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/theme.md"
+overlay_dir = "overlays/theme"
+`)
+	writeFile("fragments/prompts/theme.md", "fragment prompt\n")
+	writeFile("fragments/overlays/theme/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
+	}
+	if agents[0].PromptTemplate != "fragments/prompts/theme.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/theme.md", agents[0].PromptTemplate)
+	}
+	if agents[0].OverlayDir != "fragments/overlays/theme" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/theme", agents[0].OverlayDir)
+	}
+}
+
+func TestLoadWithIncludes_RootPatchSessionSetupScriptResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+session_setup_script = "scripts/local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("scripts/local.sh", "#!/bin/sh\necho local\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
+	}
+	want := filepath.Join(dir, "scripts/local.sh")
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_RootPatchPromptTemplateAndOverlayDirResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+prompt_template = "prompts/local.md"
+overlay_dir = "overlays/local"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("prompts/local.md", "city prompt\n")
+	writeFile("overlays/local/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
+	}
+	if agents[0].PromptTemplate != "prompts/local.md" {
+		t.Fatalf("PromptTemplate = %q, want prompts/local.md", agents[0].PromptTemplate)
+	}
+	if agents[0].OverlayDir != "overlays/local" {
+		t.Fatalf("OverlayDir = %q, want overlays/local", agents[0].OverlayDir)
+	}
+}
+
+func TestLoadWithIncludes_FragmentRigOverridePromptTemplateAndOverlayDirApplyEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/rig.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile("fragments/rig.toml", `
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  prompt_template = "prompts/rig-worker.md"
+  overlay_dir = "overlays/rig-worker"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+prompt_template = "prompts/base-worker.md"
+overlay_dir = "overlays/base-worker"
+`)
+	writeFile("fragments/prompts/rig-worker.md", "rig override prompt\n")
+	writeFile("fragments/overlays/rig-worker/.keep", "")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
+	}
+	if agents[0].PromptTemplate != "fragments/prompts/rig-worker.md" {
+		t.Fatalf("PromptTemplate = %q, want fragments/prompts/rig-worker.md", agents[0].PromptTemplate)
+	}
+	if agents[0].OverlayDir != "fragments/overlays/rig-worker" {
+		t.Fatalf("OverlayDir = %q, want fragments/overlays/rig-worker", agents[0].OverlayDir)
+	}
+}
+
+func TestLoadWithIncludes_RootRigOverrideSessionSetupScriptResolvedFromCityDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  session_setup_script = "scripts/rig-local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+	writeFile("scripts/rig-local.sh", "#!/bin/sh\necho city-override\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
+	}
+	want := filepath.Join(dir, "scripts/rig-local.sh")
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
+	}
+}
+
+func TestLoadWithIncludes_FragmentRigOverrideSessionSetupScriptResolvedFromFragmentDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+include = ["fragments/rig.toml"]
+
+[workspace]
+name = "test"
+`)
+	writeFile("fragments/rig.toml", `
+[[rigs]]
+name = "hw"
+path = "rig"
+includes = ["packs/base"]
+
+  [[rigs.overrides]]
+  agent = "worker"
+  session_setup_script = "scripts/fragment-local.sh"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`)
+	writeFile("fragments/scripts/fragment-local.sh", "#!/bin/sh\necho fragment-override\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit Agents) = %d, want 1", len(agents))
+	}
+	want := filepath.Join(dir, "fragments/scripts/fragment-local.sh")
+	if agents[0].SessionSetupScript != want {
+		t.Fatalf("SessionSetupScript = %q, want %q", agents[0].SessionSetupScript, want)
 	}
 }
 
@@ -755,6 +1753,65 @@ func TestAdjustAgentPaths_OverlayDirAdjusted(t *testing.T) {
 	// Empty: unchanged.
 	if agents[2].OverlayDir != "" {
 		t.Errorf("plain overlay = %q, want empty", agents[2].OverlayDir)
+	}
+}
+
+func TestAdjustAgentOverridePaths_AllFields(t *testing.T) {
+	promptRel := "prompts/custom.md"
+	overlayRel := "overlays/custom"
+	scriptRel := "scripts/setup.sh"
+	promptAbs := "/abs/prompt.md"
+	overlayAbs := "/abs/overlay"
+	scriptAbs := "/abs/setup.sh"
+	promptCity := "//prompts/global.md"
+	overlayCity := "//overlays/global"
+
+	overrides := []AgentOverride{
+		// Relative paths should be adjusted.
+		{Agent: "worker", PromptTemplate: &promptRel, OverlayDir: &overlayRel, SessionSetupScript: &scriptRel},
+		// Absolute paths pass through unchanged.
+		{Agent: "abs", PromptTemplate: &promptAbs, OverlayDir: &overlayAbs, SessionSetupScript: &scriptAbs},
+		// "//" paths resolve to city root.
+		{Agent: "city", PromptTemplate: &promptCity, OverlayDir: &overlayCity},
+		// Nil fields: unchanged.
+		{Agent: "empty"},
+	}
+	adjustAgentOverridePaths(overrides, "/city/packs/mypack", "/city")
+
+	// Relative paths: prompt_template/overlay_dir → city-root-relative via adjustFragmentPath.
+	if *overrides[0].PromptTemplate != "packs/mypack/prompts/custom.md" {
+		t.Errorf("worker prompt = %q, want packs/mypack/prompts/custom.md", *overrides[0].PromptTemplate)
+	}
+	if *overrides[0].OverlayDir != "packs/mypack/overlays/custom" {
+		t.Errorf("worker overlay = %q, want packs/mypack/overlays/custom", *overrides[0].OverlayDir)
+	}
+	// session_setup_script → absolute via resolveConfigPath.
+	if *overrides[0].SessionSetupScript != "/city/packs/mypack/scripts/setup.sh" {
+		t.Errorf("worker script = %q, want /city/packs/mypack/scripts/setup.sh", *overrides[0].SessionSetupScript)
+	}
+
+	// Absolute paths unchanged.
+	if *overrides[1].PromptTemplate != "/abs/prompt.md" {
+		t.Errorf("abs prompt = %q, want /abs/prompt.md", *overrides[1].PromptTemplate)
+	}
+	if *overrides[1].OverlayDir != "/abs/overlay" {
+		t.Errorf("abs overlay = %q, want /abs/overlay", *overrides[1].OverlayDir)
+	}
+
+	// "//" paths resolve to city root.
+	if *overrides[2].PromptTemplate != "prompts/global.md" {
+		t.Errorf("city prompt = %q, want prompts/global.md", *overrides[2].PromptTemplate)
+	}
+	if *overrides[2].OverlayDir != "overlays/global" {
+		t.Errorf("city overlay = %q, want overlays/global", *overrides[2].OverlayDir)
+	}
+
+	// Nil fields stay nil.
+	if overrides[3].PromptTemplate != nil {
+		t.Errorf("empty prompt = %v, want nil", overrides[3].PromptTemplate)
+	}
+	if overrides[3].OverlayDir != nil {
+		t.Errorf("empty overlay = %v, want nil", overrides[3].OverlayDir)
 	}
 }
 
@@ -1134,6 +2191,12 @@ name = "reviewer"
 
 	// Use file:// protocol to reference the bare repo with //subpath.
 	remoteInclude := "file://" + bare + "//agents.toml"
+	cacheName := includeCacheName("file://" + bare)
+	cacheDir := filepath.Join(cityDir, ".gc", "cache", "includes", cacheName)
+	if err := clonePack(bare, cacheDir, ""); err != nil {
+		t.Fatalf("pre-clone cached include: %v", err)
+	}
+
 	cityToml := `
 include = ["` + remoteInclude + `"]
 
@@ -1189,8 +2252,13 @@ name = "test-fail"
 	if err == nil {
 		t.Fatal("expected error for bogus remote include, got nil")
 	}
-	if !strings.Contains(err.Error(), "fetching include") {
-		t.Errorf("error = %q, want it to contain %q", err.Error(), "fetching include")
+	if !strings.Contains(err.Error(), "resolving include") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "resolving include")
+	}
+
+	cacheDir := filepath.Join(cityDir, ".gc", "cache", "includes", includeCacheName("https://example.com/nonexistent.git"))
+	if _, statErr := os.Stat(cacheDir); !os.IsNotExist(statErr) {
+		t.Errorf("cache dir %q should not have been created; stat err = %v", cacheDir, statErr)
 	}
 }
 
@@ -1246,4 +2314,590 @@ name = "coder"
 			t.Errorf("agent %q: SessionLive[0] = %q, want %q", a.Name, a.SessionLive[0], wantCmd)
 		}
 	}
+}
+
+// TestLoadWithIncludes_ImplicitImportCollisionHardStops verifies that the
+// composer rejects a city whose explicit [imports.<name>] would shadow a
+// bootstrap implicit-import pack. Prior behavior was silent shadowing on
+// upgrade; v0.15.1 hard-stops with a diagnostic directing the operator to
+// rename one side.
+func TestLoadWithIncludes_ImplicitImportCollisionHardStops(t *testing.T) {
+	gcHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(gcHome, "implicit-import.toml"), []byte(`
+schema = 1
+
+[imports.core]
+source = "github.com/gastownhall/gc-core"
+version = "0.1.0"
+commit = "deadbeef"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", gcHome)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[imports.core]
+source = "github.com/me/my-core"
+version = "1.0.0"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err == nil {
+		t.Fatal("LoadWithIncludes should fail on implicit-import collision")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "shadows the bootstrap implicit import") {
+		t.Fatalf("error missing diagnostic: %v", err)
+	}
+	if !strings.Contains(msg, "core") {
+		t.Fatalf("error should name the colliding import: %v", err)
+	}
+	if !strings.Contains(msg, "rename one side") {
+		t.Fatalf("error should suggest remediation: %v", err)
+	}
+}
+
+// TestLoadWithIncludes_NoImplicitImportCollisionSucceeds verifies the
+// composer does not error when the city declares unrelated imports
+// alongside bootstrap implicit imports.
+func TestLoadWithIncludes_NoImplicitImportCollisionSucceeds(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	coreCacheDir := GlobalRepoCachePath(gcHome, "github.com/gastownhall/gc-core", "deadbeef")
+	if err := os.MkdirAll(coreCacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(coreCacheDir, "pack.toml"), []byte(`
+[pack]
+name = "core"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(gcHome, "implicit-import.toml"), []byte(`
+schema = 1
+
+[imports.core]
+source = "github.com/gastownhall/gc-core"
+version = "0.1.0"
+commit = "deadbeef"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	myteamDir := filepath.Join(dir, "packs", "myteam")
+	if err := os.MkdirAll(myteamDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(myteamDir, "pack.toml"), []byte(`
+[pack]
+name = "myteam"
+schema = 1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+
+[imports.myteam]
+source = "./packs/myteam"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if _, ok := cfg.Imports["core"]; !ok {
+		t.Fatalf("implicit core import should still splice in when no collision: imports=%v", cfg.Imports)
+	}
+	if _, ok := cfg.Imports["myteam"]; !ok {
+		t.Fatalf("explicit myteam import should be preserved: imports=%v", cfg.Imports)
+	}
+}
+
+// TestPopulateAgentLocalAssetDirsForDeclaredAgent verifies that an
+// agent declared explicitly in city.toml gets its SkillsDir populated
+// from agents/<name>/skills/ at compose time. Without this, the
+// materializer and collision validator see an empty SkillsDir for
+// every city.toml-declared agent and silently drop agent-local
+// skills. Regression for the bug found during Phase 4 smoke testing.
+func TestPopulateAgentLocalAssetDirsForDeclaredAgent(t *testing.T) {
+	dir := t.TempDir()
+
+	// agents/mayor/skills/ exists on disk.
+	skillsDir := filepath.Join(dir, "agents", "mayor", "skills", "plan")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"),
+		[]byte("---\nname: plan\ndescription: test\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// agents/mayor/mcp/ exists too — verify both get populated.
+	mcpDir := filepath.Join(dir, "agents", "mayor", "mcp")
+	if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// City.toml declares mayor explicitly — this path doesn't go
+	// through DiscoverPackAgents, so historically SkillsDir stayed
+	// empty for this agent.
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(`
+[workspace]
+name = "test"
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "mayor"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var mayor *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" {
+			mayor = &cfg.Agents[i]
+			break
+		}
+	}
+	if mayor == nil {
+		t.Fatal("mayor agent missing from loaded config")
+	}
+	wantSkills := filepath.Join(dir, "agents", "mayor", "skills")
+	if mayor.SkillsDir != wantSkills {
+		t.Errorf("mayor.SkillsDir = %q, want %q", mayor.SkillsDir, wantSkills)
+	}
+	wantMCP := filepath.Join(dir, "agents", "mayor", "mcp")
+	if mayor.MCPDir != wantMCP {
+		t.Errorf("mayor.MCPDir = %q, want %q", mayor.MCPDir, wantMCP)
+	}
+}
+
+// TestPopulateAgentLocalAssetDirsPreservesExisting ensures the
+// post-compose enrichment doesn't overwrite a SkillsDir/MCPDir that
+// was already set (e.g., by DiscoverPackAgents for a conventional
+// pack-agent, or explicitly set elsewhere).
+func TestPopulateAgentLocalAssetDirsPreservesExisting(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "mayor", SkillsDir: "/already/set/skills", MCPDir: "/already/set/mcp"},
+		},
+	}
+	populateAgentLocalAssetDirs(fsys.OSFS{}, cfg, "/nonexistent-city-root")
+	if cfg.Agents[0].SkillsDir != "/already/set/skills" {
+		t.Errorf("SkillsDir overwritten: %q", cfg.Agents[0].SkillsDir)
+	}
+	if cfg.Agents[0].MCPDir != "/already/set/mcp" {
+		t.Errorf("MCPDir overwritten: %q", cfg.Agents[0].MCPDir)
+	}
+}
+
+func TestLoadWithIncludes_KiroProviderBaseClaudeThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+base = "builtin:claude"
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+instructions_file = "AGENTS.md"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if spec.Base == nil || *spec.Base != "builtin:claude" {
+		t.Fatalf("Base = %v, want builtin:claude", spec.Base)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro", rp.Command)
+	}
+	if rp.BuiltinAncestor != "claude" {
+		t.Errorf("BuiltinAncestor = %q, want claude", rp.BuiltinAncestor)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md (kiro override)", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
+	}
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true (inherited from claude)")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes == nil || rp.PermissionModes["unrestricted"] != "--dangerously-skip-permissions" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --dangerously-skip-permissions (inherited)", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroStandaloneProviderThroughResolve(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+process_names = ["kiro-cli", "kiro", "node"]
+supports_hooks = true
+instructions_file = "AGENTS.md"
+resume_flag = "--resume"
+resume_style = "flag"
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+
+[providers.kiro.permission_modes]
+unrestricted = "--trust-mode full"
+default = "--trust-mode default"
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var worker *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "worker" {
+			worker = &cfg.Agents[i]
+			break
+		}
+	}
+	if worker == nil {
+		t.Fatal("worker agent not found")
+	}
+
+	rp, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Name != "kiro" {
+		t.Errorf("Name = %q, want kiro", rp.Name)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Errorf("BuiltinAncestor = %q, want \"kiro\"", rp.BuiltinAncestor)
+	}
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", rp.CommandString())
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want AGENTS.md", rp.InstructionsFile)
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want --resume", rp.ResumeFlag)
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want flag", rp.ResumeStyle)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless", rp.Env["KIRO_AGENT_MODE"])
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want --trust-mode full", rp.PermissionModes["unrestricted"])
+	}
+}
+
+func TestLoadWithIncludes_KiroFragmentOverlay(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["kiro-overlay.toml"]
+
+[workspace]
+name = "test"
+
+[providers.kiro]
+command = "kiro-cli"
+args = ["chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"]
+prompt_mode = "arg"
+ready_delay_ms = 5000
+
+[[agent]]
+name = "worker"
+provider = "kiro"
+`)
+	fs.Files["/city/kiro-overlay.toml"] = []byte(`
+[providers.kiro]
+ready_delay_ms = 8000
+
+[providers.kiro.env]
+KIRO_AGENT_MODE = "headless"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	kiro, ok := cfg.Providers["kiro"]
+	if !ok {
+		t.Fatal("kiro provider not loaded")
+	}
+	if kiro.ReadyDelayMs != 8000 {
+		t.Errorf("ReadyDelayMs = %d, want 8000 (fragment override)", kiro.ReadyDelayMs)
+	}
+	if kiro.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want headless (from fragment)", kiro.Env["KIRO_AGENT_MODE"])
+	}
+	if kiro.Command != "kiro-cli" {
+		t.Errorf("Command = %q, want kiro (from root)", kiro.Command)
+	}
+}
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseDefaulted(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p, ok := cfg.Beads.Policies["order_tracking"]
+	if !ok {
+		t.Fatal("order_tracking policy not present after LoadWithIncludes")
+	}
+	if p.DeleteAfterClose != DefaultOrderTrackingDeleteAfterClose {
+		t.Errorf("order_tracking.delete_after_close = %q, want %q", p.DeleteAfterClose, DefaultOrderTrackingDeleteAfterClose)
+	}
+}
+
+func TestLoadWithIncludes_OrderTrackingDeleteAfterCloseExplicitPreserved(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[beads.policies.order_tracking]
+delete_after_close = "48h"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "48h" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
+	}
+}
+
+// TestLoadWithIncludesSkipsBundledImportsOnNonOSFS pins the hermetic-load
+// contract: bundled builtin sources only exist on the real filesystem (the
+// user-global cache), so fake-FS loads compose without them instead of
+// failing resolution.
+func TestLoadWithIncludesSkipsBundledImportsOnNonOSFS(t *testing.T) {
+	coreSource, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("bundled core pack not registered")
+	}
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "test"
+schema = 2
+
+[imports.core]
+source = "` + coreSource + `"
+version = "` + BundledPackImportVersion + `"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if dir := cfg.PackDirByName("core"); dir != "" {
+		t.Errorf("PackDirByName(core) = %q, want empty on fake FS", dir)
+	}
+}
+
+// TestLoadWithIncludes_FragmentAgentDefaultsUpstreamPropagates verifies that an
+// [agent_defaults].upstream defined in a fragment survives mergeAgentDefaults
+// and is applied to agents with no explicit upstream. Before the merge fix the
+// fragment-defined upstream was silently dropped (mergeAgentDefaults folded
+// provider/model/wake_mode/default_sling_formula but not upstream), so the
+// agent fell back to the ambient serving environment.
+func TestLoadWithIncludes_FragmentAgentDefaultsUpstreamPropagates(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agent_defaults]
+upstream = "groq-prod"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "groq-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want %q", cfg.AgentDefaults.Upstream, "groq-prod")
+	}
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			if a.Upstream != "groq-prod" {
+				t.Errorf("worker Upstream = %q, want %q", a.Upstream, "groq-prod")
+			}
+			return
+		}
+	}
+	t.Error("worker agent not found")
+}
+
+// TestLoadWithIncludes_AgentDefaultsUpstreamRedefinitionWarns verifies that when
+// two fragments each set [agent_defaults].upstream, the later layer wins and a
+// redefinition warning is emitted, matching the behavior of the sibling scalar
+// fields (provider/model/wake_mode/default_sling_formula) in mergeAgentDefaults.
+func TestLoadWithIncludes_AgentDefaultsUpstreamRedefinitionWarns(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["a.toml", "b.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/a.toml"] = []byte(`
+[agent_defaults]
+upstream = "groq-prod"
+`)
+	fs.Files["/city/b.toml"] = []byte(`
+[agent_defaults]
+upstream = "fireworks-prod"
+`)
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "fireworks-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want later-layer %q", cfg.AgentDefaults.Upstream, "fireworks-prod")
+	}
+	if !containsWarningPrefix(prov.Warnings, "agent_defaults.upstream redefined by") {
+		t.Errorf("missing agent_defaults.upstream redefinition warning in %v", prov.Warnings)
+	}
+}
+
+// TestLoadWithIncludes_AgentDefaultsAliasUpstreamFolds verifies that a legacy
+// [agents].upstream alias folds into the canonical [agent_defaults] target via
+// mergeAgentDefaultsAliasPreferCanonical and reaches agents. Before the fold fix
+// the alias upstream was dropped while the sibling alias keys
+// (provider/model/wake_mode/default_sling_formula) folded correctly.
+func TestLoadWithIncludes_AgentDefaultsAliasUpstreamFolds(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["defaults.toml"]
+
+[workspace]
+name = "test"
+
+[[agent]]
+name = "worker"
+`)
+	fs.Files["/city/defaults.toml"] = []byte(`
+[agents]
+upstream = "groq-prod"
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	if cfg.AgentDefaults.Upstream != "groq-prod" {
+		t.Errorf("AgentDefaults.Upstream = %q, want %q", cfg.AgentDefaults.Upstream, "groq-prod")
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero value after normalization", cfg.AgentsDefaults)
+	}
+	explicit := explicitAgents(cfg.Agents)
+	for _, a := range explicit {
+		if a.Name == "worker" {
+			if a.Upstream != "groq-prod" {
+				t.Errorf("worker Upstream = %q, want %q", a.Upstream, "groq-prod")
+			}
+			return
+		}
+	}
+	t.Error("worker agent not found")
 }

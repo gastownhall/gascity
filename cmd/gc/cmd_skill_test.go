@@ -2,63 +2,251 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
-func TestSkillWorkOutput(t *testing.T) {
+func TestSkillRejectsTopicMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"skill", "work"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc skill work exited %d: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if out == "" {
-		t.Fatal("gc skill work produced no output")
-	}
-	// Should contain bd commands.
-	for _, want := range []string{"bd create", "bd list", "bd close", "bd ready"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q", want)
-		}
-	}
-}
-
-func TestSkillListTopics(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skill"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("gc skill exited %d: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	for _, topic := range []string{"work", "dispatch", "agents", "rigs", "mail", "city", "dashboard"} {
-		if !strings.Contains(out, topic) {
-			t.Errorf("topic listing missing %q", topic)
-		}
-	}
-}
-
-func TestSkillUnknownTopic(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"skill", "bogus"}, &stdout, &stderr)
 	if code == 0 {
-		t.Fatal("gc skill bogus should fail")
+		t.Fatal("gc skill work should fail")
 	}
-	if !strings.Contains(stderr.String(), "unknown topic") {
-		t.Errorf("stderr = %q, want 'unknown topic'", stderr.String())
+	if !strings.Contains(stderr.String(), "unknown subcommand") {
+		t.Errorf("stderr = %q, want 'unknown subcommand'", stderr.String())
 	}
 }
 
-func TestSkillAllTopicsReadable(t *testing.T) {
-	// Verify every registered topic has a matching embedded file.
-	for _, topic := range skillTopics {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"skill", topic.Arg}, &stdout, &stderr)
-		if code != 0 {
-			t.Errorf("gc skill %s failed: %s", topic.Arg, stderr.String())
+func TestSkillListCityCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"NAME", "code-review", "city", "skills/code-review/SKILL.md"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skill list output missing %q:\n%s", want, out)
 		}
-		if stdout.Len() == 0 {
-			t.Errorf("gc skill %s produced no output", topic.Arg)
+	}
+}
+
+func TestSkillListJSON(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --json exited %d: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Count         int    `json:"count"`
+		Entries       []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+			Path   string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Count == 0 || len(payload.Entries) == 0 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	found := false
+	for _, got := range payload.Entries {
+		if got.Name == "code-review" && got.Source == "city" && got.Path == "skills/code-review/SKILL.md" {
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Fatalf("city skill missing from %+v", payload.Entries)
+	}
+}
+
+func TestSkillListAgentCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+	writeCatalogFile(t, cityDir, "agents/mayor/skills/private-workflow/SKILL.md", "agent skill")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--agent", "mayor"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --agent exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"code-review", "city", "private-workflow", "agent"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skill list --agent output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSkillListImportedSharedCatalog(t *testing.T) {
+	clearGCEnv(t)
+	rootDir := t.TempDir()
+	cityDir := filepath.Join(rootDir, "city")
+	packDir := filepath.Join(rootDir, "helper")
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, packDir, "pack.toml", "[pack]\nname = \"helper\"\nversion = \"0.1.0\"\nschema = 2\n")
+	writeCatalogFile(t, packDir, "skills/code-review/SKILL.md", "imported skill")
+	writeCatalogFile(t, cityDir, "pack.toml", "[pack]\nname = \"city\"\nversion = \"0.1.0\"\nschema = 2\n\n[imports.helper]\nsource = \"../helper\"\n")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"helper.code-review", "helper"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skill list output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSkillListAgentCityScopedDirMatchingRigDoesNotShowRigSharedSkills(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "fe")
+	rigSkills := filepath.Join(cityDir, "imports", "helper", "skills")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogFile(t, cityDir, "imports/helper/skills/plan/SKILL.md", "rig-import skill")
+
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "fe", Path: rigDir}},
+		RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+			"fe": {{
+				SourceDir:   rigSkills,
+				BindingName: "helper",
+				PackName:    "helper",
+			}},
+		},
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Dir: "fe"},
+		},
+	}
+
+	entries, err := listVisibleSkillEntries(cityDir, cfg, nil, "mayor", "")
+	if err != nil {
+		t.Fatalf("listVisibleSkillEntries: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name == "helper.plan" {
+			t.Fatalf("city-scoped agent should not list rig-shared skill: %+v", entries)
+		}
+	}
+}
+
+func TestSkillListSessionCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_BEADS", "file")
+	writeNamedSessionCityTOML(t, cityDir)
+	writeCatalogFile(t, cityDir, "skills/code-review/SKILL.md", "city skill")
+	writeCatalogFile(t, cityDir, "agents/mayor/skills/private-workflow/SKILL.md", "agent skill")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "mayor session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template":     "mayor",
+			"session_name": "s-mayor-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(session bead): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--session", bead.ID}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --session exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"code-review", "city", "private-workflow", "agent"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("skill list --session output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestSkillListAgentShowsFullCityCatalog verifies that an agent-scoped
+// `gc skill list --agent mayor` returns the entire city catalog plus the
+// agent's private skills. Per engdocs/proposals/skill-materialization.md
+// there is no attachment filtering — every agent sees every city skill.
+// The `skills = [...]` tombstone on the agent is accepted but ignored.
+func TestSkillListAgentShowsFullCityCatalog(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	writeNamedSessionCityTOML(t, cityDir)
+	// mayor declares an attachment list — this is a v0.15.0 tombstone and
+	// must be ignored; other-skill should still appear in the agent's view.
+	writeCatalogFile(t, cityDir, "agents/mayor/agent.toml", "provider = \"codex\"\nstart_command = \"echo\"\nskills = [\"attached-skill\"]\n")
+	writeCatalogFile(t, cityDir, "skills/attached-skill/SKILL.md", "attached")
+	writeCatalogFile(t, cityDir, "skills/other-skill/SKILL.md", "other")
+	writeCatalogFile(t, cityDir, "agents/mayor/skills/private-workflow/SKILL.md", "agent-local")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"skill", "list", "--agent", "mayor"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc skill list --agent mayor exited %d: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "attached-skill") {
+		t.Errorf("attached-skill missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "private-workflow") {
+		t.Errorf("agent-local private-workflow missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "other-skill") {
+		t.Errorf("other-skill must remain visible — no attachment filtering:\n%s", out)
+	}
+}
+
+func writeCatalogFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	path := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
 }

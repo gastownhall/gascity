@@ -16,7 +16,7 @@ import (
 
 func TestNudgeCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("StatusMissingSession", func(t *testing.T) {
 		_, err := c.GC("nudge", "status")
@@ -51,7 +51,7 @@ func TestNudgeFromNonCity(t *testing.T) {
 
 func TestServiceCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("ListSucceeds", func(t *testing.T) {
 		out, err := c.GC("service", "list")

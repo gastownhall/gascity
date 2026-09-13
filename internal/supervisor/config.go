@@ -10,6 +10,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // isTestBinary reports whether the current process is a Go test binary.
@@ -27,14 +28,35 @@ func isTestBinary() bool {
 type Config struct {
 	Supervisor  Section           `toml:"supervisor"`
 	Publication PublicationConfig `toml:"publication,omitempty"`
+	Events      EventsSection     `toml:"events,omitempty"`
 }
 
 // Section holds the [supervisor] table fields.
 type Section struct {
-	Port           int    `toml:"port,omitempty"`
-	Bind           string `toml:"bind,omitempty"`
-	PatrolInterval string `toml:"patrol_interval,omitempty"`
-	AllowMutations bool   `toml:"allow_mutations,omitempty"`
+	Port           int      `toml:"port,omitempty"`
+	Bind           string   `toml:"bind,omitempty"`
+	PatrolInterval string   `toml:"patrol_interval,omitempty"`
+	AllowMutations bool     `toml:"allow_mutations,omitempty"`
+	AllowedOrigins []string `toml:"allowed_origins,omitempty"`
+	AllowedHosts   []string `toml:"allowed_hosts,omitempty"`
+	// WriteAuthVerifyKey / WriteAuthRequired require a signed write grant on
+	// every mutating request to an already-registered city (the per-city routes
+	// under /v0/city/{cityName}); city registry creation (POST /v0/city) stays
+	// on the supervisor-registry guards. See config.APIConfig for the key format
+	// and full semantics.
+	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+	WriteAuthRequired  bool   `toml:"write_auth_required,omitempty"`
+	// WriteAuthAllowUnverified acknowledges a non-loopback bind with
+	// allow_mutations and no verify key (an unauthenticated write plane behind a
+	// network front); without it that combination is a fail-closed boot error
+	// (gate G10). See config.APIConfig for the full semantics.
+	WriteAuthAllowUnverified bool `toml:"write_auth_allow_unverified,omitempty"`
+	// ReadAuthVerifyKey / ReadAuthRequired require a signed read grant on every
+	// read (GET/HEAD) of an already-registered city (the per-city routes under
+	// /v0/city/{cityName}); supervisor-scope reads (/v0/cities, /health) stay
+	// open. See config.APIConfig for the key format and full semantics.
+	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
+	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace
@@ -50,6 +72,58 @@ type PublicationConfig struct {
 // PublicationTenantAuthConfig configures tenant-route auth policy.
 type PublicationTenantAuthConfig struct {
 	PolicyRef string `toml:"policy_ref,omitempty"`
+}
+
+// EventsSection holds the [events] table of supervisor.toml.
+type EventsSection struct {
+	Export ExportConfig `toml:"export,omitempty"`
+}
+
+// ExportConfig configures the redacted event export ([events.export]). Export is
+// off unless Endpoint is set: that absence is the opt-in gate, so configuring a
+// supervisor never starts shipping events without an explicit endpoint.
+type ExportConfig struct {
+	// Endpoint is the HTTP URL that receives batched, envelope-only events.
+	Endpoint string `toml:"endpoint,omitempty"`
+	// Cities optionally restricts export to exact registered city names. A nil
+	// slice preserves the all-city default; an explicitly empty slice exports no
+	// city events.
+	Cities []string `toml:"cities,omitempty"`
+	// Token, when set, is sent as an Authorization: Bearer header.
+	Token string `toml:"token,omitempty"`
+	// TokenFile, when set, is a path to a file holding the bearer token. It is
+	// re-read on each POST so the token can be rotated out of band, and takes
+	// precedence over Token.
+	TokenFile string `toml:"token_file,omitempty"`
+	// ActorSalt salts the actor hash so it is stable yet non-reversible. It must
+	// be at least 16 bytes: a shorter salt makes the hash brute-forceable, so the
+	// projection fails closed and drops every event (the supervisor warns at
+	// startup). Leave empty to use a random per-install salt.
+	ActorSalt string `toml:"actor_salt,omitempty"`
+	// BatchMaxEvents caps events per POST (default 1000).
+	BatchMaxEvents int `toml:"batch_max_events,omitempty"`
+	// BatchInterval caps the time between POSTs (default 5s).
+	BatchInterval string `toml:"batch_interval,omitempty"`
+	// ExportRef toggles the id-gated ref field (default true).
+	ExportRef *bool `toml:"export_ref,omitempty"`
+}
+
+// Enabled reports whether event export is configured.
+func (x ExportConfig) Enabled() bool { return strings.TrimSpace(x.Endpoint) != "" }
+
+// ExportRefEnabled reports whether the id-gated ref is exported (default true).
+func (x ExportConfig) ExportRefEnabled() bool { return x.ExportRef == nil || *x.ExportRef }
+
+// BatchIntervalDuration parses BatchInterval, defaulting to 5s.
+func (x ExportConfig) BatchIntervalDuration() time.Duration {
+	if x.BatchInterval == "" {
+		return 5 * time.Second
+	}
+	d, err := time.ParseDuration(x.BatchInterval)
+	if err != nil || d <= 0 {
+		return 5 * time.Second
+	}
+	return d
 }
 
 // BindOrDefault returns the bind address, defaulting to "127.0.0.1".
@@ -146,25 +220,53 @@ func LoadConfig(path string) (Config, error) {
 // silent fallback to the user's real ~/.gc directory.
 func DefaultHome() string {
 	if v := os.Getenv("GC_HOME"); v != "" {
-		return v
+		return pathutil.NormalizePathForCompare(v)
 	}
 	if isTestBinary() {
 		panic("supervisor.DefaultHome: GC_HOME must be set during tests to prevent host supervisor interference")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), ".gc")
+	return builtinDefaultHome()
+}
+
+func builtinDefaultHome() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gc")
 	}
-	return filepath.Join(home, ".gc")
+	// Home unresolved. Never fall back to a fixed os.TempDir()/.gc: that path
+	// is shared and world-writable, so concurrent processes clobber each
+	// other's state and unrelated city scans pick it up as a real city
+	// (#3506). Hand out a process-unique directory instead.
+	if dir, err := os.MkdirTemp("", "gc-home-*"); err == nil {
+		return dir
+	}
+	// MkdirTemp failed, so the temp directory itself is unusable. Return a
+	// process-unique path under it rather than "" (which callers would join
+	// into a CWD-relative path, silently writing state to the wrong place) or
+	// the shared os.TempDir()/.gc that #3506 is about. The caller then fails
+	// loudly when it cannot create or write this path.
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-home-%d", os.Getpid()))
+}
+
+// UsesIsolatedGCHomeOverride reports whether GC_HOME points away from the builtin ~/.gc default.
+func UsesIsolatedGCHomeOverride() bool {
+	gcHome := strings.TrimSpace(os.Getenv("GC_HOME"))
+	if gcHome == "" {
+		return false
+	}
+	return pathutil.NormalizePathForCompare(gcHome) != pathutil.NormalizePathForCompare(builtinDefaultHome())
 }
 
 // RuntimeDir returns the directory for ephemeral runtime files (lock,
-// socket). Uses $XDG_RUNTIME_DIR/gc if available, falls back to
-// DefaultHome().
+// socket). Uses $XDG_RUNTIME_DIR/gc for the default machine-wide home, but
+// keeps isolated GC_HOME overrides self-contained under their own home so
+// they do not collide with the host supervisor socket.
 //
 // Guard: in test binaries, XDG_RUNTIME_DIR or GC_HOME must be set to
 // prevent connecting to the host supervisor socket.
 func RuntimeDir() string {
+	if UsesIsolatedGCHomeOverride() {
+		return DefaultHome()
+	}
 	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
 		return filepath.Join(v, "gc")
 	}
@@ -221,18 +323,15 @@ func seedIsolatedSupervisorConfig(path string) (bool, error) {
 }
 
 func shouldSeedIsolatedSupervisorConfig(path string) bool {
+	// GC_ISOLATED=1 lets non-test CI/dev sandboxes seed private supervisor configs.
+	if !isTestBinary() && os.Getenv("GC_ISOLATED") != "1" {
+		return false
+	}
 	gcHome := os.Getenv("GC_HOME")
 	if gcHome == "" {
 		return false
 	}
-	if !samePath(path, ConfigPath()) {
-		return false
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return true
-	}
-	return !samePath(gcHome, filepath.Join(home, ".gc"))
+	return pathutil.SamePath(path, ConfigPath())
 }
 
 func reserveLoopbackPort() (int, error) {
@@ -246,23 +345,4 @@ func reserveLoopbackPort() (int, error) {
 		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
 	}
 	return addr.Port, nil
-}
-
-func samePath(a, b string) bool {
-	a = canonicalPath(a)
-	b = canonicalPath(b)
-	return a == b
-}
-
-func canonicalPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = resolved
-	}
-	return filepath.Clean(p)
 }

@@ -12,7 +12,28 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
+
+func TestHistorySnapshotRawMessagesEmitsEachProviderRecordOnce(t *testing.T) {
+	repeated := json.RawMessage(`{"type":"ToolResults"}`)
+	snapshot := &worker.HistorySnapshot{Entries: []worker.HistoryEntry{
+		{ID: "child-1", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-1"}},
+		{ID: "child-2", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-1"}},
+		{ID: "child-3", Provenance: worker.Provenance{Raw: repeated, RawRecordID: "record-2"}},
+	}}
+
+	rawMessages, ids := historySnapshotRawMessages(snapshot)
+	if len(rawMessages) != 2 {
+		t.Fatalf("raw messages = %d, want two repeated source records", len(rawMessages))
+	}
+	if got, want := strings.Join(ids, ","), "child-2,child-3"; got != want {
+		t.Fatalf("raw cursor IDs = %q, want final child of each source record %q", got, want)
+	}
+}
 
 // writeSessionJSONL creates a JSONL session file at the slug path for
 // the given workDir.
@@ -37,6 +58,65 @@ func newServerWithSearchPaths(state State, searchBase string) *Server {
 	return s
 }
 
+type geminiAgentOutputStreamFixture struct {
+	state *fakeState
+	srv   *Server
+	info  session.Info
+	chats string
+}
+
+func newGeminiAgentOutputStreamFixture(t *testing.T) *geminiAgentOutputStreamFixture {
+	t.Helper()
+
+	fs := newSessionFakeState(t)
+	fs.cfg.Agents[0].Provider = "gemini"
+	fs.cfg.Workspace.Provider = "gemini"
+	srv := New(fs)
+
+	base := t.TempDir()
+	workDir := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+	fs.cfg.Rigs[0].Path = workDir
+
+	searchRoot := filepath.Join(base, ".gemini", "tmp")
+	srv.sessionLogSearchPaths = []string{searchRoot}
+	projectDir := filepath.Join(searchRoot, "project-a")
+	chatsDir := filepath.Join(projectDir, "chats")
+	for _, dir := range []string{searchRoot, projectDir, chatsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644); err != nil {
+		t.Fatalf("write .project_root: %v", err)
+	}
+
+	firstTranscript := filepath.Join(chatsDir, "session-2026-04-17T03-12-before.json")
+	writeGeminiHistoryFixtureForAPI(t, firstTranscript, "before-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:12:00Z","type":"user","content":"first-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:12:01Z","type":"gemini","content":"first-output"}`,
+	)
+	firstTime := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(firstTranscript, firstTime, firstTime); err != nil {
+		t.Fatalf("chtimes(first transcript): %v", err)
+	}
+
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	return &geminiAgentOutputStreamFixture{
+		state: fs,
+		srv:   srv,
+		info:  info,
+		chats: chatsDir,
+	}
+}
+
 func TestAgentOutputConversation(t *testing.T) {
 	state := newFakeState(t)
 	rigDir := t.TempDir()
@@ -49,9 +129,10 @@ func TestAgentOutputConversation(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -93,9 +174,10 @@ func TestAgentOutputConversationUsesConfiguredWorkDir(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -115,11 +197,11 @@ func TestAgentOutputConversationUsesConfiguredWorkDir(t *testing.T) {
 
 func TestAgentOutputNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -136,9 +218,10 @@ func TestAgentOutputCityScoped(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/mayor/output?tail=0", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/mayor/output?tail=0"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
@@ -179,11 +262,12 @@ func TestAgentOutputPagination(t *testing.T) {
 	writeSessionJSONL(t, searchBase, rigDir, lines...)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// tail=1 should return messages from the last compact boundary onward.
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=1", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output?tail=1"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
@@ -221,9 +305,10 @@ func TestAgentOutputCorruptedSessionFile(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	// The corrupt file IS found by FindSessionFile, but ReadFile returns
 	// an empty session (no valid entries). The handler should return a
@@ -242,6 +327,56 @@ func TestAgentOutputCorruptedSessionFile(t *testing.T) {
 	}
 }
 
+func TestResolveAgentTranscriptUsesBeadSessionIDWhenRuntimeMetaMissing(t *testing.T) {
+	state := newSessionFakeState(t)
+	workDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: workDir}}
+	state.cfg.Agents[0].Provider = "claude/tmux-cli"
+
+	searchBase := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(searchBase, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+
+	keyedPath := filepath.Join(transcriptDir, "sess-claude.jsonl")
+	if err := os.WriteFile(keyedPath, []byte(
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"right"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("write keyed transcript: %v", err)
+	}
+	otherPath := filepath.Join(transcriptDir, "different-session.jsonl")
+	if err := os.WriteFile(otherPath, []byte(
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"wrong"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`+"\n",
+	), 0o644); err != nil {
+		t.Fatalf("write fallback transcript: %v", err)
+	}
+
+	srv := newServerWithSearchPaths(state, searchBase)
+	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: workDir, Provider: "claude/tmux-cli", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.PersistSessionKey(info.ID, "sess-claude"); err != nil {
+		t.Fatalf("PersistSessionKey: %v", err)
+	}
+
+	resolved, err := srv.resolveAgentTranscript("myrig/worker", state.cfg.Agents[0])
+	if err != nil {
+		t.Fatalf("resolveAgentTranscript: %v", err)
+	}
+	if resolved.sessionID != info.ID {
+		t.Fatalf("sessionID = %q, want %q", resolved.sessionID, info.ID)
+	}
+	if resolved.path != keyedPath {
+		t.Fatalf("path = %q, want %q (and not %q)", resolved.path, keyedPath, otherPath)
+	}
+}
+
 func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 	state := newFakeState(t)
 	rigDir := t.TempDir()
@@ -253,16 +388,17 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 
@@ -283,11 +419,11 @@ func TestAgentOutputStreamSSEHeaders(t *testing.T) {
 
 func TestAgentOutputStreamNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent/output/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -297,11 +433,11 @@ func TestAgentOutputStreamNotFound(t *testing.T) {
 func TestAgentOutputStreamNotRunning(t *testing.T) {
 	state := newFakeState(t)
 	// Agent exists in config but no session file and not running → 404.
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
@@ -324,7 +460,7 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	rec := newSyncResponseRecorder()
 
 	done := make(chan struct{})
 	go func() {
@@ -332,8 +468,9 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for initial burst.
-	time.Sleep(100 * time.Millisecond)
+	if body := waitForRecorderSubstring(t, rec, "first", time.Second); !strings.Contains(body, "first") {
+		t.Fatalf("stream body missing initial turn: %s", body)
+	}
 
 	// Append a new entry to the session file.
 	slug := strings.ReplaceAll(rigDir, "/", "-")
@@ -349,12 +486,12 @@ func TestAgentOutputStreamNewTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wait for poll to pick up the change (poll interval is 2s).
-	time.Sleep(3 * time.Second)
+	// fsnotify should wake this quickly, but keep enough budget for the
+	// fallback poll path in environments where file watching is unavailable.
+	body := waitForRecorderSubstring(t, rec, "second", 3*time.Second)
 	cancel()
 	<-done
 
-	body := rec.Body.String()
 	// Should have two SSE events: initial "first" and new "second".
 	if !strings.Contains(body, "first") {
 		t.Errorf("body should contain initial turn, got: %s", body)
@@ -381,16 +518,17 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	)
 
 	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
 	go func() {
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 		close(done)
 	}()
 	<-done
@@ -398,10 +536,251 @@ func TestAgentOutputStreamStoppedAgent(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if got := rec.Header().Get("GC-Agent-Status"); got != "stopped" {
-		t.Errorf("GC-Agent-Status = %q, want %q", got, "stopped")
+	if got := rec.Result().Header.Get("GC-Agent-Status"); got != "stopped" {
+		t.Errorf("committed GC-Agent-Status = %q, want %q", got, "stopped")
 	}
 	if !strings.Contains(rec.Body.String(), "hello") {
 		t.Errorf("body should contain session data, got: %s", rec.Body.String())
+	}
+}
+
+func TestAgentOutputStreamStoppedAgentCommitsStatusHeader(t *testing.T) {
+	state := newFakeState(t)
+	rigDir := t.TempDir()
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+
+	searchBase := t.TempDir()
+	writeSessionJSONL(t, searchBase, rigDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+	)
+
+	srv := newServerWithSearchPaths(state, searchBase)
+	h := newTestCityHandlerWith(t, state, srv)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+cityURL(state, "/agent/myrig/worker/output/stream"), nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	cancel()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("GC-Agent-Status"); got != "stopped" {
+		t.Fatalf("committed GC-Agent-Status = %q, want %q", got, "stopped")
+	}
+}
+
+func TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fixture := newGeminiAgentOutputStreamFixture(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		fixture.srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(fixture.chats, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	sessionName := agentSessionName(fixture.state.CityName(), "myrig/worker", fixture.state.cfg.Workspace.SessionTemplate)
+	fixture.state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: sessionName,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+		t.Fatalf("stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u2","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	if err := os.Chtimes(secondTranscript, time.Now(), time.Now()); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
+func TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake(t *testing.T) {
+	fixture := newGeminiAgentOutputStreamFixture(t)
+	h := newTestCityHandlerWith(t, fixture.state, fixture.srv)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", cityURL(fixture.state, "/agent/myrig/worker/output/stream"), nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first-output", time.Second); !strings.Contains(body, "first-output") {
+		t.Fatalf("city-scoped stream body missing initial transcript turn: %s", body)
+	}
+
+	secondTranscript := filepath.Join(fixture.chats, "session-2026-04-17T03-15-after.json")
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+	)
+	secondTime := time.Now().Add(-1 * time.Minute)
+	if err := os.Chtimes(secondTranscript, secondTime, secondTime); err != nil {
+		t.Fatalf("chtimes(second transcript): %v", err)
+	}
+
+	sessionName := agentSessionName(fixture.state.CityName(), "myrig/worker", fixture.state.cfg.Workspace.SessionTemplate)
+	fixture.state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: sessionName,
+	})
+
+	if body := waitForRecorderSubstring(t, rec, "second-output", 1500*time.Millisecond); !strings.Contains(body, "second-output") {
+		t.Fatalf("city-scoped stream body missing rotated transcript after wake: %s", body)
+	}
+
+	writeGeminiHistoryFixtureForAPI(t, secondTranscript, "after-session",
+		`{"id":"u1","timestamp":"2026-04-17T03:15:00Z","type":"user","content":"second-input"}`,
+		`{"id":"a1","timestamp":"2026-04-17T03:15:01Z","type":"gemini","content":"second-output"}`,
+		`{"id":"u2","timestamp":"2026-04-17T03:15:02Z","type":"user","content":"third-input"}`,
+		`{"id":"a2","timestamp":"2026-04-17T03:15:03Z","type":"gemini","content":"third-output"}`,
+	)
+	if err := os.Chtimes(secondTranscript, time.Now(), time.Now()); err != nil {
+		t.Fatalf("chtimes(updated second transcript): %v", err)
+	}
+
+	body := waitForRecorderSubstring(t, rec, "third-output", 1500*time.Millisecond)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "third-input") || !strings.Contains(body, "third-output") {
+		t.Fatalf("city-scoped stream body missing writes to rotated transcript after wake: %s", body)
+	}
+}
+
+func TestAgentOutputStreamWorkerOperationEventWakesPeekFallback(t *testing.T) {
+	state := newFakeState(t)
+	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	state.sp.SetPeekOutput("myrig--worker", "first output")
+	srv := New(state)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
+		t.Fatalf("stream body missing initial output: %s", body)
+	}
+
+	state.sp.SetPeekOutput("myrig--worker", "wake from runtime event")
+	state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: "myrig--worker",
+	})
+
+	body := waitForRecorderSubstring(t, rec, "wake from runtime event", 10*time.Second)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "wake from runtime event") {
+		t.Fatalf("stream body missing output after worker operation wakeup: %s", body)
+	}
+}
+
+func TestAgentOutputStreamWorkerOperationSessionIDWakesPeekFallback(t *testing.T) {
+	state := newSessionFakeState(t)
+	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
+	info, err := mgr.CreateSession(
+		context.Background(), session.CreateOptions{Alias: "", ExplicitName: sessionName, Template: "myrig/worker", Title: "Chat", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Transport: "", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	state.sp.SetPeekOutput(info.SessionName, "first output")
+	srv := New(state)
+	srv.sessionLogSearchPaths = []string{t.TempDir()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+	done := make(chan struct{})
+	go func() {
+		srv.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if body := waitForRecorderSubstring(t, rec, "first output", 10*time.Second); !strings.Contains(body, "first output") {
+		t.Fatalf("stream body missing initial output: %s", body)
+	}
+
+	state.sp.SetPeekOutput(info.SessionName, "wake from session id")
+	state.eventProv.(*events.Fake).Record(events.Event{
+		Type:    events.WorkerOperation,
+		Actor:   "worker",
+		Subject: info.ID,
+	})
+
+	body := waitForRecorderSubstring(t, rec, "wake from session id", 10*time.Second)
+
+	cancel()
+	<-done
+
+	if !strings.Contains(body, "wake from session id") {
+		t.Fatalf("stream body missing output after session worker operation wakeup: %s", body)
 	}
 }

@@ -3,6 +3,8 @@ package formula
 import (
 	"context"
 	"fmt"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // FragmentRecipe is a compiled rootless subgraph that can be instantiated into
@@ -21,7 +23,17 @@ type FragmentRecipe struct {
 // substitutions. This is used by runtime fan-out to materialize item-specific
 // subgraphs into an existing workflow.
 func CompileExpansionFragment(_ context.Context, name string, searchPaths []string, target *Step, vars map[string]string) (*FragmentRecipe, error) {
-	parser := NewParser(searchPaths...)
+	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+	v2Enabled := IsFormulaV2Enabled()
+	var composedRequirements []formulaCompilerConstraint
+	collectComposedRequirements := func(f *Formula) error {
+		constraints, err := formulaCompilerConstraints(f)
+		if err != nil {
+			return err
+		}
+		composedRequirements = append(composedRequirements, constraints...)
+		return nil
+	}
 
 	f, err := parser.LoadByName(name)
 	if err != nil {
@@ -35,12 +47,27 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		return nil, fmt.Errorf("%q is not an expansion formula (type=%s)", name, resolved.Type)
 	}
 
+	// Same required-var validation as Compile — see #618.
+	if len(vars) > 0 {
+		if err := ValidateVars(resolved, vars); err != nil {
+			return nil, fmt.Errorf("expansion %q: %w", name, err)
+		}
+	}
+
 	expansionVars := ApplyDefaults(resolved, vars)
+	if err := validateCompileTimeVars(resolved, vars); err != nil {
+		return nil, fmt.Errorf("expansion %q: %w", name, err)
+	}
 	if err := MaterializeExpansionForTarget(resolved, target, expansionVars); err != nil {
 		return nil, err
 	}
+	filteredSteps, err := FilterStepsByCondition(resolved.Steps, expansionVars)
+	if err != nil {
+		return nil, fmt.Errorf("filtering conditioned steps in expansion %q: %w", name, err)
+	}
+	resolved.Steps = filteredSteps
 
-	controlFlowSteps, err := ApplyControlFlow(resolved.Steps, resolved.Compose)
+	controlFlowSteps, err := ApplyControlFlowWithVars(resolved.Steps, resolved.Compose, expansionVars)
 	if err != nil {
 		return nil, fmt.Errorf("applying control flow to expansion %q: %w", name, err)
 	}
@@ -50,14 +77,14 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		resolved.Steps = ApplyAdvice(resolved.Steps, resolved.Advice)
 	}
 
-	inlineExpandedSteps, err := ApplyInlineExpansions(resolved.Steps, parser)
+	inlineExpandedSteps, err := applyInlineExpansionsWithVars(resolved.Steps, parser, expansionVars, collectComposedRequirements)
 	if err != nil {
 		return nil, fmt.Errorf("applying inline expansions to expansion %q: %w", name, err)
 	}
 	resolved.Steps = inlineExpandedSteps
 
 	if resolved.Compose != nil && (len(resolved.Compose.Expand) > 0 || len(resolved.Compose.Map) > 0) {
-		expandedSteps, expandErr := ApplyExpansions(resolved.Steps, resolved.Compose, parser)
+		expandedSteps, expandErr := applyExpansionsWithVars(resolved.Steps, resolved.Compose, parser, expansionVars, collectComposedRequirements)
 		if expandErr != nil {
 			return nil, fmt.Errorf("applying expansions to expansion %q: %w", name, expandErr)
 		}
@@ -66,12 +93,9 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 
 	if resolved.Compose != nil && len(resolved.Compose.Aspects) > 0 {
 		for _, aspectName := range resolved.Compose.Aspects {
-			aspectFormula, loadErr := parser.LoadByName(aspectName)
+			aspectFormula, loadErr := loadResolvedAspectFormula(parser, aspectName, collectComposedRequirements)
 			if loadErr != nil {
-				return nil, fmt.Errorf("loading aspect %q: %w", aspectName, loadErr)
-			}
-			if aspectFormula.Type != TypeAspect {
-				return nil, fmt.Errorf("%q is not an aspect formula (type=%s)", aspectName, aspectFormula.Type)
+				return nil, loadErr
 			}
 			if len(aspectFormula.Advice) == 0 {
 				continue
@@ -80,11 +104,18 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		}
 	}
 
-	filteredSteps, err := FilterStepsByCondition(resolved.Steps, expansionVars)
+	filteredSteps, err = FilterStepsByCondition(resolved.Steps, expansionVars)
 	if err != nil {
 		return nil, fmt.Errorf("filtering conditioned steps in expansion %q: %w", name, err)
 	}
 	resolved.Steps = filteredSteps
+
+	if err := addFormulaCompilerConstraints(resolved, composedRequirements); err != nil {
+		return nil, err
+	}
+	if err := validateExplicitGraphCompilerRequirement(resolved); err != nil {
+		return nil, err
+	}
 
 	retrySteps, err := ApplyRetries(resolved.Steps)
 	if err != nil {
@@ -92,15 +123,33 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 	}
 	resolved.Steps = retrySteps
 
+	// Resolve "../assets/..." check paths whose {target}/{{var}} placeholders
+	// MaterializeExpansionForTarget has now substituted, before ApplyRalph
+	// freezes them into gc.check_path. Without this a templated asset check
+	// materializes a relative path the runtime cannot find in the layer tree.
+	if err := parser.resolveExpandedCheckPaths(resolved); err != nil {
+		return nil, fmt.Errorf("resolving expanded check paths in expansion %q: %w", name, err)
+	}
+
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying ralph transforms to expansion %q: %w", name, err)
 	}
 	resolved.Steps = ralphSteps
 
-	ApplyFragmentGraphControls(resolved)
+	if err := ValidateHostRequirements(resolved, v2Enabled); err != nil {
+		return nil, err
+	}
 
-	recipe, err := toRecipe(resolved)
+	graphWorkflow, err := isGraphWorkflow(resolved, v2Enabled)
+	if err != nil {
+		return nil, err
+	}
+	if graphWorkflow {
+		ApplyFragmentGraphControls(resolved)
+	}
+
+	recipe, err := toRecipeWithGraph(resolved, graphWorkflow)
 	if err != nil {
 		return nil, fmt.Errorf("flattening expansion %q: %w", name, err)
 	}
@@ -121,7 +170,7 @@ func stripFragmentRecipe(recipe *Recipe) *FragmentRecipe {
 		if step.IsRoot {
 			continue
 		}
-		if step.Metadata["gc.kind"] == "workflow-finalize" {
+		if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			continue
 		}
 		steps = append(steps, step)
@@ -173,12 +222,12 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 
 		replacements[step.ID] = controlID
 		meta := map[string]string{
-			"gc.kind":        "scope-check",
-			"gc.scope_ref":   step.Metadata["gc.scope_ref"],
-			"gc.scope_role":  "control",
-			"gc.control_for": step.ID,
+			beadmeta.KindMetadataKey:       beadmeta.KindScopeCheck,
+			beadmeta.ScopeRefMetadataKey:   step.Metadata[beadmeta.ScopeRefMetadataKey],
+			beadmeta.ScopeRoleMetadataKey:  beadmeta.ScopeRoleControl,
+			beadmeta.ControlForMetadataKey: step.ID,
 		}
-		for _, key := range []string{"gc.step_id", "gc.ralph_step_id", "gc.attempt", "gc.on_fail"} {
+		for _, key := range []string{beadmeta.StepIDMetadataKey, beadmeta.RalphStepIDMetadataKey, beadmeta.AttemptMetadataKey, beadmeta.OnFailMetadataKey} {
 			if value := step.Metadata[key]; value != "" {
 				meta[key] = value
 			}
@@ -200,11 +249,7 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 		return
 	}
 
-	for i := range fragment.Deps {
-		if replacement, ok := replacements[fragment.Deps[i].DependsOnID]; ok {
-			fragment.Deps[i].DependsOnID = replacement
-		}
-	}
+	RewriteRecipeDepsToControls(fragment.Deps, fragment.Steps, controls, replacements)
 	fragment.Steps = append(fragment.Steps, controls...)
 	fragment.Deps = append(fragment.Deps, controlDeps...)
 	fragment.Entries = fragmentEntryStepIDs(fragment)
@@ -212,18 +257,13 @@ func ApplyFragmentRecipeGraphControls(fragment *FragmentRecipe) {
 }
 
 func recipeStepNeedsScopeCheck(step RecipeStep) bool {
-	if step.Metadata["gc.scope_ref"] == "" {
+	if step.Metadata[beadmeta.ScopeRefMetadataKey] == "" {
 		return false
 	}
-	if step.Metadata["gc.scope_role"] == "teardown" {
+	if step.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return false
 	}
-	switch step.Metadata["gc.kind"] {
-	case "scope", "scope-check", "workflow-finalize", "fanout", "check":
-		return false
-	default:
-		return true
-	}
+	return !beadmeta.IsScopeCheckExemptKind(step.Metadata[beadmeta.KindMetadataKey])
 }
 
 func fragmentEntryStepIDs(fragment *FragmentRecipe) []string {
@@ -269,6 +309,10 @@ func fragmentSinkStepIDs(fragment *FragmentRecipe) []string {
 	sinks := make([]string, 0)
 	for _, step := range fragment.Steps {
 		if _, ok := referenced[step.ID]; ok {
+			continue
+		}
+		switch step.Metadata[beadmeta.KindMetadataKey] {
+		case "workflow-finalize", "spec":
 			continue
 		}
 		sinks = append(sinks, step.ID)

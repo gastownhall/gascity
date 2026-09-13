@@ -2,6 +2,7 @@
 package nudgequeue
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +13,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// wakeSocketPathLimit caps the canonical socket path length below the
+// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
+// the controllerSocketPathLimit pattern in cmd/gc/controller.go.
+const wakeSocketPathLimit = 100
 
 // Reference links a queued nudge back to the object that produced it.
 type Reference struct {
@@ -47,6 +54,15 @@ type State struct {
 	Pending  []Item `json:"pending,omitempty"`
 	InFlight []Item `json:"in_flight,omitempty"`
 	Dead     []Item `json:"dead,omitempty"`
+
+	// DispatchSkips counts, by reason, how many times the supervisor
+	// dispatch tick's per-session loop has silently skipped a target
+	// without delivering (see dispatchAllQueuedNudges in cmd/gc). It is a
+	// running total since this state file was first created; there is no
+	// reset/rotation. Persisted here (rather than kept in-process) so it
+	// stays visible to a `gc nudge status` invocation running in a
+	// different process than the supervisor that incremented it.
+	DispatchSkips map[string]int64 `json:"dispatch_skips,omitempty"`
 }
 
 // SortState orders items deterministically inside each queue bucket.
@@ -80,8 +96,40 @@ func SortState(state *State) {
 	})
 }
 
+// defaultLockWaitTimeout bounds how long WithState waits to acquire the
+// queue's exclusive flock before giving up with a descriptive error
+// (ga-2kzci3 FR1/FR2). Set to 4x nudgeEnqueueMaintenanceBudget (cmd/gc,
+// 2s), per NFR2 -- sized against normal uncontended turnaround, so it
+// doesn't false-trigger under ordinary contention while still failing fast
+// enough to diagnose in seconds, not the multi-minute hangs this fix
+// replaces. It is not a bound every holder respects: the supervisor sweep
+// runs against nudgeMaintenanceSweepBudget (cmd/gc, 5m) instead, and the
+// lazy bead-store open in nudgeMaintenanceStore.frontForState runs inside
+// the locked callback, before the first per-item deadline check, with no
+// budget of its own. A waiter can legitimately time out behind either.
+const defaultLockWaitTimeout = 8 * time.Second
+
 // WithState locks, loads, mutates, and atomically rewrites the queue state.
+// The wait to acquire the lock is bounded to defaultLockWaitTimeout
+// (ga-2kzci3 FR1/FR2); a caller that needs a different budget -- e.g. one
+// that must keep cycling other work under contention -- can call
+// withStateBounded directly instead.
 func WithState(cityPath string, fn func(*State) error) error {
+	return withStateBounded(cityPath, defaultLockWaitTimeout, clock.Real{}, fn)
+}
+
+// nudgeQueueLockPollInterval is how often withStateBounded retries a
+// non-blocking lock acquisition while waiting for its budget to expire.
+const nudgeQueueLockPollInterval = 10 * time.Millisecond
+
+// withStateBounded is WithState's bounded-wait implementation, callable
+// directly by a caller that needs a different timeout budget than
+// WithState's default -- e.g. the supervisor dispatch tick, which must keep
+// cycling other sessions even when the queue is contended (ga-2kzci3
+// FR1/FR2). flock offers no notification API, so the bound is enforced by
+// polling LOCK_EX|LOCK_NB against clk until either the lock is acquired or
+// the budget elapses.
+func withStateBounded(cityPath string, waitTimeout time.Duration, clk clock.Clock, fn func(*State) error) error {
 	dir := filepath.Dir(StatePath(cityPath))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating nudge queue dir: %w", err)
@@ -93,8 +141,22 @@ func WithState(cityPath string, fn func(*State) error) error {
 	}
 	defer lockFile.Close() //nolint:errcheck
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("locking nudge queue: %w", err)
+	deadline := clk.Now().Add(waitTimeout)
+	for {
+		lockErr := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			break
+		}
+		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("locking nudge queue: %w", lockErr)
+		}
+		if !clk.Now().Before(deadline) {
+			return fmt.Errorf("locking nudge queue: timed out waiting %s for lock", waitTimeout)
+		}
+		// Deliberately real time while the deadline above is evaluated
+		// against clk: a caller passing a non-advancing clock.Fake against a
+		// held lock would poll here forever, never reaching its deadline.
+		time.Sleep(nudgeQueueLockPollInterval)
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
 
@@ -143,4 +205,27 @@ func StatePath(cityPath string) string {
 // LockPath returns the queue state lock path for a city.
 func LockPath(cityPath string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "state.lock")
+}
+
+// WakeSocketPath returns the path to the supervisor nudge-dispatcher wake
+// socket. Producers connect to this path after enqueue to trigger immediate
+// dispatch; the supervisor listens on it when daemon.nudge_dispatcher is
+// "supervisor".
+//
+// Preserves the legacy `<city>/.gc/runtime/nudges/wake.sock` location for
+// short city paths but falls back to a deterministic short temp-path
+// when the legacy pathname is too close to the platform sockaddr_un
+// limit. Mirrors the controllerSocketPath pattern in cmd/gc/controller.go.
+func WakeSocketPath(cityPath string) string {
+	legacy := citylayout.RuntimePath(cityPath, "nudges", "wake.sock")
+	if len(legacy) <= wakeSocketPathLimit {
+		return legacy
+	}
+	canonical, err := filepath.Abs(cityPath)
+	if err != nil {
+		canonical = cityPath
+	}
+	canonical = filepath.Clean(canonical)
+	sum := sha256.Sum256([]byte(canonical))
+	return filepath.Join("/tmp", "gascity-nudge", fmt.Sprintf("%x.sock", sum[:16]))
 }

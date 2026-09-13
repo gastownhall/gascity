@@ -24,14 +24,14 @@ stdout 'cook'
 name = "my-city"
 provider = "claude"
 
-[formulas]
-dir = "formulas"
+[providers.claude]
+base = "builtin:claude"
 
 [[agent]]
 name = "chef"
 start_command = "echo hello"
 
--- my-city/formulas/pancakes.formula.toml --
+-- my-city/formulas/pancakes.toml --
 formula = "pancakes"
 description = "Make pancakes"
 version = 1

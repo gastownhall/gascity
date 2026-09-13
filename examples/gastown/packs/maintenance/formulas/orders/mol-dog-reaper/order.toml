@@ -1,8 +1,0 @@
-# Converted from formula+pool to exec. All reaper operations are
-# deterministic: SQL age comparisons, bd close, count thresholds.
-# No LLM judgment needed — runs inline in the controller.
-[order]
-description = "Reap stale wisps and purge closed molecules"
-exec = "$PACK_DIR/scripts/reaper.sh"
-gate = "cooldown"
-interval = "30m"

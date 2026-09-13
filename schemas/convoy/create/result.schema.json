@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "convoy_id", "title"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "convoy.create" },
+    "action": { "const": "create" },
+    "convoy_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string" },
+    "issue_ids": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

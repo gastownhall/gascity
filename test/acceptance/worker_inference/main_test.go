@@ -1,0 +1,1167 @@
+//go:build acceptance_c
+
+package workerinference_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	workerpkg "github.com/gastownhall/gascity/internal/worker"
+	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/test/tmuxtest"
+)
+
+var (
+	liveEnv   *helpers.Env
+	liveSetup providerSetup
+)
+
+const (
+	defaultOpenCodeGeminiModel = "google/gemini-2.5-flash"
+	// Our XIAOMI_API_KEY is a token-plan SGP key; the plain xiaomi/* and
+	// token-plan-{cn,ams}/* providers reject it.
+	defaultMimoCodeModel      = "xiaomi-token-plan-sgp/mimo-v2.5-pro"
+	defaultPiOllamaCloudModel = "gpt-oss:20b"
+)
+
+type providerSetup struct {
+	Profile      workerpkg.Profile
+	Provider     string
+	BinaryPath   string
+	ProcessNames []string
+	AuthSource   string
+	SearchPaths  []string
+	SetupError   string
+}
+
+func TestMain(m *testing.M) {
+	tmpRoot, err := acceptanceTempRoot()
+	if err != nil {
+		panic("worker-inference: preparing temp root: " + err.Error())
+	}
+	if err := os.Setenv("TMPDIR", tmpRoot); err != nil {
+		panic("worker-inference: setting TMPDIR: " + err.Error())
+	}
+	tmpDir, err := os.MkdirTemp(tmpRoot, fmt.Sprintf("gcwi-%d-*", os.Getpid()))
+	if err != nil {
+		panic("worker-inference: creating temp dir: " + err.Error())
+	}
+	if os.Getenv("GC_ACCEPTANCE_KEEP") != "1" {
+		defer os.RemoveAll(tmpDir)
+	}
+
+	gcBinary := helpers.BuildGC(tmpDir)
+	gcHome := filepath.Join(tmpDir, "gc-home")
+	runtimeDir := filepath.Join(tmpDir, "runtime")
+	for _, dir := range []string{gcHome, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			panic("worker-inference: " + err.Error())
+		}
+	}
+	if err := os.Setenv("GC_HOME", gcHome); err != nil {
+		panic("worker-inference: setting GC_HOME: " + err.Error())
+	}
+	if err := tmuxtest.ConfigureProcessEnv(filepath.Join(runtimeDir, "tmux")); err != nil {
+		panic("worker-inference: configuring tmux test env: " + err.Error())
+	}
+	if err := helpers.WriteSupervisorConfig(gcHome); err != nil {
+		panic("worker-inference: " + err.Error())
+	}
+
+	doltCfgDir := filepath.Join(gcHome, ".dolt")
+	if err := os.MkdirAll(doltCfgDir, 0o755); err != nil {
+		panic("worker-inference: " + err.Error())
+	}
+	doltCfg := `{"user.name":"gc-test","user.email":"gc-test@test.local"}`
+	if err := os.WriteFile(filepath.Join(doltCfgDir, "config_global.json"), []byte(doltCfg), 0o644); err != nil {
+		panic("worker-inference: " + err.Error())
+	}
+
+	liveEnv = helpers.NewEnv(gcBinary, gcHome, runtimeDir).
+		Without("GC_SESSION").
+		Without("GC_BEADS").
+		Without("GC_DOLT").
+		With("DOLT_ROOT_PATH", gcHome)
+	if bdPath := helpers.FindBD(); bdPath != "" {
+		bdShimDir := filepath.Join(tmpDir, "bd-bin")
+		if err := os.MkdirAll(bdShimDir, 0o755); err != nil {
+			panic("worker-inference: creating bd shim dir: " + err.Error())
+		}
+		if err := os.Symlink(bdPath, filepath.Join(bdShimDir, "bd")); err != nil {
+			panic("worker-inference: staging bd shim: " + err.Error())
+		}
+		liveEnv.With("BD_BIN", bdPath)
+		liveEnv.With("PATH", bdShimDir+string(os.PathListSeparator)+liveEnv.Get("PATH"))
+	}
+	liveSetup = prepareProviderSetup(gcHome, liveEnv)
+
+	// Reap dolt orphans left by prior crashed runs, then guard this run so an
+	// interrupt / timeout / OOM does not leak a dolt sql-server (issue #3640).
+	dolttest.SweepStale(tmpRoot, "gcwi-")
+	stopGuard := dolttest.Guard(tmpDir)
+
+	code := m.Run()
+	if liveEnv != nil {
+		helpers.RunGC(liveEnv, "", "supervisor", "stop") //nolint:errcheck
+	}
+	stopGuard()
+	os.Exit(code)
+}
+
+func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
+	setup := providerSetup{
+		Profile: resolveProfile(os.Getenv("PROFILE")),
+	}
+	setup.Provider = profileProvider(setup.Profile)
+	setup.SearchPaths = profileSearchPaths(gcHome, setup.Profile)
+	if setup.Provider == "" {
+		setup.SetupError = fmt.Sprintf("unsupported worker-inference profile %q", setup.Profile)
+		return setup
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		setup.SetupError = "tmux not found in PATH"
+		return setup
+	}
+	if helpers.FindBD() == "" {
+		setup.SetupError = "bd not found in PATH"
+		return setup
+	}
+	binaryName := profileExecutable(setup.Profile, setup.Provider)
+	binaryPath, err := exec.LookPath(binaryName)
+	if err != nil {
+		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", binaryName)
+		return setup
+	}
+	setup.BinaryPath = binaryPath
+	authSource, err := stageProviderAuth(gcHome, env, setup.Profile)
+	if err != nil {
+		setup.SetupError = err.Error()
+		return setup
+	}
+	setup.AuthSource = authSource
+	return setup
+}
+
+func resolveProfile(raw string) workerpkg.Profile {
+	switch strings.TrimSpace(raw) {
+	case "", string(workerpkg.ProfileClaudeTmuxCLI):
+		return workerpkg.ProfileClaudeTmuxCLI
+	case string(workerpkg.ProfileCodexTmuxCLI):
+		return workerpkg.ProfileCodexTmuxCLI
+	case string(workerpkg.ProfileCursorTmuxCLI):
+		return workerpkg.ProfileCursorTmuxCLI
+	case string(workerpkg.ProfileGeminiTmuxCLI):
+		return workerpkg.ProfileGeminiTmuxCLI
+	case string(workerpkg.ProfileKimiTmuxCLI):
+		return workerpkg.ProfileKimiTmuxCLI
+	case string(workerpkg.ProfileOpenCodeTmuxCLI):
+		return workerpkg.ProfileOpenCodeTmuxCLI
+	case string(workerpkg.ProfileMimoCodeTmuxCLI):
+		return workerpkg.ProfileMimoCodeTmuxCLI
+	case string(workerpkg.ProfileZCodeTmuxCLI):
+		return workerpkg.ProfileZCodeTmuxCLI
+	case string(workerpkg.ProfilePiTmuxCLI):
+		return workerpkg.ProfilePiTmuxCLI
+	case string(workerpkg.ProfileAntigravityTmuxCLI):
+		return workerpkg.ProfileAntigravityTmuxCLI
+	default:
+		return workerpkg.Profile(strings.TrimSpace(raw))
+	}
+}
+
+func profileProvider(profile workerpkg.Profile) string {
+	switch profile {
+	case workerpkg.ProfileClaudeTmuxCLI:
+		return "claude"
+	case workerpkg.ProfileCodexTmuxCLI:
+		return "codex"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor"
+	case workerpkg.ProfileGeminiTmuxCLI:
+		return "gemini"
+	case workerpkg.ProfileKimiTmuxCLI:
+		return "kimi"
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return "opencode"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimocode"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return "zcode"
+	case workerpkg.ProfilePiTmuxCLI:
+		return "pi"
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "antigravity"
+	default:
+		return ""
+	}
+}
+
+func profileExecutable(profile workerpkg.Profile, provider string) string {
+	switch profile {
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return "agy"
+	case workerpkg.ProfileCursorTmuxCLI:
+		return "cursor-agent"
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return "mimo"
+	case workerpkg.ProfileZCodeTmuxCLI:
+		// ZCode has no CLI of its own to launch; the engine's adapter is the
+		// executable (internal/worker/adapters/zcode), installed onto PATH by
+		// scripts/worker_inference_setup.py.
+		return zcodeadapter.ExecutableName
+	default:
+		return provider
+	}
+}
+
+func profileSearchPaths(gcHome string, profile workerpkg.Profile) []string {
+	switch profile {
+	case workerpkg.ProfileCodexTmuxCLI:
+		return []string{filepath.Join(gcHome, ".codex", "sessions")}
+	case workerpkg.ProfileCursorTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")}
+	case workerpkg.ProfileGeminiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".gemini", "tmp")}
+	case workerpkg.ProfileKimiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".kimi", "sessions")}
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts")}
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return []string{filepath.Join(gcHome, ".local", "share", "gascity", "zcode-transcripts")}
+	case workerpkg.ProfilePiTmuxCLI:
+		return []string{filepath.Join(gcHome, ".pi", "agent", "sessions")}
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}
+	default:
+		return []string{filepath.Join(gcHome, ".claude", "projects")}
+	}
+}
+
+func stageProviderAuth(gcHome string, env *helpers.Env, profile workerpkg.Profile) (string, error) {
+	switch profile {
+	case workerpkg.ProfileClaudeTmuxCLI:
+		return stageClaudeAuth(gcHome, env)
+	case workerpkg.ProfileCodexTmuxCLI:
+		return stageCodexAuth(gcHome, env)
+	case workerpkg.ProfileCursorTmuxCLI:
+		return stageCursorAuth(gcHome, env)
+	case workerpkg.ProfileGeminiTmuxCLI:
+		return stageGeminiAuth(gcHome, env)
+	case workerpkg.ProfileKimiTmuxCLI:
+		return stageKimiAuth(gcHome, env)
+	case workerpkg.ProfileOpenCodeTmuxCLI:
+		return stageOpenCodeGeminiAuth(gcHome, env)
+	case workerpkg.ProfileMimoCodeTmuxCLI:
+		return stageMimoCodeAuth(gcHome, env)
+	case workerpkg.ProfileZCodeTmuxCLI:
+		return stageZCodeAuth(gcHome, env)
+	case workerpkg.ProfilePiTmuxCLI:
+		return stagePiOllamaCloudAuth(gcHome, env)
+	case workerpkg.ProfileAntigravityTmuxCLI:
+		return stageAntigravityAuth(gcHome, env)
+	default:
+		return "", fmt.Errorf("unsupported worker-inference profile %q", profile)
+	}
+}
+
+func stageCursorAuth(gcHome string, env *helpers.Env) (string, error) {
+	transcriptDir := filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", err
+	}
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY",
+		"GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("cursor auth unavailable: %w", err)
+	}
+	if apiKey := strings.TrimSpace(stagedKey); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return stagedSecretSource("cursor", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("CURSOR_API_KEY")); apiKey != "" {
+		env.With("CURSOR_API_KEY", apiKey)
+		return "env:CURSOR_API_KEY", nil
+	}
+	return "", fmt.Errorf("cursor auth unavailable: set CURSOR_API_KEY or GC_WORKER_INFERENCE_CURSOR_API_KEY")
+}
+
+func stageAntigravityAuth(gcHome string, env *helpers.Env) (string, error) {
+	_ = env
+
+	cliDir := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(filepath.Join(cliDir, "brain"), 0o755); err != nil {
+		return "", err
+	}
+
+	token, tokenFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN",
+		"GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(token) != "" {
+		if err := os.WriteFile(filepath.Join(cliDir, "antigravity-oauth-token"), []byte(token), 0o600); err != nil {
+			return "", err
+		}
+		if err := stageAntigravityOnboarding("", gcHome); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("antigravity", tokenFromFile), nil
+	}
+
+	if sourceHome := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME")); sourceHome != "" {
+		if err := stageAntigravityHomeSource(sourceHome, gcHome); err != nil {
+			return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+		}
+		return "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("antigravity auth unavailable: %w", err)
+	}
+	if err := stageAntigravityHomeSource(home, gcHome); err == nil {
+		return "host-home:antigravity", nil
+	}
+	return "", fmt.Errorf("antigravity auth unavailable: set GC_WORKER_INFERENCE_ANTIGRAVITY_HOME or GC_WORKER_INFERENCE_ANTIGRAVITY_OAUTH_TOKEN")
+}
+
+func stageAntigravityHomeSource(sourceHome, gcHome string) error {
+	sourceHome = strings.TrimSpace(sourceHome)
+	if sourceHome == "" {
+		return fmt.Errorf("source home is empty")
+	}
+	srcCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	dstCLI := filepath.Join(gcHome, ".gemini", "antigravity-cli")
+	for _, name := range []string{"antigravity-oauth-token", "settings.json", "installation_id", "keybindings.json"} {
+		if err := copyFileIfExists(filepath.Join(srcCLI, name), filepath.Join(dstCLI, name), 0o600); err != nil {
+			return err
+		}
+	}
+	srcConfig := filepath.Join(sourceHome, ".gemini", "config")
+	dstConfig := filepath.Join(gcHome, ".gemini", "config")
+	for _, name := range []string{".migrated", "import_manifest.json", "mcp_config.json"} {
+		if err := copyFileIfExists(filepath.Join(srcConfig, name), filepath.Join(dstConfig, name), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := stageAntigravityOnboarding(srcCLI, gcHome); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(dstCLI, "brain"), 0o755); err != nil {
+		return err
+	}
+	if !fileExists(filepath.Join(dstCLI, "antigravity-oauth-token")) {
+		return fmt.Errorf("missing %s", filepath.Join(srcCLI, "antigravity-oauth-token"))
+	}
+	return nil
+}
+
+func stageAntigravityOnboarding(srcCLI, gcHome string) error {
+	dst := filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json")
+	if strings.TrimSpace(srcCLI) != "" {
+		if err := copyFileIfExists(filepath.Join(srcCLI, "cache", "onboarding.json"), dst, 0o600); err != nil {
+			return err
+		}
+		if fileExists(dst) {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte("{\n  \"consumerOnboardingComplete\": true,\n  \"enterpriseOnboardingComplete\": true,\n  \"onboardingComplete\": true\n}\n"), 0o600)
+}
+
+func stageKimiAuth(gcHome string, env *helpers.Env) (string, error) {
+	kimiDir := filepath.Join(gcHome, ".kimi")
+	if err := os.MkdirAll(kimiDir, 0o755); err != nil {
+		return "", err
+	}
+	env.With("KIMI_SHARE_DIR", kimiDir).
+		With("KIMI_CLI_NO_AUTO_UPDATE", "1")
+
+	config, configFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_TOML",
+		"GC_WORKER_INFERENCE_KIMI_CONFIG_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if strings.TrimSpace(config) != "" {
+		if err := os.WriteFile(filepath.Join(kimiDir, "config.toml"), []byte(config), 0o600); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("kimi", configFromFile), nil
+	}
+
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writeKimiOllamaConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:OLLAMA_API_KEY", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("KIMI_API_KEY")); apiKey != "" {
+		env.With("KIMI_API_KEY", apiKey)
+		if err := writeKimiNativeConfig(filepath.Join(kimiDir, "config.toml"), apiKey); err != nil {
+			return "", err
+		}
+		return "env:KIMI_API_KEY", nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if err := copyFileIfExists(filepath.Join(home, ".kimi", "config.toml"), filepath.Join(kimiDir, "config.toml"), 0o600); err != nil {
+		return "", fmt.Errorf("kimi auth unavailable: %w", err)
+	}
+	if fileExists(filepath.Join(kimiDir, "config.toml")) {
+		return "host-home:kimi", nil
+	}
+	return "", fmt.Errorf("kimi auth unavailable: set OLLAMA_API_KEY, KIMI_API_KEY, or GC_WORKER_INFERENCE_KIMI_CONFIG_TOML")
+}
+
+func writeKimiOllamaConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-ollama"
+default_yolo = true
+telemetry = false
+
+[providers.ollama-cloud]
+type = "openai_legacy"
+base_url = "https://ollama.com/v1"
+api_key = %q
+
+[models.kimi-ollama]
+provider = "ollama-cloud"
+model = %q
+max_context_size = 262144
+`, apiKey, liveKimiOllamaModel())
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func writeKimiNativeConfig(path, apiKey string) error {
+	content := fmt.Sprintf(`default_model = "kimi-for-coding"
+default_yolo = true
+telemetry = false
+
+[providers.kimi-for-coding]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = %q
+
+[models.kimi-for-coding]
+provider = "kimi-for-coding"
+model = "kimi-for-coding"
+max_context_size = 262144
+`, apiKey)
+	return os.WriteFile(path, []byte(content), 0o600)
+}
+
+func liveKimiOllamaModel() string {
+	model := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_KIMI_MODEL"))
+	if model == "" {
+		return "kimi-k2.6"
+	}
+	return model
+}
+
+func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
+	claudeDir := filepath.Join(gcHome, ".claude")
+	stagedCreds, credsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	stagedSettings, settingsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_SETTINGS_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_SETTINGS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	stagedLegacy, legacyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_JSON",
+		"GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	if stagedCreds != "" || stagedSettings != "" || stagedLegacy != "" {
+		if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+			return "", err
+		}
+		if stagedCreds != "" {
+			if err := os.WriteFile(filepath.Join(claudeDir, ".credentials.json"), []byte(stagedCreds), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if stagedSettings != "" {
+			if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(stagedSettings), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if stagedLegacy != "" {
+			if err := os.WriteFile(filepath.Join(gcHome, ".claude.json"), []byte(stagedLegacy), 0o600); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(claudeDir, ".claude.json"), []byte(stagedLegacy), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if err := helpers.EnsureClaudeStateFile(gcHome, claudeDir); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
+		if err := validateClaudeCredentials(filepath.Join(claudeDir, ".credentials.json"), time.Now()); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
+		env.With("CLAUDE_CONFIG_DIR", claudeDir)
+		return stagedSecretSource("claude", credsFromFile || settingsFromFile || legacyFromFile), nil
+	}
+	if authToken := strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")); authToken != "" {
+		env.With("ANTHROPIC_AUTH_TOKEN", authToken)
+		return "env:ANTHROPIC_AUTH_TOKEN", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); apiKey != "" {
+		env.With("ANTHROPIC_API_KEY", apiKey)
+		return "env:ANTHROPIC_API_KEY", nil
+	}
+	if sourceDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); sourceDir != "" {
+		if err := stageClaudeOAuthSource(sourceDir, "", gcHome); err == nil {
+			if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+				return "", fmt.Errorf("claude auth unavailable: %w", err)
+			}
+			env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
+			return "env:CLAUDE_CONFIG_DIR", nil
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("claude auth unavailable: %w", err)
+	}
+	srcClaudeDir := filepath.Join(home, ".claude")
+	if _, err := os.Stat(srcClaudeDir); err == nil {
+		if err := stageClaudeOAuth(home, gcHome); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
+		if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
+		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
+		return "host-home:claude", nil
+	}
+	if err := stageClaudeOAuth(home, gcHome); err == nil {
+		if err := helpers.EnsureClaudeStateFile(gcHome, filepath.Join(gcHome, ".claude")); err != nil {
+			return "", fmt.Errorf("claude auth unavailable: %w", err)
+		}
+		env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
+		return "host-home:claude", nil
+	}
+	return "", fmt.Errorf("claude auth unavailable: set ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY or stage ~/.claude credentials")
+}
+
+func stageCodexAuth(gcHome string, env *helpers.Env) (string, error) {
+	codexDir := filepath.Join(gcHome, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		return "", err
+	}
+	env.With("CODEX_HOME", codexDir)
+	stagedAuth, authFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_CODEX_AUTH_JSON",
+		"GC_WORKER_INFERENCE_CODEX_AUTH_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("codex auth unavailable: %w", err)
+	}
+	if stagedAuth != "" {
+		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(stagedAuth), 0o600); err != nil {
+			return "", err
+		}
+		return stagedSecretSource("codex", authFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); apiKey != "" {
+		env.With("OPENAI_API_KEY", apiKey)
+		return "env:OPENAI_API_KEY", nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("codex auth unavailable: %w", err)
+	}
+	if err := copyFileIfExists(filepath.Join(home, ".codex", "auth.json"), filepath.Join(codexDir, "auth.json"), 0o600); err != nil {
+		return "", fmt.Errorf("codex auth unavailable: %w", err)
+	}
+	if fileExists(filepath.Join(codexDir, "auth.json")) {
+		return "host-home:codex", nil
+	}
+	return "", fmt.Errorf("codex auth unavailable: set OPENAI_API_KEY or stage ~/.codex/auth.json")
+}
+
+func stageGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
+	geminiDir := filepath.Join(gcHome, ".gemini")
+	if err := os.MkdirAll(geminiDir, 0o755); err != nil {
+		return "", err
+	}
+	settings, settingsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_GEMINI_SETTINGS_JSON",
+		"GC_WORKER_INFERENCE_GEMINI_SETTINGS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	creds, credsFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_JSON",
+		"GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if settings != "" || creds != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
+		if settings != "" {
+			sanitized, err := sanitizeGeminiSettings(settings)
+			if err != nil {
+				return "", fmt.Errorf("gemini auth unavailable: %w", err)
+			}
+			if err := os.WriteFile(filepath.Join(geminiDir, "settings.json"), []byte(sanitized), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if creds != "" {
+			if err := os.WriteFile(filepath.Join(geminiDir, "oauth_creds.json"), []byte(creds), 0o600); err != nil {
+				return "", err
+			}
+		}
+		if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
+			env.With("GEMINI_API_KEY", apiKey)
+		}
+		if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); apiKey != "" {
+			env.With("GOOGLE_API_KEY", apiKey)
+		}
+		return combineAuthSource(stagedSecretSource("gemini", settingsFromFile || credsFromFile), adcSource), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
+		env.With("GEMINI_API_KEY", apiKey)
+		return combineAuthSource("env:GEMINI_API_KEY", adcSource), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); apiKey != "" {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
+		env.With("GOOGLE_API_KEY", apiKey)
+		return combineAuthSource("env:GOOGLE_API_KEY", adcSource), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if err := copySanitizedGeminiSettingsIfExists(filepath.Join(home, ".gemini", "settings.json"), filepath.Join(geminiDir, "settings.json")); err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if err := copyFileIfExists(filepath.Join(home, ".gemini", "oauth_creds.json"), filepath.Join(geminiDir, "oauth_creds.json"), 0o600); err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if fileExists(filepath.Join(geminiDir, "settings.json")) && fileExists(filepath.Join(geminiDir, "oauth_creds.json")) {
+		adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+		if err != nil {
+			return "", fmt.Errorf("gemini auth unavailable: %w", err)
+		}
+		return combineAuthSource("host-home:gemini", adcSource), nil
+	}
+	adcSource, err := stageGoogleApplicationCredentials(gcHome, env)
+	if err != nil {
+		return "", fmt.Errorf("gemini auth unavailable: %w", err)
+	}
+	if adcSource != "" {
+		return adcSource, nil
+	}
+	return "", fmt.Errorf("gemini auth unavailable: set GEMINI_API_KEY/GOOGLE_API_KEY or stage ~/.gemini oauth files")
+}
+
+func stageOpenCodeGeminiAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "opencode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_OPENCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_GENERATIVE_AI_API_KEY")); apiKey != "" {
+		env.With("GOOGLE_GENERATIVE_AI_API_KEY", apiKey)
+		return "env:GOOGLE_GENERATIVE_AI_API_KEY", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); apiKey != "" {
+		env.With("GEMINI_API_KEY", apiKey)
+		return "env:GEMINI_API_KEY", nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")); apiKey != "" {
+		env.With("GOOGLE_API_KEY", apiKey).With("GEMINI_API_KEY", apiKey)
+		return "env:GOOGLE_API_KEY", nil
+	}
+	if authContent := strings.TrimSpace(os.Getenv("OPENCODE_AUTH_CONTENT")); authContent != "" {
+		env.With("OPENCODE_AUTH_CONTENT", authContent)
+		return "env:OPENCODE_AUTH_CONTENT", nil
+	}
+	return "", fmt.Errorf("opencode gemini auth unavailable: set GOOGLE_GENERATIVE_AI_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY or OPENCODE_AUTH_CONTENT")
+}
+
+func stageMimoCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "mimocode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_MIMOCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	if apiKey := strings.TrimSpace(os.Getenv("XIAOMI_API_KEY")); apiKey != "" {
+		env.With("XIAOMI_API_KEY", apiKey)
+		return "env:XIAOMI_API_KEY", nil
+	}
+	return "", fmt.Errorf("mimocode auth unavailable: set XIAOMI_API_KEY")
+}
+
+// stageZCodeAuth isolates the ZCode adapter's state under the test gc home and
+// forwards the harness configuration the adapter and the CLI bundle read.
+//
+// The credential is passed through as an env var and never written to a file or
+// echoed: ZCODE_API_KEY reaches the pane via the ZCODE_ provider-credential
+// passthrough. ZCODE_CJS must point at a readable ZCode bundle; without it (or
+// without the key) the profile reports an environment error rather than
+// pretending to certify, matching every other credential-gated profile.
+func stageZCodeAuth(gcHome string, env *helpers.Env) (string, error) {
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	xdgConfig := filepath.Join(gcHome, ".config")
+	xdgCache := filepath.Join(gcHome, ".cache")
+	xdgState := filepath.Join(gcHome, ".local", "state")
+	transcriptDir := filepath.Join(xdgData, "gascity", "zcode-transcripts")
+	for _, dir := range []string{xdgData, xdgConfig, xdgCache, xdgState, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("XDG_DATA_HOME", xdgData).
+		With("XDG_CONFIG_HOME", xdgConfig).
+		With("XDG_CACHE_HOME", xdgCache).
+		With("XDG_STATE_HOME", xdgState).
+		With("GC_ZCODE_TRANSCRIPT_DIR", transcriptDir)
+
+	bundle := strings.TrimSpace(os.Getenv("ZCODE_CJS"))
+	if bundle == "" {
+		return "", fmt.Errorf("zcode harness unavailable: set ZCODE_CJS to the ZCode CLI bundle")
+	}
+	if _, err := os.Stat(bundle); err != nil {
+		return "", fmt.Errorf("zcode harness unavailable: ZCODE_CJS %q is not readable: %w", bundle, err)
+	}
+	apiKey := strings.TrimSpace(os.Getenv("ZCODE_API_KEY"))
+	if apiKey == "" {
+		return "", fmt.Errorf("zcode auth unavailable: set ZCODE_API_KEY")
+	}
+	env.With("ZCODE_CJS", bundle).With("ZCODE_API_KEY", apiKey)
+	for _, key := range []string{"ZCODE_MODEL", "ZCODE_BASE_URL", "ZCODE_NODE_BIN"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			env.With(key, value)
+		}
+	}
+	return "env:ZCODE_API_KEY", nil
+}
+
+func stagePiOllamaCloudAuth(gcHome string, env *helpers.Env) (string, error) {
+	piDir := filepath.Join(gcHome, ".pi", "agent")
+	sessionDir := filepath.Join(piDir, "sessions")
+	xdgData := filepath.Join(gcHome, ".local", "share")
+	transcriptDir := filepath.Join(xdgData, "gascity", "pi-transcripts")
+	for _, dir := range []string{piDir, sessionDir, transcriptDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", err
+		}
+	}
+	env.With("PI_CODING_AGENT_DIR", piDir).
+		With("PI_CODING_AGENT_SESSION_DIR", sessionDir).
+		With("GC_PI_TRANSCRIPT_DIR", transcriptDir)
+
+	stagedKey, keyFromFile, err := stagedValue(
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY",
+		"GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY_FILE",
+	)
+	if err != nil {
+		return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+	}
+	if stagedKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, stagedKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return stagedSecretSource("pi-ollama-cloud", keyFromFile), nil
+	}
+	if apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")); apiKey != "" {
+		if err := writePiOllamaCloudAuth(piDir, apiKey); err != nil {
+			return "", fmt.Errorf("pi ollama cloud auth unavailable: %w", err)
+		}
+		env.Without("OLLAMA_API_KEY")
+		return "env:OLLAMA_API_KEY", nil
+	}
+	return "", fmt.Errorf("pi ollama cloud auth unavailable: set OLLAMA_API_KEY or stage GC_WORKER_INFERENCE_PI_OLLAMA_API_KEY")
+}
+
+func writePiOllamaCloudAuth(piDir, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return fmt.Errorf("empty ollama cloud api key")
+	}
+	auth := map[string]map[string]string{
+		"ollama-cloud": {
+			"type": "api_key",
+			"key":  apiKey,
+		},
+	}
+	data, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		return err
+	}
+	authPath := filepath.Join(piDir, "auth.json")
+	if err := os.WriteFile(authPath, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(authPath, 0o600)
+}
+
+func copySanitizedGeminiSettingsIfExists(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sanitized, err := sanitizeGeminiSettings(string(data))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, []byte(sanitized), 0o600)
+}
+
+func sanitizeGeminiSettings(settings string) (string, error) {
+	settings = strings.TrimSpace(settings)
+	if settings == "" {
+		return "", nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(settings), &cfg); err != nil {
+		return "", fmt.Errorf("parsing Gemini settings: %w", err)
+	}
+	delete(cfg, "hooks")
+	general, _ := cfg["general"].(map[string]any)
+	if general == nil {
+		general = make(map[string]any)
+	}
+	general["enableAutoUpdate"] = false
+	general["enableAutoUpdateNotification"] = false
+	cfg["general"] = general
+	encoded, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(append(encoded, '\n')), nil
+}
+
+func stageGoogleApplicationCredentials(gcHome string, env *helpers.Env) (string, error) {
+	adcJSON := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+	if adcJSON == "" {
+		adcPath := strings.TrimSpace(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+		if adcPath == "" {
+			return "", nil
+		}
+		adcJSONBytes, err := os.ReadFile(adcPath)
+		if err != nil {
+			return "", fmt.Errorf("reading GOOGLE_APPLICATION_CREDENTIALS %q: %w", adcPath, err)
+		}
+		adcJSON = string(adcJSONBytes)
+	}
+	dst := filepath.Join(gcHome, "google-application-credentials.json")
+	if err := os.WriteFile(dst, []byte(adcJSON), 0o600); err != nil {
+		return "", err
+	}
+	env.With("GOOGLE_APPLICATION_CREDENTIALS", dst)
+	return "env:GOOGLE_APPLICATION_CREDENTIALS", nil
+}
+
+func stagedValue(contentEnv, fileEnv string) (string, bool, error) {
+	if staged := strings.TrimSpace(os.Getenv(contentEnv)); staged != "" {
+		return staged, false, nil
+	}
+	path := strings.TrimSpace(os.Getenv(fileEnv))
+	if path == "" {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", true, fmt.Errorf("read %s %q: %w", fileEnv, path, err)
+	}
+	return string(data), true, nil
+}
+
+func stagedSecretSource(provider string, fromFile bool) string {
+	provider = strings.TrimSpace(provider)
+	if fromFile {
+		return "file-secret:" + provider
+	}
+	return "inline-secret:" + provider
+}
+
+func stageClaudeOAuthSource(sourceDir, rootConfigPath, gcHome string) error {
+	sourceDir = strings.TrimSpace(sourceDir)
+	if sourceDir == "" {
+		return fmt.Errorf("claude source config dir is empty")
+	}
+	dstClaudeDir := filepath.Join(gcHome, ".claude")
+	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range []string{".credentials.json", "settings.json"} {
+		if err := copyFileIfExists(filepath.Join(sourceDir, name), filepath.Join(dstClaudeDir, name), 0o600); err != nil {
+			return err
+		}
+	}
+	rootConfigPath = strings.TrimSpace(rootConfigPath)
+	if rootConfigPath == "" {
+		rootConfigPath = filepath.Join(filepath.Dir(sourceDir), ".claude.json")
+	}
+	if err := mergeClaudeLocalConfig(
+		rootConfigPath,
+		filepath.Join(sourceDir, ".claude.json"),
+		filepath.Join(dstClaudeDir, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	if err := mergeClaudeLocalConfig(
+		rootConfigPath,
+		filepath.Join(sourceDir, ".claude.json"),
+		filepath.Join(gcHome, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
+}
+
+func stageClaudeOAuth(realHome, gcHome string) error {
+	srcClaudeDir := filepath.Join(realHome, ".claude")
+	dstClaudeDir := filepath.Join(gcHome, ".claude")
+	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range []string{".credentials.json", "settings.json"} {
+		if err := copyFileIfExists(filepath.Join(srcClaudeDir, name), filepath.Join(dstClaudeDir, name), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := mergeClaudeLocalConfig(
+		filepath.Join(realHome, ".claude.json"),
+		filepath.Join(srcClaudeDir, ".claude.json"),
+		filepath.Join(dstClaudeDir, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	if err := mergeClaudeLocalConfig(
+		filepath.Join(realHome, ".claude.json"),
+		filepath.Join(srcClaudeDir, ".claude.json"),
+		filepath.Join(gcHome, ".claude.json"),
+	); err != nil {
+		return err
+	}
+	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
+}
+
+func copyFileIfExists(src, dst string, perm os.FileMode) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, perm)
+}
+
+func mergeClaudeLocalConfig(rootSrc, nestedSrc, dst string) error {
+	rootData, err := readJSONMapIfExists(rootSrc)
+	if err != nil {
+		return err
+	}
+	nestedData, err := readJSONMapIfExists(nestedSrc)
+	if err != nil {
+		return err
+	}
+	if len(rootData) == 0 && len(nestedData) == 0 {
+		return nil
+	}
+	merged := make(map[string]any, len(rootData)+len(nestedData))
+	for key, value := range rootData {
+		merged[key] = value
+	}
+	for key, value := range nestedData {
+		merged[key] = value
+	}
+	data, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, append(data, '\n'), 0o600)
+}
+
+func validateClaudeCredentials(path string, now time.Time) error {
+	data, err := readJSONMapIfExists(path)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("Claude OAuth credentials file is missing")
+	}
+	oauthRaw, ok := data["claudeAiOauth"]
+	if !ok {
+		return nil
+	}
+	oauth, ok := oauthRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	expiry, ok, err := parseUnixMillis(oauth["expiresAt"])
+	if err != nil {
+		return fmt.Errorf("parse %s expiresAt: %w", path, err)
+	}
+	if !ok {
+		return nil
+	}
+	if !expiry.After(now.Add(2 * time.Minute)) {
+		if refreshToken, _ := oauth["refreshToken"].(string); strings.TrimSpace(refreshToken) != "" {
+			// Claude Code can refresh an expired access token when the staged
+			// OAuth blob still carries a refresh token. Acceptance setup should
+			// not reject a credential set that the real CLI can refresh.
+			return nil
+		}
+		return fmt.Errorf("OAuth token expired at %s", expiry.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func parseUnixMillis(value any) (time.Time, bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return time.Time{}, false, nil
+	case float64:
+		return time.UnixMilli(int64(typed)), true, nil
+	case int64:
+		return time.UnixMilli(typed), true, nil
+	case int:
+		return time.UnixMilli(int64(typed)), true, nil
+	case json.Number:
+		millis, err := typed.Int64()
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return time.UnixMilli(millis), true, nil
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return time.Time{}, false, nil
+		}
+		millis, err := json.Number(strings.TrimSpace(typed)).Int64()
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return time.UnixMilli(millis), true, nil
+	default:
+		return time.Time{}, false, fmt.Errorf("unsupported type %T", value)
+	}
+}
+
+func readJSONMapIfExists(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return out, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func combineAuthSource(primary, secondary string) string {
+	primary = strings.TrimSpace(primary)
+	secondary = strings.TrimSpace(secondary)
+	if primary == "" {
+		return secondary
+	}
+	if secondary == "" {
+		return primary
+	}
+	return primary + "+" + secondary
+}
+
+func acceptanceTempRoot() (string, error) {
+	root := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_TMPDIR"))
+	if root == "" {
+		root = filepath.Join("/tmp", "gcac")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			root = filepath.Join(os.TempDir(), "gcac")
+		}
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	return root, nil
+}

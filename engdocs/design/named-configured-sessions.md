@@ -2,13 +2,21 @@
 title: "Named Configured Sessions"
 ---
 
-| Field | Value |
-|---|---|
-| Status | Accepted |
-| Date | 2026-03-23 |
-| Author(s) | Codex |
-| Issue | N/A |
-| Supersedes | N/A |
+| Field         | Value                                 |
+| ------------- | ------------------------------------- |
+| Status        | Accepted                              |
+| Date          | 2026-03-23                            |
+| Author(s)     | Codex                                 |
+| Issue         | N/A                                   |
+| Supersedes    | N/A                                   |
+| Superseded by | session-model-unification (partially) |
+
+> Note
+>
+> This document introduced `[[named_session]]`. The accepted follow-on
+> design in [`session-model-unification`](session-model-unification.md)
+> keeps that concept but replaces the remaining pool/non-pool split with
+> one unified session model.
 
 ## Summary
 
@@ -63,7 +71,7 @@ canonical sessions where they make sense.
   runtime singleton.
 - Add an explicit config object for canonical persistent sessions.
 - Give named sessions a stable alias so `gc sling`, `gc mail`, `gc
-  nudge`, attach, and workflow routing can target the same identity.
+nudge`, attach, and workflow routing can target the same identity.
 - Support both:
   - `always`: controller-kept sessions like `deacon`
   - `on_demand`: lazy sessions like `mayor` or `refinery`
@@ -415,6 +423,11 @@ Named sessions add a second desired-state source:
   - the template has pending work, or
   - dependency wake requires the named-session identity
 
+An `always` named session is visible on a fresh city as a canonical session
+bead in `creating` state before the runtime process is confirmed. This is the
+same controller-owned creation intent used for any desired session; it is not a
+separate operator action.
+
 Dependency wake is evaluated over the validated graph of fully qualified
 template identities after pack expansion, not over ambiguous bare
 template strings. Each configured named session maps 1:1 to one
@@ -588,9 +601,9 @@ CLI and API session targeting intentionally differ on ambient context:
 - API resolution has no ambient rig shortcut. Bare names only resolve
   when city-unique; otherwise callers must send the fully qualified
   identity or use `template:<qualified-name>`.
-- Dashboard and other API clients should normalize user-selected targets
-  to fully qualified identities before calling GC so rig-scoped templates
-  and aliases are always representable.
+- real-world app and other API clients should normalize user-selected
+  targets to fully qualified identities before calling GC so rig-scoped
+  templates and aliases are always representable.
 
 Centralized resolution does not mean every command materializes a
 reserved `on_demand` named session. First-reference behavior is
@@ -763,7 +776,7 @@ Rationale:
 - `witness`: proactive patrol loop per rig
 - `refinery`: canonical merge queue endpoint, wake on work
 
-For the lifecycle/tutorial packs, `refinery` should also be expressed as
+For the lifecycle and minimal packs, `refinery` should also be expressed as
 an `on_demand` named session instead of an implicit singleton.
 
 ### Refinery does not need a new "check" feature
@@ -905,7 +918,7 @@ identity.
    helpers in desired-state and wake evaluation.
 3. Centralize configured-session materialization through one aliased
    helper and switch mail/nudge/sling/workflow to use it.
-4. Update Gastown and tutorial/lifecycle packs to declare explicit named
+4. Update Gastown and the minimal/lifecycle packs to declare explicit named
    sessions.
 5. Update status output and tests so canonical named sessions, not plain
    templates, define singleton runtime presence.
@@ -937,5 +950,5 @@ identity.
 - `gc session new <template>` continues to create fresh ordinary
   sessions even when a configured named session reserves the same
   qualified identity.
-- Gastown and lifecycle/tutorial configs work through explicit named
+- Gastown and lifecycle/minimal configs work through explicit named
   sessions instead of implicit singleton templates.

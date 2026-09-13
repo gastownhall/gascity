@@ -1,29 +1,36 @@
 package api
 
 import (
-	"net/http"
-
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
-	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
 // configResponse is the JSON representation of the city configuration.
 // It provides a structured view of the expanded (post-pack, post-patch)
 // configuration state.
 type configResponse struct {
-	Workspace workspaceResponse           `json:"workspace"`
-	Agents    []configAgentResponse       `json:"agents"`
-	Rigs      []configRigResponse         `json:"rigs"`
-	Providers map[string]providerSpecJSON `json:"providers,omitempty"`
-	Patches   *configPatchesResponse      `json:"patches,omitempty"`
+	Workspace       workspaceResponse           `json:"workspace"`
+	EffectiveAPIURL string                      `json:"effective_api_url,omitempty"`
+	Agents          []configAgentResponse       `json:"agents"`
+	Rigs            []configRigResponse         `json:"rigs"`
+	Providers       map[string]providerSpecJSON `json:"providers,omitempty"`
+	Patches         *configPatchesResponse      `json:"patches,omitempty"`
 }
 
 type workspaceResponse struct {
 	Name            string `json:"name"`
+	Prefix          string `json:"prefix,omitempty"`
+	DeclaredName    string `json:"declared_name,omitempty"`
+	DeclaredPrefix  string `json:"declared_prefix,omitempty"`
 	Provider        string `json:"provider,omitempty"`
 	Suspended       bool   `json:"suspended"`
 	SessionTemplate string `json:"session_template,omitempty"`
+	// MaxActiveSessions is the city-wide cap on total concurrent sessions,
+	// mirrored from config.Workspace.MaxActiveSessions. The tri-state is
+	// preserved: nil = unset (no city-level cap declared), -1 = unlimited,
+	// any other value = the explicit cap. Agents and rigs inherit this when
+	// they don't declare their own.
+	MaxActiveSessions *int `json:"max_active_sessions,omitempty"`
 }
 
 type configAgentResponse struct {
@@ -45,7 +52,9 @@ type configRigResponse struct {
 type providerSpecJSON struct {
 	DisplayName  string            `json:"display_name,omitempty"`
 	Command      string            `json:"command,omitempty"`
+	ACPCommand   string            `json:"acp_command,omitempty"`
 	Args         []string          `json:"args,omitempty"`
+	ACPArgs      *[]string         `json:"acp_args,omitempty"`
 	PromptMode   string            `json:"prompt_mode,omitempty"`
 	PromptFlag   string            `json:"prompt_flag,omitempty"`
 	ReadyDelayMs int               `json:"ready_delay_ms,omitempty"`
@@ -58,195 +67,37 @@ type configPatchesResponse struct {
 	ProviderCount int `json:"provider_count"`
 }
 
-func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.state.Config()
-
-	agents := make([]configAgentResponse, 0, len(cfg.Agents))
-	for _, a := range cfg.Agents {
-		agents = append(agents, configAgentResponse{
-			Name:      a.Name,
-			Dir:       a.Dir,
-			Provider:  a.Provider,
-			IsPool:    isMultiSessionAgent(a),
-			Scope:     a.Scope,
-			Suspended: a.Suspended,
-		})
+// providerSpecJSONFrom renders a config.ProviderSpec into its wire shape.
+// Shared by the loaded-config and defaults-baseline handlers so the two
+// surfaces stay in lock-step.
+func providerSpecJSONFrom(spec config.ProviderSpec) providerSpecJSON {
+	return providerSpecJSON{
+		DisplayName:  spec.DisplayName,
+		Command:      spec.Command,
+		ACPCommand:   spec.ACPCommand,
+		Args:         spec.Args,
+		ACPArgs:      optionalStringSlice(spec.ACPArgs),
+		PromptMode:   spec.PromptMode,
+		PromptFlag:   spec.PromptFlag,
+		ReadyDelayMs: spec.ReadyDelayMs,
+		Env:          spec.Env,
 	}
-
-	rigs := make([]configRigResponse, 0, len(cfg.Rigs))
-	for _, r := range cfg.Rigs {
-		rigs = append(rigs, configRigResponse{
-			Name:      r.Name,
-			Path:      r.Path,
-			Prefix:    r.Prefix,
-			Suspended: r.Suspended,
-		})
-	}
-
-	providers := make(map[string]providerSpecJSON, len(cfg.Providers))
-	for name, spec := range cfg.Providers {
-		providers[name] = providerSpecJSON{
-			DisplayName:  spec.DisplayName,
-			Command:      spec.Command,
-			Args:         spec.Args,
-			PromptMode:   spec.PromptMode,
-			PromptFlag:   spec.PromptFlag,
-			ReadyDelayMs: spec.ReadyDelayMs,
-			Env:          spec.Env,
-		}
-	}
-
-	resp := configResponse{
-		Workspace: workspaceResponse{
-			Name:            cfg.Workspace.Name,
-			Provider:        cfg.Workspace.Provider,
-			Suspended:       cfg.Workspace.Suspended,
-			SessionTemplate: cfg.Workspace.SessionTemplate,
-		},
-		Agents:    agents,
-		Rigs:      rigs,
-		Providers: providers,
-	}
-
-	if !cfg.Patches.IsEmpty() {
-		resp.Patches = &configPatchesResponse{
-			AgentCount:    len(cfg.Patches.Agents),
-			RigCount:      len(cfg.Patches.Rigs),
-			ProviderCount: len(cfg.Patches.Providers),
-		}
-	}
-
-	writeIndexJSON(w, s.latestIndex(), resp)
-}
-
-// handleConfigExplain returns the config with provenance annotations showing
-// where each resource originates: raw config, pack-derived, or patched.
-func (s *Server) handleConfigExplain(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.state.Config()
-	builtins := config.BuiltinProviders()
-
-	type annotatedAgent struct {
-		configAgentResponse
-		Origin string `json:"origin"` // "inline" or "pack-derived"
-	}
-
-	type annotatedProvider struct {
-		providerSpecJSON
-		Origin string `json:"origin"` // "builtin", "city", or "builtin+city"
-	}
-
-	// Use raw config for accurate provenance when available.
-	var rawCfg *config.City
-	if rcp, ok := s.state.(RawConfigProvider); ok {
-		rawCfg = rcp.RawConfig()
-	}
-
-	agents := make([]annotatedAgent, 0, len(cfg.Agents))
-	for _, a := range cfg.Agents {
-		origin := agentOrigin(a, rawCfg, cfg)
-		agents = append(agents, annotatedAgent{
-			configAgentResponse: configAgentResponse{
-				Name:      a.Name,
-				Dir:       a.Dir,
-				Provider:  a.Provider,
-				IsPool:    isMultiSessionAgent(a),
-				Scope:     a.Scope,
-				Suspended: a.Suspended,
-			},
-			Origin: origin,
-		})
-	}
-
-	// Annotate providers with origin.
-	provMap := make(map[string]annotatedProvider)
-	// City-level providers.
-	for name, spec := range cfg.Providers {
-		origin := "city"
-		if _, isBuiltin := builtins[name]; isBuiltin {
-			origin = "builtin+city"
-		}
-		provMap[name] = annotatedProvider{
-			providerSpecJSON: providerSpecJSON{
-				DisplayName:  spec.DisplayName,
-				Command:      spec.Command,
-				Args:         spec.Args,
-				PromptMode:   spec.PromptMode,
-				PromptFlag:   spec.PromptFlag,
-				ReadyDelayMs: spec.ReadyDelayMs,
-				Env:          spec.Env,
-			},
-			Origin: origin,
-		}
-	}
-	// Builtins not overridden.
-	for name, spec := range builtins {
-		if _, ok := provMap[name]; !ok {
-			provMap[name] = annotatedProvider{
-				providerSpecJSON: providerSpecJSON{
-					DisplayName:  spec.DisplayName,
-					Command:      spec.Command,
-					Args:         spec.Args,
-					PromptMode:   spec.PromptMode,
-					PromptFlag:   spec.PromptFlag,
-					ReadyDelayMs: spec.ReadyDelayMs,
-					Env:          spec.Env,
-				},
-				Origin: "builtin",
-			}
-		}
-	}
-
-	writeIndexJSON(w, s.latestIndex(), map[string]any{
-		"agents":    agents,
-		"providers": provMap,
-		"patches": map[string]int{
-			"agents":    len(cfg.Patches.Agents),
-			"rigs":      len(cfg.Patches.Rigs),
-			"providers": len(cfg.Patches.Providers),
-		},
-	})
-}
-
-// handleConfigValidate checks the current config for validation errors
-// and semantic warnings without writing anything.
-func (s *Server) handleConfigValidate(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.state.Config()
-
-	var errors []string
-
-	if err := config.ValidateAgents(cfg.Agents); err != nil {
-		errors = append(errors, err.Error())
-	}
-	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
-		errors = append(errors, err.Error())
-	}
-	if err := config.ValidateServices(cfg.Services); err != nil {
-		errors = append(errors, err.Error())
-	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
-		errors = append(errors, err.Error())
-	}
-
-	warnings := config.ValidateSemantics(cfg, "city.toml")
-	warnings = append(warnings, config.ValidateDurations(cfg, "city.toml")...)
-
-	valid := len(errors) == 0
-	writeJSON(w, http.StatusOK, map[string]any{
-		"valid":    valid,
-		"errors":   errors,
-		"warnings": warnings,
-	})
 }
 
 // agentOrigin determines the provenance of an agent. When raw config is
-// available (via RawConfigProvider), it uses two-phase detection for
-// accurate results. Otherwise falls back to the patch-presence heuristic.
+// available (via RawConfigProvider), it uses the same two-phase detection the
+// mutation gate uses (configedit.AgentOrigin), so the result agrees with the
+// ErrPackDerived/409 decision. When raw is genuinely unavailable, it falls
+// back to positive-only heuristics that can confirm pack origin but never
+// emit a confident "inline" for a pack-derived agent:
+//   - a non-empty BindingName is definitive proof of import expansion, and
+//   - a [[patches.agent]] override targeting the agent implies a pack origin.
+//
+// In production raw is reliably cached (controllerState.RawConfig), so the
+// fallback is a safety net, not the basis for routing decisions.
 func agentOrigin(a config.Agent, raw, expanded *config.City) string {
 	if raw != nil {
-		qn := a.Name
-		if a.Dir != "" {
-			qn = a.Dir + "/" + a.Name
-		}
-		switch configedit.AgentOrigin(raw, expanded, qn) {
+		switch configedit.AgentOrigin(raw, expanded, a.QualifiedName()) {
 		case configedit.OriginInline:
 			return "inline"
 		case configedit.OriginDerived:
@@ -255,11 +106,29 @@ func agentOrigin(a config.Agent, raw, expanded *config.City) string {
 			return "inline"
 		}
 	}
-	// Fallback: heuristic based on patch presence.
+	// Fallback (raw unavailable): positive-only pack-derived signals.
+	// An import-expanded agent always carries its binding name.
+	if a.BindingName != "" {
+		return "pack-derived"
+	}
 	for _, p := range expanded.Patches.Agents {
 		if p.Dir == a.Dir && p.Name == a.Name {
 			return "pack-derived"
 		}
 	}
 	return "inline"
+}
+
+// agentPackProvenance reports whether an agent is pack-derived and, if so, the
+// import binding name ([imports.<name>] key) it came from. It reuses the same
+// origin detection that backs config-explain and ErrPackDerived: an agent is
+// pack-derived exactly when a direct mutation would be rejected (it is present
+// in the expanded config but absent from the raw config). The binding name is
+// read straight from the agent's BindingName, the field set during V2 import
+// expansion. Returns ("", false) for city-native agents.
+func agentPackProvenance(a config.Agent, raw, expanded *config.City) (pack string, derived bool) {
+	if agentOrigin(a, raw, expanded) != "pack-derived" {
+		return "", false
+	}
+	return a.BindingName, true
 }

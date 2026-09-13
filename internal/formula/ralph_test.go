@@ -1,8 +1,9 @@
 package formula
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 func TestApplyRalph_Basic(t *testing.T) {
@@ -33,12 +34,13 @@ func TestApplyRalph_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("len(got) = %d, want 2 (control + iteration)", len(got))
+	if len(got) != 3 {
+		t.Fatalf("len(got) = %d, want 3 (control + spec + iteration)", len(got))
 	}
 
 	control := got[0]
-	iteration := got[1]
+	spec := got[1]
+	iteration := got[2]
 
 	// Control bead.
 	if control.ID != "implement" {
@@ -62,9 +64,10 @@ func TestApplyRalph_Basic(t *testing.T) {
 	if control.Metadata["gc.control_epoch"] != "1" {
 		t.Errorf("control gc.control_epoch = %q, want 1", control.Metadata["gc.control_epoch"])
 	}
-	if control.Metadata["gc.source_step_spec"] == "" {
-		t.Fatal("control missing gc.source_step_spec")
+	if control.Metadata["gc.source_step_spec"] != "" {
+		t.Fatalf("control gc.source_step_spec = %q, want empty", control.Metadata["gc.source_step_spec"])
 	}
+	assertFrozenSpecStep(t, spec, "implement", nil)
 
 	// Control blocks on the iteration (not a check bead).
 	wantControlNeeds := map[string]bool{"setup": true, "implement.iteration.1": true}
@@ -122,20 +125,14 @@ func TestApplyRalph_FrozenSpecRoundTrips(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	control := got[0]
-	var frozen Step
-	if err := json.Unmarshal([]byte(control.Metadata["gc.source_step_spec"]), &frozen); err != nil {
-		t.Fatalf("unmarshal frozen spec: %v", err)
-	}
-	if frozen.ID != "converge" {
-		t.Errorf("frozen ID = %q, want converge", frozen.ID)
-	}
-	if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
-		t.Errorf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
-	}
-	if len(frozen.Children) != 1 || frozen.Children[0].ID != "apply" {
-		t.Errorf("frozen children = %v, want [apply]", frozen.Children)
-	}
+	assertFrozenSpecStep(t, got[1], "converge", func(frozen Step) {
+		if frozen.Ralph == nil || frozen.Ralph.MaxAttempts != 5 {
+			t.Errorf("frozen ralph = %+v, want max_attempts=5", frozen.Ralph)
+		}
+		if len(frozen.Children) != 1 || frozen.Children[0].ID != "apply" {
+			t.Errorf("frozen children = %v, want [apply]", frozen.Children)
+		}
+	})
 }
 
 func TestApplyRalph_NestedWithChildren(t *testing.T) {
@@ -160,17 +157,17 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Expect: control + iteration scope + 2 body children = 4
-	if len(got) != 4 {
+	// Expect: control + spec + iteration scope + 2 body children = 5
+	if len(got) != 5 {
 		names := make([]string, len(got))
 		for i, s := range got {
 			names[i] = s.ID
 		}
-		t.Fatalf("len(got) = %d, want 4; steps: %v", len(got), names)
+		t.Fatalf("len(got) = %d, want 5; steps: %v", len(got), names)
 	}
 
 	control := got[0]
-	iteration := got[1]
+	iteration := got[2]
 
 	if control.Metadata["gc.kind"] != "ralph" {
 		t.Errorf("control gc.kind = %q, want ralph", control.Metadata["gc.kind"])
@@ -183,8 +180,8 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 	}
 
 	// Body children should be namespaced under the iteration.
-	review := got[2]
-	apply := got[3]
+	review := got[3]
+	apply := got[4]
 	if review.ID != "review-loop.iteration.1.review" {
 		t.Errorf("review.ID = %q, want review-loop.iteration.1.review", review.ID)
 	}
@@ -229,7 +226,7 @@ func TestApplyRalph_BodyStepsHaveNamespacedStepRef(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Body steps (index 2+) should have gc.step_ref matching their namespaced ID.
+	// Iteration/body steps (after control + spec) should have gc.step_ref matching their namespaced ID.
 	for _, step := range got[2:] {
 		ref := step.Metadata["gc.step_ref"]
 		if ref != step.ID {
@@ -281,7 +278,7 @@ func TestApplyRalph_RetryChildrenHaveNamespacedStepRef(t *testing.T) {
 
 	// Find all body steps (skip control + iteration scope)
 	for _, step := range got {
-		if step.ID == "review-loop" || step.ID == "review-loop.iteration.1" {
+		if step.ID == "review-loop" || step.ID == "review-loop.iteration.1" || isSourceSpecStep(step) {
 			continue
 		}
 		ref := step.Metadata["gc.step_ref"]
@@ -372,6 +369,9 @@ func TestApplyRalph_ComposeExpandChildrenHaveNamespacedStepRef(t *testing.T) {
 		if step.ID == "review-loop" {
 			continue // control doesn't need this check
 		}
+		if isSourceSpecStep(step) {
+			continue
+		}
 		ref := step.Metadata["gc.step_ref"]
 		if ref != step.ID {
 			mismatches = append(mismatches, step.ID+": got "+ref)
@@ -439,17 +439,21 @@ func TestApplyRalph_NestedRetryInsideRalphStepRefChains(t *testing.T) {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
 
-	// Check that the retry control has namespaced step_ref
+	// Check that the retry control has namespaced step_ref.
+	foundSpec := false
 	for _, step := range got {
 		if step.ID == "outer.iteration.1.work" {
 			ref := step.Metadata["gc.step_ref"]
 			if ref != "outer.iteration.1.work" {
 				t.Errorf("retry control gc.step_ref = %q, want %q", ref, "outer.iteration.1.work")
 			}
-			// Verify frozen spec still exists for runtime retry spawning
-			if step.Metadata["gc.source_step_spec"] == "" {
-				t.Error("retry control missing gc.source_step_spec")
+			if step.Metadata["gc.source_step_spec"] != "" {
+				t.Errorf("retry control gc.source_step_spec = %q, want empty", step.Metadata["gc.source_step_spec"])
 			}
+		}
+		if step.ID == "outer.iteration.1.work.spec" {
+			foundSpec = true
+			assertFrozenSpecStep(t, step, "work", nil)
 		}
 		if step.ID == "outer.iteration.1.work.attempt.1" {
 			ref := step.Metadata["gc.step_ref"]
@@ -457,6 +461,9 @@ func TestApplyRalph_NestedRetryInsideRalphStepRefChains(t *testing.T) {
 				t.Errorf("retry attempt gc.step_ref = %q, want %q", ref, "outer.iteration.1.work.attempt.1")
 			}
 		}
+	}
+	if !foundSpec {
+		t.Fatal("missing retry control spec bead")
 	}
 }
 
@@ -539,6 +546,62 @@ func TestApplyRalph_NestedRetryControlsPreserveOwnStepID(t *testing.T) {
 	}
 }
 
+func TestApplyRalph_StepTimeoutPropagated(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:      "build",
+			Title:   "Build project",
+			Type:    "task",
+			Timeout: "10m",
+			Ralph: &RalphSpec{
+				MaxAttempts: 3,
+				Check: &RalphCheckSpec{
+					Mode: "exec",
+					Path: "scripts/check.sh",
+				},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+
+	control := got[0]
+	if control.Metadata["gc.step_timeout"] != "10m" {
+		t.Errorf("control gc.step_timeout = %q, want 10m", control.Metadata["gc.step_timeout"])
+	}
+}
+
+func TestApplyRalph_StepTimeoutOmittedWhenEmpty(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "build",
+			Title: "Build project",
+			Type:  "task",
+			// No Timeout set
+			Ralph: &RalphSpec{
+				MaxAttempts: 3,
+				Check: &RalphCheckSpec{
+					Mode: "exec",
+					Path: "scripts/check.sh",
+				},
+			},
+		},
+	}
+
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+
+	control := got[0]
+	if _, exists := control.Metadata["gc.step_timeout"]; exists {
+		t.Errorf("control should not have gc.step_timeout when step.Timeout is empty, got %q", control.Metadata["gc.step_timeout"])
+	}
+}
+
 func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	steps := []*Step{
 		{ID: "setup", Title: "Setup"},
@@ -553,9 +616,9 @@ func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyRalph failed: %v", err)
 	}
-	// setup + (control + iteration) + cleanup = 4
-	if len(got) != 4 {
-		t.Fatalf("len(got) = %d, want 4", len(got))
+	// setup + (control + spec + iteration) + cleanup = 5
+	if len(got) != 5 {
+		t.Fatalf("len(got) = %d, want 5", len(got))
 	}
 	if got[0].ID != "setup" {
 		t.Errorf("got[0].ID = %q, want setup", got[0].ID)
@@ -563,10 +626,197 @@ func TestApplyRalph_PreservesNonRalphSteps(t *testing.T) {
 	if got[1].ID != "work" { // control
 		t.Errorf("got[1].ID = %q, want work (control)", got[1].ID)
 	}
-	if got[2].ID != "work.iteration.1" {
-		t.Errorf("got[2].ID = %q, want work.iteration.1", got[2].ID)
+	if got[2].ID != "work.spec" {
+		t.Errorf("got[2].ID = %q, want work.spec", got[2].ID)
 	}
-	if got[3].ID != "cleanup" {
-		t.Errorf("got[3].ID = %q, want cleanup", got[3].ID)
+	if got[3].ID != "work.iteration.1" {
+		t.Errorf("got[3].ID = %q, want work.iteration.1", got[3].ID)
+	}
+	if got[4].ID != "cleanup" {
+		t.Errorf("got[4].ID = %q, want cleanup", got[4].ID)
+	}
+}
+
+// TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds keeps the ralph
+// body-sink marker in lockstep with beadmeta.ScopeCheckExemptKinds plus its
+// one deliberate extra exclusion, KindRalph (a nested ralph control's output
+// contract is owned by its own OnComplete, not by the enclosing body). Before
+// ga-e154xo this list lagged by {tally, drain}, so hand-written drain/tally
+// control steps that were body sinks were wrongly marked
+// gc.output_json_required even though control beads are never worker-executed.
+func TestMarkRalphBodyOutputSinksTracksBeadmetaExemptKinds(t *testing.T) {
+	exempt := append([]string{beadmeta.KindRalph}, beadmeta.ScopeCheckExemptKinds...)
+	for _, kind := range exempt {
+		steps := []*Step{
+			{
+				ID:       "sink",
+				Title:    "Sink",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: kind},
+			},
+		}
+		markRalphBodyOutputSinks(steps)
+		if got := steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey]; got == "true" {
+			t.Errorf("markRalphBodyOutputSinks marked kind=%q sink, want skipped", kind)
+		}
+	}
+
+	for _, kind := range []string{"", beadmeta.KindTask, beadmeta.KindRetry} {
+		steps := []*Step{
+			{
+				ID:       "sink",
+				Title:    "Sink",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: kind},
+			},
+		}
+		markRalphBodyOutputSinks(steps)
+		if got := steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey]; got != "true" {
+			t.Errorf("markRalphBodyOutputSinks did not mark kind=%q sink, want marked", kind)
+		}
+	}
+
+	// Referenced (non-sink) steps and teardown-role steps stay unmarked
+	// regardless of kind.
+	steps := []*Step{
+		{ID: "upstream", Title: "Upstream"},
+		{ID: "downstream", Title: "Downstream", Needs: []string{"upstream"}},
+		{
+			ID:    "teardown",
+			Title: "Teardown",
+			Metadata: map[string]string{
+				beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleTeardown,
+			},
+		},
+	}
+	markRalphBodyOutputSinks(steps)
+	if steps[0].Metadata[beadmeta.OutputJSONRequiredMetadataKey] == "true" {
+		t.Error("referenced upstream step was marked as an output sink")
+	}
+	if steps[1].Metadata[beadmeta.OutputJSONRequiredMetadataKey] != "true" {
+		t.Error("sink downstream step was not marked as an output sink")
+	}
+	if steps[2].Metadata[beadmeta.OutputJSONRequiredMetadataKey] == "true" {
+		t.Error("teardown-role step was marked as an output sink")
+	}
+}
+
+func TestApplyRalph_StampsControlForOnIterationRoot(t *testing.T) {
+	// Simple ralph (no children): iteration.1 work bead carries the stamp.
+	simple := []*Step{
+		{
+			ID:    "implement",
+			Title: "Implement",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+		},
+	}
+	got, err := ApplyRalph(simple)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	control, iteration := got[0], got[2]
+	if iteration.Metadata[beadmeta.ControlForMetadataKey] != "implement" {
+		t.Fatalf("simple iteration gc.control_for = %q, want implement", iteration.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if control.Metadata[beadmeta.StepIDMetadataKey] != "implement" {
+		t.Fatalf("control gc.step_id = %q, want implement (must match iteration gc.control_for)", control.Metadata[beadmeta.StepIDMetadataKey])
+	}
+	if _, ok := control.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("control must not carry gc.control_for")
+	}
+
+	// Nested ralph: only the iteration scope root carries the stamp; body
+	// children (which are not attempt roots) must not.
+	nested := []*Step{
+		{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+			Children: []*Step{
+				{ID: "review", Title: "Review"},
+				{ID: "apply", Title: "Apply", Needs: []string{"review"}},
+			},
+		},
+	}
+	got2, err := ApplyRalph(nested)
+	if err != nil {
+		t.Fatalf("ApplyRalph nested failed: %v", err)
+	}
+	scope, reviewChild, applyChild := got2[2], got2[3], got2[4]
+	if scope.Metadata[beadmeta.ControlForMetadataKey] != "review-loop" {
+		t.Fatalf("nested scope gc.control_for = %q, want review-loop", scope.Metadata[beadmeta.ControlForMetadataKey])
+	}
+	if _, ok := reviewChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", reviewChild.ID)
+	}
+	if _, ok := applyChild.Metadata[beadmeta.ControlForMetadataKey]; ok {
+		t.Fatalf("body child %q must not carry gc.control_for", applyChild.ID)
+	}
+}
+
+// TestApplyRalph_NamespacesNestedControlForAcrossBody is the S38 nested-lineage
+// regression guard for the producer side. An outer ralph with a retry child
+// must stamp the nested retry's attempt root with the *namespaced* control ref
+// (the cloned inner control's gc.step_ref), not the bare inner step id.
+//
+// The bare step id ("inner") is shared by the inner control of every sibling
+// outer ralph iteration, so a bare gc.control_for let findLatestAttempt's
+// primary lookup match a foreign iteration's inner control through the shared
+// gc.step_id identity member. Namespacing the stamp scopes it to this outer
+// iteration's inner control, mirroring the runtime buildNestedControlSeed path.
+func TestApplyRalph_NamespacesNestedControlForAcrossBody(t *testing.T) {
+	// Mirror the compile pipeline order: retries expand before ralph, so the
+	// ralph body already holds the inner control + attempt beads when
+	// namespaceRalphBodySteps runs over them.
+	steps := []*Step{
+		{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{MaxAttempts: 3, Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}},
+			Children: []*Step{
+				{
+					ID:    "inner",
+					Title: "Inner",
+					Retry: &RetrySpec{MaxAttempts: 2},
+				},
+			},
+		},
+	}
+	retried, err := ApplyRetries(steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries: %v", err)
+	}
+	expanded, err := ApplyRalph(retried)
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	var innerControl, innerAttempt *Step
+	for _, s := range expanded {
+		switch {
+		case s.ID == "review-loop.iteration.1.inner" && s.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry:
+			innerControl = s
+		case s.ID == "review-loop.iteration.1.inner.attempt.1":
+			innerAttempt = s
+		}
+	}
+	if innerControl == nil {
+		t.Fatalf("nested inner control not found among expanded steps")
+	}
+	if innerAttempt == nil {
+		t.Fatalf("nested inner attempt root not found among expanded steps")
+	}
+
+	wantCF := innerControl.Metadata[beadmeta.StepRefMetadataKey]
+	if wantCF == "" || wantCF == "inner" {
+		t.Fatalf("inner control gc.step_ref = %q, want a namespaced ref", wantCF)
+	}
+	got := innerAttempt.Metadata[beadmeta.ControlForMetadataKey]
+	if got == "inner" {
+		t.Fatalf("nested attempt gc.control_for is the bare step id %q; must be namespaced to the inner control ref", got)
+	}
+	if got != wantCF {
+		t.Fatalf("nested attempt gc.control_for = %q, want %q (must equal inner control gc.step_ref)", got, wantCF)
 	}
 }

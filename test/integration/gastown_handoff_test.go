@@ -47,8 +47,8 @@ func TestGastown_HandoffSelfRequiresContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected self-handoff to fail without agent context")
 	}
-	if !strings.Contains(out, "not in agent context") {
-		t.Errorf("expected 'not in agent context' error:\n%s", out)
+	if !strings.Contains(out, "not in session context") {
+		t.Errorf("expected 'not in session context' error:\n%s", out)
 	}
 }
 

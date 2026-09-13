@@ -4,13 +4,39 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
+
+func loadConfigCommandCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath, extraConfigFiles...)
+}
+
+// loadCityConfigWithBuiltinPacks loads the city config after refreshing the
+// materialized builtin packs. The includes are caller-supplied extras (e.g.
+// --config files); builtin packs themselves compose only through the explicit
+// city.toml includes written by gc init and repaired by gc doctor --fix.
+func loadCityConfigWithBuiltinPacks(cityPath string, includes ...string) (*config.City, *config.Provenance, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
+		return nil, nil, err
+	}
+	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, includes...)
+	if err != nil {
+		return nil, nil, err
+	}
+	warnMissingRequiredBuiltinImports(fsys.OSFS{}, cfg, tomlPath, resolveLoadCityConfigWarningWriter())
+	if err := validatePackRuntimeRegistrations(cfg); err != nil {
+		return nil, nil, err
+	}
+	return cfg, prov, nil
+}
 
 func newConfigCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -34,6 +60,7 @@ config and "explain" to see where each value originated.`,
 func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
 	var validate bool
 	var showProvenance bool
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Dump the resolved city configuration as TOML",
@@ -46,10 +73,11 @@ config element. Use -f to layer additional config files.`,
 		Example: `  gc config show
   gc config show --validate
   gc config show --provenance
+  gc config show --json
   gc config show -f overlay.toml`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doConfigShow(validate, showProvenance, stdout, stderr) != 0 {
+			if doConfigShow(validate, showProvenance, asJSON, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -57,6 +85,7 @@ config element. Use -f to layer additional config files.`,
 	}
 	cmd.Flags().BoolVar(&validate, "validate", false, "validate config and exit (0 = valid, 1 = errors)")
 	cmd.Flags().BoolVar(&showProvenance, "provenance", false, "show where each config element originated")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
@@ -64,30 +93,29 @@ config element. Use -f to layer additional config files.`,
 
 // doConfigShow loads city.toml (with includes) and dumps the resolved
 // config, validates it, or shows provenance.
-func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
+func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc config show: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	// Composition warnings.
-	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	compositionWarnings := append([]string(nil), prov.Warnings...)
+	if !asJSON {
+		for _, w := range compositionWarnings {
+			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 	}
 
 	// Run validation.
@@ -98,13 +126,30 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 	if err := config.ValidateRigs(cfg.Rigs, config.EffectiveHQPrefix(cfg)); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		validationErrors = append(validationErrors, err.Error())
+	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	} else if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		validationErrors = append(validationErrors, err.Error())
 	}
+	validationErrors = append(validationErrors, validateLegacyFormulaConfigRoutes(cfg)...)
+	validationWarnings := singletonSessionMigrationWarnings(cfg)
 
 	if validate {
+		if asJSON {
+			if code := writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, nil); code != 0 {
+				return code
+			}
+			if len(validationErrors) > 0 {
+				return 1
+			}
+			return 0
+		}
+		for _, w := range validationWarnings {
+			fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+		}
 		if len(validationErrors) > 0 {
 			for _, e := range validationErrors {
 				fmt.Fprintf(stderr, "gc config show: %s\n", e) //nolint:errcheck // best-effort stderr
@@ -115,7 +160,18 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	if asJSON {
+		var provenance any
+		if showProvenance {
+			provenance = prov
+		}
+		return writeConfigShowJSON(stdout, cityPath, cfg, compositionWarnings, validationWarnings, validationErrors, provenance)
+	}
+
 	// Print validation warnings even in show mode.
+	for _, w := range validationWarnings {
+		fmt.Fprintf(stderr, "gc config show: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
 	for _, e := range validationErrors {
 		fmt.Fprintf(stderr, "gc config show: warning: %s\n", e) //nolint:errcheck // best-effort stderr
 	}
@@ -125,33 +181,159 @@ func doConfigShow(validate, showProvenance bool, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	data, err := cfg.Marshal()
+	data, err := configForDisplay(cfg).Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// Emit provider inheritance chain annotations as a comment block
+	// preceding the marshaled TOML. `cfg.Marshal()` strips comments, so
+	// we can't annotate per-block — instead we produce an up-front
+	// summary that operators can diff / grep against.
+	if annotations := renderProviderChainAnnotations(cfg); annotations != "" {
+		fmt.Fprint(stdout, annotations) //nolint:errcheck // best-effort stdout
 	}
 	fmt.Fprint(stdout, string(data)) //nolint:errcheck // best-effort stdout
 	return 0
 }
 
+func writeConfigShowJSON(stdout io.Writer, cityPath string, cfg *config.City, warnings, validationWarnings, validationErrors []string, provenance any) int {
+	payload := map[string]any{
+		"schema_version": "1",
+		"city_path":      cityPath,
+		"config":         configForDisplay(cfg),
+		"warnings":       nonNilStrings(warnings),
+		"validation": map[string]any{
+			"ok":       len(validationErrors) == 0,
+			"warnings": nonNilStrings(validationWarnings),
+			"errors":   nonNilStrings(validationErrors),
+		},
+	}
+	if provenance != nil {
+		payload["provenance"] = provenance
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func configForDisplay(cfg *config.City) *config.City {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.Workspace = cfg.Workspace
+	if strings.TrimSpace(clone.Workspace.Name) == "" {
+		clone.Workspace.Name = config.EffectiveCityName(cfg, "")
+	}
+	if strings.TrimSpace(clone.Workspace.Prefix) == "" {
+		clone.Workspace.Prefix = strings.TrimSpace(cfg.ResolvedWorkspacePrefix)
+	}
+	return &clone
+}
+
+// renderProviderChainAnnotations produces a commented block summarizing
+// each custom provider's resolved inheritance chain. Format:
+//
+//	# Provider inheritance chains (as resolved at config load):
+//	#   codex-max       → codex → builtin:codex
+//	#   my-standalone   → (no inheritance)
+//	#   my-alias        → my-base (no built-in ancestor)
+//
+// Returns empty string if there are no custom providers OR if the
+// resolved cache was not built (e.g., when chain resolution failed).
+func renderProviderChainAnnotations(cfg *config.City) string {
+	if cfg == nil || len(cfg.ResolvedProviders) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.ResolvedProviders))
+	for n := range cfg.ResolvedProviders {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var b strings.Builder
+	b.WriteString("# Provider inheritance chains (as resolved at config load):\n")
+	for _, name := range names {
+		r := cfg.ResolvedProviders[name]
+		b.WriteString("#   ")
+		b.WriteString(padRight(name, 20))
+		b.WriteString(" ")
+		if len(r.Chain) <= 1 {
+			b.WriteString("(no inheritance)")
+		} else {
+			for i, hop := range r.Chain {
+				if i > 0 {
+					b.WriteString(" → ")
+				}
+				if hop.Kind == "builtin" {
+					b.WriteString(config.BasePrefixBuiltin)
+				}
+				b.WriteString(hop.Name)
+			}
+			if r.BuiltinAncestor == "" && len(r.Chain) > 1 {
+				b.WriteString(" (no built-in ancestor)")
+			}
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("#\n")
+	return b.String()
+}
+
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
+}
+
 func newConfigExplainCmd(stdout, stderr io.Writer) *cobra.Command {
 	var rigFilter string
 	var agentFilter string
+	var providerFilter string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "explain",
-		Short: "Show resolved agent config with provenance annotations",
-		Long: `Show the resolved configuration for each agent with provenance.
+		Short: "Show resolved config with provenance annotations",
+		Long: `Show the resolved configuration with provenance.
 
-Displays every resolved field with an annotation showing which config
-file provided the value. Use --rig and --agent to filter the output.
-Useful for debugging config composition and understanding override
-resolution.`,
+For agents (default): displays every resolved field with an annotation
+showing which config file provided the value. Use --rig and --agent to
+filter.
+
+For providers (--provider): displays the resolved ProviderSpec along
+with per-field and per-map-key attribution — which chain layer
+(builtin:X or providers.Y) contributed each value. Useful for
+debugging base-chain inheritance.
+
+Use --json to emit machine-readable output (providers only).`,
 		Example: `  gc config explain
   gc config explain --agent mayor
   gc config explain --rig my-project
+  gc config explain --provider codex-max
+  gc config explain --provider codex-max --json
   gc config explain -f overlay.toml --agent polecat`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if providerFilter != "" {
+				if doConfigExplainProvider(providerFilter, asJSON, stdout, stderr) != 0 {
+					return errExit
+				}
+				return nil
+			}
+			if asJSON {
+				fmt.Fprintln(stderr, "gc config explain: --json is only supported with --provider") //nolint:errcheck
+				return errExit
+			}
 			if doConfigExplain(rigFilter, agentFilter, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -160,9 +342,169 @@ resolution.`,
 	}
 	cmd.Flags().StringVar(&rigFilter, "rig", "", "filter to agents in this rig")
 	cmd.Flags().StringVar(&agentFilter, "agent", "", "filter to a specific agent name")
+	cmd.Flags().StringVar(&providerFilter, "provider", "", "explain a provider's resolved chain instead of agents")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON (requires --provider)")
 	cmd.Flags().StringArrayVarP(&extraConfigFiles, "file", "f", nil,
 		"additional config files to layer (can be repeated)")
 	return cmd
+}
+
+func singletonSessionMigrationWarnings(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	cityName := cfg.EffectiveCityName()
+	namedByTemplate := make(map[string]bool, len(cfg.NamedSessions))
+	for i := range cfg.NamedSessions {
+		spec, ok := findNamedSessionSpec(cfg, cityName, cfg.NamedSessions[i].QualifiedName())
+		if !ok {
+			continue
+		}
+		namedByTemplate[namedSessionBackingTemplate(spec)] = true
+	}
+	var warnings []string
+	for i := range cfg.Agents {
+		agentCfg := &cfg.Agents[i]
+		if !agentCfg.UsesCanonicalSingletonPoolIdentity() {
+			continue
+		}
+		if namedByTemplate[agentCfg.QualifiedName()] {
+			continue
+		}
+		warnings = append(warnings,
+			fmt.Sprintf("agent %q: max_active_sessions=1 creates a canonical singleton that drains when scale_check returns 0; declare [[named_session]] only if you need a session that survives empty-demand windows", agentCfg.QualifiedName()))
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+func validateLegacyFormulaConfigRoutes(cfg *config.City) []string {
+	if cfg == nil {
+		return nil
+	}
+	paths := formulaValidationPaths(cfg)
+	if len(paths) == 0 {
+		return nil
+	}
+	parser := formula.NewParser(paths...).SetSource(formula.SourceFromEnv())
+	formulaNames := discoverFormulaNamesFromSource(parser.Source(), paths)
+	agentTargets, namedTargets := formulaValidationTargets(cfg)
+	var errs []string
+	for _, name := range formulaNames {
+		loaded, err := parser.LoadByName(name)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("formula %q: %v", name, err))
+			continue
+		}
+		resolved, err := parser.Resolve(loaded)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("formula %q: %v", name, err))
+			continue
+		}
+		if resolved.Type != formula.TypeWorkflow {
+			continue
+		}
+		if !formula.UsesGraphCompiler(resolved) {
+			continue
+		}
+		collectLegacyGraphAssigneeErrors(name, resolved.Steps, agentTargets, namedTargets, &errs)
+	}
+	sort.Strings(errs)
+	return errs
+}
+
+func formulaValidationPaths(cfg *config.City) []string {
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(candidates []string) {
+		for _, p := range candidates {
+			if strings.TrimSpace(p) == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			paths = append(paths, p)
+		}
+	}
+	add(cfg.FormulaLayers.City)
+	for _, rigPaths := range cfg.FormulaLayers.Rigs {
+		add(rigPaths)
+	}
+	return paths
+}
+
+// discoverFormulaNamesFromSource lists formula names through the same
+// Source the parser uses for loading. This keeps catalog discovery
+// consistent with ref-stable resolution (#2030 / PR #2537 Copilot
+// finding): when GC_FORMULA_REF is set, a name discovered via
+// working-tree ReadDir but absent at the ref would otherwise either
+// vanish silently from listings or surface a hard load error during
+// validation.
+func discoverFormulaNamesFromSource(src formula.Source, paths []string) []string {
+	if src == nil {
+		src = formula.FSSource{}
+	}
+	seen := make(map[string]struct{})
+	var names []string
+	for _, dir := range paths {
+		entries, err := src.ListDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name, ok := formula.TrimTOMLFilename(entry)
+			if !ok {
+				continue
+			}
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func formulaValidationTargets(cfg *config.City) (map[string]struct{}, map[string]struct{}) {
+	agentTargets := make(map[string]struct{}, len(cfg.Agents)*2)
+	for i := range cfg.Agents {
+		agentTargets[cfg.Agents[i].Name] = struct{}{}
+		agentTargets[cfg.Agents[i].QualifiedName()] = struct{}{}
+	}
+	namedTargets := make(map[string]struct{}, len(cfg.NamedSessions)*2)
+	for i := range cfg.NamedSessions {
+		namedTargets[cfg.NamedSessions[i].IdentityName()] = struct{}{}
+		namedTargets[cfg.NamedSessions[i].QualifiedName()] = struct{}{}
+	}
+	return agentTargets, namedTargets
+}
+
+func collectLegacyGraphAssigneeErrors(
+	formulaName string,
+	steps []*formula.Step,
+	agentTargets map[string]struct{},
+	namedTargets map[string]struct{},
+	errs *[]string,
+) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		target := strings.TrimSpace(step.Assignee)
+		if target != "" && !strings.Contains(target, "{") {
+			if _, ok := namedTargets[target]; !ok {
+				if _, ok := agentTargets[target]; ok {
+					*errs = append(*errs,
+						fmt.Sprintf("formula %q step %q: assignee=%q now requires a concrete session target; use metadata.gc.run_target for config routing", formulaName, step.ID, target))
+				}
+			}
+		}
+		collectLegacyGraphAssigneeErrors(formulaName, step.Children, agentTargets, namedTargets, errs)
+	}
 }
 
 // doConfigExplain shows the resolved config for agents with provenance
@@ -174,15 +516,12 @@ func doConfigExplain(rigFilter, agentFilter string, stdout, stderr io.Writer) in
 		return 1
 	}
 
-	// Auto-fetch remote packs before full config load.
-	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
-		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
-			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
-	cfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), extraConfigFiles...)
+	cfg, prov, err := loadConfigCommandCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -256,6 +595,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	if a.StartCommand != "" {
 		explainField(w, "start_command", a.StartCommand, source)
 	}
+	if a.Lifecycle != "" {
+		explainField(w, "lifecycle", a.Lifecycle, source)
+	}
 	if a.Nudge != "" {
 		explainField(w, "nudge", a.Nudge, source)
 	}
@@ -274,7 +616,7 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	}
 
 	// Scaling.
-	if isMultiSessionCfgAgent(a) {
+	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
 		sp := scaleParamsFor(a)
 		explainField(w, "min_active_sessions", fmt.Sprintf("%d", sp.Min), source)
 		explainField(w, "max_active_sessions", fmt.Sprintf("%d", sp.Max), source)
@@ -285,6 +627,228 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 			explainField(w, "drain_timeout", a.DrainTimeout, source)
 		}
 	}
+
+	// Lifecycle timeouts. These resolved keys drive idle-suspend and
+	// session-age recycling but were previously omitted from explain output,
+	// forcing operators to read their provenance from the pack agent.toml
+	// directly (#3965). Only render keys that are set, matching the
+	// conditional pattern used for the fields above.
+	if a.IdleTimeout != "" {
+		explainField(w, "idle_timeout", a.IdleTimeout, source)
+	}
+	if a.SleepAfterIdle != "" {
+		explainField(w, "sleep_after_idle", a.SleepAfterIdle, source)
+	}
+	if a.MaxSessionAge != "" {
+		explainField(w, "max_session_age", a.MaxSessionAge, source)
+	}
+	if a.MaxSessionAgeJitter != "" {
+		explainField(w, "max_session_age_jitter", a.MaxSessionAgeJitter, source)
+	}
+}
+
+// doConfigExplainProvider explains a single provider's resolved chain.
+// Emits human-readable output by default, or JSON when asJSON is true.
+func doConfigExplainProvider(providerName string, asJSON bool, stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	if quickCfg, qErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); qErr == nil && len(quickCfg.Packs) > 0 {
+		if fErr := config.FetchPacks(quickCfg.Packs, cityPath); fErr != nil {
+			fmt.Fprintf(stderr, "gc config explain: fetching packs: %v\n", fErr) //nolint:errcheck
+			return 1
+		}
+	}
+
+	cfg, _, err := loadConfigCommandCityConfig(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config explain: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	resolved, ok := config.ResolvedProviderCached(cfg, providerName)
+	if !ok {
+		if _, isBuiltin := config.BuiltinProviders()[providerName]; isBuiltin {
+			fmt.Fprintf(stderr, "gc config explain: %q is a built-in provider; --provider only resolves custom entries\n", providerName) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stderr, "gc config explain: no provider %q in resolved config\n", providerName) //nolint:errcheck
+		}
+		return 1
+	}
+
+	if asJSON {
+		return renderProviderExplainJSON(resolved, providerName, stdout, stderr)
+	}
+	renderProviderExplainText(stdout, resolved, providerName)
+	return 0
+}
+
+// renderProviderExplainText writes a human-readable explanation of a
+// resolved provider chain.
+func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name string) {
+	fmt.Fprintf(w, "Provider: %s\n", name) //nolint:errcheck
+
+	if len(r.Chain) > 0 {
+		var hops []string
+		for _, h := range r.Chain {
+			if h.Kind == "builtin" {
+				hops = append(hops, config.BasePrefixBuiltin+h.Name)
+			} else {
+				hops = append(hops, "providers."+h.Name)
+			}
+		}
+		fmt.Fprintf(w, "  chain: %s\n", strings.Join(hops, " → ")) //nolint:errcheck
+	}
+	if r.BuiltinAncestor != "" {
+		fmt.Fprintf(w, "  builtin_ancestor: %s\n", r.BuiltinAncestor) //nolint:errcheck
+	}
+
+	explainProviderField(w, "command", r.Command, r.Provenance.FieldLayer["command"])
+	if len(r.Args) > 0 {
+		explainProviderField(w, "args", fmt.Sprintf("[%d]", len(r.Args)), r.Provenance.FieldLayer["args"])
+	}
+	explainProviderField(w, "prompt_mode", r.PromptMode, r.Provenance.FieldLayer["prompt_mode"])
+	explainProviderField(w, "prompt_flag", r.PromptFlag, r.Provenance.FieldLayer["prompt_flag"])
+	if r.ReadyDelayMs != 0 {
+		explainProviderField(w, "ready_delay_ms", fmt.Sprintf("%d", r.ReadyDelayMs), r.Provenance.FieldLayer["ready_delay_ms"])
+	}
+	explainProviderField(w, "ready_prompt_prefix", r.ReadyPromptPrefix, r.Provenance.FieldLayer["ready_prompt_prefix"])
+	if len(r.ProcessNames) > 0 {
+		explainProviderField(w, "process_names", strings.Join(r.ProcessNames, ","), r.Provenance.FieldLayer["process_names"])
+	}
+	explainProviderField(w, "resume_command", r.ResumeCommand, r.Provenance.FieldLayer["resume_command"])
+	explainProviderField(w, "resume_flag", r.ResumeFlag, r.Provenance.FieldLayer["resume_flag"])
+	explainProviderField(w, "resume_style", r.ResumeStyle, r.Provenance.FieldLayer["resume_style"])
+	explainProviderField(w, "session_id_flag", r.SessionIDFlag, r.Provenance.FieldLayer["session_id_flag"])
+	explainProviderField(w, "title_model", r.TitleModel, r.Provenance.FieldLayer["title_model"])
+
+	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
+	explainResolvedBool(w, "supports_acp", r.SupportsACP, r.Provenance.FieldLayer["supports_acp"])
+	explainResolvedBool(w, "emits_permission_warning", r.EmitsPermissionWarning, r.Provenance.FieldLayer["emits_permission_warning"])
+	explainResolvedBoolPtr(w, "accept_startup_dialogs", r.AcceptStartupDialogs, r.Provenance.FieldLayer["accept_startup_dialogs"])
+
+	explainProviderMap(w, "env", r.Env, r.Provenance.MapKeyLayer["env"])
+	explainProviderMap(w, "permission_modes", r.PermissionModes, r.Provenance.MapKeyLayer["permission_modes"])
+	explainProviderMap(w, "option_defaults", r.EffectiveDefaults, r.Provenance.MapKeyLayer["option_defaults"])
+}
+
+func explainProviderField(w io.Writer, key, value, layer string) {
+	if value == "" {
+		return
+	}
+	display := value
+	if len(display) > 60 {
+		display = display[:57] + "..."
+	}
+	if strings.ContainsAny(display, " \t") {
+		display = `"` + display + `"`
+	}
+	line := fmt.Sprintf("  %-28s = %-30s", key, display)
+	if layer != "" {
+		line += "  # " + layer
+	}
+	fmt.Fprintln(w, line) //nolint:errcheck
+}
+
+// explainResolvedBool prints a resolved boolean only when some chain
+// layer explicitly set it (layer != ""). The underlying ResolvedProvider
+// exposes a plain bool; per-layer attribution lives in Provenance and
+// carries the tri-state signal (absent layer = no explicit setter).
+func explainResolvedBool(w io.Writer, key string, value bool, layer string) {
+	if layer == "" {
+		return
+	}
+	v := "false"
+	if value {
+		v = "true"
+	}
+	explainProviderField(w, key, v, layer)
+}
+
+func explainResolvedBoolPtr(w io.Writer, key string, value *bool, layer string) {
+	if layer == "" || value == nil {
+		return
+	}
+	v := "false"
+	if *value {
+		v = "true"
+	}
+	explainProviderField(w, key, v, layer)
+}
+
+func explainProviderMap(w io.Writer, field string, m map[string]string, perKey map[string]string) {
+	if len(m) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		line := fmt.Sprintf("  %-28s = %-30s", field+"."+k, m[k])
+		if layer := perKey[k]; layer != "" {
+			line += "  # " + layer
+		}
+		fmt.Fprintln(w, line) //nolint:errcheck
+	}
+}
+
+// renderProviderExplainJSON emits a machine-readable view of a resolved
+// provider including chain and per-field/per-key provenance.
+func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, stderr io.Writer) int {
+	chain := make([]map[string]string, 0, len(r.Chain))
+	for _, h := range r.Chain {
+		chain = append(chain, map[string]string{"kind": h.Kind, "name": h.Name})
+	}
+	// Surface tri-state capability flags as null when no chain layer set
+	// them (i.e. Provenance has no attribution for the field). The
+	// ResolvedProvider stores bool, so we use provenance presence as the
+	// explicit-vs-default signal.
+	triStateFromProvenance := func(field string, value bool) any {
+		if _, set := r.Provenance.FieldLayer[field]; !set {
+			return nil
+		}
+		return value
+	}
+	payload := map[string]any{
+		"name":             name,
+		"builtin_ancestor": r.BuiltinAncestor,
+		"chain":            chain,
+		"resolved": map[string]any{
+			"command":                  r.Command,
+			"args":                     r.Args,
+			"prompt_mode":              r.PromptMode,
+			"prompt_flag":              r.PromptFlag,
+			"ready_delay_ms":           r.ReadyDelayMs,
+			"ready_prompt_prefix":      r.ReadyPromptPrefix,
+			"process_names":            r.ProcessNames,
+			"resume_command":           r.ResumeCommand,
+			"resume_flag":              r.ResumeFlag,
+			"resume_style":             r.ResumeStyle,
+			"session_id_flag":          r.SessionIDFlag,
+			"title_model":              r.TitleModel,
+			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
+			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),
+			"emits_permission_warning": triStateFromProvenance("emits_permission_warning", r.EmitsPermissionWarning),
+			"accept_startup_dialogs":   r.AcceptStartupDialogs,
+			"env":                      r.Env,
+			"permission_modes":         r.PermissionModes,
+			"option_defaults":          r.EffectiveDefaults,
+		},
+		"provenance": map[string]any{
+			"field_layer":   r.Provenance.FieldLayer,
+			"map_key_layer": r.Provenance.MapKeyLayer,
+		},
+	}
+	if err := writeCLIJSONLine(stdout, payload); err != nil {
+		fmt.Fprintf(stderr, "gc config explain: json encode: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	return 0
 }
 
 // explainField prints a single field with its provenance source.

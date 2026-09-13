@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,7 +56,7 @@ func TestDoServiceListUsesLiveStatuses(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doServiceList(cfg, reader, &stdout, &stderr); code != 0 {
+	if code := doServiceList("", cfg, reader, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -74,7 +75,7 @@ func TestDoServiceDoctorFallsBackToConfigView(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doServiceDoctor(cfg, nil, "review-intake", &stdout, &stderr); code != 0 {
+	if code := doServiceDoctor("", cfg, nil, "review-intake", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
@@ -88,11 +89,92 @@ func TestDoServiceDoctorFallsBackToConfigView(t *testing.T) {
 
 func TestDoServiceDoctorMissingService(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := doServiceDoctor(&config.City{}, nil, "missing", &stdout, &stderr)
+	code := doServiceDoctor("", &config.City{}, nil, "missing", false, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), `service "missing" not found`) {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestDoServiceListJSON(t *testing.T) {
+	cfg := &config.City{
+		Services: []config.Service{{
+			Name:     "healthz",
+			Workflow: config.ServiceWorkflowConfig{Contract: "gc.healthz.v1"},
+		}},
+	}
+	reader := fakeServiceReader{
+		items: []workspacesvc.Status{{
+			ServiceName: "healthz",
+			Kind:        "workflow",
+			MountPath:   "/svc/healthz",
+			State:       "ready",
+			LocalState:  "ready",
+		}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doServiceList("/tmp/city", cfg, reader, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		CityPath      string `json:"city_path"`
+		Live          bool   `json:"live"`
+		Services      []struct {
+			ServiceName string `json:"service_name"`
+			State       string `json:"state"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.CityPath != "/tmp/city" || !payload.Live || len(payload.Services) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if payload.Services[0].ServiceName != "healthz" || payload.Services[0].State != "ready" {
+		t.Fatalf("service = %+v", payload.Services[0])
+	}
+}
+
+func TestDoServiceDoctorJSON(t *testing.T) {
+	cfg := &config.City{
+		Services: []config.Service{{
+			Name:     "review-intake",
+			Workflow: config.ServiceWorkflowConfig{Contract: "pack.gc/review.v1"},
+		}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doServiceDoctor("/tmp/city", cfg, nil, "review-intake", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+
+	var payload struct {
+		SchemaVersion string `json:"schema_version"`
+		Live          bool   `json:"live"`
+		ObservedState string `json:"observed_state"`
+		Service       struct {
+			ServiceName      string `json:"service_name"`
+			WorkflowContract string `json:"workflow_contract"`
+		} `json:"service"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != "1" || payload.Live || payload.ObservedState != "controller_unavailable" {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if payload.Service.ServiceName != "review-intake" || payload.Service.WorkflowContract != "pack.gc/review.v1" {
+		t.Fatalf("service = %+v", payload.Service)
 	}
 }

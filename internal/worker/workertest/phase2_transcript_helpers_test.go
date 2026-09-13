@@ -1,0 +1,482 @@
+package workertest
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	worker "github.com/gastownhall/gascity/internal/worker"
+)
+
+func writeMalformedHistoryTranscript(t *testing.T, profile Profile) string {
+	t.Helper()
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.jsonl")
+		body := strings.Join([]string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"malformed-claude"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-04T09:00:01Z","sessionId":"malformed-claude"}`,
+		}, "\n") + "\n" + `{"uuid":"torn","type":"assistant","message":`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write malformed claude transcript: %v", err)
+		}
+		return path
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"hello"}]}}`,
+			`not json`,
+			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"malformed-cursor"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"hello"},"session_id":"malformed-cursor"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":"done"},"session_id":"malformed-cursor"}`,
+			`{"id":"torn","type":"assistant","message":`,
+		})
+	case ProfileGeminiTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"sessionId":"malformed-gemini","messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed gemini transcript: %v", err)
+		}
+		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-malformed", "context.jsonl"), []string{
+			`{"role":"user","content":"hello"}`,
+			`{"role":"assistant","content":"done"}`,
+			`{"role":"assistant","content":`,
+		})
+	case ProfileOpenCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-opencode","directory":"/tmp/gascity/phase2/opencode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed opencode transcript: %v", err)
+		}
+		return path
+	case ProfileMimoCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-mimocode","directory":"/tmp/gascity/phase2/mimocode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed mimocode transcript: %v", err)
+		}
+		return path
+	case ProfileZCodeTmuxCLI:
+		path := filepath.Join(t.TempDir(), "session.json")
+		if err := os.WriteFile(path, []byte(`{"info":{"id":"malformed-zcode","directory":"/tmp/gascity/phase2/zcode"},"messages":[`), 0o644); err != nil {
+			t.Fatalf("write malformed zcode transcript: %v", err)
+		}
+		return path
+	case ProfilePiTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"session","version":3,"id":"malformed-pi","timestamp":"2026-04-04T09:00:00Z","cwd":"/tmp/gascity/phase2/pi"}`,
+			`{"type":"message","id":"u1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"hello"}}`,
+			`{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+			`{"type":"message","id":"torn","message":`,
+		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"hello"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"done"}`,
+			`{"step_index":2,"type":"PLANNER_RESPONSE","created_at":`,
+		})
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeInteractionHistoryTranscript(t *testing.T, profile Profile) string {
+	t.Helper()
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"interaction-phase2"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]},"timestamp":"2026-04-04T09:00:01Z","sessionId":"interaction-phase2"}`,
+		})
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"run a tool"}]}}`,
+			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}}`,
+		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-interaction-phase2"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"run a tool"},"session_id":"cursor-interaction-phase2"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]},"session_id":"cursor-interaction-phase2"}`,
+		})
+	case ProfileGeminiTmuxCLI:
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.json")
+		body := `{
+  "sessionId": "gemini-interaction-phase2",
+  "messages": [
+    {"id":"m1","timestamp":"2026-04-04T09:00:00Z","type":"user","content":"run a tool"},
+    {"id":"m2","timestamp":"2026-04-04T09:00:01Z","type":"gemini","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}
+  ]
+}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write gemini interaction transcript: %v", err)
+		}
+		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-phase2", "context.jsonl"), []string{
+			`{"role":"user","content":"run a tool"}`,
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileMimoCodeTmuxCLI:
+		return writeMimoCodeExportTranscript(t, "mimocode-interaction-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfileZCodeTmuxCLI:
+		return writeZCodeExportTranscript(t, "zcode-interaction-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"zcode-interaction-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"run a tool"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-interaction-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	case ProfilePiTmuxCLI:
+		return writePiSessionTranscript(t, "pi-interaction-phase2", "/tmp/gascity/phase2/pi", []string{
+			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"run a tool"}}`,
+			`{"type":"message","id":"msg_assistant_1","parentId":"msg_user_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}}`,
+		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"run a tool"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"],"metadata":{"tool_name":"Read"}}]}`,
+		})
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeInteractionLifecycleTranscript(t *testing.T, profile Profile, finalState worker.InteractionState) string {
+	t.Helper()
+
+	finalStateText := string(finalState)
+	finalAction := "acknowledge"
+	if finalState == worker.InteractionStateDismissed {
+		finalAction = "dismiss"
+	}
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"run a tool"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"interaction-lifecycle-phase2"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"timestamp":"2026-04-04T09:00:01Z","sessionId":"interaction-lifecycle-phase2"}`,
+			fmt.Sprintf(`{"uuid":"u2","parentUuid":"a1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]},"timestamp":"2026-04-04T09:00:02Z","sessionId":"interaction-lifecycle-phase2"}`, finalStateText, finalAction),
+		})
+	case ProfileCodexTmuxCLI:
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}}`,
+			fmt.Sprintf(`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}}`, finalStateText, finalAction),
+		})
+	case ProfileCursorTmuxCLI:
+		return writeLinesFile(t, "session.jsonl", []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-interaction-lifecycle-phase2"}`,
+			`{"id":"a1","type":"assistant","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},"session_id":"cursor-interaction-lifecycle-phase2"}`,
+			fmt.Sprintf(`{"id":"u1","type":"user","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]},"session_id":"cursor-interaction-lifecycle-phase2"}`, finalStateText, finalAction),
+		})
+	case ProfileGeminiTmuxCLI:
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.json")
+		body := fmt.Sprintf(`{
+  "sessionId": "gemini-interaction-lifecycle-phase2",
+  "messages": [
+    {"id":"m1","timestamp":"2026-04-04T09:00:00Z","type":"gemini","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]},
+    {"id":"m2","timestamp":"2026-04-04T09:00:01Z","type":"user","content":"interaction updated","interactions":[{"request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}
+  ]
+}`, finalStateText, finalAction)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write gemini interaction lifecycle transcript: %v", err)
+		}
+		return path
+	case ProfileKimiTmuxCLI:
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-interaction-lifecycle-phase2", "context.jsonl"), []string{
+			`{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileOpenCodeTmuxCLI:
+		return writeOpenCodeExportTranscript(t, "opencode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"opencode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileMimoCodeTmuxCLI:
+		return writeMimoCodeExportTranscript(t, "mimocode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"mimocode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfileZCodeTmuxCLI:
+		return writeZCodeExportTranscript(t, "zcode-interaction-lifecycle-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-interaction-lifecycle-phase2","role":"assistant","time":{"created":1770000000000}},"parts":[{"id":"part_interaction_1","type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"info":{"id":"msg_user_1","sessionID":"zcode-interaction-lifecycle-phase2","role":"user","parentID":"msg_assistant_1","time":{"created":1770000001000}},"parts":[{"id":"part_interaction_2","type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	case ProfilePiTmuxCLI:
+		return writePiSessionTranscript(t, "pi-interaction-lifecycle-phase2", "/tmp/gascity/phase2/pi", []string{
+			`{"type":"message","id":"msg_assistant_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"assistant","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}}`,
+			fmt.Sprintf(`{"type":"message","id":"msg_user_1","parentId":"msg_assistant_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"user","content":[{"type":"interaction","request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}}`, finalStateText, finalAction),
+		})
+	case ProfileAntigravityTmuxCLI:
+		return writeLinesFile(t, "transcript.jsonl", []string{
+			`{"step_index":0,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:00Z","content":"approval needed","interactions":[{"request_id":"approval-1","kind":"approval","state":"pending","prompt":"Allow Read?","options":["approve","deny"]}]}`,
+			fmt.Sprintf(`{"step_index":1,"type":"USER_INPUT","created_at":"2026-04-04T09:00:01Z","content":"interaction updated","interactions":[{"request_id":"approval-1","kind":"approval","state":%q,"action":%q}]}`, finalStateText, finalAction),
+		})
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeToolTranscript(t *testing.T, profile Profile, openTail bool) string {
+	t.Helper()
+
+	switch profile.ID {
+	case ProfileClaudeTmuxCLI:
+		lines := []string{
+			`{"uuid":"u1","type":"user","message":{"role":"user","content":"read the file"},"timestamp":"2026-04-04T09:00:00Z","sessionId":"tool-phase2"}`,
+			`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]},"timestamp":"2026-04-04T09:00:01Z","sessionId":"tool-phase2"}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"uuid":"r1","parentUuid":"a1","type":"result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"file data"}],"is_error":false},"timestamp":"2026-04-04T09:00:02Z","sessionId":"tool-phase2"}`,
+				`{"uuid":"a2","parentUuid":"r1","type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-04T09:00:03Z","sessionId":"tool-phase2"}`,
+			)
+		}
+		return writeLinesFile(t, "session.jsonl", lines)
+	case ProfileCodexTmuxCLI:
+		lines := []string{
+			`{"timestamp":"2026-04-04T09:00:00Z","type":"session_meta","payload":{"cwd":"/tmp/gascity/phase2/codex"}}`,
+			`{"timestamp":"2026-04-04T09:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"Read"}}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"timestamp":"2026-04-04T09:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"file data"}}`,
+				`{"timestamp":"2026-04-04T09:00:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"done"}]}}`,
+			)
+		}
+		return writeLinesFile(t, filepath.Join("2026", "04", "04", "session.jsonl"), lines)
+	case ProfileCursorTmuxCLI:
+		lines := []string{
+			`{"type":"system","subtype":"init","cwd":"/tmp/gascity/phase2/cursor","session_id":"cursor-tool-phase2"}`,
+			`{"id":"u1","type":"user","message":{"role":"user","content":"read the file"},"session_id":"cursor-tool-phase2"}`,
+			`{"type":"tool_call","subtype":"started","call_id":"call-1","tool_call":{"readToolCall":{"toolCallId":"call-1","args":{"path":"README.md"}}},"session_id":"cursor-tool-phase2"}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":{"readToolCall":{"toolCallId":"call-1","args":{"path":"README.md"},"result":{"success":{"content":"file data","isEmpty":false,"exceededLimit":false,"totalLines":1,"totalChars":9}}}},"session_id":"cursor-tool-phase2"}`,
+				`{"id":"a1","type":"assistant","message":{"role":"assistant","content":"done"},"session_id":"cursor-tool-phase2"}`,
+			)
+		}
+		return writeLinesFile(t, "session.jsonl", lines)
+	case ProfileGeminiTmuxCLI:
+		dir := t.TempDir()
+		projectDir := filepath.Join(dir, "project-a", "chats")
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			t.Fatalf("mkdir gemini tree: %v", err)
+		}
+		path := filepath.Join(projectDir, "session.json")
+		body := `{
+  "sessionId": "gemini-phase2",
+  "messages": [
+    {"id":"m1","timestamp":"2026-04-04T09:00:00Z","type":"user","content":"hello"},
+    {"id":"m2","timestamp":"2026-04-04T09:00:01Z","type":"gemini","content":"checking","toolCalls":[{"id":"tool-2","name":"Read","args":{"path":"README.md"}}]}` + trailingGeminiToolResult(openTail) + `
+  ]
+}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write gemini transcript: %v", err)
+		}
+		return path
+	case ProfileKimiTmuxCLI:
+		lines := []string{
+			`{"role":"user","content":"read the file"}`,
+			`{"role":"assistant","content":[],"tool_calls":[{"type":"function","id":"call-1","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}`,
+		}
+		if !openTail {
+			lines = append(lines,
+				`{"role":"tool","content":"file data","tool_call_id":"call-1"}`,
+				`{"role":"assistant","content":"done"}`,
+			)
+		}
+		return writeLinesFile(t, filepath.Join("sessions", "5decc6790b1207964f31266c8258989e", "kimi-tool-phase2", "context.jsonl"), lines)
+	case ProfileOpenCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeOpenCodeExportTranscript(t, "opencode-tool-phase2", "/tmp/gascity/phase2/opencode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"opencode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"opencode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
+	case ProfileMimoCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"mimocode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeMimoCodeExportTranscript(t, "mimocode-tool-phase2", "/tmp/gascity/phase2/mimocode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"mimocode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"mimocode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
+	case ProfileZCodeTmuxCLI:
+		state := `{"status":"running","input":{"path":"README.md"}}`
+		tail := ""
+		if !openTail {
+			state = `{"status":"completed","input":{"path":"README.md"},"output":"file data"}`
+			tail = `,{"info":{"id":"msg_assistant_2","sessionID":"zcode-tool-phase2","role":"assistant","parentID":"msg_assistant_1","time":{"created":1770000002000}},"parts":[{"id":"part_assistant_2","type":"text","text":"done"}]}`
+		}
+		return writeZCodeExportTranscript(t, "zcode-tool-phase2", "/tmp/gascity/phase2/zcode", []string{
+			`{"info":{"id":"msg_user_1","sessionID":"zcode-tool-phase2","role":"user","time":{"created":1770000000000}},"parts":[{"id":"part_user_1","type":"text","text":"read the file"}]}`,
+			`{"info":{"id":"msg_assistant_1","sessionID":"zcode-tool-phase2","role":"assistant","parentID":"msg_user_1","time":{"created":1770000001000}},"parts":[{"id":"part_tool_1","type":"tool","callID":"call-1","tool":"Read","state":` + state + `}]}` + tail,
+		})
+	case ProfilePiTmuxCLI:
+		entries := []string{
+			`{"type":"message","id":"msg_user_1","parentId":null,"timestamp":"2026-04-04T09:00:00Z","message":{"role":"user","content":"read the file"}}`,
+			`{"type":"message","id":"msg_assistant_1","parentId":"msg_user_1","timestamp":"2026-04-04T09:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"Read","arguments":{"path":"README.md"}}]}}`,
+		}
+		if !openTail {
+			entries = append(entries,
+				`{"type":"message","id":"msg_tool_1","parentId":"msg_assistant_1","timestamp":"2026-04-04T09:00:02Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"Read","content":[{"type":"text","text":"file data"}],"isError":false}}`,
+				`{"type":"message","id":"msg_assistant_2","parentId":"msg_tool_1","timestamp":"2026-04-04T09:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}`,
+			)
+		}
+		return writePiSessionTranscript(t, "pi-tool-phase2", "/tmp/gascity/phase2/pi", entries)
+	case ProfileAntigravityTmuxCLI:
+		entries := []string{
+			`{"step_index":0,"type":"USER_INPUT","created_at":"2026-04-04T09:00:00Z","content":"read the file"}`,
+			`{"step_index":1,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:01Z","content":"checking","tool_calls":[{"name":"Read","args":{"path":"README.md"}}]}`,
+		}
+		if !openTail {
+			entries = append(entries,
+				`{"step_index":2,"type":"READ_FILE","created_at":"2026-04-04T09:00:02Z","content":"file data"}`,
+				`{"step_index":3,"type":"PLANNER_RESPONSE","created_at":"2026-04-04T09:00:03Z","content":"done"}`,
+			)
+		}
+		return writeLinesFile(t, "transcript.jsonl", entries)
+	default:
+		t.Fatalf("unsupported profile %s", profile.ID)
+		return ""
+	}
+}
+
+func writeOpenCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write opencode transcript: %v", err)
+	}
+	return path
+}
+
+// writeZCodeExportTranscript writes a ZCode export-mirror file, the layout the
+// zcode-repl adapter appends after every completed turn. ZCode transcripts are
+// authored in OpenCode's `{info, messages}` shape, so the reader delegates.
+func writeZCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), sessionID+".json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write zcode transcript: %v", err)
+	}
+	return path
+}
+
+// writeMimoCodeExportTranscript writes a MiMo Code session export into the
+// mirror layout consumed by the mimocode reader. MiMo Code is an OpenCode fork
+// whose exports share the `{info, messages}` JSON shape byte-for-byte.
+func writeMimoCodeExportTranscript(t *testing.T, sessionID, workDir string, messages []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	body := `{"info":{"id":` + fmt.Sprintf("%q", sessionID) + `,"directory":` + fmt.Sprintf("%q", workDir) + `},"messages":[` + strings.Join(messages, ",") + `]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write mimocode transcript: %v", err)
+	}
+	return path
+}
+
+func writePiSessionTranscript(t *testing.T, sessionID, workDir string, entries []string) string {
+	t.Helper()
+
+	lines := append([]string{
+		`{"type":"session","version":3,"id":` + fmt.Sprintf("%q", sessionID) + `,"timestamp":"2026-04-04T09:00:00Z","cwd":` + fmt.Sprintf("%q", workDir) + `}`,
+	}, entries...)
+	return writeLinesFile(t, "session.jsonl", lines)
+}
+
+func writeLinesFile(t *testing.T, rel string, lines []string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	body := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	return path
+}
+
+func trailingGeminiToolResult(openTail bool) string {
+	if openTail {
+		return ""
+	}
+	return `,
+    {"id":"m3","timestamp":"2026-04-04T09:00:02Z","type":"gemini","content":"done","toolCalls":[{"id":"tool-2","name":"Read","args":{"path":"README.md"},"result":[{"functionResponse":{"id":"tool-2","response":{"output":"file data"}}}]}]}`
+}
+
+func historyHasBlockKind(history *worker.HistorySnapshot, kind worker.BlockKind) bool {
+	for _, entry := range history.Entries {
+		for _, block := range entry.Blocks {
+			if block.Kind == kind {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func historyHasOpenToolUseEvidence(history *worker.HistorySnapshot) bool {
+	if len(history.TailState.OpenToolUseIDs) > 0 {
+		for _, toolUseID := range history.TailState.OpenToolUseIDs {
+			if strings.TrimSpace(toolUseID) != "" {
+				return true
+			}
+		}
+	}
+	if len(history.Entries) == 0 {
+		return false
+	}
+	last := history.Entries[len(history.Entries)-1]
+	for _, block := range last.Blocks {
+		if block.Kind == worker.BlockKindToolUse {
+			return true
+		}
+	}
+	return false
+}
+
+func loadHistory(t *testing.T, provider, path string) *worker.HistorySnapshot {
+	t.Helper()
+
+	history, err := worker.SessionLogAdapter{}.LoadHistory(worker.LoadRequest{
+		Provider:       provider,
+		TranscriptPath: path,
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory(%s): %v", provider, err)
+	}
+	return history
+}

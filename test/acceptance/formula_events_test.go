@@ -9,6 +9,7 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ import (
 
 func TestFormulaCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("List_GastownCity_ShowsFormulas", func(t *testing.T) {
 		out, err := c.GC("formula", "list")
@@ -35,8 +36,9 @@ func TestFormulaCommands(t *testing.T) {
 	})
 
 	t.Run("Show_GastownFormula_DisplaysSteps", func(t *testing.T) {
-		// List formulas first to get a real name.
-		listOut, err := c.GC("formula", "list")
+		// List formulas first to get a real name. Parse stdout only: config
+		// advisories on stderr would otherwise land in lines[0].
+		listOut, err := c.GCStdout("formula", "list")
 		if err != nil {
 			t.Fatalf("gc formula list failed: %v\n%s", err, listOut)
 		}
@@ -70,7 +72,7 @@ func TestFormulaCommands(t *testing.T) {
 
 	t.Run("List_TutorialCity", func(t *testing.T) {
 		tc := helpers.NewCity(t, testEnv)
-		tc.Init("claude")
+		tc.InitNoStart("claude")
 
 		out, err := tc.GC("formula", "list")
 		if err != nil {
@@ -143,18 +145,23 @@ func TestEventCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("JSONFormat_OutputsParseable", func(t *testing.T) {
+	t.Run("DefaultOutput_OutputsJSONL", func(t *testing.T) {
 		// Emit an event so there's something to show.
 		c.GC("event", "emit", "test.json", "--message", "json test")
 
-		out, err := c.GC("events", "--json")
+		out, err := c.GC("events")
 		if err != nil {
-			t.Fatalf("gc events --json failed: %v\n%s", err, out)
+			t.Fatalf("gc events failed: %v\n%s", err, out)
 		}
-		// JSON output should start with [ (array) or contain {.
 		trimmed := strings.TrimSpace(out)
-		if trimmed != "" && !strings.Contains(trimmed, "{") {
-			t.Errorf("expected JSON-like output, got:\n%s", out)
+		if trimmed == "" {
+			t.Fatal("expected JSONL output, got empty output")
+		}
+		for _, line := range strings.Split(trimmed, "\n") {
+			var item map[string]any
+			if err := json.Unmarshal([]byte(line), &item); err != nil {
+				t.Fatalf("gc events line is not valid JSON: %v\nline: %s", err, line)
+			}
 		}
 	})
 

@@ -23,8 +23,15 @@ func writeScript(t *testing.T, dir, content string) string {
 	return path
 }
 
-// allOpsScript returns a script body that handles all bead store operations
-// with simple, predictable responses.
+// storeTargetEnv builds the GC-native store-target env used by exec tests.
+func storeTargetEnv(root string) map[string]string {
+	return map[string]string{
+		"GC_STORE_ROOT":   root,
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "gc",
+	}
+}
+
 func allOpsScript() string {
 	return `
 op="$1"; shift
@@ -127,6 +134,150 @@ esac
 	}
 }
 
+func TestCreate_deferUntilReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  create)
+    cat > "`+outFile+`"
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+deferUntil.Format(time.RFC3339)+`"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	created, err := s.Create(beads.Bead{Title: "test", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"defer_until":"`+deferUntil.Format(time.RFC3339)+`"`) {
+		t.Fatalf("stdin missing defer_until, got: %s", stdin)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
+func TestCreate_deferUntilRoundTripsThroughConformanceScript(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(storeTargetEnv(t.TempDir()))
+	deferUntil := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+
+	created, err := s.Create(beads.Bead{Title: "deferred", DeferUntil: &deferUntil})
+	if err != nil {
+		t.Fatalf("Create(deferred): %v", err)
+	}
+	if created.DeferUntil == nil || !created.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("created.DeferUntil = %v, want %s", created.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+	got, err := s.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(deferred): %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("Get(%s).DeferUntil = %v, want %s", created.ID, got.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+	ready, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	for _, bead := range ready {
+		if bead.ID == created.ID {
+			t.Fatalf("Ready() included future-deferred bead %s: %+v", created.ID, ready)
+		}
+	}
+}
+
+func TestCreate_ephemeralRoundTripsThroughConformanceScript(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewStore(scriptPath)
+	s.SetEnv(storeTargetEnv(t.TempDir()))
+
+	ephemeral, err := s.Create(beads.Bead{
+		Title:     "tracking",
+		Labels:    []string{"order-run:digest"},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(ephemeral): %v", err)
+	}
+	if !ephemeral.Ephemeral {
+		t.Fatalf("created.Ephemeral = false, want true")
+	}
+	got, err := s.Get(ephemeral.ID)
+	if err != nil {
+		t.Fatalf("Get(ephemeral): %v", err)
+	}
+	if !got.Ephemeral {
+		t.Fatalf("Get(%s).Ephemeral = false, want true", ephemeral.ID)
+	}
+
+	regular, err := s.Create(beads.Bead{
+		Title:  "regular work",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatalf("Create(regular): %v", err)
+	}
+
+	ready, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != regular.ID {
+		t.Fatalf("Ready() = %+v, want only non-ephemeral bead %s", ready, regular.ID)
+	}
+
+	issuesOnly, err := s.ListByLabel("order-run:digest", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(issues): %v", err)
+	}
+	if len(issuesOnly) != 1 || issuesOnly[0].ID != regular.ID {
+		t.Fatalf("issues tier = %+v, want only regular bead %s", issuesOnly, regular.ID)
+	}
+
+	wispsOnly, err := s.ListByLabel("order-run:digest", 0, beads.WithEphemeral)
+	if err != nil {
+		t.Fatalf("ListByLabel(wisps): %v", err)
+	}
+	if len(wispsOnly) != 1 || wispsOnly[0].ID != ephemeral.ID {
+		t.Fatalf("wisps tier = %+v, want only ephemeral bead %s", wispsOnly, ephemeral.ID)
+	}
+
+	both, err := s.ListByLabel("order-run:digest", 0, beads.WithBothTiers)
+	if err != nil {
+		t.Fatalf("ListByLabel(both): %v", err)
+	}
+	if len(both) != 2 {
+		t.Fatalf("both tiers = %+v, want both regular and ephemeral beads", both)
+	}
+}
+
 func TestCreate_metadataReachesScript(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "stdin.json")
@@ -183,7 +334,7 @@ func TestCreate_metadataRoundTripsViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "mayor",
@@ -239,7 +390,7 @@ func TestUpdate_metadataRoundTripsViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "mayor",
@@ -290,7 +441,7 @@ func TestSetMetadata_deduplicatesViaConformance(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "test",
@@ -333,7 +484,7 @@ func TestCreate_metadataWithSpecialCharsRoundTrips(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title:  "agent-session",
@@ -383,7 +534,7 @@ func TestCreate_numericLookingMetadataStaysString(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{
 		Title: "quarantined-session",
@@ -440,6 +591,36 @@ esac
 	}
 	if !strings.Contains(string(data), `"type":"task"`) {
 		t.Errorf("stdin should contain type=task, got: %s", string(data))
+	}
+}
+
+func TestUpdate_typeReachesScript(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+
+	script := writeScript(t, dir, `
+op="$1"
+case "$op" in
+  update)
+    cat > "`+outFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	beadType := "bug"
+	if err := s.Update("EX-1", beads.UpdateOpts{Type: &beadType}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured stdin: %v", err)
+	}
+	stdin := string(data)
+	if !strings.Contains(stdin, `"type":"bug"`) {
+		t.Errorf("stdin missing type, got: %s", stdin)
 	}
 }
 
@@ -547,7 +728,7 @@ func TestUpdate_assigneeRoundTripsThroughConformanceScript(t *testing.T) {
 	}
 
 	s := NewStore(scriptPath)
-	s.SetEnv(map[string]string{"BEADS_DIR": t.TempDir()})
+	s.SetEnv(storeTargetEnv(t.TempDir()))
 
 	created, err := s.Create(beads.Bead{Title: "reassignable"})
 	if err != nil {
@@ -648,6 +829,203 @@ func TestReady(t *testing.T) {
 	}
 }
 
+func TestReady_wispsRequestsEphemeralRows(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "ready-args.txt")
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  ready)
+    printf '%s\n' "$*" > "`+argsFile+`"
+    case " $* " in
+      *" --include-ephemeral "*)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-wisp","title":"wisp","status":"open","type":"task","created_at":"2026-02-27T10:01:00Z","ephemeral":true}]'
+        ;;
+      *)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+        ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierWisps})
+	if err != nil {
+		t.Fatalf("Ready(TierWisps): %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	if !strings.Contains(string(args), "--include-ephemeral") {
+		t.Fatalf("ready args = %q, want --include-ephemeral", string(args))
+	}
+	if len(got) != 1 || got[0].ID != "EX-wisp" {
+		t.Fatalf("Ready(TierWisps) = %+v, want only EX-wisp", got)
+	}
+}
+
+func TestReady_tierBothRequestsEphemeralRows(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "ready-args.txt")
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  ready)
+    printf '%s\n' "$*" > "`+argsFile+`"
+    case " $* " in
+      *" --include-ephemeral "*)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-wisp","title":"wisp","status":"open","type":"task","created_at":"2026-02-27T10:01:00Z","ephemeral":true}]'
+        ;;
+      *)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+        ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("Ready(TierBoth): %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	if !strings.Contains(string(args), "--include-ephemeral") {
+		t.Fatalf("ready args = %q, want --include-ephemeral", string(args))
+	}
+	if len(got) != 2 {
+		t.Fatalf("Ready(TierBoth) returned %d beads, want durable and ephemeral rows: %+v", len(got), got)
+	}
+	if got[0].ID != "EX-issue" || got[1].ID != "EX-wisp" {
+		t.Fatalf("Ready(TierBoth) = %+v, want EX-issue then EX-wisp", got)
+	}
+}
+
+func TestReady_includeEphemeralUnsupportedReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  ready)
+    case " $* " in
+      *" --include-ephemeral "*)
+        echo "unsupported flag: --include-ephemeral" >&2
+        exit 1
+        ;;
+      *)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+        ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err == nil {
+		t.Fatal("Ready(TierBoth) succeeded with a script that rejected --include-ephemeral, want error")
+	}
+	if !strings.Contains(err.Error(), "unsupported flag: --include-ephemeral") {
+		t.Fatalf("Ready(TierBoth) error = %q, want unsupported flag context", err)
+	}
+}
+
+func TestReady_includeEphemeralExit2ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  ready)
+    case " $* " in
+      *" --include-ephemeral "*)
+        echo "unknown argument: --include-ephemeral" >&2
+        exit 2
+        ;;
+      *)
+        echo '[{"id":"EX-issue","title":"regular","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+        ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	if err == nil {
+		t.Fatal("Ready(TierBoth) succeeded after ready --include-ephemeral exited 2, want error")
+	}
+	if !strings.Contains(err.Error(), "unknown argument: --include-ephemeral") {
+		t.Fatalf("Ready(TierBoth) error = %q, want exit-2 stderr context", err)
+	}
+}
+
+func TestReady_treatsMissingOrEmptyStatusAsOpen(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ready)
+    echo '[{"id":"EX-missing","title":"missing status","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-empty","title":"empty status","status":"","type":"task","created_at":"2026-02-27T10:01:00Z"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+		if bead.Status != "open" {
+			t.Fatalf("Ready bead %s status = %q, want normalized open", bead.ID, bead.Status)
+		}
+	}
+	if !ids["EX-missing"] || !ids["EX-empty"] {
+		t.Fatalf("Ready ids = %v, want missing-status and empty-status beads", ids)
+	}
+}
+
+func TestReady_excludesFutureDeferredBeads(t *testing.T) {
+	dir := t.TempDir()
+	future := time.Now().UTC().Add(24 * time.Hour)
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	script := writeScript(t, dir, `
+case "$1" in
+  ready)
+    echo '[{"id":"EX-ready","title":"ready","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"},{"id":"EX-future","title":"future","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+future.Format(time.RFC3339)+`"},{"id":"EX-past","title":"past","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z","defer_until":"`+past.Format(time.RFC3339)+`"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Ready()
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, bead := range got {
+		ids[bead.ID] = true
+	}
+	if !ids["EX-ready"] || !ids["EX-past"] {
+		t.Fatalf("Ready ids = %v, want ready and past-deferred beads", ids)
+	}
+	if ids["EX-future"] {
+		t.Fatalf("Ready ids = %v, future-deferred bead must be hidden", ids)
+	}
+}
+
 func TestChildren(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -738,6 +1116,52 @@ esac
 	}
 	if got.Metadata["name"] != "ok" {
 		t.Errorf("Metadata[name] = %q, want %q", got.Metadata["name"], "ok")
+	}
+}
+
+func TestGet_deferUntilRoundTripsFromScript(t *testing.T) {
+	dir := t.TempDir()
+	deferUntil := time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)
+
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","defer_until":"`+deferUntil.Format(time.RFC3339)+`"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Fatalf("DeferUntil = %v, want %s", got.DeferUntil, deferUntil.Format(time.RFC3339))
+	}
+}
+
+func TestGet_updatedAtRoundTripsFromJSON(t *testing.T) {
+	dir := t.TempDir()
+
+	script := writeScript(t, dir, `
+case "$1" in
+  get)
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T03:04:05Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	got, err := s.Get("EX-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if !got.UpdatedAt.Equal(want) {
+		t.Fatalf("UpdatedAt = %s, want %s", got.UpdatedAt, want)
 	}
 }
 
@@ -847,6 +1271,101 @@ esac
 
 // --- Conformance suite ---
 
+func TestExecStoreConformanceUsesGCStoreRoot(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	scriptPath, err := filepath.Abs(filepath.Join("testdata", "conformance.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	storeRoot := t.TempDir()
+	legacyDir := t.TempDir()
+	s := NewStore(scriptPath)
+	s.SetEnv(map[string]string{
+		"GC_STORE_ROOT":   storeRoot,
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "gc",
+		"BEADS_DIR":       legacyDir,
+	})
+
+	created, err := s.Create(beads.Bead{Title: "store-target-probe"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(storeRoot, created.ID+".json")); err != nil {
+		t.Fatalf("storeRoot did not receive bead file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, created.ID+".json")); err == nil {
+		t.Fatalf("legacy BEADS_DIR should be ignored, but %s/%s.json exists", legacyDir, created.ID)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat legacy BEADS_DIR bead file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, ".counter")); err == nil {
+		t.Fatalf("legacy BEADS_DIR should be ignored, but %s/.counter exists", legacyDir)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat legacy BEADS_DIR counter: %v", err)
+	}
+}
+
+func TestRunSanitizesAmbientLegacyAndStoreTargetEnv(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "env.txt")
+
+	t.Setenv("BEADS_DIR", "/ambient/.beads")
+	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
+	t.Setenv("GC_STORE_ROOT", "/ambient/root")
+	t.Setenv("GC_STORE_SCOPE", "city")
+	t.Setenv("GC_BEADS_PREFIX", "ambient")
+	t.Setenv("GC_PROVIDER", "ambient-provider")
+
+	script := writeScript(t, dir, `
+case "$1" in
+  create)
+    printf 'BEADS_DIR=%s\nGC_DOLT_HOST=%s\nGC_STORE_ROOT=%s\nGC_STORE_SCOPE=%s\nGC_BEADS_PREFIX=%s\nGC_PROVIDER=%s\nGC_RIG=%s\nGC_RIG_ROOT=%s\n' \
+      "${BEADS_DIR:-}" "${GC_DOLT_HOST:-}" "${GC_STORE_ROOT:-}" "${GC_STORE_SCOPE:-}" "${GC_BEADS_PREFIX:-}" "${GC_PROVIDER:-}" "${GC_RIG:-}" "${GC_RIG_ROOT:-}" > "`+outFile+`"
+    cat >/dev/null
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-02-27T10:00:00Z"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+	s.SetEnv(map[string]string{
+		"GC_STORE_ROOT":   "/scope/root",
+		"GC_STORE_SCOPE":  "rig",
+		"GC_BEADS_PREFIX": "fe",
+		"GC_PROVIDER":     "exec:/tmp/spy",
+		"GC_RIG":          "frontend",
+		"GC_RIG_ROOT":     "/scope/root",
+	})
+
+	if _, err := s.Create(beads.Bead{Title: "sanitized"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"BEADS_DIR=\n",
+		"GC_DOLT_HOST=\n",
+		"GC_STORE_ROOT=/scope/root\n",
+		"GC_STORE_SCOPE=rig\n",
+		"GC_BEADS_PREFIX=fe\n",
+		"GC_PROVIDER=exec:/tmp/spy\n",
+		"GC_RIG=frontend\n",
+		"GC_RIG_ROOT=/scope/root\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("captured env missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestExecStoreConformance(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
@@ -858,7 +1377,7 @@ func TestExecStoreConformance(t *testing.T) {
 	beadstest.RunStoreTests(t, func() beads.Store {
 		dir := t.TempDir()
 		s := NewStore(scriptPath)
-		s.SetEnv(map[string]string{"BEADS_DIR": dir})
+		s.SetEnv(storeTargetEnv(dir))
 		return s
 	})
 }
@@ -866,3 +1385,115 @@ func TestExecStoreConformance(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ beads.Store = (*Store)(nil)
+
+func TestListForwardsSupportedFilters(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{Assignee: "mayor", Type: "message", Status: "open", Limit: 7})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	for _, want := range []string{"--status=open", "--assignee=mayor", "--type=message", "--limit=7"} {
+		if !strings.Contains(argsText, want) {
+			t.Fatalf("list args missing %q: %s", want, argsText)
+		}
+	}
+}
+
+func TestListWithCreatedBeforeDoesNotForwardLimitBeforeClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{
+		Type:          "task",
+		CreatedBefore: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
+		Limit:         7,
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	if strings.Contains(argsText, "--limit=7") {
+		t.Fatalf("list args should not limit before created-before filtering: %s", argsText)
+	}
+	if !strings.Contains(argsText, "--type=task") {
+		t.Fatalf("list args missing type filter: %s", argsText)
+	}
+}
+
+func TestListWithSeekAfterDoesNotForwardLimitBeforeClientFilter(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	script := writeScript(t, dir, `
+op="$1"
+shift
+case "$op" in
+  list)
+    printf '%s
+' "$*" > "`+argsFile+`"
+    echo '[]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	_, err := s.List(beads.ListQuery{
+		Type:  "task",
+		Sort:  beads.SortCreatedDesc,
+		Limit: 7,
+		SeekAfter: &beads.SeekBoundary{
+			CreatedAt: time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+			ID:        "gc-9",
+		},
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile(args): %v", err)
+	}
+	argsText := string(argsData)
+	// The script cannot express the compound (created_at, id) boundary; a
+	// script-side limit would cut rows before the Go-side seek filter runs.
+	if strings.Contains(argsText, "--limit=7") {
+		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}

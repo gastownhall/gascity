@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,9 +19,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/overlay"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
+// write fails. Sized to match terminateProcess's SIGTERM grace period so a
+// Nudge racing with Stop still converges to the best-effort nil contract
+// rather than surfacing a spurious error before SIGKILL lands.
+const nudgePostWriteDrainTimeout = 5 * time.Second
 
 // Config holds ACP provider settings.
 type Config struct {
@@ -52,24 +59,44 @@ func (c *Config) outputBufferLines() int {
 
 // Provider manages agent sessions using the Agent Client Protocol.
 type Provider struct {
-	mu       sync.Mutex
-	dir      string                  // socket/meta file directory
-	conns    map[string]*sessionConn // in-process tracking
-	workDirs map[string]string       // session name → workDir (for CopyTo)
-	cfg      Config
+	mu            sync.Mutex
+	dir           string                  // socket/meta file directory
+	conns         map[string]*sessionConn // in-process tracking
+	workDirs      map[string]string       // session name → workDir (for CopyTo)
+	cfg           Config
+	activityWrite func(path string, data []byte) error // test seam
 }
 
 // Compile-time check.
 var (
-	_ runtime.Provider            = (*Provider)(nil)
-	_ runtime.InteractionProvider = (*Provider)(nil)
+	_ runtime.Provider                    = (*Provider)(nil)
+	_ runtime.InteractionProvider         = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider = (*Provider)(nil)
 )
 
 // NewProvider returns an ACP [Provider] that stores socket files in
 // a default temporary directory.
 func NewProvider(cfg Config) *Provider {
-	dir := filepath.Join(os.TempDir(), "gc-acp")
-	_ = os.MkdirAll(dir, 0o755)
+	return NewProviderWithDir(defaultProviderDir(), cfg)
+}
+
+// defaultProviderDir is the city-less state directory: one per user, because
+// the path is otherwise identical for everyone on the host and [os.MkdirAll]
+// succeeds on a directory someone else created first. The euid does not make
+// the directory private on its own — [runtime.EnsurePrivateDir] validates
+// ownership — but it keeps two legitimate users off one path so that validation
+// is a real check rather than a permanent outage for whoever logs in second.
+func defaultProviderDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gc-acp-%d", os.Geteuid()))
+}
+
+// NewProviderWithDir returns an ACP [Provider] that stores socket files
+// in the given directory. Useful for tests that need isolated state.
+func NewProviderWithDir(dir string, cfg Config) *Provider {
+	// Best-effort here and verified at the write path: a constructor cannot
+	// report a squatted directory, and failing silently at construction would
+	// hand back a Provider that writes anyway.
+	_ = runtime.EnsurePrivateDir(dir)
 	return &Provider{
 		dir:      dir,
 		conns:    make(map[string]*sessionConn),
@@ -78,16 +105,10 @@ func NewProvider(cfg Config) *Provider {
 	}
 }
 
-// NewProviderWithDir returns an ACP [Provider] that stores socket files
-// in the given directory. Useful for tests that need isolated state.
-func NewProviderWithDir(dir string, cfg Config) *Provider {
-	_ = os.MkdirAll(dir, 0o755)
-	return &Provider{
-		dir:      dir,
-		conns:    make(map[string]*sessionConn),
-		workDirs: make(map[string]string),
-		cfg:      cfg,
-	}
+// SupportsTransport reports whether this provider can host the requested
+// session transport.
+func (p *Provider) SupportsTransport(transport string) bool {
+	return transport == "acp"
 }
 
 // Start spawns an ACP agent process, performs the JSON-RPC handshake, and
@@ -137,21 +158,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		p.mu.Unlock()
 	}
 
-	// Copy overlay and CopyFiles before starting the process.
-	if cfg.OverlayDir != "" && cfg.WorkDir != "" {
-		_ = overlay.CopyDir(cfg.OverlayDir, cfg.WorkDir, io.Discard)
-	}
-	for _, cf := range cfg.CopyFiles {
-		dst := cfg.WorkDir
-		if cf.RelDst != "" {
-			dst = filepath.Join(cfg.WorkDir, cf.RelDst)
-		}
-		if absSrc, err := filepath.Abs(cf.Src); err == nil {
-			if absDst, err := filepath.Abs(dst); err == nil && absSrc == absDst {
-				continue
-			}
-		}
-		_ = overlay.CopyFileOrDir(cf.Src, dst, io.Discard)
+	if err := runtime.StageSessionWorkDir(cfg); err != nil {
+		clearSentinel()
+		return fmt.Errorf("staging workdir for %q: %w", name, err)
 	}
 
 	command := cfg.Command
@@ -173,7 +182,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		cmd.Dir = cfg.WorkDir
 	}
 
-	// Build environment: inherit parent env + apply overrides.
+	// Build environment: inherit parent env + apply overrides. Empty overrides
+	// withhold inherited variables, as they do for the other session runtimes.
 	env := os.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -182,6 +192,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
@@ -232,7 +246,8 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	stderrW.Close() //nolint:errcheck
 
 	// Create control socket for cross-process discovery.
-	lis, err := p.startControlSocket(name, cmd)
+	processDone := make(chan struct{})
+	lis, err := p.startControlSocket(name, cmd, processDone)
 	if err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
@@ -240,19 +255,32 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("creating control socket for %q: %w", name, err)
 	}
 
-	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines())
+	sc := newSessionConn(cmd, stdinPipe, lis, p.cfg.outputBufferLines(), processDone)
 
 	// Start readLoop before handshake so we can receive responses.
 	go sc.readLoop(stdoutPipe)
 
 	// Monitor process exit — clean up pending state, socket, and listener.
+	// Socket cleanup happens BEFORE close(done) so that callers waiting
+	// on sc.done (e.g., terminateProcess) can rely on the socket being
+	// gone when done fires. Without this ordering, IsRunning can race:
+	// Stop deletes the conn from the map, terminateProcess waits on done,
+	// done closes, Stop returns — but the socket is still alive, so
+	// IsRunning falls through to socketAlive and returns true.
 	go func() {
 		_ = cmd.Wait()
+		// Order the read loop's exit ahead of the publisher's final flush so a
+		// session/update the loop did dispatch cannot race publication
+		// shutdown. This is ordering, not a drain guarantee: cmd.Wait closes
+		// the stdout read end itself, so bytes still unread at that point are
+		// not guaranteed to be dispatched.
+		<-sc.readDone
 		sc.drainPending()
-		close(sc.done)
+		sc.closeActivityPublisher()
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
 		_ = os.Remove(p.sockNamePath(name))
+		close(processDone)
 	}()
 
 	// Perform ACP handshake with a deadline. hsCtx (created above with
@@ -262,7 +290,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	hsTimeoutCtx, hsTimeoutCancel := context.WithTimeout(hsCtx, p.cfg.handshakeTimeout())
 	defer hsTimeoutCancel()
 
-	if err := p.handshake(hsTimeoutCtx, sc); err != nil {
+	if err := p.handshake(hsTimeoutCtx, sc, cfg.WorkDir, cfg.MCPServers); err != nil {
 		// Handshake failed — kill the process. The monitor goroutine
 		// handles listener/socket cleanup when the process exits.
 		_ = stdinPipe.Close()
@@ -287,7 +315,61 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("session %q was stopped during startup", name)
 	}
 
+	// Seed the sidecar synchronously at handshake completion. Start must not
+	// advertise a cross-process activity-capable session until the first
+	// durable value exists. Later updates use the non-blocking publisher.
+	seed := time.Now()
+	if err := p.publishActivity(name, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("publishing initial activity for %q: %w", name, err)
+	}
+	publisher := newActivityPublisher(
+		activityPublishInterval,
+		time.Now(),
+		func(stamp time.Time) error { return p.publishActivity(name, stamp) },
+		func(err error) {
+			fmt.Fprintf(os.Stderr, "acp: publishing activity for %q: %v\n", name, err)
+		},
+	)
+	if err := sc.installActivityPublisher(publisher, seed); err != nil {
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if p.conns[name] == sentinel {
+			delete(p.conns, name)
+			delete(p.workDirs, name)
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("starting activity publication for %q: %w", name, err)
+	}
+
+	// Commit the real connection only if the startup sentinel still owns the
+	// name. Stop may have removed it while the initial atomic write was in
+	// progress.
 	p.mu.Lock()
+	if p.conns[name] != sentinel {
+		p.mu.Unlock()
+		_ = stdinPipe.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-sc.done
+		p.mu.Lock()
+		if _, replaced := p.conns[name]; !replaced {
+			p.cleanupMeta(name)
+		}
+		p.mu.Unlock()
+		return fmt.Errorf("session %q was stopped during startup", name)
+	}
 	p.conns[name] = sc
 	p.mu.Unlock()
 
@@ -299,8 +381,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	return nil
 }
 
+func envWithoutKey(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // handshake performs the ACP initialize → initialized → session/new sequence.
-func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
+func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir string, mcpServers []runtime.MCPServerConfig) error {
 	// Step 1: Send "initialize" request.
 	initReq, _ := newInitializeRequest()
 	ch, err := sc.sendRequest(initReq)
@@ -327,7 +420,7 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn) error {
 	}
 
 	// Step 3: Send "session/new" request.
-	newReq, _ := newSessionNewRequest()
+	newReq, _ := newSessionNewRequest(workDir, mcpServers)
 	ch, err = sc.sendRequest(newReq)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
@@ -381,13 +474,19 @@ func (p *Provider) Stop(name string) error {
 		}
 		_ = sc.stdin.Close()
 		err := terminateProcess(sc)
-		p.cleanupMeta(name)
+		if err == nil || runtime.IsSessionGone(err) {
+			p.cleanupMeta(name)
+			return nil
+		}
 		return err
 	}
 
 	// Fall back to socket (cross-process case).
 	err := p.stopBySocket(name)
-	p.cleanupMeta(name)
+	if err == nil || runtime.IsSessionGone(err) {
+		p.cleanupMeta(name)
+		return nil
+	}
 	return err
 }
 
@@ -440,14 +539,15 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 }
 
 // Nudge sends a session/prompt to the named session. Waits for the agent to
-// become idle before sending. Returns nil if the session doesn't exist
-// (best-effort).
+// become idle before sending. Returns ErrSessionNotFound when this provider
+// instance does not own the in-memory ACP connection. Returns nil if the
+// agent process exits during the send (best-effort).
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
 	if !ok {
-		return nil
+		return fmt.Errorf("%w: ACP provider does not own session %q", runtime.ErrSessionNotFound, name)
 	}
 	if !sc.alive() {
 		return nil
@@ -457,6 +557,13 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	// sendRequest is atomic with respect to other concurrent Nudge calls.
 	sc.nudgeMu.Lock()
 	defer sc.nudgeMu.Unlock()
+
+	// Re-check liveness under the lock. If an earlier Nudge observed the
+	// process exit and returned nil while we were queued on nudgeMu, skip
+	// the marshal+write work instead of tripping through the recovery path.
+	if !sc.alive() {
+		return nil
+	}
 
 	// Wait for agent to become idle.
 	if !sc.waitIdle(p.cfg.nudgeBusyTimeout()) {
@@ -479,13 +586,31 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 
 	ch, err := sc.sendRequest(msg)
 	if err != nil {
-		// Clear busy state on send failure.
-		sc.mu.Lock()
-		if sc.activePromptID == id {
-			sc.activePromptID = 0
+		sc.clearActivePrompt(id)
+		// Non-pipe failures (e.g., marshal errors) have nothing to do with
+		// the agent lifecycle, so surface them immediately rather than
+		// stalling the caller on sc.done.
+		if !isPipeWriteError(err) {
+			return fmt.Errorf("sending prompt to %q: %w", name, err)
 		}
-		sc.mu.Unlock()
-		return fmt.Errorf("sending prompt to %q: %w", name, err)
+		// Pipe write failed — the agent process is exiting (e.g., a prior
+		// Interrupt delivered SIGINT and the agent died, or Stop closed
+		// our stdin end between the alive() check and the write).
+		// Sync on the existing lifecycle event: cmd.Wait() → drainPending →
+		// close(sc.done). Once that fires, this is identical to the
+		// !sc.alive() case above, so honor the best-effort contract by
+		// returning nil. The bound matches terminateProcess's SIGTERM grace
+		// period; the common path returns in microseconds.
+		select {
+		case <-sc.done:
+			// A chronically flapping agent would otherwise be silent here;
+			// a single stderr line lets ops distinguish "nothing happened"
+			// from "agent died mid-write."
+			fmt.Fprintf(os.Stderr, "acp: nudge to %q skipped (agent exiting): %v\n", name, err)
+			return nil
+		case <-time.After(nudgePostWriteDrainTimeout):
+			return fmt.Errorf("sending prompt to %q: %w", name, err)
+		}
 	}
 
 	// Drain the response channel in the background. If the agent
@@ -542,8 +667,17 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // SetMeta stores a key-value pair for the named session in a sidecar file.
+//
+// The sidecar carries session identity and drain state, which a reader can use
+// to impersonate the session and a writer can use to forge a drain
+// acknowledgement, so it is owner-only. The directory is re-checked on every
+// write rather than trusted from construction: a squatted directory is not
+// something a constructor can report.
 func (p *Provider) SetMeta(name, key, value string) error {
-	return os.WriteFile(p.metaPath(name, key), []byte(value), 0o644)
+	if err := runtime.EnsurePrivateDir(p.dir); err != nil {
+		return err
+	}
+	return runtime.WritePrivateFile(p.metaPath(name, key), []byte(value))
 }
 
 // GetMeta retrieves a metadata value from a sidecar file.
@@ -568,15 +702,70 @@ func (p *Provider) RemoveMeta(name, key string) error {
 	return err
 }
 
-// GetLastActivity returns the time of the last session/update notification.
+// lastActivityMetaKey names the sidecar holding the durable last-activity
+// stamp. Keeping it in the meta namespace means Stop's cleanupMeta already
+// removes it along with the rest of the session's sidecar state.
+const lastActivityMetaKey = "gc_last_activity"
+
+// publishActivity atomically replaces the durable last-activity stamp. Atomic
+// replacement prevents cross-process readers from observing a truncated or
+// partially-written timestamp.
+func (p *Provider) publishActivity(name string, t time.Time) error {
+	path := p.metaPath(name, lastActivityMetaKey)
+	data := []byte(t.UTC().Format(time.RFC3339Nano))
+	var err error
+	if p.activityWrite != nil {
+		err = p.activityWrite(path, data)
+	} else {
+		err = fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("writing activity sidecar: %w", err)
+	}
+	return nil
+}
+
+// GetLastActivity returns the time of the last observed session/update, or the
+// Start-time seed if none has been observed.
+//
+// It reads the in-process connection when this process owns it, and otherwise
+// falls back to the durable stamp on disk — the same
+// in-memory-then-cross-process shape that Stop, Interrupt and IsRunning
+// already use for the control socket.
+//
+// The connection and in-memory stamp live only in the process that ran Start.
+// The sidecar gives other processes the same last-observed protocol timestamp.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	p.mu.Lock()
 	sc, ok := p.conns[name]
 	p.mu.Unlock()
-	if !ok {
+	if ok {
+		if t := sc.getLastActivity(); !t.IsZero() {
+			return t, nil
+		}
+	}
+	return p.persistedActivity(name)
+}
+
+// persistedActivity reads the durable last-activity stamp.
+//
+// A missing stamp is "unknown" (zero, nil) — the pre-existing contract for a
+// session this provider knows nothing about. An unreadable or malformed stamp
+// is an error rather than a silent zero.
+func (p *Provider) persistedActivity(name string) (time.Time, error) {
+	raw, err := p.GetMeta(name, lastActivityMetaKey)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading last activity for %q: %w", name, err)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return time.Time{}, nil
 	}
-	return sc.getLastActivity(), nil
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing last activity for %q: %w", name, err)
+	}
+	return t, nil
 }
 
 // ClearScrollback clears the output buffer.
@@ -606,7 +795,7 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 	if relDst != "" {
 		dst = filepath.Join(wd, relDst)
 	}
-	return overlay.CopyFileOrDir(src, dst, io.Discard)
+	return runtime.StagePath(src, dst)
 }
 
 // ListRunning returns the names of all running sessions whose names
@@ -637,15 +826,24 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 func (p *Provider) metaPath(name, key string) string {
-	return filepath.Join(p.dir, name+".meta."+key)
+	return filepath.Join(p.dir, metaFilePrefix(name)+".meta."+metaFileKey(key))
 }
 
 // cleanupMeta removes all sidecar meta files for the named session.
 func (p *Provider) cleanupMeta(name string) {
-	matches, _ := filepath.Glob(filepath.Join(p.dir, name+".meta.*"))
+	matches, _ := filepath.Glob(filepath.Join(p.dir, metaFilePrefix(name)+".meta.*"))
 	for _, m := range matches {
 		os.Remove(m) //nolint:errcheck
 	}
+}
+
+func metaFilePrefix(name string) string {
+	return "m" + metaFileKey(name)
+}
+
+func metaFileKey(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // --- Unix socket helpers (same as subprocess) ---
@@ -680,12 +878,12 @@ func (p *Provider) socketNameForEntry(key string) string {
 }
 
 // startControlSocket creates a unix socket for cross-process commands.
-func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener, error) {
+func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan struct{}) (net.Listener, error) {
 	sp := p.sockPath(name)
 	namePath := p.sockNamePath(name)
 	os.Remove(sp) //nolint:errcheck
 	_ = os.Remove(namePath)
-	if err := os.WriteFile(namePath, []byte(name), 0o644); err != nil {
+	if err := runtime.WritePrivateFile(namePath, []byte(name)); err != nil {
 		return nil, err
 	}
 	lis, err := net.Listen("unix", sp)
@@ -699,14 +897,14 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd) (net.Listener,
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd)
+			go handleControlConn(conn, cmd, done)
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd) {
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -715,25 +913,10 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		deadline := time.After(5 * time.Second)
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		alive := true
-		for alive {
-			select {
-			case <-deadline:
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				alive = false
-			case <-ticker.C:
-				if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-					alive = false
-				}
-			}
-		}
+		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -759,29 +942,41 @@ func (p *Provider) socketAlive(name string) bool {
 
 // sendSocketCommand connects to the session's control socket and sends a command.
 func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration) error {
-	var lastErr error
+	var (
+		lastErr            error
+		firstActionableErr error
+	)
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
-		conn, err := net.DialTimeout("unix", sp, timeout)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		defer conn.Close()                        //nolint:errcheck
-		conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
-		_, err = fmt.Fprintf(conn, "%s\n", command)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		scanner := bufio.NewScanner(conn)
-		if scanner.Scan() && scanner.Text() == "ok" {
+		err := func(path string) error {
+			conn, err := net.DialTimeout("unix", path, timeout)
+			if err != nil {
+				return err
+			}
+			defer conn.Close()                        //nolint:errcheck
+			conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
+			_, err = fmt.Fprintf(conn, "%s\n", command)
+			if err != nil {
+				return err
+			}
+			scanner := bufio.NewScanner(conn)
+			if scanner.Scan() && scanner.Text() == "ok" {
+				return nil
+			}
+			if err := scanner.Err(); err != nil {
+				return err
+			}
+			return fmt.Errorf("unexpected response from socket")
+		}(sp)
+		if err == nil {
 			return nil
 		}
-		if err := scanner.Err(); err != nil {
-			lastErr = err
-			continue
+		if !isUnavailableSocketError(err) && firstActionableErr == nil {
+			firstActionableErr = err
 		}
-		lastErr = fmt.Errorf("unexpected response from socket")
+		lastErr = err
+	}
+	if firstActionableErr != nil {
+		return firstActionableErr
 	}
 	return lastErr
 }
@@ -790,17 +985,32 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 func (p *Provider) stopBySocket(name string) error {
 	err := p.sendSocketCommand(name, "stop", 7*time.Second)
 	if err != nil {
-		os.Remove(p.sockPath(name)) //nolint:errcheck
-		_ = os.Remove(p.sockNamePath(name))
-		return nil
+		if isUnavailableSocketError(err) {
+			os.Remove(p.sockPath(name)) //nolint:errcheck
+			_ = os.Remove(p.sockNamePath(name))
+			return nil
+		}
+		return err
 	}
 	return nil
 }
 
-// Capabilities reports ACP provider capabilities. The ACP provider has
-// no terminal and does not natively support attachment or activity detection.
+func isUnavailableSocketError(err error) bool {
+	return errors.Is(err, os.ErrNotExist) ||
+		errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// Capabilities reports ACP provider capabilities. ACP sessions are headless,
+// so attachment is never reportable — but session/update notifications are a
+// real activity signal, durably stamped by GetLastActivity's sidecar so it
+// survives the process boundary.
+//
+// Declaring the capability allows activity-aware policies to use the signal.
+// Those policies remain independently configured; activity age alone does not
+// diagnose the reason updates stopped.
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
-	return runtime.ProviderCapabilities{}
+	return runtime.ProviderCapabilities{CanReportActivity: true}
 }
 
 // SleepCapability reports that ACP sessions support timed-only idle sleep.
@@ -808,15 +1018,15 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityTimedOnly
 }
 
+// isPipeWriteError reports whether err originated from writing to a closed
+// stdin pipe — the signal that the agent process exited between our alive()
+// check and the write. Other sendRequest failures (marshal errors, etc.) are
+// unrelated to lifecycle and should surface immediately.
+func isPipeWriteError(err error) bool {
+	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE)
+}
+
 // terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
 func terminateProcess(sc *sessionConn) error {
-	_ = syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGTERM)
-	select {
-	case <-sc.done:
-		return nil
-	case <-time.After(5 * time.Second):
-	}
-	_ = syscall.Kill(-sc.cmd.Process.Pid, syscall.SIGKILL)
-	<-sc.done
-	return nil
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
 }

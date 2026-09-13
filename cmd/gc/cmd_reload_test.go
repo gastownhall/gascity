@@ -1,0 +1,1003 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
+)
+
+func TestCmdReloadApplied(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-cli-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+		if !samePath(cityPath, dir) {
+			t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
+		}
+		if !req.Wait || req.Timeout != "30s" {
+			t.Fatalf("req = %+v, want wait=true timeout=30s", req)
+		}
+		return reloadControlReply{
+			Outcome:  reloadOutcomeApplied,
+			Message:  "Config reloaded: 1 agents, 0 rigs (rev abc123def456)",
+			Revision: "abc123def4567890",
+			Warnings: []string{"service reload: boom"},
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, false, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "Config reloaded: 1 agents, 0 rigs (rev abc123def456)" {
+		t.Fatalf("stdout = %q", got)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: warning: service reload: boom" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadJSONApplied(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-json-cli-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(_ string, _ reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{
+			Outcome:  reloadOutcomeApplied,
+			Message:  "Config reloaded",
+			Revision: "abc123def4567890",
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, true, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var got lifecycleActionJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "reload" || got.Outcome != "applied" || got.Revision != "abc123def4567890" {
+		t.Fatalf("payload = %+v", got)
+	}
+	if got.Async == nil || *got.Async || got.Soft == nil || *got.Soft {
+		t.Fatalf("async/soft = %v/%v, want false/false", got.Async, got.Soft)
+	}
+}
+
+func TestCmdReloadSoftPrintsAcceptedDriftCount(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-soft-cli-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	accepted := 2
+	sendReloadControlRequestHook = func(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
+		if !samePath(cityPath, dir) {
+			t.Fatalf("cityPath = %q, want %q", cityPath, canonicalTestPath(dir))
+		}
+		if !req.Soft {
+			t.Fatalf("req.Soft = false, want true")
+		}
+		return reloadControlReply{
+			Outcome:            reloadOutcomeApplied,
+			Message:            "Config reloaded: 1 agents, 0 rigs (rev abc123def456)",
+			Revision:           "abc123def4567890",
+			AcceptedDriftCount: &accepted,
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, true, false, "30s", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReload = %d; stderr=%s", code, stderr.String())
+	}
+	wantStdout := "Config reloaded: 1 agents, 0 rigs (rev abc123def456)\nsoft reload: accepted config drift on 2 session(s)"
+	if got := strings.TrimSpace(stdout.String()); got != wantStdout {
+		t.Fatalf("stdout = %q, want %q", got, wantStdout)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestReloadControlReplyOmitsAcceptedDriftCountByDefault(t *testing.T) {
+	data, err := json.Marshal(reloadControlReply{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "accepted_drift_count") {
+		t.Fatalf("zero-value reloadControlReply JSON = %s, want accepted_drift_count omitted", data)
+	}
+}
+
+func TestCmdReloadAsyncExplicitTimeoutInvalid(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-flags-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, true, false, false, "30s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "--async and --timeout cannot be used together") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-unavail-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, controllerCommandError{
+			op:           "connecting to controller",
+			err:          errors.New("dial failed"),
+			unavailable:  true,
+			unresponsive: false,
+		}
+	}
+	reloadUnavailableMessageHook = func(string) string {
+		return "city failed to start under supervisor: fetching packs: auth denied"
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied: connecting to controller: dial failed" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadControllerUnresponsiveUsesRicherMessage(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-unresponsive-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, controllerCommandError{
+			op:           "reading response",
+			err:          errors.New("i/o timeout"),
+			unresponsive: true,
+		}
+	}
+	reloadUnavailableMessageHook = func(string) string {
+		return "controller is running but not responding"
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: controller is running but not responding: reading response: i/o timeout" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadPreservesProtocolErrors(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-protocol-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, errors.New("parsing response: invalid character 'o' in literal null")
+	}
+	reloadUnavailableMessageHook = func(string) string {
+		return "city is still starting under supervisor"
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: parsing response: invalid character 'o' in literal null" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadFailedReplyPrintsWarnings(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-failed-warnings-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Warnings: []string{
+				`workspace.install_agent_hooks redefined by "override.toml"`,
+			},
+			Error: "strict mode: 1 collision warning(s)",
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, false, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, `gc reload: warning: workspace.install_agent_hooks redefined by "override.toml"`) {
+		t.Fatalf("stderr = %q, want warning detail", got)
+	}
+	if !strings.Contains(got, "strict mode: 1 collision warning(s)") {
+		t.Fatalf("stderr = %q, want strict error", got)
+	}
+}
+
+func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	if req.wait {
+		t.Fatal("req.wait = true, want false")
+	}
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+	}
+	if reply.Message != "Reload requested." {
+		t.Fatalf("reply.Message = %q", reply.Message)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false,"soft":true}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	if !req.soft {
+		t.Fatal("req.soft = false, want true")
+	}
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdAsyncIgnoresInvalidTimeout(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false,"timeout":"bad"}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	if req.wait {
+		t.Fatal("req.wait = true, want false")
+	}
+	if req.timeout != 0 {
+		t.Fatalf("req.timeout = %s, want 0 for async request", req.timeout)
+	}
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdSyncTimeout(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":true,"timeout":"20ms"}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeTimeout {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeTimeout)
+	}
+	if !strings.Contains(reply.Message, "may still complete later") {
+		t.Fatalf("reply.Message = %q", reply.Message)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
+		close(done)
+	}()
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeBusy {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeBusy)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+	select {
+	case req := <-reloadReqCh:
+		t.Fatalf("unexpected queued reload request after busy reply: %+v", req)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
+		close(done)
+	}()
+
+	time.Sleep(180 * time.Millisecond)
+	req := <-reloadReqCh
+	time.Sleep(50 * time.Millisecond)
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestControllerReloadAcceptTimeoutDefault(t *testing.T) {
+	if controllerReloadAcceptTimeout != 60*time.Second {
+		t.Fatalf("controllerReloadAcceptTimeout = %s, want 60s", controllerReloadAcceptTimeout)
+	}
+}
+
+func TestReloadControlReadTimeoutAsyncOutlastsAcceptAndAckWindow(t *testing.T) {
+	readTimeout, err := reloadControlReadTimeout(reloadControlRequest{Wait: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readTimeout <= 15*time.Second {
+		t.Fatalf("async read timeout = %s, want above old 15s client deadline", readTimeout)
+	}
+	if wantMin := 2*controllerReloadAcceptTimeout + 5*time.Second; readTimeout <= wantMin {
+		t.Fatalf("async read timeout = %s, want above controller window %s", readTimeout, wantMin)
+	}
+}
+
+func TestReloadControlReadTimeoutWaitIncludesRequestedTimeout(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	readTimeout, err := reloadControlReadTimeout(reloadControlRequest{Wait: true, Timeout: "40ms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2*controllerReloadAcceptTimeout + 40*time.Millisecond + 10*time.Second
+	if readTimeout != want {
+		t.Fatalf("read timeout = %s, want %s", readTimeout, want)
+	}
+}
+
+func TestSendReloadControlRequestNoChange(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
+	sp := runtime.NewFake()
+
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			ds[a.Name] = TemplateParams{SessionName: a.Name, TemplateName: a.Name, Command: "echo hello"}
+		}
+		return DesiredStateResult{State: ds}
+	}
+
+	dir := shortSocketTempDir(t, "gc-reload-no-change-")
+	cleanupManagedDoltTestCity(t, dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyFeatureFlags(cfg)
+	configRev := config.Revision(osFS{}, prov, cfg, dir)
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForController(t, dir)
+	deadline := time.After(5 * time.Second)
+	for reconcileCount.Load() < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for initial reconcile")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
+	if err != nil {
+		t.Fatalf("sendReloadControlRequest: %v", err)
+	}
+	if reply.Outcome != reloadOutcomeNoChange {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeNoChange)
+	}
+	if reply.Message != "No config changes detected." {
+		t.Fatalf("reply.Message = %q", reply.Message)
+	}
+	// The fixture intentionally uses [[agent]] which now emits a loud v1
+	// surface deprecation warning at every config load. That warning is
+	// not what this test guards — filter it out so the assertion still
+	// reflects "no other warnings".
+	if other := warningsWithoutV1Surfaces(reply.Warnings); len(other) != 0 {
+		t.Fatalf("reply.Warnings = %v, want none (besides v1-surface deprecations)", other)
+	}
+}
+
+func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "")
+
+	dir := shortSocketTempDir(t, "gc-reload-orders-dynamic-")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
+	tomlPath := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte("[pack]\nname = \"test\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := result.Cfg
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
+	if err != nil {
+		t.Fatalf("initial order scan: %v", err)
+	}
+	cr := &CityRuntime{
+		cityPath:           dir,
+		cityName:           "test",
+		configName:         "test",
+		tomlPath:           tomlPath,
+		configRev:          result.Revision,
+		cfg:                cfg,
+		sp:                 runtime.NewFake(),
+		dops:               newDrainOps(runtime.NewFake()),
+		od:                 buildOrderDispatcherFromOrderSet(nil, dir, cfg, initialOrders.Orders, events.Discard, &stderr),
+		orderSet:           initialOrders.Orders,
+		orderSetSignature:  initialOrders.Signature,
+		orderRescanEnabled: true,
+		rec:                events.Discard,
+		stdout:             &stdout,
+		stderr:             &stderr,
+		logPrefix:          "gc test",
+	}
+	lastProviderName := cfg.Session.Provider
+
+	ordersDir := filepath.Join(dir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orderPath := filepath.Join(ordersDir, "dynamic-tick.toml")
+	if err := os.WriteFile(orderPath, []byte(`
+[order]
+exec = "true"
+trigger = "cron"
+schedule = "*/1 * * * *"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("add reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
+	}
+	if strings.Contains(reply.Message, "No config changes detected") {
+		t.Fatalf("add reply.Message = %q, should not report no change", reply.Message)
+	}
+	if !memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
+		t.Fatalf("dispatcher orders after add missing dynamic-tick")
+	}
+
+	if err := os.Remove(orderPath); err != nil {
+		t.Fatal(err)
+	}
+	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("remove reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, stderr.String())
+	}
+	if memoryDispatcherHasOrder(cr.od, "dynamic-tick") {
+		t.Fatalf("dispatcher orders after removal still contain dynamic-tick")
+	}
+	if !strings.Contains(stderr.String(), "orders reloaded: removed dynamic-tick") {
+		t.Fatalf("stderr = %q, want removal log", stderr.String())
+	}
+
+	reply = cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeNoChange {
+		t.Fatalf("quiet reply.Outcome = %q, want %q; message=%q stderr=%q",
+			reply.Outcome, reloadOutcomeNoChange, reply.Message, stderr.String())
+	}
+	if reply.Message != "No config changes detected." {
+		t.Fatalf("quiet reply.Message = %q", reply.Message)
+	}
+}
+
+func memoryDispatcherHasOrder(od orderDispatcher, name string) bool {
+	m, ok := od.(*memoryOrderDispatcher)
+	if !ok {
+		return false
+	}
+	for _, a := range m.aa {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// warningsWithoutV1Surfaces filters out warnings produced by
+// config.DetectLegacyV1Surfaces so existing tests whose fixtures use
+// the deprecated v1 surfaces continue to assert on the non-v1 set.
+func warningsWithoutV1Surfaces(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, w := range in {
+		if config.IsLegacyV1SurfaceWarning(w) {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
+	skipSlowCmdGCTest(t, "starts real Dolt lifecycle")
+	sp := runtime.NewFake()
+
+	var reconcileCount atomic.Int32
+	buildFn := func(c *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+		reconcileCount.Add(1)
+		ds := make(map[string]TemplateParams)
+		for _, a := range c.Agents {
+			if a.Implicit {
+				continue
+			}
+			ds[a.Name] = TemplateParams{SessionName: a.Name, TemplateName: a.Name, Command: "echo hello"}
+		}
+		return DesiredStateResult{State: ds}
+	}
+
+	dir := shortSocketTempDir(t, "gc-reload-invalid-")
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := writeCityTOML(t, dir, "test", "mayor")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
+	cfg, prov, err := loadCityConfigWithBuiltinPacks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	allOrders, err := scanAllOrders(dir, cfg, &stderr, "gc reload test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range allOrders {
+		cfg.Orders.Skip = append(cfg.Orders.Skip, order.Name)
+	}
+	configRev := config.Revision(osFS{}, prov, cfg, dir)
+
+	done := make(chan struct{})
+	go func() {
+		runController(dir, tomlPath, cfg, configRev, buildFn, nil, sp, nil, nil, nil, nil, events.Discard, nil, &stdout, &stderr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tryStopController(dir, &bytes.Buffer{})
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	})
+
+	waitForController(t, dir)
+	deadline := time.After(5 * time.Second)
+	for reconcileCount.Load() < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for initial reconcile")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	oldDebounce := debounceDelay
+	debounceDelay = 30 * time.Second
+	t.Cleanup(func() {
+		debounceDelay = oldDebounce
+	})
+	if err := os.WriteFile(tomlPath, []byte("[[[ bad toml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdoutBeforeInvalid := stdout.String()
+	var reply reloadControlReply
+	deadline = time.After(45 * time.Second)
+	for {
+		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
+		if err != nil {
+			t.Fatalf("sendReloadControlRequest: %v", err)
+		}
+		if reply.Outcome != reloadOutcomeBusy {
+			break
+		}
+		if strings.Contains(stderr.String(), "config reload") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reload stayed busy; last reply = %+v", reply)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	switch {
+	case reply.Outcome == reloadOutcomeBusy:
+		if !strings.Contains(stderr.String(), "config reload") {
+			t.Fatalf("busy reload did not produce invalid config error; stderr=%q", stderr.String())
+		}
+	case reply.Outcome != reloadOutcomeFailed:
+		t.Fatalf("reply.Outcome = %q, want %q; stdout=%q stderr=%q",
+			reply.Outcome, reloadOutcomeFailed, stdout.String(), stderr.String())
+	case !strings.Contains(reply.Error, "parsing city.toml"):
+		t.Fatalf("reply.Error = %q", reply.Error)
+	}
+	if strings.Contains(strings.TrimPrefix(stdout.String(), stdoutBeforeInvalid), "Config reloaded:") {
+		t.Fatalf("stdout unexpectedly contains reload success: %q", stdout.String())
+	}
+}
+
+func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {
+	t.Helper()
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("read reply: %v", err)
+		}
+		t.Fatal("read reply: connection closed")
+	}
+	var reply reloadControlReply
+	if err := json.Unmarshal(scanner.Bytes(), &reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	return reply
+}
+
+func TestSupervisorCityInfoMatchesNormalizedPath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	realDir := shortSocketTempDir(t, "gc-reload-supervisor-real-")
+	linkDir := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(supervisor.RegistryPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(realDir, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/cities" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		payload := map[string]any{
+			"items": []api.CityInfo{{
+				Name:   "test",
+				Path:   linkDir,
+				Status: "starting_agents",
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			t.Fatalf("encode cities: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	oldAlive := supervisorAliveHook
+	oldBaseURL := supervisorAPIBaseURLHook
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorAPIBaseURLHook = oldBaseURL
+	})
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorAPIBaseURLHook = func() (string, error) { return server.URL, nil }
+
+	info, ok := supervisorCityInfo(realDir)
+	if !ok {
+		t.Fatal("supervisorCityInfo returned ok=false")
+	}
+	if info.Path != linkDir {
+		t.Fatalf("info.Path = %q, want %q", info.Path, linkDir)
+	}
+}
+
+func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_SESSION", "")
+
+	dir := shortSocketTempDir(t, "gc-reload-rt-decl-")
+	disableManagedDoltRecoveryForTest(t)
+	cleanupManagedDoltTestCity(t, dir)
+
+	packDir := filepath.Join(dir, "packs", "rtpack")
+	scriptsDir := filepath.Join(packDir, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opsA := filepath.Join(t.TempDir(), "a.log")
+	opsB := filepath.Join(t.TempDir(), "b.log")
+	writeProbeScript := func(name, marker string) {
+		t.Helper()
+		script := fmt.Sprintf("#!/bin/sh\necho \"$1\" >> %q\ncase \"$1\" in is-running) echo false ;; *) exit 2 ;; esac\n", marker)
+		if err := os.WriteFile(filepath.Join(scriptsDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeProbeScript("a.sh", opsA)
+	writeProbeScript("b.sh", opsB)
+
+	writePackTOML := func(command string) {
+		t.Helper()
+		packToml := fmt.Sprintf("[pack]\nname = \"rtpack\"\nschema = 1\n\n[runtimes.rtprov]\ncommand = %q\n", command)
+		if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePackTOML("scripts/a.sh")
+
+	tomlPath := filepath.Join(dir, "city.toml")
+	cityToml := "[workspace]\nname = \"test\"\n\n[imports.rtpack]\nsource = \"packs/rtpack\"\n\n[session]\nprovider = \"rtprov\"\n"
+	if err := os.WriteFile(tomlPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := tryReloadConfig(tomlPath, "test", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := result.Cfg
+	applyFeatureFlags(cfg)
+	var stdout, stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:   dir,
+		cityName:   "test",
+		configName: "test",
+		tomlPath:   tomlPath,
+		configRev:  result.Revision,
+		cfg:        cfg,
+		sp:         runtime.NewFake(),
+		dops:       newDrainOps(runtime.NewFake()),
+		rec:        events.Discard,
+		stdout:     &stdout,
+		stderr:     &stderr,
+		logPrefix:  "gc test",
+	}
+	lastProviderName := cfg.Session.Provider
+
+	// Same selection name, different declared command. The exec proxy
+	// binds the command at construction time, so the reload must rebuild
+	// the provider — otherwise every session op keeps forking the old
+	// executable until a controller restart.
+	writePackTOML("scripts/b.sh")
+
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, dir, nil, reloadSourceManual)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q, want %q; message=%q error=%q stderr=%q",
+			reply.Outcome, reloadOutcomeApplied, reply.Message, reply.Error, stderr.String())
+	}
+	cr.sp.IsRunning("probe")
+	if _, err := os.Stat(opsB); err != nil {
+		t.Fatalf("provider still bound to the old executable after reload: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if _, err := os.Stat(opsA); err == nil {
+		data, _ := os.ReadFile(opsA)
+		t.Fatalf("old executable still invoked after reload: ops=%q", data)
+	}
+}

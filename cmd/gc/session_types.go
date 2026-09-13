@@ -1,8 +1,11 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // WakeReason describes why a session should be awake.
@@ -29,8 +32,8 @@ const (
 	WakeWork WakeReason = "work"
 	// WakePending means the session is blocked on a structured interaction.
 	WakePending WakeReason = "pending"
-	// WakeDependency means another awake session depends on this template.
-	WakeDependency WakeReason = "dependency"
+	// WakePin means pin_awake is set as a durable explicit wake reason.
+	WakePin WakeReason = "pin"
 )
 
 // ExecSpec defines a validated command for process creation.
@@ -54,6 +57,7 @@ type drainState struct {
 	reason     string // "idle", "pool-excess", "config-drift", "user"
 	generation int    // generation at drain start — fence for Stop
 	ackSet     bool   // true after GC_DRAIN_ACK has been set by the reconciler
+	followUp   bool   // true when the controller should trigger one more immediate tick
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
@@ -66,17 +70,22 @@ type idleProbeState struct {
 
 // drainTracker manages in-memory drain states for all sessions.
 type drainTracker struct {
-	mu              sync.Mutex
-	drains          map[string]*drainState     // session bead ID -> drain state
-	idleProbes      map[string]*idleProbeState // session bead ID -> async idle probe
-	idleProbeCursor int
-	idleProbeWG     sync.WaitGroup
+	mu               sync.Mutex
+	drains           map[string]*drainState     // session bead ID -> drain state
+	idleProbes       map[string]*idleProbeState // session bead ID -> async idle probe
+	resetStalls      map[string]bool            // session bead ID -> reset stall event emitted
+	zombieCrashes    map[string]bool            // session bead ID -> zombie-process session.crashed event emitted
+	suspendDeferrals map[string]int             // session bead ID -> consecutive ticks a named session has been suspend-drain-eligible with its spec absent (#3630)
+	idleProbeCursor  int
 }
 
 func newDrainTracker() *drainTracker {
 	return &drainTracker{
-		drains:     make(map[string]*drainState),
-		idleProbes: make(map[string]*idleProbeState),
+		drains:           make(map[string]*drainState),
+		idleProbes:       make(map[string]*idleProbeState),
+		resetStalls:      make(map[string]bool),
+		zombieCrashes:    make(map[string]bool),
+		suspendDeferrals: make(map[string]int),
 	}
 }
 
@@ -96,6 +105,38 @@ func (dt *drainTracker) remove(beadID string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 	delete(dt.drains, beadID)
+	delete(dt.suspendDeferrals, beadID)
+}
+
+// bumpSuspendDeferral increments and returns the consecutive-tick count for a
+// named session that is suspend-drain-eligible because its configured spec is
+// absent this tick. The reconciler requires namedSuspendConfirmTicks confirming
+// ticks before actually draining, so a transient namedSessionSpecs enumeration
+// collapse during boot (the spec vanishes for one tick and reappears) does not
+// spuriously drain a named session and lose its in-session context (#3630).
+func (dt *drainTracker) bumpSuspendDeferral(beadID string) int {
+	if dt == nil {
+		return 0
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.suspendDeferrals == nil {
+		dt.suspendDeferrals = make(map[string]int)
+	}
+	dt.suspendDeferrals[beadID]++
+	return dt.suspendDeferrals[beadID]
+}
+
+// clearSuspendDeferral resets the deferral counter once a named session's spec
+// is present again (preserved or desired), so a later genuine removal starts a
+// fresh confirmation window rather than draining on its first absent tick.
+func (dt *drainTracker) clearSuspendDeferral(beadID string) {
+	if dt == nil {
+		return
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.suspendDeferrals, beadID)
 }
 
 func (dt *drainTracker) all() map[string]*drainState {
@@ -106,6 +147,24 @@ func (dt *drainTracker) all() map[string]*drainState {
 		cp[k] = v
 	}
 	return cp
+}
+
+func (dt *drainTracker) consumeFollowUpTick() bool {
+	if dt == nil {
+		return false
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+
+	needed := false
+	for _, ds := range dt.drains {
+		if ds == nil || !ds.followUp {
+			continue
+		}
+		ds.followUp = false
+		needed = true
+	}
+	return needed
 }
 
 func (dt *drainTracker) idleProbe(beadID string) (idleProbeState, bool) {
@@ -159,25 +218,60 @@ func (dt *drainTracker) clearIdleProbe(beadID string) {
 	delete(dt.idleProbes, beadID)
 }
 
-func (dt *drainTracker) beginIdleProbe() {
-	if dt == nil {
-		return
+func (dt *drainTracker) markResetStall(beadID string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
 	}
-	dt.idleProbeWG.Add(1)
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.resetStalls[beadID] {
+		return false
+	}
+	dt.resetStalls[beadID] = true
+	return true
 }
 
-func (dt *drainTracker) doneIdleProbe() {
-	if dt == nil {
+func (dt *drainTracker) clearResetStall(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
 		return
 	}
-	dt.idleProbeWG.Done()
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.resetStalls, beadID)
 }
 
-func (dt *drainTracker) waitIdleProbes() {
-	if dt == nil {
+// markZombieCrash reports whether this is the first zombie-process detection
+// (tmux session present, expected runtime process dead) for beadID since the
+// last time it recovered (clearZombieCrash). It returns true (and records the
+// mark) on the first call, then false on every subsequent call until cleared
+// — mirrors markResetStall's dedup shape so the reconciler emits one
+// session.crashed event per zombie episode instead of re-firing every tick
+// (#5355: 299 identical events over ~5h for one wedged session).
+func (dt *drainTracker) markZombieCrash(beadID string) bool {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
+		return true
+	}
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	if dt.zombieCrashes[beadID] {
+		return false
+	}
+	if dt.zombieCrashes == nil {
+		dt.zombieCrashes = make(map[string]bool)
+	}
+	dt.zombieCrashes[beadID] = true
+	return true
+}
+
+// clearZombieCrash resets the zombie-crash dedup mark once a session is
+// observed alive again, so a later genuine zombie episode is treated as new.
+func (dt *drainTracker) clearZombieCrash(beadID string) {
+	if dt == nil || strings.TrimSpace(beadID) == "" {
 		return
 	}
-	dt.idleProbeWG.Wait()
+	dt.mu.Lock()
+	defer dt.mu.Unlock()
+	delete(dt.zombieCrashes, beadID)
 }
 
 // Reconciler tuning defaults.
@@ -186,9 +280,11 @@ const (
 	// before it's considered stable (not a rapid exit / crash).
 	stabilityThreshold = 30 * time.Second
 
-	// maxWakesPerTick limits how many sessions can be woken per reconciler
-	// tick to prevent thundering herd after controller restart.
-	defaultMaxWakesPerTick = 5
+	// defaultMaxWakesPerTick mirrors config.DefaultMaxWakesPerTick (kept
+	// here so tests and non-config call sites don't need to take a
+	// dependency on internal/config just for the default). Configurable
+	// per city via [daemon].max_wakes_per_tick; see issue #772.
+	defaultMaxWakesPerTick = config.DefaultMaxWakesPerTick
 
 	// defaultTickBudget is the wall-clock budget per reconciler tick.
 	// Remaining work is deferred to the next tick.
@@ -199,6 +295,15 @@ const (
 	// slow to register their beads.
 	orphanGraceTicks = 3
 
+	// namedSuspendConfirmTicks is how many consecutive reconciler ticks a
+	// named session must be observed as suspend-drain-eligible (its configured
+	// spec absent from the desired set) before it is actually drained. A
+	// namedSessionSpecs enumeration collapse during boot can drop a spec for a
+	// single tick and restore it on the next; suspend-class drains are
+	// revertible, so a 1-tick confirmation buffer is safe and cheap and
+	// prevents spurious context-losing respawns (#3630).
+	namedSuspendConfirmTicks = 2
+
 	// defaultDrainTimeout is the default time allowed for graceful drain
 	// before force-stopping a session.
 	defaultDrainTimeout = 5 * time.Minute
@@ -207,9 +312,31 @@ const (
 	// after exceeding max wake failures.
 	defaultQuarantineDuration = 5 * time.Minute
 
+	// defaultRateLimitQuarantineDuration is how long to hold a session when
+	// the pane shows a provider rate-limit screen. This is intentionally
+	// longer than crash-loop quarantine because immediate retries cannot help;
+	// 30m limits noisy respawn cycles for common minute-scale provider limits
+	// while still re-detecting and re-quarantining during longer windows.
+	defaultRateLimitQuarantineDuration = 30 * time.Minute
+
 	// defaultMaxWakeAttempts is how many consecutive wake failures before
 	// quarantine.
 	defaultMaxWakeAttempts = 5
+
+	// rateLimitPeekLines is the amount of pane scrollback inspected before a
+	// rapid dead process is classified as a crash. Known provider rate-limit
+	// screens are short, so 120 lines favors robust detection over shaving a
+	// cheap pane read.
+	rateLimitPeekLines = 120
+
+	// crashEventPaneOutputMaxLines bounds the pane capture embedded in a
+	// session.crashed event's Message field. Classifiers need the full
+	// rateLimitPeekLines capture, but the event log does not: an unbounded
+	// zombie-detection message repeated every tick turned a detect-loop into
+	// a ~50MB events.jsonl bloat incident (#5355, ~6.6KB x 299 for one
+	// session alone). 24 lines (first 12 + last 12) is enough context to
+	// diagnose without embedding the whole pane.
+	crashEventPaneOutputMaxLines = 24
 
 	// churnProductivityThreshold is how long a session must run to be
 	// considered productive. Sessions that survive past stabilityThreshold

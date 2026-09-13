@@ -10,6 +10,7 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     # Check if we're being drained
@@ -18,21 +19,17 @@ while true; do
         exit 0
     fi
 
-    # Check for already-claimed work
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
-
-    if echo "$hooked" | grep -q "^ID:"; then
-        id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
+    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    if echo "$hooked" | grep -q "^gc-"; then
+        id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
         bd close "$id"
         continue
     fi
 
-    # Check for available work in ready queue
     ready=$(bd ready 2>/dev/null || true)
-
     if echo "$ready" | grep -q "^gc-"; then
         id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
-        gc agent claim "$GC_AGENT" "$id" 2>/dev/null || true
+        bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi
 

@@ -1,0 +1,1368 @@
+// Package contract owns canonical beads/Dolt config and connection resolution.
+package contract
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/fsys"
+	"gopkg.in/yaml.v3"
+)
+
+// EndpointOrigin describes who owns a scope's endpoint definition.
+type EndpointOrigin string
+
+// Canonical endpoint origin values.
+const (
+	EndpointOriginManagedCity   EndpointOrigin = "managed_city"
+	EndpointOriginCityCanonical EndpointOrigin = "city_canonical"
+	EndpointOriginInheritedCity EndpointOrigin = "inherited_city"
+	EndpointOriginExplicit      EndpointOrigin = "explicit"
+)
+
+// EndpointStatus records whether a canonical external endpoint has been validated.
+type EndpointStatus string
+
+// Canonical endpoint status values.
+const (
+	EndpointStatusVerified   EndpointStatus = "verified"
+	EndpointStatusUnverified EndpointStatus = "unverified"
+)
+
+// ConfigState is the canonical endpoint-bearing subset of .beads/config.yaml.
+type ConfigState struct {
+	IssuePrefix    string
+	EndpointOrigin EndpointOrigin
+	EndpointStatus EndpointStatus
+	DoltHost       string
+	DoltPort       string
+	DoltUser       string
+	// DoltMode is the beads dolt.mode value to write to config.yaml.
+	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical config.
+	// When empty, the existing dolt.mode value is preserved.
+	DoltMode string
+	Dolt     DoltConfig
+	// CustomTypes is a caller-supplied list of bd custom bead types to ensure
+	// in the canonical `types.custom` config key. When non-empty,
+	// EnsureCanonicalConfig unions these with any types already on disk
+	// (never narrowing — pre-existing entries are preserved) and writes the
+	// merged `types.custom: a,b,c` line. When empty, the existing
+	// `types.custom` value is left untouched (passthrough). The list itself is
+	// opaque to this package; cmd/gc sources it from doctor.RequiredCustomTypes.
+	//
+	// This is the Go-owned replacement for gc-beads-bd.sh's former
+	// ensure_types_custom_in_yaml shell function; bd reads this YAML key as a
+	// fallback when its DB config table is unset, so materializing it here
+	// avoids bd's per-command auto-migrate cost on populated stores.
+	CustomTypes []string
+}
+
+// DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
+type DoltConfig struct {
+	DisableEventFlush *bool
+}
+
+// DisableEventFlushEnabled returns whether managed Dolt launches should disable
+// Dolt's event-flush telemetry reporter. Missing config defaults to true.
+func (c DoltConfig) DisableEventFlushEnabled() bool {
+	if c.DisableEventFlush == nil {
+		return true
+	}
+	return *c.DisableEventFlush
+}
+
+// MetadataState is the canonical subset of .beads/metadata.json used by GC.
+//
+// It is the subset gc *implements*, not the whole file. Backend names a
+// backend this build registers (backend_bundle.go) and the dolt fields are the
+// only backend-specific ones gc reads. Every other key on disk — including the
+// connection fields of a backend served by the linked beads library rather
+// than by gc — is passed through untouched by EnsureCanonicalMetadata, which
+// canonicalises over the raw object. gc must never force an operator to
+// hand-convert away from a shape bd itself writes.
+type MetadataState struct {
+	Database     string `json:"database"`
+	Backend      string `json:"backend"`
+	DoltMode     string `json:"dolt_mode,omitempty"`
+	DoltDatabase string `json:"dolt_database,omitempty"`
+}
+
+// MetadataParseError reports a failure to parse or validate metadata.json.
+//
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E2
+// rejection in the metadata contract. Callers may use errors.As to
+// discriminate parse failures from I/O failures (which surface as plain OS
+// errors).
+type MetadataParseError struct {
+	// Path is the absolute path to the metadata.json file that failed.
+	Path string
+	// Reason is the verbatim rejection reason text (the part after `: `).
+	Reason string
+	// Err is the typed cause, when the rejection has one. The unknown-backend
+	// rejection carries *UnknownBackendError so a caller can ask whether this
+	// build simply does not register the backend — a fact worth acting on
+	// differently from malformed metadata — without matching on Reason.
+	Err error
+}
+
+func (e *MetadataParseError) Error() string {
+	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
+}
+
+// Unwrap exposes the typed cause for errors.Is and errors.As.
+func (e *MetadataParseError) Unwrap() error { return e.Err }
+
+var deprecatedMetadataKeys = []string{
+	"dolt_host",
+	"dolt_user",
+	"dolt_password",
+	"dolt_server_host",
+	"dolt_server_port",
+	"dolt_server_user",
+	"dolt_port",
+}
+
+// crossBackendKeysToScrub returns the on-disk metadata keys that should be
+// removed when canonicalising for the given backend.
+//
+// It scrubs only keys gc itself writes and a backend gc implements does not
+// read — today, dolt_mode on a doltlite scope. A key belonging to a backend gc
+// does not implement is left alone: it is the linked beads library's to read,
+// gc cannot tell an inert leftover from live configuration, and a scope bound
+// to such a backend never reaches this function at all.
+func crossBackendKeysToScrub(backend string) []string {
+	switch backend {
+	case "doltlite":
+		return []string{"dolt_mode"}
+	default:
+		return nil
+	}
+}
+
+var deprecatedConfigKeys = []string{
+	"dolt.password",
+	"dolt_port",
+	"dolt_server_port",
+}
+
+type configParseError struct {
+	path string
+	err  error
+}
+
+func (e *configParseError) Error() string {
+	return fmt.Sprintf("parse config %s: %v", e.path, e.err)
+}
+
+func (e *configParseError) Unwrap() error {
+	return e.err
+}
+
+// ReadIssuePrefix reads the canonical issue prefix from config when present.
+func ReadIssuePrefix(fs fsys.FS, path string) (string, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		if prefix, ok := scanConfigLineValue(fs, path, "issue_prefix:", "issue-prefix:"); ok {
+			return prefix, true, nil
+		}
+		return "", false, err
+	}
+	if prefix, ok := configStringValue(mappingRoot(doc), "issue_prefix", "issue-prefix"); ok {
+		return prefix, true, nil
+	}
+	return "", false, nil
+}
+
+// ReadAutoStartDisabled reports whether dolt.auto-start is disabled in config.
+func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if value, ok := scanConfigLineValue(fs, path, "dolt.auto-start:"); ok {
+			return value == "false", nil
+		}
+		return false, err
+	}
+	if value, ok := configStringValue(mappingRoot(doc), "dolt.auto-start"); ok {
+		return value == "false", nil
+	}
+	return false, nil
+}
+
+// ReadExportAuto returns the configured value of export.auto along with a
+// presence indicator. ok=false means the key is absent from the config OR
+// the value is not a recognized boolean (the upstream bd default is true).
+// Used by gc to gate cleanup of stale .beads/issues.jsonl exports: when
+// export.auto is explicitly false, the JSONL is a stale artifact that bd's
+// auto-import-on-write path (sa-41j3kp) would otherwise reload on every
+// write, stalling bd create for minutes on large datasets.
+//
+// Because this gates destructive cleanup, parsing is strict: only the
+// boolean literals strconv.ParseBool accepts count as present. A garbage
+// value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
+// to other gc-managed signals rather than mis-treating the scope as
+// canonical.
+func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
+			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+				return parsed, true, nil
+			}
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
+		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+			return parsed, true, nil
+		}
+		return false, false, nil
+	}
+	return false, false, nil
+}
+
+// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
+func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DoltConfig{}, false, nil
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			if cfg, ok := readDoltConfigFromData(data); ok {
+				return cfg, true, nil
+			}
+		}
+		return DoltConfig{}, false, err
+	}
+	cfg := readDoltConfigFromRoot(mappingRoot(doc))
+	return cfg, cfg.hasValues(), nil
+}
+
+// ReadEndpointStatus reads gc.endpoint_status when present.
+func ReadEndpointStatus(fs fsys.FS, path string) (EndpointStatus, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			if value, ok := scanConfigLineValueFromData(data, "gc.endpoint_status:"); ok {
+				status := EndpointStatus(value)
+				switch status {
+				case EndpointStatusVerified, EndpointStatusUnverified:
+					return status, true, nil
+				}
+				return "", false, nil
+			}
+		}
+		return "", false, err
+	}
+	if value, ok := configStringValue(mappingRoot(doc), "gc.endpoint_status"); ok {
+		status := EndpointStatus(value)
+		switch status {
+		case EndpointStatusVerified, EndpointStatusUnverified:
+			return status, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// ReadConfigState reads canonical endpoint config from .beads/config.yaml.
+func ReadConfigState(fs fsys.FS, path string) (ConfigState, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ConfigState{}, false, nil
+		}
+		data, readErr := fs.ReadFile(path)
+		if readErr != nil {
+			return ConfigState{}, false, err
+		}
+		return readConfigStateFromData(data), true, nil
+	}
+	return readConfigStateFromRoot(mappingRoot(doc)), true, nil
+}
+
+// ScopeHasEndpointAuthority reports whether a scope config carries endpoint authority.
+func ScopeHasEndpointAuthority(fs fsys.FS, scopeRoot string) bool {
+	cfg, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return false
+	}
+	return ConfigHasEndpointAuthority(cfg)
+}
+
+// ReadDoltDatabase reads the pinned dolt_database from metadata.json.
+func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["dolt_database"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+// ReadDoltMode reports the dolt_mode recorded in metadata.json at path, if any.
+//
+// It is the tolerant reader ReadDoltDatabase is, for the same reason: a caller
+// that is about to REWRITE this file needs to know what it is replacing even
+// when the file would not survive full validation, and a rejection here would
+// hide the change rather than report it. Malformed JSON and an absent file both
+// report "no recorded mode" rather than an error.
+func ReadDoltMode(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["dolt_mode"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
+// LoadMetadataState parses .beads/metadata.json at path and returns the
+// canonical MetadataState if the file exists and validates.
+//
+// Returns (zero, false, nil) when the file does not exist — callers decide
+// whether absence is an error in their context (mirrors ReadIssuePrefix and
+// ReadDoltDatabase). Returns a non-nil error for read failures other than
+// ENOENT and for any of the E1–E2 rejection cases. Validation failures are
+// wrapped in *MetadataParseError; callers may use errors.As to discriminate.
+//
+// Validation order is deterministic: the operator always sees the same
+// top-most message when several things are wrong. Order is JSON parse (E1) →
+// unknown backend (E2), and E2 is now the last rung: the rejections that once
+// followed it all validated a connection shape for a backend gc no longer
+// implements. Both remaining rungs are pinned by
+// TestLoadMetadataStateRejectionOrderIsPinned.
+//
+// E2 asks the compiled backend-name registry (backend_bundle.go) rather than a
+// literal allowlist, so its refusal enumerates what this build actually
+// registers. An empty Backend is permitted — it is a registered name — and
+// downstream consumers that need a backend must check state.Backend != ""
+// themselves.
+func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MetadataState{}, false, nil
+		}
+		return MetadataState{}, false, err
+	}
+
+	abs, absErr := filepath.Abs(path)
+	if absErr != nil {
+		abs = path
+	}
+
+	var state MetadataState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("invalid metadata.json: %v", err),
+		}
+	}
+
+	if err := RecognizeBackend(state.Backend); err != nil {
+		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
+	}
+
+	return state, true, nil
+}
+
+// EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
+func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, error) {
+	missing := false
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if isConfigParseError(err) {
+			return ensureCanonicalConfigFallback(fs, path, state)
+		}
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+		missing = true
+		doc = newConfigDoc()
+	}
+
+	root := mappingRoot(doc)
+	existingPrefix, _ := configStringValue(root, "issue_prefix", "issue-prefix")
+	prefix := strings.TrimSpace(state.IssuePrefix)
+	if prefix == "" {
+		prefix = existingPrefix
+	}
+
+	changed := missing
+	if prefix != "" {
+		changed = setString(root, "issue_prefix", prefix) || changed
+		changed = setString(root, "issue-prefix", prefix) || changed
+	}
+	changed = setBool(root, "dolt.auto-start", false) || changed
+	doltConfig := readDoltConfigFromRoot(root)
+	if state.Dolt.DisableEventFlush != nil {
+		doltConfig.DisableEventFlush = state.Dolt.DisableEventFlush
+	}
+	if doltConfig.DisableEventFlush == nil {
+		enabled := true
+		doltConfig.DisableEventFlush = &enabled
+	}
+	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
+	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
+	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
+	// triggers a re-import cycle that stalls bd writes for minutes on large
+	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
+	// so bake it into the on-disk config too.
+	changed = setBool(root, "export.auto", false) || changed
+	// Managed scopes back up through mol-dog-backup; bd's PersistentPostRun
+	// auto-backup (the "backup_export" Dolt remote) is redundant and, when its
+	// remote state breaks, stuck-loops and saturates the commit path — the
+	// root cause of the 2026-06-08 town-wide wedge (ga-0eq). BD_BACKUP_ENABLED
+	// env-var suppression only covers gc's own calls, so bake it in too.
+	changed = setBool(root, "backup.enabled", false) || changed
+	if state.EndpointOrigin != "" {
+		changed = setString(root, "gc.endpoint_origin", string(state.EndpointOrigin)) || changed
+	}
+	if state.EndpointStatus != "" {
+		changed = setString(root, "gc.endpoint_status", string(state.EndpointStatus)) || changed
+	}
+
+	host := strings.TrimSpace(state.DoltHost)
+	port := strings.TrimSpace(state.DoltPort)
+	user := strings.TrimSpace(state.DoltUser)
+	if host != "" {
+		changed = setString(root, "dolt.host", host) || changed
+	} else {
+		changed = deleteKeys(root, "dolt.host") || changed
+	}
+	if port != "" {
+		changed = setPort(root, "dolt.port", port) || changed
+	} else {
+		changed = deleteKeys(root, "dolt.port") || changed
+	}
+	if user != "" {
+		changed = setString(root, "dolt.user", user) || changed
+	} else {
+		changed = deleteKeys(root, "dolt.user") || changed
+	}
+
+	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
+		changed = setString(root, "dolt.mode", mode) || changed
+	}
+
+	if len(state.CustomTypes) > 0 {
+		// Union with what's already on disk, never narrowing — pack/operator
+		// custom types beyond the GC baseline must survive. `types.custom` is a
+		// flat dotted top-level key (not nested `types: {custom:}`); this reads
+		// and writes that same flat form the shell and bd emit.
+		existing, _ := configStringValue(root, "types.custom")
+		merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes)
+		if len(merged) > 0 {
+			changed = setString(root, "types.custom", strings.Join(merged, ",")) || changed
+		}
+	}
+
+	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
+	if !changed {
+		return false, nil
+	}
+
+	encoded, err := marshalConfigDoc(doc)
+	if err != nil {
+		return false, err
+	}
+	return true, fs.WriteFile(path, encoded, 0o644)
+}
+
+// EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
+func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool, error) {
+	meta := map[string]any{}
+	data, err := fs.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &meta); err != nil {
+			meta = map[string]any{}
+		}
+	case os.IsNotExist(err):
+	case err != nil:
+		return false, err
+	}
+
+	changed := false
+	defaults := map[string]string{
+		"database":      strings.TrimSpace(state.Database),
+		"backend":       strings.TrimSpace(state.Backend),
+		"dolt_mode":     strings.TrimSpace(state.DoltMode),
+		"dolt_database": strings.TrimSpace(state.DoltDatabase),
+	}
+	for key, want := range defaults {
+		if want == "" {
+			continue
+		}
+		if trimmedString(meta[key]) != want {
+			meta[key] = want
+			changed = true
+		}
+	}
+	for _, key := range deprecatedMetadataKeys {
+		if _, ok := meta[key]; ok {
+			delete(meta, key)
+			changed = true
+		}
+	}
+	for _, key := range crossBackendKeysToScrub(strings.TrimSpace(state.Backend)) {
+		if _, ok := meta[key]; ok {
+			delete(meta, key)
+			changed = true
+		}
+	}
+
+	scopeRoot := filepath.Dir(filepath.Dir(filepath.Clean(path)))
+	if projectID, ok, err := ReadProjectIdentity(fs, scopeRoot); err != nil {
+		return false, err
+	} else if ok && projectID != "" && trimmedString(meta["project_id"]) != projectID {
+		meta["project_id"] = projectID
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+
+	encoded, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	encoded = append(encoded, '\n')
+	return true, fs.WriteFile(path, encoded, 0o644)
+}
+
+func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+
+	repairedLines, repaired := repairMalformedConfigLines(strings.Split(string(data), "\n"))
+	if repaired {
+		data = []byte(strings.Join(repairedLines, "\n"))
+	}
+
+	prefix := strings.TrimSpace(state.IssuePrefix)
+	if prefix == "" {
+		if existing, ok := scanConfigLineValueFromData(data, "issue_prefix:", "issue-prefix:"); ok {
+			prefix = existing
+		}
+	}
+
+	replacements := map[string]string{
+		"dolt.auto-start": "dolt.auto-start: false",
+		"export.auto":     "export.auto: false",
+		"backup.enabled":  "backup.enabled: false",
+	}
+	if prefix != "" {
+		replacements["issue_prefix"] = "issue_prefix: " + prefix
+		replacements["issue-prefix"] = "issue-prefix: " + prefix
+	}
+	if state.EndpointOrigin != "" {
+		replacements["gc.endpoint_origin"] = "gc.endpoint_origin: " + string(state.EndpointOrigin)
+	}
+	if state.EndpointStatus != "" {
+		replacements["gc.endpoint_status"] = "gc.endpoint_status: " + string(state.EndpointStatus)
+	}
+
+	host := strings.TrimSpace(state.DoltHost)
+	port := strings.TrimSpace(state.DoltPort)
+	user := strings.TrimSpace(state.DoltUser)
+	deletions := map[string]struct{}{
+		"dolt.password":            {},
+		"dolt.disable-event-flush": {},
+		"dolt.disable_event_flush": {},
+		"dolt_port":                {},
+		"dolt_server_port":         {},
+	}
+	if host != "" {
+		replacements["dolt.host"] = "dolt.host: " + host
+	} else {
+		deletions["dolt.host"] = struct{}{}
+	}
+	if port != "" {
+		replacements["dolt.port"] = "dolt.port: " + port
+	} else {
+		deletions["dolt.port"] = struct{}{}
+	}
+	if user != "" {
+		replacements["dolt.user"] = "dolt.user: " + user
+	} else {
+		deletions["dolt.user"] = struct{}{}
+	}
+	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
+		replacements["dolt.mode"] = "dolt.mode: " + mode
+	}
+	if len(state.CustomTypes) > 0 {
+		// Same never-narrow union as the main path, but sourced from the raw
+		// (post-repair) bytes: bd init emits a glued `sync.remote: "…"types.custom: …`
+		// line that routes here, and the shell's ensure_types_custom_in_yaml
+		// unioned regardless of YAML validity — so the fallback must too.
+		existing, _ := scanConfigLineValueFromData(data, "types.custom:")
+		if merged := MergeCustomTypes(parseCustomTypesValue(existing), state.CustomTypes); len(merged) > 0 {
+			replacements["types.custom"] = "types.custom: " + strings.Join(merged, ",")
+		}
+	}
+	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
+
+	lines := strings.Split(string(data), "\n")
+	out := make([]string, 0, len(lines)+len(replacements))
+	seen := make(map[string]bool, len(replacements))
+	changed := repaired
+
+	lastTopLevelIndex := lastTopLevelKeyIndex(lines)
+
+	for i, line := range lines {
+		key, _, ok := topLevelConfigLine(line)
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		if _, drop := deletions[key]; drop {
+			changed = true
+			continue
+		}
+		want, manage := replacements[key]
+		if !manage {
+			// When fallback rewrites malformed input, keep YAML's
+			// last-write-wins semantics for duplicate top-level keys.
+			if key != "" && i != lastTopLevelIndex[key] {
+				changed = true
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+		if seen[key] {
+			changed = true
+			continue
+		}
+		seen[key] = true
+		if strings.TrimSpace(line) != want {
+			out = append(out, want)
+			changed = true
+			continue
+		}
+		out = append(out, line)
+	}
+
+	orderedKeys := []string{
+		"issue_prefix",
+		"issue-prefix",
+		"dolt.auto-start",
+		"export.auto",
+		"backup.enabled",
+		"gc.endpoint_origin",
+		"gc.endpoint_status",
+		"dolt.host",
+		"dolt.port",
+		"dolt.user",
+		"dolt.mode",
+		"types.custom",
+	}
+	for _, key := range orderedKeys {
+		want, ok := replacements[key]
+		if !ok || seen[key] {
+			continue
+		}
+		out = append(out, want)
+		changed = true
+	}
+	var doltChanged bool
+	out, doltChanged = ensureFallbackNestedDoltDisableEventFlush(out, disableEventFlush)
+	changed = doltChanged || changed
+
+	if !changed {
+		return false, nil
+	}
+	if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) != "" {
+		out = append(out, "")
+	}
+	return true, fs.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+}
+
+// parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
+// trimmed, unquoted, non-empty entries. A blank value yields nil.
+//
+// Quote stripping matters for the malformed-YAML fallback path, which scans
+// raw bytes rather than YAML-unquoted node values: a quoted `types.custom:
+// "alpha,beta"` line splits on the comma into `"alpha` and `beta"`, so each
+// entry must have its quote characters removed before comparison — otherwise
+// the union never matches the required set and re-appends corrupted duplicates.
+// Mirrors the deleted shell function's `gsub(/"/, "", t)`.
+func parseCustomTypesValue(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(strings.ReplaceAll(p, `"`, "")); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// MergeCustomTypes returns the union of current and required, current entries
+// first (preserving on-disk order), then any required entries not already
+// present. Empty/whitespace-only entries are dropped and duplicates removed.
+// Current-first ordering matches the shell's former merge, so re-running
+// against an unchanged set produces the identical value and setString
+// short-circuits (no mtime churn). Exported so higher layers (e.g. doctor)
+// share this one implementation rather than duplicating the union algorithm.
+func MergeCustomTypes(current, required []string) []string {
+	seen := make(map[string]bool, len(current)+len(required))
+	merged := make([]string, 0, len(current)+len(required))
+	add := func(list []string) {
+		for _, t := range list {
+			t = strings.TrimSpace(t)
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			merged = append(merged, t)
+		}
+	}
+	add(current)
+	add(required)
+	return merged
+}
+
+func isConfigParseError(err error) bool {
+	var target *configParseError
+	return errors.As(err, &target)
+}
+
+func newConfigDoc() *yaml.Node {
+	return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+}
+
+func readConfigDoc(fs fsys.FS, path string) (*yaml.Node, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return newConfigDoc(), nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, &configParseError{path: path, err: err}
+	}
+	if len(doc.Content) == 0 {
+		return newConfigDoc(), nil
+	}
+	if doc.Content[0].Kind != yaml.MappingNode {
+		return nil, &configParseError{path: path, err: fmt.Errorf("root must be a mapping")}
+	}
+	return &doc, nil
+}
+
+func marshalConfigDoc(doc *yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		_ = enc.Close()
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func mappingRoot(doc *yaml.Node) *yaml.Node {
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		return doc.Content[0]
+	}
+	return doc
+}
+
+func configStringValue(root *yaml.Node, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if node := findValue(root, key); node != nil {
+			if value := strings.TrimSpace(node.Value); value != "" {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+func configBoolValue(root *yaml.Node, keys ...string) (bool, bool) {
+	if value, ok := configStringValue(root, keys...); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func nestedConfigBoolValue(root *yaml.Node, section string, keys ...string) (bool, bool) {
+	sectionNode := findValue(root, section)
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		return false, false
+	}
+	return configBoolValue(sectionNode, keys...)
+}
+
+func scanConfigLineValue(fs fsys.FS, path string, prefixes ...string) (string, bool) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return scanConfigLineValueFromData(data, prefixes...)
+}
+
+func scanConfigLineValueFromData(data []byte, prefixes ...string) (string, bool) {
+	for _, line := range strings.Split(string(data), string(rune(10))) {
+		key, value, ok := topLevelConfigLine(line)
+		if !ok {
+			continue
+		}
+		candidate := key + ":"
+		for _, prefix := range prefixes {
+			if candidate == prefix && value != "" {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+func scanConfigBoolValueFromData(data []byte, prefixes ...string) (bool, bool) {
+	if raw, ok := scanConfigLineValueFromData(data, prefixes...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func scanNestedConfigBoolValueFromData(data []byte, section string, keys ...string) (bool, bool) {
+	if raw, ok := scanNestedConfigLineValueFromData(data, section, keys...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func scanNestedConfigLineValueFromData(data []byte, section string, keys ...string) (string, bool) {
+	inSection := false
+	for _, line := range strings.Split(string(data), string(rune(10))) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.TrimLeft(line, " \t") == line {
+			key, value, ok := topLevelConfigLine(line)
+			inSection = ok && key == section && value == ""
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		for _, want := range keys {
+			if key == want {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+func readConfigStateFromData(data []byte) ConfigState {
+	return ConfigState{
+		IssuePrefix:    scanConfigValueFromData(data, "issue_prefix:", "issue-prefix:"),
+		EndpointOrigin: endpointOriginValue(scanConfigValueFromData(data, "gc.endpoint_origin:")),
+		EndpointStatus: endpointStatusValue(scanConfigValueFromData(data, "gc.endpoint_status:")),
+		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
+		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
+		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
+		Dolt:           readDoltConfigFromDataOrEmpty(data),
+	}
+}
+
+func readConfigStateFromRoot(root *yaml.Node) ConfigState {
+	return ConfigState{
+		IssuePrefix:    configValue(root, "issue_prefix", "issue-prefix"),
+		EndpointOrigin: endpointOriginValue(configValue(root, "gc.endpoint_origin")),
+		EndpointStatus: endpointStatusValue(configValue(root, "gc.endpoint_status")),
+		DoltHost:       configValue(root, "dolt.host"),
+		DoltPort:       configValue(root, "dolt.port"),
+		DoltUser:       configValue(root, "dolt.user"),
+		Dolt:           readDoltConfigFromRoot(root),
+	}
+}
+
+func readDoltConfigFromRoot(root *yaml.Node) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := nestedConfigBoolValue(root, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
+	if value, ok := configBoolValue(root, "dolt.disable-event-flush", "dolt.disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func readDoltConfigFromData(data []byte) (DoltConfig, bool) {
+	cfg := readDoltConfigFromDataOrEmpty(data)
+	return cfg, cfg.hasValues()
+}
+
+func readDoltConfigFromDataOrEmpty(data []byte) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := scanNestedConfigBoolValueFromData(data, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
+	if value, ok := scanConfigBoolValueFromData(data, "dolt.disable-event-flush:", "dolt.disable_event_flush:"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func (c DoltConfig) hasValues() bool {
+	return c.DisableEventFlush != nil
+}
+
+func doltDisableEventFlushFallbackValue(data []byte, state ConfigState) bool {
+	if state.Dolt.DisableEventFlush != nil {
+		return *state.Dolt.DisableEventFlush
+	}
+	if cfg, ok := readDoltConfigFromData(data); ok && cfg.DisableEventFlush != nil {
+		return *cfg.DisableEventFlush
+	}
+	return true
+}
+
+func configValue(root *yaml.Node, keys ...string) string {
+	value, _ := configStringValue(root, keys...)
+	return value
+}
+
+func scanConfigValueFromData(data []byte, prefixes ...string) string {
+	value, _ := scanConfigLineValueFromData(data, prefixes...)
+	return value
+}
+
+func topLevelConfigLine(line string) (key, value string, ok bool) {
+	if strings.TrimSpace(line) == "" {
+		return "", "", false
+	}
+	if strings.TrimLeft(line, " 	") != line {
+		return "", "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "#") {
+		return "", "", false
+	}
+	key, value, ok = strings.Cut(trimmed, ":")
+	if !ok {
+		return "", "", false
+	}
+	return strings.TrimSpace(key), strings.TrimSpace(value), true
+}
+
+func ensureFallbackNestedDoltDisableEventFlush(lines []string, value bool) ([]string, bool) {
+	want := "  disable-event-flush: " + boolString(value)
+	sectionIndex := -1
+	for i, line := range lines {
+		key, _, ok := topLevelConfigLine(line)
+		if ok && key == "dolt" {
+			sectionIndex = i
+		}
+	}
+	if sectionIndex == -1 {
+		return append(lines, "dolt:", want), true
+	}
+
+	sectionEnd := len(lines)
+	for i := sectionIndex + 1; i < len(lines); i++ {
+		if _, _, ok := topLevelConfigLine(lines[i]); ok {
+			sectionEnd = i
+			break
+		}
+	}
+
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:sectionIndex]...)
+	changed := false
+	if strings.TrimSpace(lines[sectionIndex]) != "dolt:" {
+		out = append(out, "dolt:")
+		changed = true
+	} else {
+		out = append(out, lines[sectionIndex])
+	}
+
+	seen := false
+	for _, line := range lines[sectionIndex+1 : sectionEnd] {
+		key, ok := nestedConfigLineKey(line)
+		if ok && (key == "disable-event-flush" || key == "disable_event_flush") {
+			if seen {
+				changed = true
+				continue
+			}
+			seen = true
+			if line != want {
+				out = append(out, want)
+				changed = true
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !seen {
+		out = append(out, want)
+		changed = true
+	}
+	out = append(out, lines[sectionEnd:]...)
+	return out, changed
+}
+
+func nestedConfigLineKey(line string) (string, bool) {
+	if strings.TrimLeft(line, " \t") == line {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	key, _, ok := strings.Cut(trimmed, ":")
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(key), true
+}
+
+func endpointOriginValue(value string) EndpointOrigin {
+	origin := EndpointOrigin(strings.TrimSpace(value))
+	switch origin {
+	case EndpointOriginManagedCity, EndpointOriginCityCanonical, EndpointOriginInheritedCity, EndpointOriginExplicit:
+		return origin
+	default:
+		return ""
+	}
+}
+
+func endpointStatusValue(value string) EndpointStatus {
+	status := EndpointStatus(strings.TrimSpace(value))
+	switch status {
+	case EndpointStatusVerified, EndpointStatusUnverified:
+		return status
+	default:
+		return ""
+	}
+}
+
+func findValue(root *yaml.Node, key string) *yaml.Node {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			return root.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func setNestedBool(root *yaml.Node, section, key string, value bool) bool {
+	sectionNode := findValue(root, section)
+	changed := false
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+		changed = setMapping(root, section, sectionNode) || changed
+	}
+	return setBool(sectionNode, key, value) || changed
+}
+
+func setMapping(root *yaml.Node, key string, value *yaml.Node) bool {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false
+	}
+	out := make([]*yaml.Node, 0, len(root.Content))
+	seen := false
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			out = append(out, root.Content[i], root.Content[i+1])
+			continue
+		}
+		if seen {
+			changed = true
+			continue
+		}
+		seen = true
+		if root.Content[i+1] != value {
+			changed = true
+		}
+		out = append(out, root.Content[i], value)
+	}
+	if seen {
+		if changed {
+			root.Content = out
+		}
+		return changed
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		value,
+	)
+	return true
+}
+
+func setString(root *yaml.Node, key, value string) bool {
+	return setScalar(root, key, value, "!!str")
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func setBool(root *yaml.Node, key string, value bool) bool {
+	if value {
+		return setScalar(root, key, "true", "!!bool")
+	}
+	return setScalar(root, key, "false", "!!bool")
+}
+
+func setPort(root *yaml.Node, key, value string) bool {
+	if _, err := strconv.Atoi(value); err == nil {
+		return setScalar(root, key, value, "!!int")
+	}
+	return setScalar(root, key, value, "!!str")
+}
+
+func setScalar(root *yaml.Node, key, value, tag string) bool {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false
+	}
+	out := make([]*yaml.Node, 0, len(root.Content))
+	seen := false
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			out = append(out, root.Content[i], root.Content[i+1])
+			continue
+		}
+		if seen {
+			changed = true
+			continue
+		}
+		seen = true
+		current := root.Content[i+1]
+		if current.Kind != yaml.ScalarNode || current.Value != value || current.Tag != tag {
+			current = &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value}
+			changed = true
+		}
+		out = append(out, root.Content[i], current)
+	}
+	if seen {
+		if changed {
+			root.Content = out
+		}
+		return changed
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value},
+	)
+	return true
+}
+
+func deleteKeys(root *yaml.Node, keys ...string) bool {
+	if root == nil || root.Kind != yaml.MappingNode || len(keys) == 0 {
+		return false
+	}
+	set := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		set[key] = struct{}{}
+	}
+	out := make([]*yaml.Node, 0, len(root.Content))
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if _, ok := set[root.Content[i].Value]; ok {
+			changed = true
+			continue
+		}
+		out = append(out, root.Content[i], root.Content[i+1])
+	}
+	if changed {
+		root.Content = out
+	}
+	return changed
+}
+
+func trimmedString(value any) string {
+	trimmed := strings.TrimSpace(fmt.Sprint(value))
+	if trimmed == "<nil>" {
+		return ""
+	}
+	return trimmed
+}
+
+// repairMalformedConfigLines splits top-level config lines that have been
+// glued together by an upstream writer that forgot a trailing newline.
+// Returns the (possibly-expanded) line slice and a flag indicating whether
+// any line was split.
+//
+// Concretely this handles the ga-um7 reproducer: `bd init` against a git
+// repo can leave a line like
+//
+//	sync.remote: "<url>"types.custom: <value>
+//
+// which would otherwise trip the YAML parser and survive the line-based
+// fallback unchanged.
+func repairMalformedConfigLines(lines []string) ([]string, bool) {
+	out := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		parts := splitGluedConfigLine(line)
+		if len(parts) > 1 {
+			changed = true
+		}
+		out = append(out, parts...)
+	}
+	return out, changed
+}
+
+// splitGluedConfigLine recursively splits a top-level config line that
+// contains a quoted-string value immediately followed by another top-level
+// key. Returns the original line as a one-element slice when no split is
+// possible.
+func splitGluedConfigLine(line string) []string {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	if trimmedLeft != line || strings.HasPrefix(trimmedLeft, "#") {
+		return []string{line}
+	}
+	colon := strings.Index(line, ":")
+	if colon <= 0 {
+		return []string{line}
+	}
+	rest := line[colon+1:]
+	quoteStart := strings.Index(rest, `"`)
+	if quoteStart < 0 {
+		return []string{line}
+	}
+	quoteEnd := strings.Index(rest[quoteStart+1:], `"`)
+	if quoteEnd < 0 {
+		return []string{line}
+	}
+	afterQuote := quoteStart + 1 + quoteEnd + 1
+	tail := strings.TrimLeft(rest[afterQuote:], " \t")
+	if !looksLikeTopLevelKeyStart(tail) {
+		return []string{line}
+	}
+	head := line[:colon+1+afterQuote]
+	// The tail may itself glue another key; recurse so chains of
+	// missing-newline writes all get split apart.
+	return append([]string{head}, splitGluedConfigLine(tail)...)
+}
+
+// looksLikeTopLevelKeyStart reports whether s begins with a YAML-style
+// top-level key followed by a colon (e.g. `types.custom: value`).
+func looksLikeTopLevelKeyStart(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == ':' {
+			return i > 0
+		}
+		if !isYamlKeyRune(r) {
+			return false
+		}
+	}
+	return false
+}
+
+func isYamlKeyRune(r rune) bool {
+	// This is intentionally a narrow .beads/config.yaml repair heuristic,
+	// not a general YAML key parser.
+	switch {
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '.' || r == '-' || r == '_':
+		return true
+	default:
+		return false
+	}
+}
+
+// lastTopLevelKeyIndex returns a map from top-level key name to the index
+// of its final occurrence in lines. Used by the fallback writer to drop
+// earlier duplicates so YAML last-write-wins semantics survive a rewrite.
+func lastTopLevelKeyIndex(lines []string) map[string]int {
+	last := make(map[string]int, len(lines))
+	for i, line := range lines {
+		if key, _, ok := topLevelConfigLine(line); ok {
+			if key == "" {
+				continue
+			}
+			last[key] = i
+		}
+	}
+	return last
+}

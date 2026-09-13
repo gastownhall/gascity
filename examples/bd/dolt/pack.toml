@@ -1,0 +1,16 @@
+# Dolt — reusable Dolt database management pack.
+#
+# Provides lifecycle commands (status, start, restart, logs, sql, list, recover,
+# sync, rollback, cleanup, health) for the Dolt SQL server backing bead storage.
+#
+# Formula-backed orders route to this pack's local dog agent pool.
+#
+# Minimum dolt version: 2.1.0. This is the managed bd/Dolt compatibility
+# floor and preserves the original guard for the GC/writer deadlock fixed in
+# dolthub/dolt commit ccf7bde206 (PR #10876). The doctor check
+# (doctor/check-dolt) fails closed; mol-dog-backup preflight records the same
+# failure outcome, and the sync step checks it before running backup sync.
+
+[pack]
+name = "dolt"
+schema = 2

@@ -1,0 +1,1021 @@
+package packman
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+func TestSyncLockFromLockWalksTransitiveImports(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.2.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^2.0"
+`)
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 2 {
+		t.Fatalf("len(Packs) = %d, want 2", len(got.Packs))
+	}
+}
+
+// TestSyncLockWalksLocalPathSourceTransitiveImports is the regression for
+// #4523: a local path-source pack's own remote imports were never walked
+// into the reachable closure (walkImport returned immediately for any
+// non-remote source), so `gc import install` silently wrote no lock entry
+// for them, and loading the config later failed with "not installed" —
+// even though install had just reported success. The same pack imported
+// from a remote source recurses fine; only the local-path branch skipped
+// discovery entirely.
+func TestSyncLockWalksLocalPathSourceTransitiveImports(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^2.0"
+`)
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: localPack},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("len(Packs) = %d, want 1: %#v", len(got.Packs), got.Packs)
+	}
+	if _, ok := got.Packs["https://example.com/b.git"]; !ok {
+		t.Fatalf("missing transitive lock entry for local pack's remote import b: %#v", got.Packs)
+	}
+}
+
+// TestSyncLockWalksRelativeLocalPathSourceTransitiveImports is the regression
+// for the relative-source half of #4523: `gc import add` stores a non-git
+// local pack as a path relative to the city (e.g. "packs/local"), and
+// discovery must resolve that against the city root — not the process working
+// directory. Before this fix, walkImport read the source cwd-relative, so a
+// packman run from any cwd ≠ city silently found no pack.toml and wrote no
+// transitive lock entry. This test runs from a foreign cwd to pin that.
+func TestSyncLockWalksRelativeLocalPathSourceTransitiveImports(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	// Run from a working directory different from the city so a cwd-relative
+	// read of the source would fail to find the pack.
+	t.Chdir(t.TempDir())
+	stubCachedPackGit(t)
+
+	if err := os.MkdirAll(filepath.Join(city, "packs", "local"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "packs", "local", "pack.toml"), []byte(`
+[pack]
+name = "local"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^2.0"
+`), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: filepath.Join("packs", "local")},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("len(Packs) = %d, want 1: %#v", len(got.Packs), got.Packs)
+	}
+	if _, ok := got.Packs["https://example.com/b.git"]; !ok {
+		t.Fatalf("missing transitive lock entry for relative local pack's remote import b: %#v", got.Packs)
+	}
+}
+
+// TestSyncLockToleratesMissingLocalPathSourcePack is the regression for the
+// PR #4540 CI break this fix's own first landing caused: a local path
+// source that isn't materialized on disk (a doctor-fix in-flight rewrite, a
+// synthetic/placeholder import used by a test fixture, or a not-yet-created
+// pack directory) has no transitive imports to discover -- that's not a
+// hard error, it's the same "nothing to see yet" case a not-yet-resolved
+// remote source already gets. Before this, #4523's own fix turned every such
+// placeholder into `local pack "...": reading pack.toml: ... no such file or
+// directory`, breaking several existing tests and doctor-fix flows that
+// declare a local import without ever materializing it on disk.
+func TestSyncLockToleratesMissingLocalPathSourcePack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"local": {Source: filepath.Join(city, "does-not-exist")},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v, want no error for an unmaterialized local path source", err)
+	}
+	if len(got.Packs) != 0 {
+		t.Fatalf("Packs = %#v, want empty", got.Packs)
+	}
+}
+
+// TestSyncLockWithPolicyBlocksTransitiveInternalImport is the regression for the
+// transitive-import SSRF finding: a public top-level pack that passes the caller's
+// source fence can declare a nested internal/link-local/file import in its
+// pack.toml, and SyncLock resolves that closure. SyncLockWithPolicy must apply the
+// untrusted-source policy to every reachable source — including transitive ones —
+// so the nested internal import is rejected before any git/cache seam runs for it.
+func TestSyncLockWithPolicyBlocksTransitiveInternalImport(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	const internalSource = "http://169.254.169.254/b.git"
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.2.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			internalSource:              {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	// A public top-level pack whose pack.toml pulls an internal transitive import.
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "http://169.254.169.254/b.git"
+version = "^2.0"
+`)
+	stageCachedPack(t, internalSource, "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	direct := map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	}
+
+	// Without a policy the closure walks cleanly, so the block below is provably the
+	// policy's doing and not a broken graph.
+	if got, err := SyncLock(city, direct, InstallFromLock); err != nil {
+		t.Fatalf("SyncLock (no policy): %v", err)
+	} else if len(got.Packs) != 2 {
+		t.Fatalf("SyncLock (no policy) len(Packs) = %d, want 2", len(got.Packs))
+	}
+
+	// The policy fences internal hosts. The direct public source passes; the
+	// transitive internal import must be rejected.
+	var consulted []string
+	policy := func(source string) error {
+		consulted = append(consulted, source)
+		if strings.Contains(source, "169.254.169.254") {
+			return fmt.Errorf("blocked internal source %q", source)
+		}
+		return nil
+	}
+	_, err := SyncLockWithPolicy(city, direct, InstallFromLock, policy)
+	if err == nil {
+		t.Fatal("SyncLockWithPolicy allowed a transitive internal import; want rejection")
+	}
+	if !strings.Contains(err.Error(), "169.254.169.254") {
+		t.Fatalf("error = %v, want it to name the blocked internal host", err)
+	}
+	if !contains(consulted, internalSource) {
+		t.Fatalf("policy was not consulted for the transitive internal source; saw %v", consulted)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSyncLockHonorsTransitiveFalse(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.2.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+`)
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	transitive := false
+	got, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Transitive: &transitive},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 1 {
+		t.Fatalf("len(Packs) = %d, want 1", len(got.Packs))
+	}
+}
+
+func TestSyncLockExpandsRepeatedSourceWhenAnyImportIsTransitive(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	lock := &Lockfile{
+		Packs: map[string]LockedPack{
+			"https://example.com/shared.git": {Version: "1.0.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/inner.git":  {Version: "1.0.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCachedPack(t, "https://example.com/shared.git", "aaaa", `
+[pack]
+name = "shared"
+schema = 1
+
+[imports.inner]
+source = "https://example.com/inner.git"
+version = "^1.0"
+`)
+	stageCachedPack(t, "https://example.com/inner.git", "bbbb", `
+[pack]
+name = "inner"
+schema = 1
+`)
+
+	transitiveFalse := false
+	got, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/shared.git", Version: "^1.0", Transitive: &transitiveFalse},
+		"z": {Source: "https://example.com/shared.git", Version: "^1.0"},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 2 {
+		t.Fatalf("len(Packs) = %d, want 2", len(got.Packs))
+	}
+}
+
+func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			return "aaaa\trefs/tags/v1.0.0\n", nil
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "pack.toml"), []byte("[pack]\nname = \"a\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	}, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack, ok := got.Packs["https://example.com/a.git"]
+	if !ok {
+		t.Fatal("missing lock entry for a")
+	}
+	if pack.Version != "1.0.0" || pack.Commit != "aaaa" {
+		t.Fatalf("pack = %#v", pack)
+	}
+}
+
+func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
+			"https://example.com/b.git": {Version: "2.0.0", Commit: "bbbb"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var seen []string
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "pack.toml"), []byte("[pack]\nname = \"cached\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			seen = append(seen, args[len(args)-2])
+			return "", nil
+		case "checkout":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	lock, err := InstallLocked(city)
+	if err != nil {
+		t.Fatalf("InstallLocked: %v", err)
+	}
+	if len(lock.Packs) != 2 {
+		t.Fatalf("len(Packs) = %d, want 2", len(lock.Packs))
+	}
+	if len(seen) != 2 {
+		t.Fatalf("cloned %d repos, want 2", len(seen))
+	}
+}
+
+func TestReadCachedPackImportsUsesSubpath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	source := "file:///tmp/repo.git//packs/base"
+	commit := "abc123"
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	writeCachedPackCommit(t, path, commit)
+	if err := os.MkdirAll(filepath.Join(path, "packs", "base"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(subpath): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "packs", "base", "pack.toml"), []byte(`
+[pack]
+name = "base"
+schema = 1
+
+[imports.inner]
+source = "https://example.com/inner.git"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	imports, err := ReadCachedPackImports(source, commit)
+	if err != nil {
+		t.Fatalf("ReadCachedPackImports: %v", err)
+	}
+	if _, ok := imports["inner"]; !ok {
+		t.Fatalf("missing nested import from subpath pack: %#v", imports)
+	}
+}
+
+func TestReadCachedPackImportsRejectsMissingGitHead(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := "file:///tmp/repo.git//packs/base"
+	commit := "abc123"
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, "packs", "base"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(subpath): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "packs", "base", "pack.toml"), []byte("[pack]\nname = \"base\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	_, err = ReadCachedPackImports(source, commit)
+	if err == nil {
+		t.Fatal("ReadCachedPackImports succeeded for cache with missing .git/HEAD")
+	}
+	if !strings.Contains(err.Error(), "reading cached repo HEAD") {
+		t.Fatalf("error = %v, want cached repo HEAD failure", err)
+	}
+}
+
+func TestSyncLockConflictingPinnedVersionsError(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	_, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "sha:aaaa"},
+		"b": {Source: "https://example.com/a.git", Version: "sha:bbbb"},
+	}, InstallResolveIfNeeded)
+	if err == nil {
+		t.Fatal("expected conflicting pinned versions error")
+	}
+	if !strings.Contains(err.Error(), "incompatible pinned versions") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			return "aaaa\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "pack.toml"), []byte("[pack]\nname = \"a\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	lock, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: ">=1.0"},
+		"b": {Source: "https://example.com/a.git", Version: "<2.0"},
+	}, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack := lock.Packs["https://example.com/a.git"]
+	if pack.Version != "1.5.0" {
+		t.Fatalf("Version = %q, want %q", pack.Version, "1.5.0")
+	}
+}
+
+func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			return "cccc\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\n", nil
+		case "clone":
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "pack.toml"), []byte("[pack]\nname = \"shared\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	lock, err := SyncLockSelectiveUpgrade(city, map[string]config.Import{
+		"pack:shared":         {Source: "https://example.com/shared.git", Version: ">=1.0"},
+		"rig:frontend:shared": {Source: "https://example.com/shared.git", Version: "<2.0"},
+	}, map[string]struct{}{
+		"https://example.com/shared.git": {},
+	})
+	if err != nil {
+		t.Fatalf("SyncLockSelectiveUpgrade: %v", err)
+	}
+	pack := lock.Packs["https://example.com/shared.git"]
+	if pack.Version != "1.5.0" {
+		t.Fatalf("Version = %q, want %q", pack.Version, "1.5.0")
+	}
+}
+
+func TestSyncLockMergesDirectAndTransitiveConstraintsBeforeResolution(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/c.git": {Version: "1.5.0", Commit: "bbbb", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.c]
+source = "https://example.com/c.git"
+version = ">=2.0"
+`)
+	stageCachedPack(t, "https://example.com/c.git", "bbbb", `
+[pack]
+name = "c"
+schema = 1
+`)
+
+	_, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "https://example.com/a.git", Version: "^1.0"},
+		"c": {Source: "https://example.com/c.git", Version: "<2.0"},
+	}, InstallFromLock)
+	if err == nil {
+		t.Fatal("expected direct/transitive conflict")
+	}
+	if !strings.Contains(err.Error(), `source "https://example.com/c.git" has conflicting constraints`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSyncLockInstallUpgradeReconcilesCompatibleConstraintsAcrossScopes(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/shared.git":   {Version: "1.0.0", Commit: "aaaa", Fetched: time.Unix(10, 0).UTC()},
+			"https://example.com/consumer.git": {Version: "1.0.0", Commit: "dddd", Fetched: time.Unix(20, 0).UTC()},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	stageCachedPack(t, "https://example.com/shared.git", "aaaa", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/shared.git", "bbbb", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/shared.git", "cccc", `
+[pack]
+name = "shared"
+schema = 1
+`)
+	stageCachedPack(t, "https://example.com/consumer.git", "dddd", `
+[pack]
+name = "consumer"
+schema = 1
+
+[imports.shared]
+source = "https://example.com/shared.git"
+version = "<2.0"
+`)
+
+	stubCachedPackGit(t)
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			switch args[len(args)-1] {
+			case "https://example.com/shared.git":
+				return "cccc\trefs/tags/v2.0.0\nbbbb\trefs/tags/v1.5.0\naaaa\trefs/tags/v1.0.0\n", nil
+			case "https://example.com/consumer.git":
+				return "dddd\trefs/tags/v1.0.0\n", nil
+			default:
+				return "", nil
+			}
+		default:
+			return prev(dir, args...)
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	lock, err := SyncLock(city, map[string]config.Import{
+		"a_shared":   {Source: "https://example.com/shared.git", Version: ">=1.0"},
+		"z_consumer": {Source: "https://example.com/consumer.git", Version: "^1.0"},
+	}, InstallUpgrade)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+
+	pack := lock.Packs["https://example.com/shared.git"]
+	if pack.Version != "1.5.0" {
+		t.Fatalf("Version = %q, want %q", pack.Version, "1.5.0")
+	}
+}
+
+func TestSyncLockConvergesForDeepTransitiveChains(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	lock := &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  make(map[string]LockedPack),
+	}
+	for i := 0; i <= 10; i++ {
+		source := fmt.Sprintf("https://example.com/p%d.git", i)
+		commit := fmt.Sprintf("c%d", i)
+		lock.Packs[source] = LockedPack{
+			Version: "1.0.0",
+			Commit:  commit,
+			Fetched: time.Unix(int64(i+1), 0).UTC(),
+		}
+
+		packToml := "[pack]\nname = \"p\"\nschema = 1\n"
+		if i < 10 {
+			packToml += fmt.Sprintf("\n[imports.next]\nsource = %q\nversion = \"^1.0\"\n", fmt.Sprintf("https://example.com/p%d.git", i+1))
+		}
+		stageCachedPack(t, source, commit, packToml)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	got, err := SyncLock(city, map[string]config.Import{
+		"root": {Source: "https://example.com/p0.git", Version: "^1.0"},
+	}, InstallFromLock)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(got.Packs) != 11 {
+		t.Fatalf("len(Packs) = %d, want 11", len(got.Packs))
+	}
+}
+
+func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	cloneCount := 0
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "ls-remote":
+			return "aaaa\trefs/tags/v1.2.3\n", nil
+		case "clone":
+			cloneCount++
+			target := args[len(args)-1]
+			if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.MkdirAll(filepath.Join(target, "packs", "a"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.MkdirAll(filepath.Join(target, "packs", "b"), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "packs", "a", "pack.toml"), []byte("[pack]\nname = \"a\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(filepath.Join(target, "packs", "b", "pack.toml"), []byte("[pack]\nname = \"b\"\nschema = 1\n"), 0o644); err != nil {
+				return "", err
+			}
+			return "", nil
+		case "checkout":
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		case "rev-parse":
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		case "status":
+			return "", nil
+		default:
+			return "", nil
+		}
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	lock, err := SyncLock(city, map[string]config.Import{
+		"a": {Source: "file:///tmp/repo.git//packs/a", Version: "^1.2"},
+		"b": {Source: "file:///tmp/repo.git//packs/b", Version: "^1.2"},
+	}, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	if len(lock.Packs) != 2 {
+		t.Fatalf("len(Packs) = %d, want 2", len(lock.Packs))
+	}
+	if cloneCount != 1 {
+		t.Fatalf("cloneCount = %d, want 1 shared clone", cloneCount)
+	}
+	if lock.Packs["file:///tmp/repo.git//packs/a"].Commit != "aaaa" {
+		t.Fatalf("subpath a commit = %q, want aaaa", lock.Packs["file:///tmp/repo.git//packs/a"].Commit)
+	}
+	if lock.Packs["file:///tmp/repo.git//packs/b"].Commit != "aaaa" {
+		t.Fatalf("subpath b commit = %q, want aaaa", lock.Packs["file:///tmp/repo.git//packs/b"].Commit)
+	}
+}
+
+func TestEnsureBundledPacksCurrentRepairsStaleSyntheticCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("no bundled core source")
+	}
+	commit := strings.TrimPrefix(config.BundledPackImportVersion, "sha:")
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  map[string]LockedPack{source: {Version: "1.0.0", Commit: commit}},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	// Write a synthetic cache with a stale content hash, simulating a cache
+	// produced by a different binary version (the binary-upgrade skew case).
+	cacheDir, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	staleMarker := `.gc-bundled-pack-cache.toml`
+	stalePath := filepath.Join(cacheDir, staleMarker)
+	// schema must match the current marker schema: the point of this fixture is
+	// the CONTENT-HASH skew branch, and a stale schema would trip the earlier
+	// schema check instead, leaving the skew case unexercised.
+	staleData := `schema = 2
+repository = "https://github.com/gastownhall/gascity.git"
+commit = "` + commit + `"
+content_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+`
+	if err := os.WriteFile(stalePath, []byte(staleData), 0o644); err != nil {
+		t.Fatalf("WriteFile(stale marker): %v", err)
+	}
+	// Confirm the cache is stale before the repair.
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err == nil {
+		t.Fatal("expected stale cache to fail validation before repair")
+	}
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+
+	// After repair the cache must pass validation.
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("ValidateSyntheticRepo after repair: %v", err)
+	}
+
+	// An unrelated file makes the full integrity walk fail while leaving the
+	// binary/commit marker valid. The reload hot path must trust that marker and
+	// avoid re-materializing the entire shared cache.
+	sentinel := filepath.Join(cacheDir, "reload-fast-path-sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sentinel): %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err == nil {
+		t.Fatal("expected full validation to reject the unrelated sentinel")
+	}
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("marker fast path re-materialized the cache: %v", err)
+	}
+}
+
+func TestEnsureBundledPacksCurrentSkipsNonBundledPacks(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	stubCachedPackGit(t)
+
+	// Non-bundled pack in packs.lock — should not be cloned by
+	// EnsureBundledPacksCurrent.
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs: map[string]LockedPack{
+			"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var cloned []string
+	prev := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "clone" {
+			cloned = append(cloned, args[len(args)-2])
+		}
+		return prev("", args...)
+	}
+	t.Cleanup(func() { runGit = prev })
+	routeNetworkGitThroughRunGit(t)
+
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent: %v", err)
+	}
+	if len(cloned) != 0 {
+		t.Fatalf("cloned %d non-bundled repos, want 0", len(cloned))
+	}
+}
+
+func TestEnsureBundledPacksCurrentNoLockfile(t *testing.T) {
+	city := t.TempDir()
+	if err := EnsureBundledPacksCurrent(city); err != nil {
+		t.Fatalf("EnsureBundledPacksCurrent with no lockfile: %v", err)
+	}
+}
+
+func stageCachedPack(t *testing.T, source, commit, packToml string) {
+	t.Helper()
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeCachedPackCommit(t, path, commit)
+	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+}

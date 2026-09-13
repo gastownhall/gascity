@@ -3,7 +3,8 @@
 // helper pattern: a single script receives the operation name as its first
 // argument and communicates via stdin/stdout.
 //
-// See examples/session-scripts/README.md for the protocol specification.
+// See docs/reference/exec-session-provider.md for the protocol
+// specification and contrib/session-scripts/ for maintained scripts.
 package exec
 
 import (
@@ -25,6 +26,7 @@ type copyEntry struct {
 type startConfig struct {
 	WorkDir            string            `json:"work_dir,omitempty"`
 	Command            string            `json:"command,omitempty"`
+	Lifecycle          runtime.Lifecycle `json:"lifecycle,omitempty"`
 	Env                map[string]string `json:"env,omitempty"`
 	ProcessNames       []string          `json:"process_names,omitempty"`
 	Nudge              string            `json:"nudge,omitempty"`
@@ -48,6 +50,7 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 	sc := startConfig{
 		WorkDir:            cfg.WorkDir,
 		Command:            cfg.Command,
+		Lifecycle:          cfg.Lifecycle,
 		Env:                cfg.Env,
 		ProcessNames:       cfg.ProcessNames,
 		Nudge:              cfg.Nudge,

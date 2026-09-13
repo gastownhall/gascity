@@ -230,7 +230,11 @@ func TestUpdatePack(t *testing.T) {
 	}
 	mustGit(t, pushDir, "add", "-A")
 	mustGit(t, pushDir, "commit", "-m", "v2")
-	mustGit(t, pushDir, "push")
+	// Explicit refspec: a bare `git push` relies on push.default, which ambient
+	// user config commonly sets to "nothing" (refusing the push). Pushing HEAD
+	// to origin is deterministic regardless of push.default and of the default
+	// branch name (master/main), simulating upstream advancement reliably.
+	mustGit(t, pushDir, "push", "origin", "HEAD")
 
 	// Update cache.
 	if err := updatePack(cacheDir, ""); err != nil {
@@ -277,7 +281,10 @@ func TestUpdatePackWithBranchRef(t *testing.T) {
 	}
 	mustGit(t, pushDir, "add", "-A")
 	mustGit(t, pushDir, "commit", "-m", "v2")
-	mustGit(t, pushDir, "push")
+	// Explicit refspec: see TestUpdatePack — a bare `git push` depends on
+	// push.default, which ambient config may set to "nothing". Push HEAD to
+	// origin deterministically, independent of push.default and branch name.
+	mustGit(t, pushDir, "push", "origin", "HEAD")
 
 	// Update cache with explicit branch ref.
 	if err := updatePack(cacheDir, "main"); err != nil {
@@ -534,29 +541,34 @@ func TestFetchRemoteInclude(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// First fetch: clone.
-	cacheDir, err := fetchRemoteInclude(bare, "", cityRoot)
+	cacheName := includeCacheName(bare)
+	cacheDir := filepath.Join(cityRoot, ".gc", "cache", "includes", cacheName)
+	if err := clonePack(bare, cacheDir, ""); err != nil {
+		t.Fatalf("pre-clone cached include: %v", err)
+	}
+
+	resolvedDir, err := fetchRemoteInclude(bare, "", cityRoot)
 	if err != nil {
 		t.Fatalf("fetchRemoteInclude: %v", err)
 	}
 
 	// Verify pack.toml exists in the cache.
-	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(resolvedDir, "pack.toml")); err != nil {
 		t.Errorf("pack.toml not in cache: %v", err)
 	}
 
 	// Cache path should be under cache/includes/.
-	if !strings.Contains(cacheDir, filepath.Join(".gc", "cache", "includes")) {
-		t.Errorf("cacheDir = %q, want under cache/includes/", cacheDir)
+	if !strings.Contains(resolvedDir, filepath.Join(".gc", "cache", "includes")) {
+		t.Errorf("cacheDir = %q, want under cache/includes/", resolvedDir)
 	}
 
-	// Idempotent: second fetch succeeds (updates existing).
+	// Idempotent: second lookup returns the same cache path.
 	cacheDir2, err := fetchRemoteInclude(bare, "", cityRoot)
 	if err != nil {
 		t.Fatalf("second fetchRemoteInclude: %v", err)
 	}
-	if cacheDir2 != cacheDir {
-		t.Errorf("cache path changed: %q → %q", cacheDir, cacheDir2)
+	if cacheDir2 != resolvedDir {
+		t.Errorf("cache path changed: %q → %q", resolvedDir, cacheDir2)
 	}
 }
 
@@ -567,17 +579,39 @@ func TestFetchRemoteInclude_WithRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cacheDir, err := fetchRemoteInclude(bare, "v1.0.0", cityRoot)
+	cacheName := includeCacheName(bare)
+	cacheDir := filepath.Join(cityRoot, ".gc", "cache", "includes", cacheName)
+	if err := clonePack(bare, cacheDir, "v1.0.0"); err != nil {
+		t.Fatalf("pre-clone cached include: %v", err)
+	}
+
+	resolvedDir, err := fetchRemoteInclude(bare, "v1.0.0", cityRoot)
 	if err != nil {
 		t.Fatalf("fetchRemoteInclude: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(cacheDir, "pack.toml"))
+	data, err := os.ReadFile(filepath.Join(resolvedDir, "pack.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), `version = "v1.0.0"`) {
 		t.Errorf("expected tagged content, got: %s", data)
+	}
+}
+
+func TestFetchRemoteInclude_MissingCache(t *testing.T) {
+	bare := initBareRepo(t, "inc-missing")
+	cityRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityRoot, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fetchRemoteInclude(bare, "", cityRoot)
+	if err == nil {
+		t.Fatal("expected missing cache error")
+	}
+	if !strings.Contains(err.Error(), "not cached") {
+		t.Fatalf("error = %v, want not cached", err)
 	}
 }
 
@@ -619,7 +653,7 @@ name = "boss"
 		t.Fatal(err)
 	}
 
-	agents, _, _, _, _, _, _, err := loadPack(
+	agents, _, _, _, _, _, _, _, err := loadPack(
 		fsys.OSFS{},
 		filepath.Join(topoDir, "pack.toml"),
 		topoDir,
@@ -650,6 +684,12 @@ func TestExpandCityPacks_SkipsMissingRemoteSubpath(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cacheName := includeCacheName("file://" + bare)
+	cacheDir := filepath.Join(cityRoot, ".gc", "cache", "includes", cacheName)
+	if err := clonePack(bare, cacheDir, ""); err != nil {
+		t.Fatalf("pre-clone cached include: %v", err)
+	}
+
 	// Use file:// URL with //subpath syntax pointing to a non-existent subpath.
 	// This is a remote ref (isRemoteRef returns true) that resolves to a
 	// directory that doesn't contain the expected subpath.
@@ -662,7 +702,7 @@ func TestExpandCityPacks_SkipsMissingRemoteSubpath(t *testing.T) {
 		},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, cityRoot)
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, cityRoot)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks should skip missing remote subpath, got error: %v", err)
 	}

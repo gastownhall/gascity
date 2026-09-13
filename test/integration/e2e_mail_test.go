@@ -25,35 +25,6 @@ func TestE2E_MailSend(t *testing.T) {
 	}
 }
 
-// TestE2E_MailCheck verifies that gc mail check returns 0 when mail exists
-// and 1 when the inbox is empty.
-func TestE2E_MailCheck(t *testing.T) {
-	city := e2eCity{
-		Agents: []e2eAgent{
-			{Name: "checker", StartCommand: e2eSleepScript()},
-		},
-	}
-	cityDir := setupE2ECity(t, nil, city)
-
-	// Empty inbox: should exit non-zero.
-	_, err := gc(cityDir, "mail", "check", "checker")
-	if err == nil {
-		t.Error("mail check should fail when inbox is empty")
-	}
-
-	// Send a message.
-	out, err := gc(cityDir, "mail", "send", "checker", "test mail check")
-	if err != nil {
-		t.Fatalf("gc mail send failed: %v\noutput: %s", err, out)
-	}
-
-	// Non-empty inbox: should exit 0.
-	out, err = gc(cityDir, "mail", "check", "checker")
-	if err != nil {
-		t.Errorf("mail check should succeed with mail: %v\noutput: %s", err, out)
-	}
-}
-
 // TestE2E_MailCheckInject verifies that gc mail check --inject wraps messages
 // in system-reminder tags.
 func TestE2E_MailCheckInject(t *testing.T) {

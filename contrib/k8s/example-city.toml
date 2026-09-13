@@ -51,20 +51,3 @@ provider = "exec:gc-mail-mcp-agent-mail"
 # Default is 30s. Increase further for 100+ agents.
 # [daemon]
 # patrol_interval = "30s"
-
-[[agent]]
-name = "mayor"
-prompt_template = "prompts/mayor.md.tmpl"
-install_hooks = ["claude"]
-process_names = ["claude"]
-ready_prompt_prefix = "claude"
-nudge = "Check mail and hook status, then act accordingly."
-
-[[agent]]
-name = "coder"
-prompt_template = "prompts/coder.md.tmpl"
-install_hooks = ["claude"]
-process_names = ["claude"]
-ready_prompt_prefix = "claude"
-nudge = "Check your hook for work assignments."
-pool = 2

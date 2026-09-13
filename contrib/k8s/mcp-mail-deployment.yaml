@@ -28,10 +28,19 @@ spec:
       labels:
         app: mcp-mail
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: mcp-mail
         image: gc-mcp-mail:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
         ports:
         - containerPort: 8765
           name: http
@@ -59,3 +68,13 @@ spec:
           limits:
             cpu: "1"
             memory: 1Gi
+        volumeMounts:
+        - name: mail-data
+          mountPath: /var/lib/mcp-mail
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: mail-data
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}

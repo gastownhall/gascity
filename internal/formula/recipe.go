@@ -1,6 +1,10 @@
 package formula
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // Recipe is the output of formula compilation. It contains a flattened,
 // ordered list of steps with namespaced IDs and all dependency edges.
@@ -12,6 +16,10 @@ type Recipe struct {
 
 	// Description is the formula's description field.
 	Description string
+
+	// Metadata is formula-level metadata preserved for inspection APIs.
+	// It is not copied into bead metadata.
+	Metadata map[string]any
 
 	// Steps is the flattened, ordered step list. Steps[0] is always the
 	// root workflow bead. Subsequent entries are in creation order (parent
@@ -37,6 +45,13 @@ type Recipe struct {
 	// without materializing child steps. This is the default for
 	// vapor-phase formulas (patrol wisps).
 	RootOnly bool
+
+	// ContentHash is the SHA-256 hex digest of the source formula file.
+	// Propagated from Formula.ContentHash during compilation.
+	ContentHash string
+
+	// FormulaSource is the file path from which the formula was loaded.
+	FormulaSource string
 }
 
 // RecipeStep represents a single step in a compiled recipe.
@@ -105,6 +120,19 @@ func (r *Recipe) RootStep() *RecipeStep {
 		return nil
 	}
 	return &r.Steps[0]
+}
+
+// RecipeHasReadySurface reports whether instantiating recipe creates a root
+// bead that Ready queries can see and route directly.
+func RecipeHasReadySurface(recipe *Recipe) bool {
+	if recipe == nil {
+		return false
+	}
+	if recipe.RootOnly {
+		return true
+	}
+	root := recipe.RootStep()
+	return root != nil && root.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow
 }
 
 // StepByID returns the step with the given ID, or nil if not found.

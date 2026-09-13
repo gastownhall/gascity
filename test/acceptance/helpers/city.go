@@ -3,10 +3,12 @@ package acceptancehelpers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +31,7 @@ type City struct {
 // The city is NOT initialized — call Init() or InitFrom() next.
 func NewCity(t *testing.T, env *Env) *City {
 	t.Helper()
-	return newCityAt(t, env, t.TempDir())
+	return newCityAt(t, env, acceptanceTempDir(t))
 }
 
 // NewCityInRoot creates a city under the provided root directory.
@@ -43,8 +45,18 @@ func NewCityInRoot(t *testing.T, env *Env, root string) *City {
 func newCityAt(t *testing.T, env *Env, dir string) *City {
 	t.Helper()
 	cityDir := filepath.Join(dir, uniqueName())
+	return NewCityAt(t, env, cityDir)
+}
+
+// NewCityAt creates a city DSL handle rooted at an explicit directory.
+// The directory is created if needed. Callers own cleanup of the parent path.
+func NewCityAt(t *testing.T, env *Env, cityDir string) *City {
+	t.Helper()
 	if err := os.MkdirAll(cityDir, 0o755); err != nil {
 		t.Fatalf("acceptance: creating city dir: %v", err)
+	}
+	if err := EnsureClaudeProjectState(env, cityDir); err != nil {
+		t.Fatalf("acceptance: seeding Claude state for city %s: %v", cityDir, err)
 	}
 	return &City{t: t, Dir: cityDir, Env: env}
 }
@@ -62,7 +74,24 @@ func (c *City) Init(provider string) {
 		c.t.Fatalf("gc init failed: %v\n%s", err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+		c.cleanupRuntime()
+	})
+}
+
+// InitNoStart runs gc init without registering or starting the city.
+func (c *City) InitNoStart(provider string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness", "--no-start"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	args = append(args, c.Dir)
+	out, err := RunGC(c.Env, "", args...)
+	if err != nil {
+		c.t.Fatalf("gc init --no-start failed: %v\n%s", err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
 	})
 }
 
@@ -74,7 +103,19 @@ func (c *City) InitFrom(srcDir string) {
 		c.t.Fatalf("gc init --from %s failed: %v\n%s", srcDir, err, out)
 	}
 	c.t.Cleanup(func() {
-		RunGC(c.Env, c.Dir, "stop", c.Dir) //nolint:errcheck
+		c.cleanupRuntime()
+	})
+}
+
+// InitFromNoStart runs gc init --from without registering or starting the city.
+func (c *City) InitFromNoStart(srcDir string) {
+	c.t.Helper()
+	out, err := RunGC(c.Env, "", "init", "--from", srcDir, "--skip-provider-readiness", "--no-start", c.Dir)
+	if err != nil {
+		c.t.Fatalf("gc init --from %s --no-start failed: %v\n%s", srcDir, err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
 	})
 }
 
@@ -91,6 +132,15 @@ func (c *City) RigAdd(rigPath string, include string) {
 	if err != nil {
 		c.t.Fatalf("gc rig add failed: %v\n%s", err, out)
 	}
+	if err := EnsureClaudeProjectState(c.Env, rigPath); err != nil {
+		c.t.Fatalf("acceptance: seeding Claude state for rig %s: %v", rigPath, err)
+	}
+	// Rig temp dirs are often created with t.TempDir() after Init/InitFrom has
+	// already registered city cleanup. Registering another best-effort city
+	// cleanup here keeps the rig registration from outliving its temp dir.
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
+	})
 }
 
 // AppendToConfig appends raw TOML content to city.toml.
@@ -100,12 +150,77 @@ func (c *City) AppendToConfig(extra string) {
 	c.WriteConfig(existing + extra)
 }
 
+// AppendToPack appends raw TOML content to the city root pack.toml.
+func (c *City) AppendToPack(extra string) {
+	c.t.Helper()
+	packPath := filepath.Join(c.Dir, "pack.toml")
+	f, err := os.OpenFile(packPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		c.t.Fatalf("opening pack.toml: %v", err)
+	}
+	defer f.Close() //nolint:errcheck // test helper failure is already captured on write
+	if _, err := f.WriteString(extra); err != nil {
+		c.t.Fatalf("appending to pack.toml: %v", err)
+	}
+}
+
 // WriteConfig overwrites city.toml with the given content.
 func (c *City) WriteConfig(toml string) {
 	c.t.Helper()
 	if err := os.WriteFile(filepath.Join(c.Dir, "city.toml"), []byte(toml), 0o644); err != nil {
 		c.t.Fatalf("writing city.toml: %v", err)
 	}
+}
+
+// WriteV1AgentBlock appends a legacy [[agent]] block to the city root pack.toml.
+func (c *City) WriteV1AgentBlock(name string, fields ...string) {
+	c.t.Helper()
+	var b strings.Builder
+	b.WriteString("\n[[agent]]\n")
+	fmt.Fprintf(&b, "name = %q\n", name)
+	if !hasTOMLFieldKey(fields, "scope") {
+		b.WriteString("scope = \"city\"\n")
+	}
+	writeTOMLFields(&b, fields)
+
+	c.AppendToPack(b.String())
+}
+
+// WriteV2AgentDir writes a convention-discovered agent under the city root pack.
+func (c *City) WriteV2AgentDir(name string, fields ...string) {
+	c.t.Helper()
+	agentDir := filepath.Join(c.Dir, "agents", name)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		c.t.Fatalf("creating agents/%s: %v", name, err)
+	}
+
+	var b strings.Builder
+	if !hasTOMLFieldKey(fields, "scope") {
+		b.WriteString("scope = \"city\"\n")
+	}
+	writeTOMLFields(&b, fields)
+	if err := os.WriteFile(filepath.Join(agentDir, "agent.toml"), []byte(b.String()), 0o644); err != nil {
+		c.t.Fatalf("writing agents/%s/agent.toml: %v", name, err)
+	}
+
+	prompt := fmt.Sprintf("# %s\n\nYou are the %s test agent.\n", name, name)
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.template.md"), []byte(prompt), 0o644); err != nil {
+		c.t.Fatalf("writing agents/%s/prompt.template.md: %v", name, err)
+	}
+}
+
+// StartExpectingFatal runs gc start and returns its captured failure output.
+func (c *City) StartExpectingFatal(t *testing.T) string {
+	t.Helper()
+	out, err := c.GC("start", c.Dir)
+	if err == nil {
+		t.Fatalf("gc start succeeded; want fatal failure\n%s", out)
+	}
+	last := lastVisuallyDistinctLine(out)
+	if !fatalLinePrefixRE.MatchString(last) {
+		t.Fatalf("last visually distinct line = %q, want fatal prefix; full output:\n%s", last, out)
+	}
+	return out
 }
 
 // Stop runs gc stop.
@@ -140,6 +255,35 @@ func (c *City) Stop() {
 		_ = c.logFile.Close()
 		c.logFile = nil
 	}
+}
+
+func (c *City) cleanupRuntime() {
+	c.t.Helper()
+	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, "", "supervisor", "stop", "--wait"); err != nil {
+		c.t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+	}
+}
+
+func (c *City) cleanupScaffoldOnly() {
+	c.t.Helper()
+	if out, err := RunGC(c.Env, c.Dir, "stop", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
+	}
+	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
+		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)
+	}
+}
+
+// CleanupRuntime tears down supervisor-backed runtime state for manually initialized test cities.
+func (c *City) CleanupRuntime() {
+	c.t.Helper()
+	c.cleanupRuntime()
 }
 
 // AgentEnv reads an agent's environment by inspecting the session metadata.
@@ -186,6 +330,13 @@ func (c *City) GC(args ...string) (string, error) {
 	return RunGC(c.Env, c.Dir, args...)
 }
 
+// GCStdout runs a gc command and returns only stdout. Prefer this over GC
+// when parsing output positionally.
+func (c *City) GCStdout(args ...string) (string, error) {
+	stdout, _, err := RunGCStreams(c.Env, c.Dir, args...)
+	return stdout, err
+}
+
 func parseKeyValues(s string) map[string]string {
 	m := make(map[string]string)
 	for _, line := range strings.Split(s, "\n") {
@@ -197,12 +348,97 @@ func parseKeyValues(s string) map[string]string {
 	return m
 }
 
+var (
+	ansiEscapeRE      = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+	fatalLinePrefixRE = regexp.MustCompile(`^(FATAL:|gc-fatal:)`)
+)
+
+func hasTOMLFieldKey(fields []string, key string) bool {
+	for _, field := range fields {
+		k, _, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if ok && strings.TrimSpace(k) == key {
+			return true
+		}
+	}
+	return false
+}
+
+func writeTOMLFields(b *strings.Builder, fields []string) {
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		b.WriteString(field)
+		b.WriteByte('\n')
+	}
+}
+
+func lastVisuallyDistinctLine(out string) string {
+	var last string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(ansiEscapeRE.ReplaceAllString(line, ""))
+		if line != "" {
+			last = line
+		}
+	}
+	return last
+}
+
 func uniqueName() string {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
 		return "at-fallback"
 	}
 	return "at-" + hex.EncodeToString(b)
+}
+
+func acceptanceTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gc-acceptance-*")
+	if err != nil {
+		t.Fatalf("acceptance: creating temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		removeAllWithRetry(t, dir, 5*time.Second, 50*time.Millisecond)
+	})
+	return dir
+}
+
+// TempDir creates a retry-cleaned temp directory for acceptance test artifacts.
+func TempDir(t *testing.T) string {
+	t.Helper()
+	return acceptanceTempDir(t)
+}
+
+func removeAllWithRetry(t *testing.T, dir string, timeout, interval time.Duration) {
+	t.Helper()
+	if err := removeAllWithRetryFunc(dir, timeout, interval, os.RemoveAll); err != nil {
+		t.Fatalf("acceptance: removing temp dir %s: %v", dir, err)
+	}
+}
+
+func removeAllWithRetryFunc(dir string, timeout, interval time.Duration, remove func(string) error) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := remove(dir); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			lastErr = err
+		} else {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(interval)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("timed out")
+	}
+	return lastErr
 }
 
 // ExamplesDir returns the absolute path to the examples/ directory

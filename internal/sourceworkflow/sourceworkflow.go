@@ -1,0 +1,832 @@
+// Package sourceworkflow provides primitives for enforcing the "one live
+// graph workflow per source bead" invariant. It owns the singleton scanner
+// (ListLiveRoots), the cross-process launch lock (WithLock), the conflict
+// error type (ConflictError), and helpers for snapshotting / closing /
+// restoring workflow subtrees during force-replacement flows. Callers in
+// internal/sling and cmd/gc use this package to gate graph launches and
+// to drive the `gc workflow delete-source` / `reopen-source` recovery
+// commands.
+package sourceworkflow
+
+import (
+	"cmp"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/closeorder"
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
+)
+
+// ConflictError is returned when a graph workflow launch is blocked by one
+// or more already-live workflow roots for the same source bead. The CLI
+// maps this to exit code 3 and renders a `gc workflow delete-source`
+// cleanup hint; the API maps it to HTTP 409.
+type ConflictError struct {
+	SourceBeadID string
+	WorkflowIDs  []string
+}
+
+// SourceStoreRefMetadataKey is the bead metadata key recording which store
+// a workflow root's source bead lives in (e.g. "city:foo" or "rig:alpha").
+// Used by WorkflowMatchesSource to scope cross-store singleton checks.
+const SourceStoreRefMetadataKey = beadmeta.SourceStoreRefMetadataKey
+
+// WorkflowSubtreeClosedReason is stamped on workflow subtree force-closes so
+// strict stores that require a human-readable close reason accept the cleanup.
+const WorkflowSubtreeClosedReason = "source workflow cleanup: subtree force-closed by CloseWorkflowSubtree"
+
+// WorkflowSpecSidecarClosedReason is stamped on generated spec sidecars when
+// their owning workflow root has closed. These beads are topology hints, not
+// executable work, so leaving them open after the root closes makes them appear
+// as leaked work.
+const WorkflowSpecSidecarClosedReason = "workflow cleanup: generated spec sidecar closed with workflow root"
+
+// WorkflowSkippedCloseReason is the canonical close_reason stamped on
+// workflow-subtree beads when they are force-closed via the
+// gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
+// flows, or workflow-cleanup HTTP endpoints). Without an explicit reason
+// of >=20 chars, bd's validation.on-close=error rejects the close, the
+// bead stays open, and the cleanup is incomplete.
+//
+// Used in tandem with the gc.outcome=skipped metadata stamp (which
+// records the workflow-level outcome): close_reason satisfies the
+// validator; gc.outcome carries the semantic.
+const WorkflowSkippedCloseReason = "workflow cleanup: subtree bead force-closed via skip directive"
+
+// IsWorkflowRoot reports whether a bead is a source-workflow root. It must
+// stay in sync with sling.IsWorkflowAttachment: roots may be marked via the
+// legacy gc.kind=workflow label, via gc.formula_contract=graph.v2, or both.
+// Queries that only match one label miss graph.v2-only roots and allow
+// --force to spawn duplicates.
+func IsWorkflowRoot(b beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindWorkflow) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2)
+}
+
+func (e *ConflictError) Error() string {
+	if e == nil {
+		return "source workflow conflict"
+	}
+	if len(e.WorkflowIDs) == 0 {
+		return fmt.Sprintf("source bead %s already has a live workflow", e.SourceBeadID)
+	}
+	return fmt.Sprintf(
+		"source bead %s already has live workflow(s): %s",
+		e.SourceBeadID,
+		strings.Join(e.WorkflowIDs, ","),
+	)
+}
+
+// NormalizeSourceBeadID trims whitespace from a source bead ID so equality
+// checks don't fail on stray spaces from user-entered labels.
+func NormalizeSourceBeadID(sourceBeadID string) string {
+	return strings.TrimSpace(sourceBeadID)
+}
+
+// NormalizeSourceStoreRef trims whitespace from a store ref for comparison.
+func NormalizeSourceStoreRef(sourceStoreRef string) string {
+	return strings.TrimSpace(sourceStoreRef)
+}
+
+// GraphStoreRefPrefix tags a city's relocated graph binding in a store ref, the
+// way "city" and "rig" tag a scope root. It is not a scope kind — graph roots
+// carry scope metadata of their own — only a store-identity tag, so a singleton
+// scan that consults both the binding and the city work store never conflates
+// them. internal/api mints and round-trips the same spelling for the workflow
+// snapshot scan (workflowGraphStoreRefPrefix), and this is that constant: one
+// spelling, or the store_ref a conflict reports cannot be parsed back.
+const GraphStoreRefPrefix = "graph"
+
+// GraphStoreRef returns the source-workflow store ref for a city's relocated
+// graph binding. An unnamed city falls back to "graph:city" so the ref is never
+// the bare prefix, which would parse as a scope-less sentinel.
+func GraphStoreRef(cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName == "" {
+		cityName = "city"
+	}
+	return GraphStoreRefPrefix + ":" + cityName
+}
+
+// LockScopeForStoreRef returns the filesystem scope used for source-workflow
+// locks for a source bead's resident store ref.
+func LockScopeForStoreRef(cityPath, defaultStorePath, storeRef string, rigPath func(string) (string, bool)) string {
+	cityPath = strings.TrimSpace(cityPath)
+	defaultStorePath = strings.TrimSpace(defaultStorePath)
+	storeRef = strings.TrimSpace(storeRef)
+	if storeRef == "" {
+		switch {
+		case defaultStorePath != "":
+			return filepath.Clean(defaultStorePath)
+		case cityPath != "":
+			return filepath.Clean(cityPath)
+		default:
+			return ""
+		}
+	}
+	if cityPath == "" {
+		return filepath.Clean(storeRef)
+	}
+	switch {
+	case strings.HasPrefix(storeRef, "city:"):
+		return filepath.Clean(cityPath)
+	case strings.HasPrefix(storeRef, "rig:"):
+		rigName := strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+		if rigPath != nil {
+			if path, ok := rigPath(rigName); ok {
+				path = strings.TrimSpace(path)
+				if path != "" {
+					if !filepath.IsAbs(path) {
+						path = filepath.Join(cityPath, path)
+					}
+					return filepath.Clean(path)
+				}
+			}
+		}
+	}
+	return filepath.Clean(storeRef)
+}
+
+// WorkflowMatchesSource reports whether a workflow root belongs to the
+// given source bead and (optionally) a specific source store ref. Legacy
+// roots without SourceStoreRefMetadataKey are treated as belonging to the
+// store they physically live in (rootStoreRef).
+func WorkflowMatchesSource(root beads.Bead, sourceBeadID, sourceStoreRef, rootStoreRef string) bool {
+	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
+	if sourceBeadID == "" {
+		return false
+	}
+	if NormalizeSourceBeadID(root.Metadata[beadmeta.SourceBeadIDMetadataKey]) != sourceBeadID {
+		return false
+	}
+	sourceStoreRef = NormalizeSourceStoreRef(sourceStoreRef)
+	if sourceStoreRef == "" {
+		return true
+	}
+	rootSourceStoreRef := NormalizeSourceStoreRef(root.Metadata[SourceStoreRefMetadataKey])
+	if rootSourceStoreRef != "" {
+		return rootSourceStoreRef == sourceStoreRef
+	}
+	rootStoreRef = NormalizeSourceStoreRef(rootStoreRef)
+	if rootStoreRef == "" {
+		return false
+	}
+	return rootStoreRef == sourceStoreRef
+}
+
+// ListLiveRoots returns the live (not-closed) workflow roots in store that
+// belong to sourceBeadID, scoped to sourceStoreRef when set. The query
+// indexes on gc.source_bead_id and filters via IsWorkflowRoot so both
+// legacy gc.kind=workflow roots and graph.v2-only roots are visible.
+func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef string) ([]beads.Bead, error) {
+	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
+	if store == nil || sourceBeadID == "" {
+		return nil, nil
+	}
+	roots, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Metadata: map[string]string{
+			beadmeta.SourceBeadIDMetadataKey: sourceBeadID,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	roots = slices.DeleteFunc(roots, func(root beads.Bead) bool {
+		if !IsWorkflowRoot(root) {
+			return true
+		}
+		return !WorkflowMatchesSource(root, sourceBeadID, sourceStoreRef, rootStoreRef)
+	})
+	slices.SortFunc(roots, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return roots, nil
+}
+
+// BlockingWorkflowIDs extracts sorted root IDs from a list of blocking
+// workflows for rendering in ConflictError messages and cleanup hints.
+func BlockingWorkflowIDs(roots []beads.Bead) []string {
+	ids := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if root.ID == "" {
+			continue
+		}
+		ids = append(ids, root.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+var (
+	localLocksMu sync.Mutex
+	localLocks   = map[string]*localLock{}
+)
+
+const fileLockRetryInterval = 25 * time.Millisecond
+
+type localLock struct {
+	token chan struct{}
+	refs  int
+}
+
+// WithLock acquires a per-source-bead lock (in-process mutex + on-disk
+// flock) rooted at cityPath before invoking fn. Guarantees at-most-one
+// concurrent graph-workflow launch or recovery per (scopeRef, sourceBeadID)
+// across processes. Honors ctx cancellation for both mutex and flock waits.
+func WithLock(ctx context.Context, cityPath, scopeRef, sourceBeadID string, fn func() error) error {
+	sourceBeadID = NormalizeSourceBeadID(sourceBeadID)
+	if sourceBeadID == "" {
+		return fn()
+	}
+	lockPath, key, err := lockIdentity(cityPath, scopeRef, sourceBeadID)
+	if err != nil {
+		return err
+	}
+	mu := inProcessMutex(key)
+	defer releaseInProcessMutex(key, mu)
+	if err := mu.Lock(ctx); err != nil {
+		return err
+	}
+	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return fmt.Errorf("create source workflow lock dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open source workflow lock: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best-effort cleanup
+	if err := lockFile(ctx, f, sourceBeadID); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fn()
+}
+
+func inProcessMutex(key string) *localLock {
+	localLocksMu.Lock()
+	defer localLocksMu.Unlock()
+	mu := localLocks[key]
+	if mu == nil {
+		mu = newLocalLock()
+		localLocks[key] = mu
+	}
+	mu.refs++
+	return mu
+}
+
+func releaseInProcessMutex(key string, mu *localLock) {
+	localLocksMu.Lock()
+	defer localLocksMu.Unlock()
+	current := localLocks[key]
+	if current == nil || current != mu {
+		return
+	}
+	if current.refs > 0 {
+		current.refs--
+	}
+	if current.refs == 0 {
+		delete(localLocks, key)
+	}
+}
+
+func newLocalLock() *localLock {
+	lock := &localLock{token: make(chan struct{}, 1)}
+	lock.token <- struct{}{}
+	return lock
+}
+
+func (l *localLock) Lock(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.token:
+		return nil
+	}
+}
+
+func (l *localLock) Unlock() {
+	l.token <- struct{}{}
+}
+
+func lockFile(ctx context.Context, f *os.File, sourceBeadID string) error {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return fmt.Errorf("lock source workflow %q: %w", sourceBeadID, err)
+		}
+		timer := time.NewTimer(fileLockRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func lockIdentity(cityPath, scopeRef, sourceBeadID string) (lockPath, key string, _ error) {
+	cityPath, err := canonicalCityPath(cityPath)
+	if err != nil {
+		return "", "", err
+	}
+	scopeRef = canonicalScopeRef(scopeRef)
+	if scopeRef == "" {
+		scopeRef = "city"
+	}
+	hash := sha256.Sum256([]byte(scopeRef + "\x00" + sourceBeadID))
+	key = cityPath + "\x00" + scopeRef + "\x00" + sourceBeadID
+	lockPath = filepath.Join(
+		citylayout.RuntimeDataDir(cityPath),
+		"sling-source-locks",
+		hex.EncodeToString(hash[:])+".lock",
+	)
+	return lockPath, key, nil
+}
+
+func canonicalScopeRef(scopeRef string) string {
+	scopeRef = strings.TrimSpace(scopeRef)
+	if scopeRef == "" {
+		return ""
+	}
+	if isStoreScopeSentinel(scopeRef) {
+		return scopeRef
+	}
+	return pathutil.NormalizePathForCompare(scopeRef)
+}
+
+// isStoreScopeSentinel reports whether ref is a logical store reference such
+// as "rig:alpha" or "city:main" rather than a filesystem path.
+// LockScopeForStoreRef falls through to the literal ref when a rig name cannot
+// be resolved to a path; absolutizing that sentinel would make the derived
+// lock key and lock filename depend on the caller's working directory and
+// silently weaken mutual exclusion. A single-character scheme (a Windows drive
+// letter) is a path, not a sentinel.
+func isStoreScopeSentinel(ref string) bool {
+	i := strings.IndexByte(ref, ':')
+	if i < 2 {
+		return false
+	}
+	return !strings.ContainsAny(ref[:i], `/\`)
+}
+
+// ListWorkflowBeads returns the root and all descendant beads tagged with
+// gc.root_bead_id=rootID (closed included). Used by CloseWorkflowSubtree
+// and force-replacement snapshot/restore.
+func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
+	rootID = strings.TrimSpace(rootID)
+	if store == nil || rootID == "" {
+		return nil, nil
+	}
+	reader := beads.HandlesFor(store).Live
+	root, err := reader.Get(rootID)
+	if err != nil {
+		return nil, err
+	}
+	descendants, err := reader.List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: rootID,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	beadsByID := map[string]beads.Bead{
+		root.ID: root,
+	}
+	for _, bead := range descendants {
+		beadsByID[bead.ID] = bead
+	}
+	out := make([]beads.Bead, 0, len(beadsByID))
+	for _, bead := range beadsByID {
+		out = append(out, bead)
+	}
+	slices.SortFunc(out, func(a, b beads.Bead) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return out, nil
+}
+
+// CloseWorkflowSubtree closes the root and every open descendant of a
+// workflow, marking each gc.outcome=skipped. It closes descendants before the
+// root and honors in-batch "blocks" dependencies so strict stores can close
+// workflow step chains without rejecting blocked-before-blocker order. Returns
+// the count of newly closed beads.
+func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
+	return CloseWorkflowSubtreeAs(store, rootID, beadmeta.OutcomeSkipped, WorkflowSubtreeClosedReason, nil)
+}
+
+// CloseWorkflowSubtreeAs closes the root and every open descendant of a workflow
+// with gc.outcome=outcome and the given close_reason, using the same
+// descendant-before-root + blocker-first ordering as CloseWorkflowSubtree so a
+// strict store accepts the batch. When rootExtra is non-empty its entries are
+// stamped ONLY on the root's close (never smeared onto member beads, e.g. run
+// cancel's gc.cancel_requested intent) and the root is closed last, in its own
+// batch. On a store whose Tx commits atomically (beads.StoreSupportsAtomicTx),
+// that root metadata write and close share one transaction, so a failed close
+// persists NEITHER and the root never lingers open carrying a half-set marker.
+// On a non-atomic store the write falls back to a set-then-close batch that
+// durably records the marker, so the caller's returned error is a retryable
+// signal that completes the wind-down rather than losing the intent. Returns
+// the count of newly closed beads.
+func CloseWorkflowSubtreeAs(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string) (int, error) {
+	return CloseWorkflowSubtreeAsExcept(store, rootID, outcome, reason, rootExtra, nil)
+}
+
+// CloseWorkflowSubtreeAsExcept is CloseWorkflowSubtreeAs with an exclusion
+// predicate: any member for which exclude reports true is left untouched, even
+// when it is otherwise open. A nil predicate closes the whole subtree, matching
+// CloseWorkflowSubtreeAs.
+//
+// The exclusion exists for members that stay executable after the workflow
+// reaches a terminal state — the teardown tail, which by contract runs after
+// the root settles or is canceled (see molecule.TeardownTailExclusion). Callers
+// own the policy; this function only skips.
+func CloseWorkflowSubtreeAsExcept(store beads.Store, rootID, outcome, reason string, rootExtra map[string]string, exclude func(beads.Bead) bool) (int, error) {
+	ordered, err := orderedOpenWorkflowSubtree(store, rootID, exclude)
+	if err != nil {
+		return 0, err
+	}
+	if len(ordered) == 0 {
+		return 0, nil
+	}
+	base := map[string]string{
+		beadmeta.OutcomeMetadataKey: outcome,
+		"close_reason":              reason,
+	}
+	if len(rootExtra) == 0 {
+		return store.CloseAll(ordered, base)
+	}
+
+	rootID = strings.TrimSpace(rootID)
+	descendants := make([]string, 0, len(ordered))
+	rootOpen := false
+	for _, id := range ordered {
+		if id == rootID {
+			rootOpen = true
+			continue
+		}
+		descendants = append(descendants, id)
+	}
+	total := 0
+	if len(descendants) > 0 {
+		n, err := store.CloseAll(descendants, base)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	if rootOpen {
+		rootMeta := map[string]string{
+			beadmeta.OutcomeMetadataKey: outcome,
+			"close_reason":              reason,
+		}
+		for k, v := range rootExtra {
+			rootMeta[k] = v
+		}
+		n, err := closeRootWithMarker(store, rootID, rootMeta)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// closeRootWithMarker closes the workflow root and stamps its close-only metadata
+// (e.g. run cancel's gc.cancel_requested intent). On a store whose Tx commits
+// atomically it writes the metadata and closes the root in one transaction, so a
+// failed close rolls the marker back and the root never lingers open half-marked;
+// on a non-atomic store it falls back to CloseAll's set-then-close, which durably
+// records the marker so a retry can complete the wind-down. Returns 1 if the root
+// was newly closed, 0 if it was already closed — matching CloseAll's count of
+// newly closed beads.
+func closeRootWithMarker(store beads.Store, rootID string, rootMeta map[string]string) (int, error) {
+	if !beads.StoreSupportsAtomicTx(store) {
+		return store.CloseAll([]string{rootID}, rootMeta)
+	}
+	// Re-read as close to the write as possible and skip an already-closed root,
+	// so a concurrently finalized root is not re-stamped — the same guard CloseAll
+	// applies per id before it writes.
+	current, err := store.Get(rootID)
+	if err != nil {
+		return 0, err
+	}
+	if current.Status == "closed" {
+		return 0, nil
+	}
+	if err := store.Tx("gc: close workflow root "+rootID, func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch(rootID, rootMeta); err != nil {
+			return err
+		}
+		return tx.Close(rootID)
+	}); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+// orderedOpenWorkflowSubtree returns the open beads of the workflow rooted at
+// rootID (root included) ordered deepest-descendant-first and then blocker-first
+// via closeorder.Order, so a strict store accepts the close batch and the root
+// sorts last. Closed beads are excluded so an already-terminal member keeps its
+// recorded outcome. A non-nil exclude also drops any member it reports true
+// for, even though it is open.
+func orderedOpenWorkflowSubtree(store beads.Store, rootID string, exclude func(beads.Bead) bool) ([]string, error) {
+	matched, err := ListWorkflowBeads(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]beads.Bead, len(matched))
+	for _, bead := range matched {
+		byID[bead.ID] = bead
+	}
+	depthMemo := make(map[string]int, len(matched))
+	const visitingDepth = -1
+	var depth func(string) int
+	depth = func(id string) int {
+		if d, ok := depthMemo[id]; ok {
+			if d == visitingDepth {
+				return 0
+			}
+			return d
+		}
+		bead, ok := byID[id]
+		if !ok {
+			return 0
+		}
+		parentID := strings.TrimSpace(bead.ParentID)
+		if parentID == "" || parentID == id {
+			depthMemo[id] = 0
+			return 0
+		}
+		parent, ok := byID[parentID]
+		if !ok || parent.ID == "" {
+			depthMemo[id] = 0
+			return 0
+		}
+		depthMemo[id] = visitingDepth
+		d := depth(parentID) + 1
+		depthMemo[id] = d
+		return d
+	}
+	slices.SortFunc(matched, func(a, b beads.Bead) int {
+		if da, db := depth(a.ID), depth(b.ID); da != db {
+			return cmp.Compare(db, da)
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	ids := make([]string, 0, len(matched))
+	for _, bead := range matched {
+		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
+			continue
+		}
+		ids = append(ids, bead.ID)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return closeorder.Order(store, ids)
+}
+
+// CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
+// workflow root. It is safe to call after the root has already been closed.
+func CloseSpecSidecarsForRoot(store beads.Store, rootID, reason string) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return 0, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = WorkflowSpecSidecarClosedReason
+	}
+
+	matched, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		IncludeClosed: true,
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: rootID,
+		},
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing workflow spec sidecars for %s: %w", rootID, err)
+	}
+	ids := make([]string, 0, len(matched))
+	for _, bead := range matched {
+		if bead.ID == "" || bead.Status == "closed" || !IsGeneratedSpecSidecar(bead) {
+			continue
+		}
+		ids = append(ids, bead.ID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	slices.Sort(ids)
+	ordered, err := closeorder.Order(store, ids)
+	if err != nil {
+		return 0, fmt.Errorf("ordering workflow spec sidecars for %s: %w", rootID, err)
+	}
+	return store.CloseAll(ordered, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+		"close_reason":              reason,
+	})
+}
+
+// CloseSpecSidecarsForClosedRoots closes generated spec sidecars whose owning
+// workflow root is already closed. It repairs residues left by older workflow
+// finalizers and source-bead close hooks.
+func CloseSpecSidecarsForClosedRoots(store beads.Store, reason string) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	specs, err := generatedSpecSidecarCandidates(store)
+	if err != nil {
+		return 0, err
+	}
+	rootIDs := make(map[string]struct{})
+	for _, spec := range specs {
+		rootID := strings.TrimSpace(spec.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID == "" {
+			continue
+		}
+		root, err := store.Get(rootID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return 0, fmt.Errorf("loading workflow root %s for spec %s: %w", rootID, spec.ID, err)
+		}
+		if root.Status == "closed" && IsWorkflowRoot(root) {
+			rootIDs[rootID] = struct{}{}
+		}
+	}
+	if len(rootIDs) == 0 {
+		return 0, nil
+	}
+	orderedRoots := make([]string, 0, len(rootIDs))
+	for rootID := range rootIDs {
+		orderedRoots = append(orderedRoots, rootID)
+	}
+	slices.Sort(orderedRoots)
+
+	closed := 0
+	for _, rootID := range orderedRoots {
+		n, err := CloseSpecSidecarsForRoot(store, rootID, reason)
+		if err != nil {
+			return closed, err
+		}
+		closed += n
+	}
+	return closed, nil
+}
+
+func generatedSpecSidecarCandidates(store beads.Store) ([]beads.Bead, error) {
+	seen := map[string]struct{}{}
+	var out []beads.Bead
+	appendUnique := func(items []beads.Bead) {
+		for _, item := range items {
+			if item.ID == "" || item.Status == "closed" || !IsGeneratedSpecSidecar(item) {
+				continue
+			}
+			if _, ok := seen[item.ID]; ok {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			out = append(out, item)
+		}
+	}
+
+	typed, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Type:          "spec",
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing open spec sidecars by type: %w", err)
+	}
+	appendUnique(typed)
+
+	marked, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Metadata:      map[string]string{beadmeta.KindMetadataKey: beadmeta.KindSpec},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing open spec sidecars by metadata: %w", err)
+	}
+	appendUnique(marked)
+
+	return out, nil
+}
+
+// IsGeneratedSpecSidecar reports whether a bead is a generated workflow spec
+// sidecar rather than executable work.
+func IsGeneratedSpecSidecar(bead beads.Bead) bool {
+	return strings.EqualFold(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]), beadmeta.KindSpec) ||
+		strings.EqualFold(strings.TrimSpace(bead.Type), "spec")
+}
+
+// WorkflowBeadSnapshot captures the mutable fields of a workflow subtree
+// bead so force-replacement can restore them if the replacement's finalize
+// or post-finalize invariant check fails.
+type WorkflowBeadSnapshot struct {
+	ID            string
+	Status        string
+	Assignee      string
+	Outcome       string
+	FailureReason string
+	CloseReason   string
+}
+
+// SnapshotOpenWorkflowBeads records the status/assignee/outcome of every
+// open bead in a workflow subtree, used to roll back a force-replacement
+// on finalize failure.
+func SnapshotOpenWorkflowBeads(store beads.Store, rootID string) ([]WorkflowBeadSnapshot, error) {
+	matched, err := ListWorkflowBeads(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WorkflowBeadSnapshot, 0, len(matched))
+	for _, bead := range matched {
+		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		out = append(out, WorkflowBeadSnapshot{
+			ID:            bead.ID,
+			Status:        bead.Status,
+			Assignee:      bead.Assignee,
+			Outcome:       bead.Metadata[beadmeta.OutcomeMetadataKey],
+			FailureReason: bead.Metadata[beadmeta.FailureReasonMetadataKey],
+			CloseReason:   bead.Metadata["close_reason"],
+		})
+	}
+	return out, nil
+}
+
+// RestoreWorkflowBeads re-applies a prior WorkflowBeadSnapshot set.
+// Continues past individual failures and joins them into one error so the
+// caller sees every restoration problem at once.
+func RestoreWorkflowBeads(store beads.Store, snapshots []WorkflowBeadSnapshot) error {
+	var restoreErr error
+	for _, snapshot := range snapshots {
+		if strings.TrimSpace(snapshot.ID) == "" {
+			continue
+		}
+		status := snapshot.Status
+		assignee := snapshot.Assignee
+		if err := store.Update(snapshot.ID, beads.UpdateOpts{
+			Status:   &status,
+			Assignee: &assignee,
+		}); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s: %w", snapshot.ID, err))
+			continue
+		}
+		if err := store.SetMetadata(snapshot.ID, beadmeta.OutcomeMetadataKey, snapshot.Outcome); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s outcome: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, beadmeta.FailureReasonMetadataKey, snapshot.FailureReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s failure reason: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, "close_reason", snapshot.CloseReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s close reason: %w", snapshot.ID, err))
+		}
+	}
+	return restoreErr
+}
+
+func canonicalCityPath(cityPath string) (string, error) {
+	cleaned := filepath.Clean(strings.TrimSpace(cityPath))
+	if cleaned == "" || cleaned == "." {
+		return "", fmt.Errorf("source workflow lock requires city path")
+	}
+	return pathutil.NormalizePathForCompare(cleaned), nil
+}

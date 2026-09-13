@@ -52,6 +52,20 @@ func setupTerminatedHandler(t *testing.T, terminalReason string, extraMeta map[s
 	return handler, store, emitter
 }
 
+func TestRetryHandler_CarriesRigForward(t *testing.T) {
+	handler, store, _ := setupTerminatedHandler(t, TerminalStopped,
+		map[string]string{FieldRig: "gascity-prod"})
+
+	result, err := handler.RetryHandler(context.Background(), "source-1", "alice", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	meta, _ := store.GetMetadata(result.NewBeadID)
+	if meta[FieldRig] != "gascity-prod" {
+		t.Errorf("retry bead rig = %q, want %q (rig must carry forward)", meta[FieldRig], "gascity-prod")
+	}
+}
+
 func TestRetryHandler_Success(t *testing.T) {
 	handler, store, _ := setupTerminatedHandler(t, TerminalStopped, nil)
 
@@ -221,6 +235,44 @@ func TestRetryHandler_CopiesConfig(t *testing.T) {
 	}
 	if meta[VarPrefix+"extra_var"] != "extra_value" {
 		t.Errorf("var.extra_var = %q, want %q", meta[VarPrefix+"extra_var"], "extra_value")
+	}
+}
+
+// TestRetryHandler_CarriesTriggerForward is the regression guard for the
+// live trigger-config-loss drift: before RetryHandler delegated to
+// CreateHandler it silently dropped the trigger/trigger_condition fields, so
+// retrying a trigger-gated loop produced a non-trigger-gated loop that poured
+// its first wisp immediately. Delegation must carry the trigger config forward
+// AND honor CreateHandler's trigger entry gate (waiting_trigger, no first wisp).
+func TestRetryHandler_CarriesTriggerForward(t *testing.T) {
+	handler, store, _ := setupTerminatedHandler(t, TerminalStopped, map[string]string{
+		FieldTrigger:          TriggerEvent,
+		FieldTriggerCondition: "/path/to/trigger.sh",
+	})
+
+	result, err := handler.RetryHandler(context.Background(), "source-1", "alice", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	meta, _ := store.GetMetadata(result.NewBeadID)
+	if meta[FieldTrigger] != TriggerEvent {
+		t.Errorf("trigger = %q, want %q (trigger config must carry forward on retry)", meta[FieldTrigger], TriggerEvent)
+	}
+	if meta[FieldTriggerCondition] != "/path/to/trigger.sh" {
+		t.Errorf("trigger_condition = %q, want %q", meta[FieldTriggerCondition], "/path/to/trigger.sh")
+	}
+	// The trigger entry gate must defer the first pour: state waiting_trigger,
+	// iteration 0, no first wisp — exactly what CreateHandler does for a fresh
+	// trigger-gated loop.
+	if meta[FieldState] != StateWaitingTrigger {
+		t.Errorf("state = %q, want %q (trigger entry gate must be honored on retry)", meta[FieldState], StateWaitingTrigger)
+	}
+	if meta[FieldIteration] != "0" {
+		t.Errorf("iteration = %q, want %q", meta[FieldIteration], "0")
+	}
+	if result.FirstWispID != "" {
+		t.Errorf("FirstWispID = %q, want empty (trigger-gated loop defers first pour)", result.FirstWispID)
 	}
 }
 

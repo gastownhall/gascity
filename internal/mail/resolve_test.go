@@ -1,6 +1,8 @@
 package mail
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestResolveRecipientHuman(t *testing.T) {
 	got, err := ResolveRecipient("human", nil)

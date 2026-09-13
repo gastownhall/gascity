@@ -161,6 +161,105 @@ esac
 	}
 }
 
+func TestListAppliesSDKFilterAndStripsScriptLimit(t *testing.T) {
+	dir := t.TempDir()
+	outFile := filepath.Join(dir, "stdin.json")
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list) cat > "`+outFile+`"
+    echo '[{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"},{"seq":2,"type":"bead.created","ts":"2025-06-15T10:31:00Z","actor":"actor-a","subject":"gc-1"},{"seq":3,"type":"bead.created","ts":"2025-06-15T10:32:00Z","actor":"actor-a","subject":"gc-2"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+	until := time.Date(2025, 6, 15, 10, 31, 0, 0, time.UTC)
+
+	evts, err := p.List(events.Filter{Subject: "gc-1", Until: until, Limit: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("List returned %d events, want 1", len(evts))
+	}
+	if evts[0].Seq != 1 {
+		t.Errorf("Seq = %d, want 1", evts[0].Seq)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read filter: %v", err)
+	}
+	var f events.Filter
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("unmarshal filter: %v", err)
+	}
+	if f.Subject != "" {
+		t.Errorf("script filter Subject = %q, want empty legacy value", f.Subject)
+	}
+	if !f.Until.IsZero() {
+		t.Errorf("script filter Until = %v, want zero legacy value", f.Until)
+	}
+	if f.Limit != 0 {
+		t.Errorf("script filter Limit = %d, want 0", f.Limit)
+	}
+}
+
+func TestListUsesLegacyScriptFilterShape(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list)
+    input="$(cat)"
+    case "$input" in
+      *'"Subject"'*|*'"Until"'*|*'"Limit"'*)
+        echo "unknown filter key in $input" >&2
+        exit 1
+        ;;
+    esac
+    echo '[{"seq":1,"type":"bead.created","ts":"2025-06-15T10:30:00Z","actor":"actor-a","subject":"gc-1"},{"seq":2,"type":"bead.created","ts":"2025-06-15T10:31:00Z","actor":"actor-a","subject":"gc-2"}]'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	evts, err := p.List(events.Filter{Subject: "gc-1", Limit: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("List returned %d events, want 1", len(evts))
+	}
+	if evts[0].Subject != "gc-1" {
+		t.Fatalf("List returned subject %q, want gc-1", evts[0].Subject)
+	}
+}
+
+func TestListInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+case "$1" in
+  ensure-running) exit 2 ;;
+  list) cat > /dev/null
+    echo 'not-json'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script, os.Stderr)
+
+	_, err := p.List(events.Filter{})
+	if err == nil {
+		t.Fatal("List returned nil error, want unmarshal error")
+	}
+	if !strings.Contains(err.Error(), "unmarshal events") {
+		t.Fatalf("List error = %q, want unmarshal context", err.Error())
+	}
+}
+
 func TestLatestSeq(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -200,7 +299,7 @@ func TestWatch(t *testing.T) {
 	script := writeScript(t, dir, allOpsScript())
 	p := NewProvider(script, os.Stderr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	w, err := p.Watch(ctx, 0)
@@ -420,8 +519,10 @@ case "$op" in
     if [ "$last_lines" -gt 0 ]; then
       head -n "$last_lines" "$DATAFILE" | jq -c "select(.seq > $after_seq)"
     fi
-    # Poll for new events (up to 3 seconds for tests).
-    end=$(($(date +%s) + 3))
+    # Poll for new events. The window must outlive the conformance
+    # suite's watch deadlines; tests kill the subprocess on cleanup, so
+    # this only bounds runaway processes if cleanup never runs.
+    end=$(($(date +%s) + 60))
     while [ "$(date +%s)" -lt "$end" ]; do
       cur_lines=$(wc -l < "$DATAFILE" 2>/dev/null || echo 0)
       if [ "$cur_lines" -gt "$last_lines" ]; then

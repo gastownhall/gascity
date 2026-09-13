@@ -1,5 +1,8 @@
 version: "2"
 
+run:
+  modules-download-mode: readonly
+
 severity:
   default: error
 
@@ -13,9 +16,13 @@ formatters:
     - goimports
 
 linters:
-  # Default linters (errcheck, govet, ineffassign, staticcheck, unused)
-  # are always enabled. Add extras here.
+  # Keep govet explicit in configured lint. The changed-scope target bounds
+  # both this copy and the Go tool's vet to the same affected graph, preserving
+  # their distinct diagnostics without repeating either across the whole repo.
+  # Other default linters (errcheck, ineffassign, staticcheck, unused) remain
+  # enabled alongside these configured extras.
   enable:
+    - govet
     - errorlint
     - misspell
     - gocritic
@@ -58,3 +65,17 @@ linters:
         linters:
           - revive
         text: "var-naming"
+      # These domain packages intentionally use package-qualified exported names
+      # (for example sling.SlingResult) to keep adapter call sites explicit.
+      - path: internal/convoy/
+        linters:
+          - revive
+        text: "stutters"
+      - path: internal/graphroute/
+        linters:
+          - revive
+        text: "stutters"
+      - path: internal/sling/
+        linters:
+          - revive
+        text: "stutters"

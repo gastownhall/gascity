@@ -61,7 +61,7 @@ func TestHandleServicesListAndGet(t *testing.T) {
 			ServiceName:      "review-intake",
 			Kind:             "workflow",
 			WorkflowContract: "pack.gc/review-intake.v1",
-			MountPath:        "/svc/review-intake",
+			MountPath:        cityURL(state, "/svc/review-intake"),
 			PublishMode:      "private",
 			StateRoot:        ".gc/services/review-intake",
 			State:            "ready",
@@ -69,11 +69,11 @@ func TestHandleServicesListAndGet(t *testing.T) {
 			PublicationState: "private",
 		}},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	listReq := httptest.NewRequest(http.MethodGet, "/v0/services", nil)
+	listReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/services"), nil)
 	listRec := httptest.NewRecorder()
-	srv.ServeHTTP(listRec, listReq)
+	h.ServeHTTP(listRec, listReq)
 
 	if listRec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want %d", listRec.Code, http.StatusOK)
@@ -92,9 +92,9 @@ func TestHandleServicesListAndGet(t *testing.T) {
 		t.Fatalf("Items = %#v, want review-intake", listResp.Items)
 	}
 
-	getReq := httptest.NewRequest(http.MethodGet, "/v0/service/review-intake", nil)
+	getReq := httptest.NewRequest(http.MethodGet, cityURL(state, "/service/review-intake"), nil)
 	getRec := httptest.NewRecorder()
-	srv.ServeHTTP(getRec, getReq)
+	h.ServeHTTP(getRec, getReq)
 
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d", getRec.Code, http.StatusOK)
@@ -124,12 +124,12 @@ func TestServiceProxyDirectAllowsExternalMutationWithoutCSRF(t *testing.T) {
 			return true
 		},
 	}
-	srv := NewReadOnly(state)
+	h := newTestCityHandlerReadOnly(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
@@ -153,12 +153,12 @@ func TestServiceProxyPublishedReadOnlyStillBlocksExternalMutation(t *testing.T) 
 			return false
 		},
 	}
-	srv := NewReadOnly(state)
+	h := newTestCityHandlerReadOnly(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -179,12 +179,12 @@ func TestServiceProxyPublishedRejectsExternalRequestsOnRawListener(t *testing.T)
 			return false
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodGet, "/svc/review-intake/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/svc/review-intake/healthz"), nil)
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -203,13 +203,13 @@ func TestServiceProxyReadOnlyBlocksPrivateMutation(t *testing.T) {
 			return false
 		},
 	}
-	srv := NewReadOnly(state)
+	h := newTestCityHandlerReadOnly(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "127.0.0.1:9000"
 	req.Header.Set("X-GC-Request", "1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -228,12 +228,12 @@ func TestServiceProxyPrivateRejectsExternalRequests(t *testing.T) {
 			return false
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "198.51.100.10:9000"
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -253,13 +253,13 @@ func TestServiceProxyPrivateAllowsExternalReadWithInternalHeader(t *testing.T) {
 			return true
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodGet, "/svc/review-intake/healthz", nil)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/svc/review-intake/healthz"), nil)
 	req.RemoteAddr = "198.51.100.10:9000"
 	req.Header.Set("X-GC-Request", "1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -279,13 +279,13 @@ func TestServiceProxyPrivateAllowsExternalMutationWithInternalHeader(t *testing.
 			return true
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "198.51.100.10:9000"
 	req.Header.Set("X-GC-Request", "1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
@@ -304,12 +304,12 @@ func TestServiceProxyPrivateRequiresCSRFForLocalMutation(t *testing.T) {
 			return false
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "127.0.0.1:9000"
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
@@ -329,13 +329,13 @@ func TestServiceProxyPrivateAllowsLocalMutationWithCSRF(t *testing.T) {
 			return true
 		},
 	}
-	srv := New(state)
+	h := newTestCityHandler(t, state)
 
-	req := httptest.NewRequest(http.MethodPost, "/svc/review-intake/hooks/github", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, cityURL(state, "/svc/review-intake/hooks/github"), strings.NewReader(`{}`))
 	req.RemoteAddr = "127.0.0.1:9000"
 	req.Header.Set("X-GC-Request", "1")
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)

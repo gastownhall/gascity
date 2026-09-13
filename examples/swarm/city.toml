@@ -1,6 +1,7 @@
 # Swarm — flat peer pack with shared-directory rigs.
 #
-# A mayor coordinates, a deacon patrols health, dogs handle infrastructure.
+# A mayor coordinates, a deacon patrols health, and the initialized city
+# picks up mechanical housekeeping orders from the builtin core pack.
 # Per-rig: N coders self-organize via beads and mail, a dedicated committer
 # handles git. No worktree isolation — all rig agents share one directory.
 #
@@ -10,11 +11,15 @@
 #
 # To use: gc start examples/swarm/
 # Requires rigs to be registered: gc rig add <path>
+#
+# The sibling pack.toml owns the Swarm import.
 
 [workspace]
 name = "swarm"
 provider = "claude"
-includes = ["packs/swarm"]
+
+[providers.claude]
+base = "builtin:claude"
 
 [daemon]
 patrol_interval = "30s"
@@ -26,4 +31,3 @@ shutdown_timeout = "5s"
 # [[rigs]]
 # name = "myproject"
 # path = "/path/to/your/project"
-# includes = ["packs/swarm"]

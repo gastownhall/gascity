@@ -28,7 +28,7 @@ cd $WORK
 stderr 'not in a city directory'
 
 ! exec gc events
-stderr 'not in a city directory'
+stderr 'could not auto-discover the supervisor API'
 
 ! exec gc convoy list
 stderr 'not in a city directory'
@@ -67,8 +67,8 @@ stderr 'not found'
 ! exec gc mail archive
 stderr 'missing message ID'
 
-! exec gc mail archive gc-999
-stderr 'not found'
+exec gc mail archive gc-999
+stdout 'Already archived gc-999'
 
 # --- Event errors ---
 

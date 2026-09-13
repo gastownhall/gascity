@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "qualified_name", "suspended"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "agent add" },
+    "action": { "const": "add" },
+    "name": { "type": "string" },
+    "qualified_name": { "type": "string" },
+    "suspended": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

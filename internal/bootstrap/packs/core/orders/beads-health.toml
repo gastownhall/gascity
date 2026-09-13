@@ -1,0 +1,7 @@
+[order]
+description = "Check beads provider health and recover on failure"
+trigger = "cooldown"
+interval = "30s"
+exec = "gc beads health --quiet"
+timeout = "60s"
+reserved_dispatch = true

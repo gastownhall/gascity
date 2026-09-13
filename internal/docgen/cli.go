@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const skipCLIDocAnnotation = "gc.docgen.skip"
+
 func escapeMDXText(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
@@ -23,7 +25,7 @@ func escapeMDXText(s string) string {
 // Hidden commands are skipped. The output format matches config.md style:
 // H2 headings per command, synopsis, examples, flags table, subcommands table.
 func RenderCLIMarkdown(w io.Writer, root *cobra.Command) error {
-	if _, err := fmt.Fprintf(w, "# CLI Reference\n\n"); err != nil {
+	if _, err := fmt.Fprintf(w, "---\ntitle: \"CLI Reference\"\ndescription: \"Every gc command, flag, and example, generated from the CLI definitions.\"\n---\n\n"); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "> **Auto-generated** — do not edit. Run `go run ./cmd/genschema` to regenerate.\n\n"); err != nil {
@@ -48,10 +50,17 @@ func WriteCLIMarkdown(path string, root *cobra.Command) error {
 	}
 	tmpName := tmp.Name()
 
-	if err := RenderCLIMarkdown(tmp, root); err != nil {
+	var rendered strings.Builder
+	if err := RenderCLIMarkdown(&rendered, root); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("rendering %s: %w", path, err)
+	}
+	data := strings.TrimRight(rendered.String(), "\n") + "\n"
+	if _, err := io.WriteString(tmp, data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
@@ -70,7 +79,7 @@ func walkCommands(w io.Writer, cmd *cobra.Command) error {
 		return err
 	}
 	for _, child := range cmd.Commands() {
-		if child.Hidden {
+		if skipCLIDocCommand(child) {
 			continue
 		}
 		if err := walkCommands(w, child); err != nil {
@@ -78,6 +87,13 @@ func walkCommands(w io.Writer, cmd *cobra.Command) error {
 		}
 	}
 	return nil
+}
+
+func skipCLIDocCommand(cmd *cobra.Command) bool {
+	if cmd.Hidden {
+		return true
+	}
+	return cmd.Annotations[skipCLIDocAnnotation] == "true"
 }
 
 // renderCommand renders a single command section.
@@ -107,7 +123,7 @@ func renderCommand(w io.Writer, cmd *cobra.Command) error {
 
 	// Example.
 	if cmd.Example != "" {
-		if _, err := fmt.Fprintf(w, "**Example:**\n\n```\n%s\n```\n\n", strings.TrimSpace(cmd.Example)); err != nil {
+		if _, err := fmt.Fprintf(w, "**Example:**\n\n```\n%s\n```\n\n", dedentExample(cmd.Example)); err != nil {
 			return err
 		}
 	}
@@ -123,6 +139,35 @@ func renderCommand(w io.Writer, cmd *cobra.Command) error {
 	}
 
 	return nil
+}
+
+// dedentExample strips the common leading whitespace that cobra Example
+// strings carry for terminal help indentation, so every line renders
+// flush-left inside the markdown code fence instead of only the first.
+func dedentExample(s string) string {
+	lines := strings.Split(s, "\n")
+	prefix := ""
+	havePrefix := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if !havePrefix {
+			prefix = indent
+			havePrefix = true
+			continue
+		}
+		for !strings.HasPrefix(line, prefix) {
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	if prefix != "" {
+		for i, line := range lines {
+			lines[i] = strings.TrimPrefix(line, prefix)
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // renderGlobalFlags renders the global (persistent) flags section.
@@ -227,7 +272,7 @@ func writeFlagTable(w io.Writer, flags []flagInfo) error {
 func renderSubcommandsTable(w io.Writer, cmd *cobra.Command) error {
 	var children []*cobra.Command
 	for _, c := range cmd.Commands() {
-		if !c.Hidden {
+		if !skipCLIDocCommand(c) {
 			children = append(children, c)
 		}
 	}

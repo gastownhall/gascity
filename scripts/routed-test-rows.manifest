@@ -1,0 +1,23 @@
+# Routed six-row-matrix manifest (repo-root-relative paths, one per line).
+#
+# Every file listed here MUST contain all six read-path routing rows enforced by
+# scripts/check-routed-test-rows.sh (api-happy-path, api-cache-not-live,
+# api-500-fallback, api-404-error, controller-down, escape-hatch).
+#
+# This checked-in denominator is the hardening the CLI-unification council asked
+# for: without it, renaming a row marker would drop every file to "0 rows found"
+# and the guard would pass vacuously, silently unpoliced. With it, the same
+# rename makes every manifest file report <6 rows and the check fails loudly.
+#
+# When a command becomes a fully-migrated read-path matrix file (all six rows),
+# add it here; the check fails if a fully-covered cmd_*_test.go is NOT listed.
+cmd/gc/cmd_beads_test.go
+cmd/gc/cmd_citystatus_test.go
+cmd/gc/cmd_convoy_test.go
+cmd/gc/cmd_mail_test.go
+cmd/gc/cmd_maintenance_test.go
+cmd/gc/cmd_order_test.go
+cmd/gc/cmd_rig_test.go
+cmd/gc/cmd_session_test.go
+cmd/gc/cmd_status_test.go
+cmd/gc/cmd_wait_test.go

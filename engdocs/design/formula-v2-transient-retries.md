@@ -232,12 +232,14 @@ Retry-managed attempt parsing is fail-closed:
 
 1. `gc.outcome` is authoritative for pass/fail
 2. `gc.failure_class` is consulted only when `gc.outcome=fail`
-3. Any invalid or contradictory tuple is treated as:
+3. Any invalid or contradictory tuple is treated as a transient contract
+   violation so the workflow gets a bounded retry instead of immediately
+   hard-failing:
 
 ```text
 gc.outcome=fail
-gc.failure_class=hard
-gc.failure_reason=invalid_worker_result_contract
+gc.failure_class=transient
+gc.failure_reason=<specific-contract-reason>
 ```
 
 Examples of invalid tuples:
@@ -246,6 +248,26 @@ Examples of invalid tuples:
 - `gc.outcome=pass` with any `gc.failure_class`
 - `gc.outcome=pass` with any `gc.failure_reason`
 - unknown `gc.failure_class`
+- unknown `gc.outcome` value
+
+Current reason tokens are:
+
+- `missing_outcome`
+- `pass_with_failure_metadata`
+- `unknown_failure_class`
+- `invalid_outcome_value`
+
+### Expansion fanout `scope_ref`
+
+Graph v2 expansion fanouts can provide `scope_ref` from two places:
+
+- live fanout control metadata (`gc.scope_ref`)
+- static fanout bond vars (`gc.bond_vars.scope_ref`)
+
+At runtime, the live fanout `gc.scope_ref` wins. The dispatcher injects the
+current fanout scope into expansion vars after materializing `gc.bond_vars`,
+so iteration-scoped fanouts always compile child fragments against the active
+scope even if `bond_vars.scope_ref` is stale or omitted.
 
 ### Reason taxonomy
 
@@ -257,7 +279,10 @@ V0 should standardize on short machine-readable reasons, for example:
 - `prompt_too_large`
 - `missing_input`
 - `invalid_repo_state`
-- `invalid_worker_result_contract`
+- `missing_outcome`
+- `pass_with_failure_metadata`
+- `unknown_failure_class`
+- `invalid_outcome_value`
 
 The runtime does not need to interpret these in v0; they are for
 observability and future policy. `gc.failure_reason` should be a short
@@ -599,8 +624,9 @@ Add store-driven tests similar to the existing Ralph and scope tests:
 2. transient fail to exhausted budget -> hard fail
 3. transient fail to exhausted budget with `on_exhausted=soft_fail`
 4. explicit hard failure -> logical fail
-5. malformed worker result contract -> hard fail with
-   `invalid_worker_result_contract`
+5. malformed worker result contract -> transient retry with one of
+   `missing_outcome`, `pass_with_failure_metadata`,
+   `unknown_failure_class`, or `invalid_outcome_value`
 6. stale `eval.n` cannot close a logical step already closed by attempt
    `n+1`
 7. pooled transient failure recycles the current session and leaves the

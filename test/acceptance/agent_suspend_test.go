@@ -9,6 +9,8 @@
 package acceptance_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,33 +24,53 @@ import (
 // name so they don't interfere with each other.
 func TestAgentAddCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NewAgent", func(t *testing.T) {
 		out, err := c.GC("agent", "add", "--name", "reviewer")
 		if err != nil {
 			t.Fatalf("gc agent add failed: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "Scaffolded agent 'reviewer'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
 
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "reviewer") {
-			t.Errorf("city.toml should contain agent 'reviewer':\n%s", toml)
+		if !c.HasFile("agents/reviewer/prompt.template.md") {
+			t.Fatal("agents/reviewer/prompt.template.md missing after add")
+		}
+		showOut, err := c.GC("config", "show")
+		if err != nil {
+			t.Fatalf("gc config show: %v\n%s", err, showOut)
+		}
+		if !strings.Contains(showOut, "reviewer") {
+			t.Errorf("gc config show should list reviewer:\n%s", showOut)
 		}
 	})
 
 	t.Run("WithPromptTemplate", func(t *testing.T) {
+		// V2 init no longer seeds a top-level prompts/ dir, so the test
+		// fixture creates the source location before writing the sample.
+		srcDir := filepath.Join(c.Dir, "prompts")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			t.Fatalf("creating prompts/: %v", err)
+		}
+		srcPath := filepath.Join(srcDir, "planner.md")
+		if err := os.WriteFile(srcPath, []byte("You are the planner.\n"), 0o644); err != nil {
+			t.Fatalf("writing prompt template source: %v", err)
+		}
+
 		out, err := c.GC("agent", "add", "--name", "planner",
 			"--prompt-template", "prompts/planner.md")
 		if err != nil {
 			t.Fatalf("gc agent add failed: %v\n%s", err, out)
 		}
-
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "planner") {
-			t.Errorf("city.toml missing agent name:\n%s", toml)
+		if !strings.Contains(out, "Scaffolded agent 'planner'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
 		}
-		if !strings.Contains(toml, "prompts/planner.md") {
-			t.Errorf("city.toml missing prompt_template:\n%s", toml)
+
+		got := c.ReadFile("agents/planner/prompt.template.md")
+		if got != "You are the planner.\n" {
+			t.Errorf("copied prompt template mismatch:\n%s", got)
 		}
 	})
 
@@ -84,10 +106,13 @@ func TestAgentAddCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("gc agent add --suspended failed: %v\n%s", err, out)
 		}
+		if !strings.Contains(out, "Scaffolded agent 'dormant'") {
+			t.Fatalf("gc agent add output mismatch:\n%s", out)
+		}
 
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "suspended") {
-			t.Errorf("city.toml should contain 'suspended' for the agent:\n%s", toml)
+		agentToml := c.ReadFile("agents/dormant/agent.toml")
+		if !strings.Contains(agentToml, "suspended = true") {
+			t.Errorf("agent.toml should contain suspended = true:\n%s", agentToml)
 		}
 	})
 }
@@ -98,7 +123,7 @@ func TestAgentAddCommands(t *testing.T) {
 // city. The ThenResume subtest overwrites city.toml so it runs last.
 func TestAgentSuspendResume(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("SuspendMissingName", func(t *testing.T) {
 		out, err := c.GC("agent", "suspend")
@@ -125,8 +150,9 @@ func TestAgentSuspendResume(t *testing.T) {
 	t.Run("ThenResume", func(t *testing.T) {
 		// Stop the supervisor so agent suspend/resume falls through to
 		// direct city.toml mutation (the API would reject an agent it
-		// doesn't know about from config reload).
-		c.GC("supervisor", "stop")
+		// doesn't know about from config reload). --wait so subsequent
+		// config edits don't race the supervisor's shutdown path.
+		c.GC("supervisor", "stop", "--wait")
 
 		// Write config with a known agent.
 		c.WriteConfig(`[workspace]
@@ -169,7 +195,7 @@ start_command = "echo hello"
 // ThenResume subtest overwrites city.toml; NotACity uses its own temp dir.
 func TestCitySuspendResume(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("ThenResume", func(t *testing.T) {
 		// Write a config with an agent so hook has something to look for.

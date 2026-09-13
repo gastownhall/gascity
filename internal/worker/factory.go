@@ -1,0 +1,307 @@
+package worker
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/usage"
+)
+
+// SessionRuntimeResolver resolves provider/runtime details for an existing
+// session-backed worker without exposing SessionSpec mutation to callers.
+type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metadata map[string]string) (*ResolvedRuntime, error)
+
+// FactoryConfig constructs worker-owned session handles and catalogs without
+// leaking session.Manager setup into higher layers.
+type FactoryConfig struct {
+	Store                 beads.Store
+	Provider              runtime.Provider
+	CityPath              string
+	SearchPaths           []string
+	Recorder              events.Recorder
+	UsageSink             usage.Sink
+	ResolveTransport      func(template, provider string) string
+	ResolveSessionRuntime SessionRuntimeResolver
+	// StaleKeyDetectionWaiter supplies the session lifecycle signal used before
+	// a keyed start is probed for stale resume-key failure. Nil preserves the
+	// session package production timer.
+	StaleKeyDetectionWaiter sessionpkg.StaleKeyDetectionWaiter
+	// Pricing estimates per-invocation cost for telemetry. Nil falls back
+	// to the registry built from shipped defaults.
+	Pricing *pricing.Registry
+	// ActivityMemo is shared by every adapter and handle the factory builds. A
+	// caller that builds a Factory per request (the API server) holds one memo
+	// for its lifetime and passes it here, so an unchanged mirror is parsed
+	// once across requests rather than once per request. Nil gives the factory
+	// a private memo.
+	ActivityMemo *DerivedActivityMemo
+}
+
+// Factory centralizes worker-boundary object construction for callers such as
+// the API server and gc CLI.
+type Factory struct {
+	manager               *sessionpkg.Manager
+	store                 beads.Store
+	provider              runtime.Provider
+	searchPaths           []string
+	recorder              events.Recorder
+	usageSink             usage.Sink
+	resolveSessionRuntime SessionRuntimeResolver
+	pricing               *pricing.Registry
+	// activityMemo is shared by every adapter and handle this factory builds —
+	// and, when the caller injected it, by every other factory that caller
+	// builds — so per-request handles do not each re-derive an unchanged
+	// mirror's activity.
+	activityMemo *DerivedActivityMemo
+}
+
+// NewFactory constructs a Factory backed by a session.Manager configured for
+// the caller's city/runtime context.
+func NewFactory(cfg FactoryConfig) (*Factory, error) {
+	opts := make([]sessionpkg.ManagerOption, 0, 3)
+	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
+	}
+	if cfg.ResolveTransport != nil {
+		opts = append(opts, sessionpkg.WithTransportResolver(cfg.ResolveTransport))
+	}
+	if cfg.StaleKeyDetectionWaiter != nil {
+		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
+	return newFactory(manager, cfg)
+}
+
+// NewFactoryFromManager wraps an already-constructed session manager behind the
+// worker boundary. Primarily useful in tests.
+func NewFactoryFromManager(manager *sessionpkg.Manager, searchPaths []string) (*Factory, error) {
+	return newFactory(manager, FactoryConfig{SearchPaths: searchPaths})
+}
+
+func newFactory(manager *sessionpkg.Manager, cfg FactoryConfig) (*Factory, error) {
+	if manager == nil {
+		return nil, fmt.Errorf("%w: manager is required", ErrHandleConfig)
+	}
+	usageSink := cfg.UsageSink
+	if usageSink == nil {
+		usageSink = usage.Discard
+	}
+	memo := cfg.ActivityMemo
+	if memo == nil {
+		memo = NewDerivedActivityMemo()
+	}
+	return &Factory{
+		manager:               manager,
+		store:                 cfg.Store,
+		provider:              cfg.Provider,
+		searchPaths:           append([]string(nil), cfg.SearchPaths...),
+		recorder:              cfg.Recorder,
+		usageSink:             usageSink,
+		resolveSessionRuntime: cfg.ResolveSessionRuntime,
+		pricing:               cfg.Pricing,
+		activityMemo:          memo,
+	}, nil
+}
+
+// Catalog returns a worker-owned session catalog backed by the factory's
+// session manager.
+func (f *Factory) Catalog() (*SessionCatalog, error) {
+	return NewSessionCatalog(f.manager)
+}
+
+// UsageSink returns the usage-fact sink the factory threads into every handle it
+// constructs. Never nil: usage.Discard when usage is disabled or unset.
+func (f *Factory) UsageSink() usage.Sink {
+	if f.usageSink == nil {
+		return usage.Discard
+	}
+	return f.usageSink
+}
+
+// Session returns a worker-owned session handle backed by the factory's
+// session manager and transcript search paths.
+func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
+	return NewSessionHandle(SessionHandleConfig{
+		Manager:     f.manager,
+		SearchPaths: append([]string(nil), f.searchPaths...),
+		Adapter:     f.Adapter(),
+		Recorder:    f.recorder,
+		UsageSink:   f.usageSink,
+		Session:     spec,
+		Pricing:     f.pricing,
+	})
+}
+
+// SessionByID rebuilds a session-backed worker handle from persisted session
+// metadata and the factory's optional resolved-runtime hook. It is retained as
+// the established API name; the construction lives in SessionByHandle.
+func (f *Factory) SessionByID(id string) (Handle, error) {
+	return f.SessionByHandle(id)
+}
+
+// SessionByHandle rebuilds a session-backed worker handle from a bead-id handle:
+// one session.Store.GetPersistedResponse fetch (the same single-fetch cost as
+// the retired Manager.GetWithBead) for the persisted Info + PersistedResponse,
+// the read-path empty-type heal, and the runtime overlay (EnrichInfo), then the
+// spec build off (Info, PersistedResponse). No raw beads.Bead crosses the
+// boundary.
+func (f *Factory) SessionByHandle(id string) (Handle, error) {
+	info, pr, err := sessionRecordViaManager(f.manager, id)
+	if err != nil {
+		return nil, err
+	}
+	return f.sessionFromRecord(info, pr)
+}
+
+// SessionByRecord builds a session-backed worker handle from an already-resolved
+// session record (Info + PersistedResponse), avoiding a redundant store.Get for
+// callers that just resolved it (e.g. via session.ResolveSessionRecordByExactID).
+// It applies the runtime overlay (EnrichInfo) to the persisted Info so the
+// resolved-runtime hook sees the same enriched Info the retired
+// SessionByLoadedBead path produced (which enriched via Manager.SessionInfoFromBead).
+//
+// This deliberately deviates from the work-items' SessionByInfo(info): the spec
+// build passes the FULL persisted metadata map (via PersistedResponse.Metadata)
+// into the SessionRuntimeResolver hook — the t3bridge fork boundary whose
+// signature must not change. A bare SessionByInfo could not reconstruct that map
+// and would force a hidden re-Get; PersistedResponse.Metadata is the documented
+// typed envelope for exactly this.
+func (f *Factory) SessionByRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	return f.sessionFromRecord(f.manager.EnrichInfo(info), pr)
+}
+
+func (f *Factory) sessionFromRecord(info sessionpkg.Info, pr sessionpkg.PersistedResponse) (Handle, error) {
+	spec := SessionSpec{
+		ID:       info.ID,
+		Template: info.Template,
+		Title:    info.Title,
+		Alias:    info.Alias,
+		Command:  info.Command,
+		Provider: info.Provider,
+		WorkDir:  info.WorkDir,
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:    info.ResumeFlag,
+			ResumeStyle:   info.ResumeStyle,
+			ResumeCommand: info.ResumeCommand,
+		},
+	}
+	sessionKind := strings.TrimSpace(pr.Metadata["real_world_app_session_kind"])
+	if profile := strings.TrimSpace(pr.Metadata["worker_profile"]); profile != "" {
+		spec.Profile = Profile(profile)
+	}
+	metadata := cloneStringMap(pr.Metadata)
+	if f.resolveSessionRuntime != nil {
+		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
+		if err != nil {
+			return nil, err
+		}
+		applyResolvedRuntimeToSessionSpec(&spec, resolved)
+	}
+	return f.Session(spec)
+}
+
+// HandleForTarget resolves a session target to a session-backed worker when
+// possible, falling back to a runtime-only handle for legacy live sessions.
+func (f *Factory) HandleForTarget(target string, processNames []string) (Handle, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, sessionpkg.ErrSessionNotFound
+	}
+	if f.store != nil {
+		if id, err := sessionpkg.ResolveSessionIDByExactID(f.store, target); err == nil {
+			return f.SessionByID(id)
+		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return nil, err
+		}
+		if id, err := sessionpkg.ResolveSessionID(f.store, target); err == nil {
+			return f.SessionByID(id)
+		} else if !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+			return nil, err
+		}
+		if f.provider != nil {
+			if sessionID, err := f.provider.GetMeta(target, "GC_SESSION_ID"); err == nil && strings.TrimSpace(sessionID) != "" {
+				return f.SessionByID(strings.TrimSpace(sessionID))
+			}
+		}
+	}
+	if f.provider == nil {
+		return nil, sessionpkg.ErrSessionNotFound
+	}
+	providerName := strings.TrimSpace(target)
+	if liveProvider, err := f.provider.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+		providerName = strings.TrimSpace(liveProvider)
+	}
+	return f.RuntimeHandle(target, providerName, "", processNames)
+}
+
+// RuntimeHandle constructs a runtime-only worker handle using the factory's
+// configured provider and recorder.
+func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, processNames []string) (Handle, error) {
+	if f.provider == nil {
+		return nil, sessionpkg.ErrSessionNotFound
+	}
+	return NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     f.provider,
+		SessionName:  sessionName,
+		ProviderName: providerName,
+		Transport:    transport,
+		ProcessNames: append([]string(nil), processNames...),
+		Recorder:     f.recorder,
+	})
+}
+
+// Adapter returns a transcript adapter configured with the factory's search
+// paths for callers that need transcript reads outside a session handle.
+func (f *Factory) Adapter() SessionLogAdapter {
+	return SessionLogAdapter{SearchPaths: append([]string(nil), f.searchPaths...), activity: f.activityMemo}
+}
+
+// DiscoverTranscript returns the best available transcript path for a worker.
+func (f *Factory) DiscoverTranscript(provider, workDir, gcSessionID string) string {
+	return f.Adapter().DiscoverTranscript(provider, workDir, gcSessionID)
+}
+
+// DiscoverWorkDirTranscript resolves the best provider-specific transcript for
+// a workdir without requiring a stable session identifier.
+func (f *Factory) DiscoverWorkDirTranscript(provider, workDir string) string {
+	return f.Adapter().DiscoverWorkDirTranscript(provider, workDir)
+}
+
+// TailMeta reads model/context metadata from a discovered transcript path.
+func (f *Factory) TailMeta(path string) (*TranscriptTailMeta, error) {
+	return f.Adapter().TailMeta(path)
+}
+
+// TailMetaForProvider reads model/context metadata using the provider's
+// transcript schema while preserving TailMeta as the compatibility path.
+func (f *Factory) TailMetaForProvider(provider, path string) (*TranscriptTailMeta, error) {
+	return f.Adapter().TailMetaForProvider(provider, path)
+}
+
+// AgentMappings lists subagent transcript mappings for a parent transcript.
+func (f *Factory) AgentMappings(path string) ([]AgentMapping, error) {
+	return f.Adapter().AgentMappings(path)
+}
+
+// ReadAgentTranscript loads a subagent transcript while preserving raw
+// message fidelity for worker-owned API surfaces.
+func (f *Factory) ReadAgentTranscript(path, agentID string) (*AgentTranscriptResult, error) {
+	return f.Adapter().ReadAgentTranscript(path, agentID)
+}
+
+// ReadTranscript loads a provider transcript while preserving raw pagination
+// and message fidelity for worker-owned API/CLI surfaces.
+func (f *Factory) ReadTranscript(req TranscriptRequest) (*TranscriptResult, error) {
+	return f.Adapter().ReadTranscript(req)
+}
+
+// LoadHistory loads and normalizes a provider transcript.
+func (f *Factory) LoadHistory(req LoadRequest) (*HistorySnapshot, error) {
+	return f.Adapter().LoadHistory(req)
+}

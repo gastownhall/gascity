@@ -10,17 +10,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 const (
-	bdInitTimeout          = 15 * time.Second
+	bdInitTimeout          = 60 * time.Second
 	doltServerStartupLimit = 10 * time.Second
+	// doltServerReadyTimeout budgets startDoltServerOnAllInterfaces's
+	// TCP-dial readiness wait (dolt_config_test.go). Kept separate from
+	// doltServerStartupLimit — same shape of wait, but a distinct call
+	// site — so a future tuning of one doesn't silently retune the other;
+	// that kind of implicit coupling is what let runBDInitCompat's timeout
+	// drift out of sync with bdInitTimeout in the first place (ga-gajll3).
+	doltServerReadyTimeout = 60 * time.Second
 )
 
 // TestBdStoreConformance runs the beads conformance suite against BdStore
@@ -31,23 +40,26 @@ const (
 // dolt server on a unique port. This avoids port conflicts and lets bd
 // manage the server lifecycle.
 //
-// Requires: dolt and bd installed.
+// Requires: Dolt and bd binaries configured via PATH or the integration
+// override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skip if dolt or bd not installed.
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed")
-	}
-	if _, err := exec.LookPath("bd"); err != nil {
-		t.Skip("bd not installed")
-	}
-
-	// Ensure dolt identity is configured (mirrors git user.name/email).
-	ensureDoltIdentity(t)
+	// Skipped while gascity is pinned to bd 1.0.4 (ga-e7z613). bd 1.0.4 avoids
+	// bd 1.0.5's data-corruption bug but lacks the #3691 empty-DB-guard fix (it
+	// was tagged ~6.5h before #3691 merged), so it silently auto-imports into an
+	// empty on-disk DB, which trips gascity's ErrBDSilentFallback guard (#2080).
+	// This is NOT a regression: gascity 1.2.1 shipped on bd 1.0.4 with identical
+	// bd behavior; only the loud-fallback detection added after 1.2.1
+	// (#1930/#2080/#2079) is new. The user explicitly authorized applying this
+	// skip on main on 2026-06-21 as part of merging release/v1.3.0 into main.
+	// Remove once gascity moves to a clean bd (#3691 + the corruption fix).
+	t.Skip("bd 1.0.4 trips the silent-fallback guard (pre-existing, non-regression; pinned to avoid 1.0.5 corruption) — ga-e7z613")
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
 
 	rootDir := t.TempDir()
 	doltDataDir := filepath.Join(rootDir, "dolt")
 	workspacesDir := filepath.Join(rootDir, "workspaces")
-	serverPort := startSharedDoltServer(t, doltDataDir)
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
 	var dbCounter atomic.Int64
 
 	// Factory: each call creates a fresh workspace bound to the shared Dolt
@@ -70,16 +82,11 @@ func TestBdStoreConformance(t *testing.T) {
 			t.Fatalf("git init: %v: %s", err, out)
 		}
 
-		runBDInit(t, wsDir, prefix, serverPort)
+		runBDInit(t, env, wsDir, prefix, serverPort)
 
-		// Explicitly set issue_prefix (required for bd create).
-		bdConfig := exec.Command("bd", "config", "set", "issue_prefix", prefix)
-		bdConfig.Dir = wsDir
-		if out, err := bdConfig.CombinedOutput(); err != nil {
-			t.Fatalf("bd config set: %v: %s", err, out)
-		}
+		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
 
-		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
+		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
@@ -91,7 +98,7 @@ func TestBdStoreConformance(t *testing.T) {
 // startSharedDoltServer starts one explicit Dolt SQL server for the test and
 // returns its port. Using a shared server keeps bd commands fast and avoids
 // the embedded local-server shutdown delays seen in CI.
-func startSharedDoltServer(t *testing.T, dataDir string) string {
+func startSharedDoltServer(t *testing.T, env []string, dataDir string) string {
 	t.Helper()
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
@@ -114,7 +121,8 @@ func startSharedDoltServer(t *testing.T, dataDir string) string {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "dolt", "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
+	cmd := exec.CommandContext(ctx, doltBinary, "sql-server", "-H", "127.0.0.1", "-P", port, "--data-dir", dataDir)
+	cmd.Env = env
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -152,14 +160,15 @@ func startSharedDoltServer(t *testing.T, dataDir string) string {
 }
 
 // runBDInit initializes beads against the shared Dolt server with a bounded wait.
-func runBDInit(t *testing.T, dir, prefix, port string) {
+func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 
-	bdInit := exec.CommandContext(ctx, "bd", "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
+	bdInit := exec.CommandContext(ctx, bdBinary, "init", "--server", "--server-host", "127.0.0.1", "--server-port", port, "-p", prefix, "--skip-hooks", "--skip-agents")
 	bdInit.Dir = dir
+	bdInit.Env = env
 	out, err := bdInit.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		t.Fatalf("bd init timed out after %s: %s", bdInitTimeout, out)
@@ -169,34 +178,90 @@ func runBDInit(t *testing.T, dir, prefix, port string) {
 	}
 }
 
-// ensureDoltIdentity ensures dolt has user.name and user.email set.
-// Copies from git config if available, otherwise sets defaults.
-func ensureDoltIdentity(t *testing.T) {
+// TestBdStoreMailWispInsert verifies that creating an ephemeral mail message
+// bead via BdStore succeeds through the full bd CLI → Dolt SQL stack.
+//
+// Regression tripwire for the 2026-06-11 P0 incident: gc mail send broke in
+// production with "Field 'id' doesn't have a default value" because the bd CLI
+// code omitted id on INSERT INTO wisp_events while a newer schema migration had
+// dropped the DEFAULT (UUID()). The e2e mail tests use the file beads provider
+// and never touch Dolt SQL; this test closes that gap by exercising the
+// BdStore → bd create --ephemeral → Dolt → wisp_events INSERT path directly.
+func TestBdStoreMailWispInsert(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	doltDataDir := filepath.Join(rootDir, "dolt")
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, doltDataDir)
+
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitCmd := exec.Command("git", "init", "--quiet")
+	gitCmd.Dir = wsDir
+	if out, err := gitCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	runBDInit(t, env, wsDir, "mc", serverPort)
+	configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+
+	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+
+	// Create an ephemeral message bead — exercises bd create --ephemeral →
+	// Dolt SQL INSERT INTO wisps + INSERT INTO wisp_events.
+	// A NOT NULL / no-DEFAULT failure on wisp_events.id reproduces the incident.
+	sent, err := store.Create(beads.Bead{
+		Title:     "hello from bdstore mail regression",
+		Type:      "message",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("BdStore Create ephemeral message (wisp_events INSERT): %v", err)
+	}
+	if !sent.Ephemeral {
+		t.Fatalf("Ephemeral = false on returned bead %s, want true", sent.ID)
+	}
+	if sent.ID == "" {
+		t.Fatal("returned bead has empty ID")
+	}
+
+	// List with TierWisps to confirm the bead is readable after the INSERT.
+	results, err := store.List(beads.ListQuery{
+		TierMode: beads.TierWisps,
+		Assignee: "builder",
+	})
+	if err != nil {
+		t.Fatalf("BdStore List wisp beads: %v", err)
+	}
+	var found bool
+	for _, b := range results {
+		if b.ID == sent.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("sent bead %s not in BdStore List(TierWisps); got %d beads total", sent.ID, len(results))
+	}
+}
+
+func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
 	t.Helper()
 
-	// Check if dolt identity is already set.
-	name, _ := exec.Command("dolt", "config", "--global", "--get", "user.name").Output()
-	email, _ := exec.Command("dolt", "config", "--global", "--get", "user.email").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
+	defer cancel()
 
-	if len(name) > 0 && len(email) > 0 {
-		return
+	cmd := exec.CommandContext(ctx, bdBinary, "config", "set", "types.custom", strings.Join(customTypes, ","))
+	cmd.Dir = wsDir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)
 	}
-
-	// Copy from git config.
-	if len(name) == 0 {
-		gitName, _ := exec.Command("git", "config", "--global", "user.name").Output()
-		if len(gitName) > 0 {
-			exec.Command("dolt", "config", "--global", "--add", "user.name", string(gitName)).Run()
-		} else {
-			exec.Command("dolt", "config", "--global", "--add", "user.name", "test").Run()
-		}
-	}
-	if len(email) == 0 {
-		gitEmail, _ := exec.Command("git", "config", "--global", "user.email").Output()
-		if len(gitEmail) > 0 {
-			exec.Command("dolt", "config", "--global", "--add", "user.email", string(gitEmail)).Run()
-		} else {
-			exec.Command("dolt", "config", "--global", "--add", "user.email", "test@test.com").Run()
-		}
+	if err != nil {
+		t.Fatalf("bd config set types.custom: %v: %s", err, out)
 	}
 }

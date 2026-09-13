@@ -16,52 +16,48 @@ import (
 
 func TestHandleSessionSubmitDefaultsToProviderDefaultBehavior(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["queued"]; got != false {
-		t.Fatalf("queued = %#v, want false", got)
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
 	}
-	if got := resp["intent"]; got != string(session.SubmitIntentDefault) {
-		t.Fatalf("intent = %#v, want %q", got, session.SubmitIntentDefault)
+
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
-	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatal("session should be running after POST /submit")
+	// Default intent on a suspended session resumes immediately (not queued).
+	if success.Queued {
+		t.Fatalf("queued = true, want false (default intent resumes)")
 	}
-	found := false
-	for _, call := range fs.sp.Calls {
-		if call.Method == "Nudge" && call.Name == info.SessionName && call.Message == "hello" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("calls = %#v, want Nudge(hello)", fs.sp.Calls)
+	if success.Intent != string(session.SubmitIntentDefault) {
+		t.Fatalf("intent = %q, want %q", success.Intent, session.SubmitIntentDefault)
 	}
 }
 
 func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "helper", "Codex Submit", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex Submit", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -69,45 +65,53 @@ func TestHandleSessionSubmitUsesImmediateDefaultForCodex(t *testing.T) {
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	found := false
-	for _, call := range fs.sp.Calls {
-		if call.Method == "NudgeNow" && call.Name == info.SessionName && call.Message == "hello" {
-			found = true
-			break
-		}
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if !found {
-		t.Fatalf("calls = %#v, want NudgeNow(hello)", fs.sp.Calls)
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
+	}
+
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
 func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Queue Me")
 
-	req := newPostRequest("/v0/session/"+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up"}`))
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/submit", strings.NewReader(`{"message":"later please","intent":"follow_up"}`))
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var accepted asyncAcceptedBody
+	if err := json.NewDecoder(rec.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["queued"]; got != true {
-		t.Fatalf("queued = %#v, want true", got)
+	if accepted.RequestID == "" {
+		t.Fatal("missing request_id")
 	}
+
+	success, failure := waitForSessionSubmitResult(t, fs.eventProv, accepted.RequestID)
+	if success == nil {
+		t.Fatalf("session submit failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
+	}
+
 	state, err := nudgequeue.LoadState(fs.cityPath)
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
@@ -126,7 +130,7 @@ func TestHandleSessionSubmitFollowUpQueuesMessage(t *testing.T) {
 
 func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Capabilities")
 	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{
@@ -139,8 +143,8 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(rec, req)
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -159,10 +163,10 @@ func TestHandleSessionGetIncludesSubmissionCapabilities(t *testing.T) {
 
 func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "helper", "Codex", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Codex", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -173,8 +177,8 @@ func TestHandleSessionStopUsesSoftEscapeForCodex(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+info.ID+"/stop", nil)
-	srv.ServeHTTP(rec, req)
+	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/stop", nil)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("stop status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())

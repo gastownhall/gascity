@@ -58,7 +58,7 @@ func agentCount(cfg *config.City, name string) int {
 // single gc init call.
 func TestRegression_GastownConfig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(c.Dir, "city.toml"))
 	if err != nil {
@@ -99,91 +99,110 @@ func TestRegression_GastownConfig(t *testing.T) {
 		}
 	})
 
-	// Fallback resolution: gastown's non-fallback dog overrides maintenance's fallback.
-	t.Run("FallbackAgentResolution", func(t *testing.T) {
-		count := agentCount(cfg, "dog")
-		if count != 1 {
-			t.Errorf("expected exactly 1 dog agent, got %d (fallback resolution failure)", count)
-		}
-
+	// Each pack owns its dog outright: gastown ships the themed utility
+	// dog and the dolt pack ships its own Dolt-maintenance dog, re-exported
+	// through the bd pack's [imports.dolt] binding so it surfaces as bd.dog.
+	// The maintenance fallback dog and the fallback-resolution mechanism were
+	// removed, so the two coexist under distinct binding-qualified names.
+	t.Run("PacksOwnTheirDogs", func(t *testing.T) {
+		dogsByBinding := make(map[string]config.Agent)
 		for _, a := range cfg.Agents {
 			if a.Name == "dog" {
-				if a.Fallback {
-					t.Error("dog agent has fallback=true; gastown's non-fallback should have won")
-				}
-				if len(a.SessionLive) == 0 {
-					t.Error("dog agent has no session_live; expected gastown's themed dog")
-				}
-				break
+				dogsByBinding[a.BindingName] = a
 			}
+		}
+		if len(dogsByBinding) != 2 {
+			t.Errorf("dogs by binding = %v, want gastown + bd", dogsByBinding)
+		}
+		if _, ok := dogsByBinding["bd"]; !ok {
+			t.Error("dolt maintenance dog (binding bd) missing")
+		}
+		dog, ok := dogsByBinding["gastown"]
+		if !ok {
+			t.Fatal("gastown pack dog missing")
+		}
+		if len(dog.SessionLive) == 0 {
+			t.Error("gastown dog has no session_live; expected gastown's themed dog")
+		}
+		if !strings.Contains(dog.WorkDir, ".gc/agents/dogs/") {
+			t.Errorf("gastown dog work_dir = %q, want gastown dog workdir", dog.WorkDir)
+		}
+		if !strings.Contains(dog.PromptTemplate, filepath.Join("gastown", "agents", "dog", "prompt.template.md")) {
+			t.Errorf("gastown dog prompt_template = %q, want gastown-owned dog prompt", dog.PromptTemplate)
+		}
+		if dog.OverlayDir != "" {
+			t.Errorf("gastown dog overlay_dir = %q, want empty (pack-local dog ships no overlay)", dog.OverlayDir)
 		}
 	})
 
-	// Transitive inclusion: gastown pack includes maintenance pack.
+	// Gastown pack agents arrive via pack expansion.
 	t.Run("PackIncludesTransitive", func(t *testing.T) {
-		gastownAgents := []string{"mayor", "deacon", "boot"}
+		gastownAgents := []string{"mayor", "deacon", "boot", "dog"}
 		for _, name := range gastownAgents {
 			if !hasAgent(cfg, name) {
-				t.Errorf("gastown agent %q missing from config (transitive include failure)", name)
+				t.Errorf("gastown agent %q missing from config (pack expansion failure)", name)
 			}
-		}
-
-		if !hasAgent(cfg, "dog") {
-			t.Error("maintenance agent 'dog' missing from config (transitive include failure)")
 		}
 	})
 
-	// PR #213: system packs (maintenance) auto-included via pack expansion.
-	t.Run("SystemPacksAutoIncluded", func(t *testing.T) {
-		if !hasAgent(cfg, "dog") {
-			t.Error("maintenance pack agent 'dog' not found; system pack auto-inclusion failed (PR #213 regression)")
-		}
-
-		hasGastownInclude := false
-		for _, inc := range cfg.Workspace.Includes {
+	// Builtin packs compose via the explicit city.toml includes that gc init
+	// writes (no config-load auto-inclusion).
+	t.Run("BuiltinPacksExplicitlyIncluded", func(t *testing.T) {
+		// V2: gastown arrives via [imports.gastown] rather than
+		// workspace.includes. Accept either form so this regression test
+		// covers both the legacy-includes and the V2-imports layouts.
+		hasGastownReference := false
+		for _, inc := range cfg.Workspace.LegacyIncludes() {
 			if strings.Contains(inc, "gastown") {
-				hasGastownInclude = true
+				hasGastownReference = true
 				break
 			}
 		}
-		if !hasGastownInclude {
-			t.Error("workspace.includes does not reference gastown pack")
+		if !hasGastownReference {
+			if _, ok := cfg.Imports["gastown"]; ok {
+				hasGastownReference = true
+			}
+		}
+		if !hasGastownReference {
+			t.Error("gastown pack not referenced via workspace.includes or [imports.gastown]")
 		}
 
 		if len(cfg.PackDirs) == 0 {
 			t.Error("PackDirs is empty after config load; pack expansion did not run")
 		}
 
-		if cfg.Beads.Provider == "bd" || cfg.Beads.Provider == "" {
-			t.Log("beads provider is bd (or default); maintenance formulas expected via pack expansion")
+		if cfg.PackDirByName("core") == "" {
+			t.Error("core pack not reachable from composed config (missing pinned [imports.core])")
 		}
 
 		cityFormulas := cfg.FormulaLayers.City
-		hasMaintenanceFormulas := false
+		hasCoreFormulas := false
 		for _, dir := range cityFormulas {
-			if strings.Contains(dir, "maintenance") {
-				hasMaintenanceFormulas = true
+			if strings.Contains(filepath.ToSlash(dir), "/packs/core") {
+				hasCoreFormulas = true
 				break
 			}
 		}
-		if !hasMaintenanceFormulas && len(cityFormulas) > 0 {
-			t.Error("maintenance pack formulas not found in formula layers")
+		if !hasCoreFormulas && len(cityFormulas) > 0 {
+			t.Error("core pack formulas not found in formula layers")
 		}
 	})
 }
 
 // TestRegression_GastownPackArtifacts groups regression tests that validate
 // materialized pack artifacts (formulas, prompts, git excludes) on a plain
-// gastown city. They share a single gc init call.
+// gastown city. The pack arrives via the pinned public import, so the
+// artifacts live in the user-global repo cache rather than a city-local
+// packs/ directory. They share a single gc init call.
 func TestRegression_GastownPackArtifacts(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	packDir := gastownCachePackDir(t, c)
 
 	// PR #3044: invalid TOML escape in a formula file broke 5 CI tests.
 	t.Run("FormulasParse", func(t *testing.T) {
 		formulaDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "formulas"),
-			filepath.Join(c.Dir, "packs", "maintenance", "formulas"),
+			filepath.Join(packDir, "formulas"),
 		}
 
 		count := 0
@@ -195,20 +214,20 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 				if info.IsDir() {
 					return nil
 				}
-				if !strings.HasSuffix(path, ".formula.toml") && !strings.HasSuffix(path, "order.toml") {
+				if !strings.HasSuffix(path, ".toml") {
 					return nil
 				}
 				count++
 
 				data, readErr := os.ReadFile(path)
 				if readErr != nil {
-					t.Errorf("reading %s: %v", relPath(c.Dir, path), readErr)
+					t.Errorf("reading %s: %v", relPath(packDir, path), readErr)
 					return nil
 				}
 
 				var raw map[string]interface{}
 				if _, parseErr := toml.Decode(string(data), &raw); parseErr != nil {
-					t.Errorf("invalid TOML in %s: %v (PR #3044 regression)", relPath(c.Dir, path), parseErr)
+					t.Errorf("invalid TOML in %s: %v (PR #3044 regression)", relPath(packDir, path), parseErr)
 				}
 				return nil
 			})
@@ -225,13 +244,12 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 
 	// PR #2939: prompt referenced nonexistent /ralph-loop slash command.
 	t.Run("PromptsRender", func(t *testing.T) {
-		promptDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "prompts"),
-			filepath.Join(c.Dir, "packs", "maintenance", "prompts"),
+		packDirs := []string{
+			packDir,
 		}
 
 		count := 0
-		for _, dir := range promptDirs {
+		for _, dir := range packDirs {
 			err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
@@ -239,24 +257,24 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 				if info.IsDir() {
 					return nil
 				}
-				if !strings.HasSuffix(path, ".md.tmpl") {
+				if !strings.HasSuffix(path, ".template.md") {
 					return nil
 				}
 				count++
 
 				data, readErr := os.ReadFile(path)
 				if readErr != nil {
-					t.Errorf("reading %s: %v", relPath(c.Dir, path), readErr)
+					t.Errorf("reading %s: %v", relPath(packDir, path), readErr)
 					return nil
 				}
 
 				if len(data) == 0 {
-					t.Errorf("%s is empty", relPath(c.Dir, path))
+					t.Errorf("%s is empty", relPath(packDir, path))
 					return nil
 				}
 
 				if strings.Contains(string(data), "/ralph-loop") {
-					t.Errorf("%s contains /ralph-loop reference (PR #2939 regression)", relPath(c.Dir, path))
+					t.Errorf("%s contains /ralph-loop reference (PR #2939 regression)", relPath(packDir, path))
 				}
 				return nil
 			})
@@ -266,17 +284,16 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 		}
 
 		if count == 0 {
-			t.Fatal("no .md.tmpl files found in materialized packs")
+			t.Fatal("no .template.md files found in materialized packs")
 		}
 		t.Logf("validated %d prompt template files", count)
 	})
 
-	// PR #3289: .beads/, .runtime/, .claude/commands/ blocked gt done.
+	// PR #3289: .beads/ and .claude/commands/ blocked gt done.
 	t.Run("GtDoneNotBlockedByInfraFiles", func(t *testing.T) {
 		overlayDirs := []string{
-			filepath.Join(c.Dir, "packs", "gastown", "overlays", "default"),
-			filepath.Join(c.Dir, "packs", "gastown", "overlay"),
-			filepath.Join(c.Dir, "packs", "maintenance", "overlays", "default"),
+			filepath.Join(packDir, "overlays", "default"),
+			filepath.Join(packDir, "overlay"),
 		}
 
 		beadsExcluded := false
@@ -290,7 +307,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 			}
 		}
 
-		scriptsDir := filepath.Join(c.Dir, "packs", "gastown", "scripts")
+		scriptsDir := filepath.Join(packDir, "assets", "scripts")
 		if entries, err := os.ReadDir(scriptsDir); err == nil {
 			for _, e := range entries {
 				if strings.HasSuffix(e.Name(), ".sh") {
@@ -321,7 +338,7 @@ func TestRegression_GastownPackArtifacts(t *testing.T) {
 // single gc init call and rig setup.
 func TestRegression_GastownWithRigs(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rig1 := t.TempDir()
 	rig2 := t.TempDir()

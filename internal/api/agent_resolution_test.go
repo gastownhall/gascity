@@ -55,3 +55,16 @@ func TestResolveSessionTemplateAgentRejectsAmbiguousBareName(t *testing.T) {
 		t.Fatal("expected ambiguous bare name to fail")
 	}
 }
+
+func TestFindAgentByQualifiedTemplateNilConfig(t *testing.T) {
+	// The endpoint 503 path short-circuits before this helper, so the nil
+	// guard is only reachable on a concurrent config swap-to-nil. Assert it
+	// directly: a nil config must return no match without dereferencing.
+	a, ok := findAgentByQualifiedTemplate(nil, "x")
+	if ok {
+		t.Fatal("expected nil config to yield no match")
+	}
+	if got := a.QualifiedName(); got != "" {
+		t.Fatalf("QualifiedName = %q, want empty zero-value agent", got)
+	}
+}

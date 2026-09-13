@@ -1,0 +1,2559 @@
+// Package dolt_test validates that the dolt pack's health.sh script
+// completes within a bounded time even when the Dolt server is
+// unresponsive. This is a regression guard for the hang reported in
+// the atlas city (deacon patrol, 2026-04-17).
+package dolt_test
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// healthScript is the on-disk path to the health command script. The
+// dolt pack wraps each CLI command in its own directory with a
+// `run.sh` entry point (and a sibling `command.toml` descriptor), so
+// the health script lives at `commands/health/run.sh`.
+const healthScript = "commands/health/run.sh"
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, filename, _, _ := runtime.Caller(0)
+	return filepath.Dir(filename)
+}
+
+// filteredEnv returns os.Environ() with the supplied keys removed and
+// every GC_* / DOLT_* entry stripped unconditionally. The blanket
+// scrub keeps shell-script tests hermetic when invoked from an agent
+// worktree, where the host shell carries managed-runtime
+// state (GC_DOLT_STATE_FILE, GC_CITY_RUNTIME_DIR, GC_DOLT_PORT, etc.)
+// that would otherwise override the test fixture's temp paths and
+// route runtime.sh at the production state file. The explicit keys
+// argument remains for non-GC_/DOLT_ scrubbing such as PATH.
+func filteredEnv(keys ...string) []string {
+	blocked := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		blocked[key] = struct{}{}
+	}
+	env := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, skip := blocked[key]; skip {
+				continue
+			}
+			if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "DOLT_") {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
+// TestFilteredEnvStripsGCAndDOLTPrefixes is the unit-level regression
+// guard for the env scrub. The TestRuntimeScriptPortPrecedence* tests
+// only fail when the host shell happens to carry leaking GC_* values,
+// so a revert of the prefix scrub goes undetected on clean machines.
+// This test injects the leak explicitly and asserts it never reaches
+// the returned slice.
+func TestFilteredEnvStripsGCAndDOLTPrefixes(t *testing.T) {
+	t.Setenv("GC_DOLT_STATE_FILE", "/host/leak/dolt-state.json")
+	t.Setenv("GC_DOLT_PORT", "38676")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/host/leak/runtime")
+	t.Setenv("DOLT_CLI_PASSWORD", "host-leak")
+	t.Setenv("FILTERED_ENV_TEST_KEEP", "kept")
+
+	got := filteredEnv()
+
+	for _, entry := range got {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "DOLT_") {
+			t.Errorf("filteredEnv leaked %q; GC_*/DOLT_* must be stripped", entry)
+		}
+	}
+
+	var sawKept bool
+	for _, entry := range got {
+		if entry == "FILTERED_ENV_TEST_KEEP=kept" {
+			sawKept = true
+			break
+		}
+	}
+	if !sawKept {
+		t.Errorf("filteredEnv dropped non-GC_/DOLT_ entry FILTERED_ENV_TEST_KEEP")
+	}
+}
+
+// startDeadTCPListener accepts connections but never writes or reads —
+// simulating a Dolt server whose goroutines are stuck before the MySQL
+// handshake completes. Returns the port and a cleanup func.
+func startDeadTCPListener(t *testing.T) (int, func()) {
+	t.Helper()
+	lc := net.ListenConfig{}
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open but send nothing. The Dolt
+			// client blocks waiting for the server handshake, which
+			// reproduces the hang mode the health script must tolerate.
+			go func(c net.Conn) {
+				<-stop
+				_ = c.Close()
+			}(c)
+		}
+	}()
+	cleanup := func() {
+		close(stop)
+		_ = l.Close()
+		wg.Wait()
+	}
+	return l.Addr().(*net.TCPAddr).Port, cleanup
+}
+
+// TestHealthScriptIsBounded runs commands/health.sh against a TCP
+// listener that accepts connections but never speaks MySQL. The
+// script used to hang indefinitely here because the per-database
+// commit count ran `dolt log --oneline` directly against the on-disk
+// database while the server held it open. The fix routes commit
+// counts through SQL and wraps all dolt binary invocations in a
+// timeout. We assert completion well under a minute.
+func TestHealthScriptIsBounded(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed; skipping")
+	}
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	port, cleanup := startDeadTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Minimal metadata file so metadata_files has a target.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"at"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	script := filepath.Join(root, healthScript)
+
+	// Stub gc on PATH: metadata_files would otherwise call the real gc
+	// with the 30s rig-list bound from runtime.sh, leaving this budget
+	// hostage to host `gc rig list` latency — worst exactly on the busy
+	// hosts this hang guard is for. The bounded dolt probe is what this
+	// test measures; rig discovery is incidental.
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 1\n")
+
+	cmd := exec.Command("sh", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		// Skip zombie enumeration: we're testing bounded-probe
+		// behavior, and per-PID `ps` calls on machines with many
+		// ambient dolt processes dominate the runtime budget.
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+
+	done := make(chan error, 1)
+	stdout, stdoutW := io.Pipe()
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stdoutW
+	go func() {
+		done <- cmd.Run()
+		_ = stdoutW.Close()
+	}()
+
+	// Drain output so the pipe never fills.
+	var buf strings.Builder
+	go func() { _, _ = io.Copy(&buf, stdout) }()
+
+	// With gc stubbed out, the largest per-call bound left is the 5s
+	// dolt probe. Allow generous slack for CI jitter, but fail hard
+	// well before "indefinite hang".
+	const budget = 45 * time.Second
+	select {
+	case err := <-done:
+		// Non-zero exit is expected here — the server isn't speaking
+		// MySQL, so the health script should signal unhealthy. A
+		// nil err means the script exited 0, which silently defeats
+		// the exit-code regression guard. A non-ExitError means the
+		// script couldn't even run (fork/exec failure, bad path) —
+		// surface that distinctly so the failure points at the
+		// right cause.
+		if err == nil {
+			t.Fatalf("health.sh exited 0 against unresponsive server; expected non-zero\n%s", buf.String())
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("health.sh produced non-exit error: %v\n%s", err, buf.String())
+		}
+	case <-time.After(budget):
+		_ = cmd.Process.Kill()
+		t.Fatalf("health.sh exceeded %s budget against unresponsive server\n%s", budget, buf.String())
+	}
+}
+
+// TestHealthScriptDoesNotInvokeDoltLog is a cheap regression guard
+// for the specific bug: the old script ran `dolt log --oneline`
+// locally against each on-disk database, which deadlocked with the
+// running dolt sql-server. Routing commit counts through SQL is
+// the only safe option. If a future refactor reintroduces `dolt log`,
+// the hang comes back.
+//
+// The regex matches `dolt log` as an executable call across the
+// common invocation shapes: space-separated, tab-separated, and
+// backslash-continued across lines. It deliberately does not match
+// the SQL identifier `dolt_log` (the system table) or prose usages
+// like "run `dolt log` to see commits". Line-by-line scanning with
+// simple substring checks would miss `dolt \\<newline>log` and
+// `dolt<tab>log`, which are both valid shell invocations.
+var doltLogCallRe = regexp.MustCompile(`(?m)(^|[^_A-Za-z0-9])dolt[ \t\\]+\n?[ \t]*log(\s|$)`)
+
+func TestHealthScriptDoesNotInvokeDoltLog(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, healthScript))
+	if err != nil {
+		t.Fatalf("read %s: %v", healthScript, err)
+	}
+	// Strip comment lines so the regex cannot false-positive on
+	// explanatory prose (e.g. "historically ran `dolt log --oneline`").
+	var body strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		body.WriteString(line)
+		body.WriteByte('\n')
+	}
+	if m := doltLogCallRe.FindString(body.String()); m != "" {
+		t.Errorf("%s contains `dolt log` as an executable call (match: %q).\n"+
+			"Commit counts must go through SQL (SELECT COUNT(*) FROM dolt_log) to avoid "+
+			"deadlocking with the running sql-server.", healthScript, m)
+	}
+}
+
+// TestHealthOrphansFromCleanupAuthority pins #3200: the orphan list is
+// sourced from `gc dolt-cleanup --json` (.dropped.names), the rig-protected
+// dry-run authority — never from health's own metadata scan, which flagged
+// every live rig DB as an orphan when rig metadata was sparse/unreachable. A
+// live rig DB present on disk but absent from dropped.names must NOT appear in
+// orphans (acting on that false positive could delete a live rig ledger).
+func TestHealthOrphansFromCleanupAuthority(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed; skipping")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed; skipping")
+	}
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	// TCP-reachable but never speaks MySQL → server.reachable=false, so the
+	// per-database (open_beads) probe is skipped and we exercise the orphan
+	// path in isolation.
+	port, cleanup := startDeadTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	// Dolt data dir: three live rig DBs plus one genuine orphan.
+	dataDir := t.TempDir()
+	for _, db := range []string{"hq", "gco", "tga", "stale_orphan"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", db, err)
+		}
+	}
+
+	// Stub `gc` on PATH. `gc dolt-cleanup --json` returns the rig-protected
+	// dry-run authority: stale_orphan is the only drop candidate; the live rig
+	// DBs are protected. Any other gc call (e.g. `gc rig list`) is a no-op.
+	binDir := t.TempDir()
+	stub := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"dolt-cleanup\" ]; then\n" +
+		"  printf '%s' '{\"ok\":true,\"rigs_protected\":[{\"rig\":\"gchq\",\"db\":\"hq\"},{\"rig\":\"gco\",\"db\":\"gco\"},{\"rig\":\"tga\",\"db\":\"tga\"}],\"dropped\":{\"count\":1,\"names\":[\"stale_orphan\"]}}'\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gc"), []byte(stub), 0o755); err != nil {
+		t.Fatalf("write gc stub: %v", err)
+	}
+
+	root := repoRoot(t)
+	script := filepath.Join(root, healthScript)
+	cmd := exec.Command("sh", script, "--json")
+	cmd.Env = append(filteredEnv("GC_DOLT_PORT", "PATH", "GC_DOLT_DATA_DIR"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Orphans []struct {
+			Name string `json:"name"`
+		} `json:"orphans"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	got := make([]string, 0, len(report.Orphans))
+	for _, o := range report.Orphans {
+		got = append(got, o.Name)
+	}
+	if len(got) != 1 || got[0] != "stale_orphan" {
+		t.Errorf("orphans = %v, want [stale_orphan] (from cleanup authority)", got)
+	}
+	for _, o := range got {
+		switch o {
+		case "hq", "gco", "tga":
+			t.Errorf("live rig DB %q misclassified as orphan", o)
+		}
+	}
+}
+
+// TestHealthScriptToleratesSlowRigListDiscovery pins the health half of
+// gascity#2740: `gc rig list --json` regularly takes longer than the old 5s
+// discovery bound on busy hosts. When the bound expires, metadata_files
+// silently degrades to a city-only filesystem scan that cannot see
+// externally-pathed rigs, so their metadata drops out of downstream
+// consumers — surfacing here as a live external rig DB misclassified as an
+// orphan, a false positive automation may act on. Answer rig list after 7s
+// with an external rig and require the result to be consumed.
+func TestHealthScriptToleratesSlowRigListDiscovery(t *testing.T) {
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	// External rig OUTSIDE the city directory: only the rig-list result can
+	// discover it — the fallback find scan is rooted at the city path.
+	extRig := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(extRig, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir external rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(extRig, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"extdb"}`), 0o644); err != nil {
+		t.Fatalf("write external rig metadata: %v", err)
+	}
+
+	// Data dir holds the city DB and the external rig's DB.
+	dataDir := t.TempDir()
+	for _, db := range []string{"hq", "extdb"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir db %s: %v", db, err)
+		}
+	}
+
+	binDir := t.TempDir()
+	// Fake gc: `rig list` answers after 7s — past the old 5s bound, inside
+	// the 30s one — naming the external rig. Everything else (notably
+	// `gc dolt-cleanup`) fails, so orphan detection takes the metadata
+	// referenced-set fallback, which protects extdb only when the rig-list
+	// result was consumed instead of the city-only scan.
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
+  sleep 7
+  printf '{"rigs":[{"path": "`+extRig+`"}]}\n'
+  exit 0
+fi
+exit 1
+`)
+	// No live server: lsof/nc fail, so the bounded dolt probe is skipped.
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_DOLT_PORT", "PATH", "GC_DOLT_DATA_DIR", "GC_DOLT_RIG_LIST_TIMEOUT_SECS"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Orphans []struct {
+			Name string `json:"name"`
+		} `json:"orphans"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	for _, o := range report.Orphans {
+		if o.Name == "extdb" {
+			t.Fatalf("external rig DB extdb misclassified as orphan: a rig list answering within the 30s bound must be consumed, not dropped for the city-only fallback scan\n%s", out)
+		}
+	}
+}
+
+func TestRuntimeScriptPortPrecedence(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, cityPath string) string
+		wantExit78 bool
+	}{
+		{
+			name: "managed state beats compatibility port mirror",
+			setup: func(t *testing.T, cityPath string) string {
+				t.Helper()
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("Listen: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+				port := listener.Addr().(*net.TCPAddr).Port
+				writeManagedRuntimeStateForScript(t, cityPath, port)
+				if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("1111\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return strconv.Itoa(port)
+			},
+		},
+		{
+			name: "invalid managed state falls back to provider state",
+			setup: func(t *testing.T, cityPath string) string {
+				t.Helper()
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("Listen: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+				port := listener.Addr().(*net.TCPAddr).Port
+				stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(`not-json`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				writeManagedRuntimeStateFileForScript(t, cityPath, "dolt-provider-state.json", port, os.Getpid())
+				return strconv.Itoa(port)
+			},
+		},
+		{
+			name: "corrupt managed state exits 78 despite compatibility port mirror",
+			setup: func(t *testing.T, cityPath string) string {
+				t.Helper()
+				stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+				if err := os.MkdirAll(stateDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(stateDir, "dolt-state.json"), []byte(`not-json`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(cityPath, ".beads", "dolt-server.port"), []byte("45785\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return ""
+			},
+			wantExit78: true,
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			want := tt.setup(t, cityPath)
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST")
+			cmd.Env = append(cmd.Env,
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+			)
+			out, err := cmd.CombinedOutput()
+			if tt.wantExit78 {
+				assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+				return
+			}
+			if err != nil {
+				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRuntimeScriptManagedStateBeatsStaleEnvPort(t *testing.T) {
+	cityPath := t.TempDir()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	writeManagedRuntimeStateForScript(t, cityPath, port)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+	cmd.Env = append(filteredEnv(
+		"GC_CITY_PATH",
+		"GC_PACK_DIR",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_PACK_STATE_DIR",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_PORT",
+		"GC_DOLT_HOST",
+	),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_PORT=4406",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != strconv.Itoa(port) {
+		t.Fatalf("GC_DOLT_PORT = %q, want live managed state port %d", got, port)
+	}
+}
+
+func TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof(t *testing.T) {
+	tests := []struct {
+		name        string
+		lsofBody    string
+		ncBody      func(port string) string
+		wantManaged bool
+		wantExit78  bool
+	}{
+		{
+			name:     "inconclusive lsof accepts reachable port",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(port string) string {
+				return `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "` + port + `" ]; then
+  exit 0
+fi
+exit 1
+`
+			},
+			wantManaged: true,
+		},
+		{
+			name:     "mismatched lsof pid still rejects port",
+			lsofBody: "#!/bin/sh\necho $$\nsleep 5\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 0
+`
+			},
+			wantExit78: true,
+		},
+		{
+			name:     "inconclusive lsof with unreachable port still rejects port",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 1
+`
+			},
+			wantExit78: true,
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := listener.Addr().(*net.TCPAddr).Port
+			managedPort := strconv.Itoa(port)
+			want := "3307"
+			if tt.wantManaged {
+				want = managedPort
+			}
+
+			writeManagedRuntimeStateForScript(t, cityPath, port)
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+			cmd.Env = append(cmd.Env,
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			out, err := cmd.CombinedOutput()
+			if tt.wantExit78 {
+				assertRuntimePortExit78(t, err, out, filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-state.json"), cityPath)
+				return
+			}
+			if err != nil {
+				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func assertRuntimePortExit78(t *testing.T, err error, out []byte, stateFile, cityPath string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("runtime.sh exited 0, want exit 78\n%s", out)
+	}
+	exitErr := &exec.ExitError{}
+	ok := errors.As(err, &exitErr)
+	if !ok {
+		t.Fatalf("runtime.sh returned non-exit error: %v\n%s", err, out)
+	}
+	if exitErr.ExitCode() != 78 {
+		t.Fatalf("runtime.sh exit code = %d, want 78\n%s", exitErr.ExitCode(), out)
+	}
+	if got, want := string(out), expectedPortResolveErrorWithProvider(stateFile, cityPath, "present but not running"); got != want {
+		t.Fatalf("runtime.sh output = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid(t *testing.T) {
+	tests := []struct {
+		name     string
+		lsofBody string
+		ncBody   func(port string) string
+	}{
+		{
+			name:     "listener pid match via ps fallback",
+			lsofBody: "#!/bin/sh\necho 424242\n",
+			ncBody: func(_ string) string {
+				return `#!/bin/sh
+exit 1
+`
+			},
+		},
+		{
+			name:     "reachable port via ps fallback when lsof is inconclusive",
+			lsofBody: "#!/bin/sh\nexit 0\n",
+			ncBody: func(port string) string {
+				return `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "` + port + `" ]; then
+  exit 0
+fi
+exit 1
+`
+			},
+		},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := listener.Addr().(*net.TCPAddr).Port
+			managedPort := strconv.Itoa(port)
+
+			writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, 424242)
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
+			writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
+if [ "$1" = "-p" ] && [ "$2" = "424242" ]; then
+  echo " 424242"
+  exit 0
+fi
+exit 1
+`)
+
+			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+			cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+			cmd.Env = append(cmd.Env,
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != managedPort {
+				t.Fatalf("GC_DOLT_PORT = %q, want %q", got, managedPort)
+			}
+		})
+	}
+}
+
+func TestRuntimeScriptPortPrecedenceParsesManagedRuntimeStateWithPortableSed(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	managedPort := strconv.Itoa(port)
+
+	realSed, err := exec.LookPath("sed")
+	if err != nil {
+		t.Fatalf("LookPath(sed): %v", err)
+	}
+
+	writeManagedRuntimeStateForScript(t, cityPath, port)
+	writeExecutable(t, filepath.Join(fakeBin, "sed"), fmt.Sprintf(`#!/bin/sh
+case "$2" in
+  *'\\(true\\|false\\)'*)
+    exit 0
+    ;;
+esac
+exec %q "$@"
+`, realSed))
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
+	cmd.Env = filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_PORT", "GC_DOLT_HOST", "PATH")
+	cmd.Env = append(cmd.Env,
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runtime.sh failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != managedPort {
+		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, managedPort)
+	}
+}
+
+// reachableServerEnv builds a fake lsof/nc/dolt PATH plus a live TCP
+// listener so health.sh's server-detection probes all report reachable,
+// returning the environment for exec.Command. Shared by every test that
+// needs the script to see server_reachable=true without a real dolt
+// sql-server.
+func reachableServerEnv(t *testing.T, root, cityPath string) []string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+
+	return append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+}
+
+// newHealthScriptCmd builds an *exec.Cmd for invoking health.sh with the
+// given environment and args. Callers choose Output() (stdout only, for
+// JSON-mode assertions that must not see stray stderr) vs
+// CombinedOutput() (for human-mode assertions and failure messages).
+func newHealthScriptCmd(root string, env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command("sh", append([]string{filepath.Join(root, healthScript)}, args...)...)
+	cmd.Env = env
+	return cmd
+}
+
+func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
+	cityPath := t.TempDir()
+	root := repoRoot(t)
+
+	out, err := newHealthScriptCmd(root, reachableServerEnv(t, root, cityPath), "--json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `"running": true`) {
+		t.Fatalf("health output missing running=true:\n%s", out)
+	}
+}
+
+func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "bsd percent n literal", raw: "1776740122N"},
+		{name: "empty percent n output", raw: ""},
+	}
+
+	root := repoRoot(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+			writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+host="$2"
+probe_port="$3"
+if [ "$1" = "-z" ] && [ "$host" = "127.0.0.1" ] && [ "$probe_port" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "date"), `#!/bin/sh
+case "$1" in
+  +%s%N)
+    printf '%s' "${FAKE_DATE_PERCENT_SN_RAW-}"
+    exit 0
+    ;;
+  +%s)
+    counter_file="${FAKE_DATE_SECONDS_COUNTER_FILE:?}"
+    if [ -f "$counter_file" ]; then
+      count=$(cat "$counter_file")
+    else
+      count=0
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$counter_file"
+    case "$count" in
+      1) printf '%s\n' "${FAKE_DATE_SECONDS_FIRST-1776740122}" ;;
+      *) printf '%s\n' "${FAKE_DATE_SECONDS_SECOND-1776740123}" ;;
+    esac
+    exit 0
+    ;;
+  -u)
+    printf '%s\n' '2026-04-23T00:00:00Z'
+    exit 0
+    ;;
+esac
+exec /bin/date "$@"
+`)
+
+			counterFile := filepath.Join(t.TempDir(), "date-counter")
+			cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+			cmd.Env = append(filteredEnv(
+				"FAKE_DATE_PERCENT_SN_RAW",
+				"FAKE_DATE_SECONDS_COUNTER_FILE",
+				"FAKE_DATE_SECONDS_FIRST",
+				"FAKE_DATE_SECONDS_SECOND",
+				"GC_CITY_PATH",
+				"GC_PACK_DIR",
+				"GC_DOLT_HOST",
+				"GC_DOLT_PORT",
+				"GC_DOLT_USER",
+				"GC_DOLT_PASSWORD",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN",
+				"PATH",
+			),
+				"FAKE_DATE_PERCENT_SN_RAW="+tt.raw,
+				"FAKE_DATE_SECONDS_COUNTER_FILE="+counterFile,
+				"FAKE_DATE_SECONDS_FIRST=1776740122",
+				"FAKE_DATE_SECONDS_SECOND=1776740123",
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_HOST=127.0.0.1",
+				"GC_DOLT_PORT="+port,
+				"GC_DOLT_USER=root",
+				"GC_DOLT_PASSWORD=",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+			}
+
+			var report struct {
+				Server struct {
+					Running   bool `json:"running"`
+					Reachable bool `json:"reachable"`
+					LatencyMS int  `json:"latency_ms"`
+				} `json:"server"`
+			}
+			if err := json.Unmarshal(out, &report); err != nil {
+				t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+			}
+			if !report.Server.Running {
+				t.Fatalf("server.running = false, want true\n%s", out)
+			}
+			if !report.Server.Reachable {
+				t.Fatalf("server.reachable = false, want true\n%s", out)
+			}
+			if report.Server.LatencyMS != 1000 {
+				t.Fatalf("server.latency_ms = %d, want 1000 to prove seconds fallback ran\n%s", report.Server.LatencyMS, out)
+			}
+		})
+	}
+}
+
+func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) {
+	t.Helper()
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
+}
+
+func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, port int, pid int) {
+	t.Helper()
+	writeManagedRuntimeStateFileForScript(t, cityPath, "dolt-state.json", port, pid)
+}
+
+func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filename string, port int, pid int) {
+	t.Helper()
+	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(fmt.Sprintf(
+		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
+		pid,
+		port,
+		dataDir,
+	))
+	if err := os.WriteFile(filepath.Join(stateDir, filename), payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "dolt.args")
+	emptyDataDir := t.TempDir()
+
+	// Force the local managed-server precheck to fail. External hosts must still
+	// be probed via SQL against GC_DOLT_HOST:GC_DOLT_PORT.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	// Append (not overwrite) each invocation's args: for an external endpoint
+	// health issues the SELECT 1 reachability probe AND a SHOW DATABASES catalog
+	// query, so a single-write fake would clobber the SELECT 1 record.
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+printf '%s\n' "$@" >> "$FAKE_DOLT_ARGS"
+exit 0
+`)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS",
+		"GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"FAKE_DOLT_ARGS="+argsFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for external host; want false local-managed signal\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; want configured external host SQL probe to succeed\n%s", out)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake dolt was not invoked: %v\nhealth output:\n%s", err, out)
+	}
+	gotArgs := "\n" + string(args)
+	for _, want := range []string{"\n--host\nsuperlzy-dolt\n", "\n--port\n3306\n", "\n--user\nsuperlzy\n", "\nsql\n", "\n-q\n", "\nSELECT 1\n"} {
+		if !strings.Contains(gotArgs, want) {
+			t.Fatalf("fake dolt args missing %q; got:\n%s\nhealth output:\n%s", want, args, out)
+		}
+	}
+}
+
+// smartFakeDoltForExternal is a fake `dolt` client that answers the health
+// command's SQL probes for a configured external endpoint: SELECT 1 succeeds
+// (reachable), SHOW DATABASES returns a remote catalog, and the per-database
+// count queries return fixed numbers. It lets the enumeration path be exercised
+// without a live server.
+const smartFakeDoltForExternal = `#!/bin/sh
+q=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-q" ] && q="$a"
+  prev="$a"
+done
+case "$q" in
+  *"SHOW DATABASES"*) printf 'Database\ninformation_schema\nmysql\nac\ndh\nhq\n' ;;
+  *"FROM dolt_log"*)  printf 'count\n42\n' ;;
+  *"FROM issues"*)    printf 'count\n7\n' ;;
+esac
+exit 0
+`
+
+// TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL is the primary
+// regression guard for su-deol8: for a reachable configured external Dolt
+// endpoint the health report must enumerate databases from SQL (SHOW DATABASES)
+// rather than the local on-disk data-dir scan — which sees nothing for a remote
+// server and previously reported databases=[] despite healthy SQL. It also
+// asserts the report distinguishes an external endpoint (server.external=true)
+// from a downed local server: server.running/pid stay at their local-process
+// defaults but must not be read as authoritative "down" while reachable.
+func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	emptyDataDir := t.TempDir()
+
+	// Local managed precheck must fail so the external SQL path is taken; the
+	// on-disk data dir is empty, proving databases come from SQL, not the scan.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+		Databases []struct {
+			Name      string `json:"name"`
+			Commits   int    `json:"commits"`
+			OpenBeads int    `json:"open_beads"`
+		} `json:"databases"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; want reachable external endpoint\n%s", out)
+	}
+	if !report.Server.External {
+		t.Fatalf("server.external = false; want true for a non-local configured host\n%s", out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for external host; local-process signal must stay false\n%s", out)
+	}
+
+	got := map[string]struct {
+		commits, open int
+	}{}
+	for _, db := range report.Databases {
+		got[db.Name] = struct{ commits, open int }{db.Commits, db.OpenBeads}
+	}
+	for _, name := range []string{"ac", "dh", "hq"} {
+		d, ok := got[name]
+		if !ok {
+			t.Fatalf("database %q missing from SQL-enumerated report (databases=[] regression); got %+v\n%s", name, report.Databases, out)
+		}
+		if d.commits != 42 || d.open != 7 {
+			t.Fatalf("database %q counts = commits %d open %d; want 42/7 from SQL\n%s", name, d.commits, d.open, out)
+		}
+	}
+	for _, sys := range []string{"information_schema", "mysql"} {
+		if _, ok := got[sys]; ok {
+			t.Fatalf("system database %q leaked into report; SHOW DATABASES system filter failed\n%s", sys, out)
+		}
+	}
+}
+
+// TestHealthScriptLocalEndpointIsNotExternal guards the local managed-Dolt path:
+// a reachable server on a loopback host must report server.external=false so the
+// external-endpoint branch never masks a genuinely downed local server.
+func TestHealthScriptLocalEndpointIsNotExternal(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+if [ "$1" = "-z" ] && [ "$2" = "127.0.0.1" ] && [ "$3" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.Running {
+		t.Fatalf("server.running = false; want true for a reachable local managed server\n%s", out)
+	}
+	if report.Server.External {
+		t.Fatalf("server.external = true for loopback host; want false (local managed)\n%s", out)
+	}
+}
+
+// TestHealthScriptNonOneLoopbackHostIsExternal pins the host-classification
+// contract for a non-.1 loopback address (127.0.0.2): it must be treated as an
+// external endpoint (server.external=true), matching the sibling gc-beads-bd
+// `is_remote`/`restart`/`recover` scripts, which classify only 127.0.0.1 as the
+// local managed server. A future re-broadening of is_local_dolt_host back to the
+// whole 127.* block — which would split the health/status/logs commands from the
+// restart/recover contract — is caught here (su-deol8).
+func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	emptyDataDir := t.TempDir()
+
+	// Local managed precheck must fail so classification alone decides the path;
+	// the smart fake answers the external SELECT 1 / SHOW DATABASES probes.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=127.0.0.2",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			External  bool `json:"external"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if !report.Server.External {
+		t.Fatalf("server.external = false for 127.0.0.2; a non-.1 loopback host must classify as external to match the is_remote contract\n%s", out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for 127.0.0.2; the local-process signal must stay false for a non-local host\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; the fake external endpoint answers SELECT 1\n%s", out)
+	}
+}
+
+// TestHealthScriptZombieScanExcludesRigLocalServers verifies that
+// Dolt processes on rig-configured ports are not flagged as zombies.
+// Regression guard for the bug where deacon patrol killed rig-local
+// Dolt servers because the zombie scan treated every non-city-server
+// dolt sql-server PID as a zombie.
+func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig string) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19901"
+	rigPort := "19902"
+
+	mainPID := "424201"
+	rigPID := "424202"
+	zombiePID := "424203"
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig directory with config.yaml containing dolt.port.
+	rigBeads := filepath.Join(cityPath, "rigs", "enterprise", ".beads")
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+		[]byte(`{"dolt_database":"enterprise"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "config.yaml"),
+		[]byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns rig PID and zombie PID (main PID excluded
+	// by server_pid check, not by pgrep filtering).
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
+
+	// Fake lsof: maps ports to PIDs.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID, rigPort, rigPID))
+
+	// Fake ps: handles pid_is_running (`-p <pid> -o pid=`) and the zombie
+	// scan's single process-table pass (`ps -eo pid=,stat=,args=`, #2482).
+	// All three dolt PIDs appear as live sql-servers; the script excludes the
+	// city server (server_pid) and the rig-local dolt, leaving the orphan.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, rigPID, zombiePID))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// The true zombie (424203) should be counted.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+
+	// The rig PID (424202) must NOT appear in zombie_pids.
+	if strings.Contains(output, rigPID) {
+		t.Errorf("rig-local Dolt PID %s should not be in zombie_pids; got:\n%s", rigPID, output)
+	}
+
+	// The true zombie PID (424203) must appear in zombie_pids.
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
+func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
+	tests := []struct {
+		name      string
+		rigConfig string
+	}{
+		{
+			name:      "bare port",
+			rigConfig: "dolt.port: 19902\n",
+		},
+		{
+			name:      "quoted port",
+			rigConfig: "dolt.port: \"19902\"\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runHealthScriptZombieScanExcludesRigLocalServers(t, tc.rigConfig)
+		})
+	}
+}
+
+// TestHealthScriptZombieScanExcludesForeignManagedServers verifies that
+// Dolt servers managed by OTHER cities on the same host are not flagged
+// as zombies. Regression guard for the bug where deacon patrol in every
+// city on a shared dev host counted the other cities' Dolt servers as
+// zombies, because the rig-local PID filter only sees rigs of the calling
+// city. The scan extracts `--config <path>` from the args column of the
+// single bounded `ps -eo` pass and checks for a sibling `dolt.pid`
+// claiming the PID — the same shape gc itself uses when it manages Dolt
+// for any city. This drives the bounded pass (its awk + the matched-server
+// shell loop), NOT a per-PID `ps -p` shim.
+func TestHealthScriptZombieScanExcludesForeignManagedServers(t *testing.T) {
+	cityPath := t.TempDir()
+	foreignCityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19903"
+	mainPID := "424301"
+	foreignPID := "424302"
+	zombiePID := "424303"
+
+	// Foreign city: dolt-config.yaml + dolt.pid sibling claiming foreignPID.
+	foreignDoltDir := filepath.Join(foreignCityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(foreignDoltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigPath := filepath.Join(foreignDoltDir, "dolt-config.yaml")
+	if err := os.WriteFile(foreignConfigPath, []byte("# foreign city dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDoltDir, "dolt.pid"),
+		[]byte(foreignPID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID, foreign PID, and a true zombie PID.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, zombiePID))
+
+	// Fake lsof: maps main port to mainPID.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
+	// foreign PID's args line WITH `--config <path>` so the awk pass extracts
+	// it; the others are plain sql-servers. Also answer the `-p <pid> -o pid=`
+	// liveness probe used by managed_runtime_listener_pid.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, foreignPID, foreignConfigPath, zombiePID))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	// Only the true zombie (424303) should be counted; foreign-managed is excluded.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+	if strings.Contains(output, foreignPID) {
+		t.Errorf("foreign-managed Dolt PID %s should not be in zombie_pids; got:\n%s", foreignPID, output)
+	}
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
+// TestHealthScriptZombieScanFlagsMismatchedForeignPidFile verifies that
+// when a foreign --config exists but the sibling dolt.pid does NOT match
+// the candidate PID (the recorded process died, a stranger reused the
+// PID, etc.), the candidate is still treated as a zombie. The foreign
+// recognition logic must self-validate against the sibling pid file
+// rather than trust the config-file path alone. Like the test above this
+// drives the bounded `ps -eo` pass, not a per-PID `ps -p` shim.
+func TestHealthScriptZombieScanFlagsMismatchedForeignPidFile(t *testing.T) {
+	cityPath := t.TempDir()
+	foreignCityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19904"
+	mainPID := "424401"
+	suspectPID := "424402"
+	// dolt.pid records a different PID — the sibling claim doesn't match
+	// the candidate, so the candidate is still a zombie.
+	recordedPID := "424499"
+
+	foreignDoltDir := filepath.Join(foreignCityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(foreignDoltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignConfigPath := filepath.Join(foreignDoltDir, "dolt-config.yaml")
+	if err := os.WriteFile(foreignConfigPath, []byte("# foreign city dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreignDoltDir, "dolt.pid"),
+		[]byte(recordedPID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, suspectPID))
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+	// Bounded `ps -eo` pass: the suspect PID carries `--config <path>` but
+	// its sibling dolt.pid records a different PID, so the foreign-managed
+	// check must NOT exclude it.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, suspectPID, foreignConfigPath))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1 (PID-mismatched config does not protect from zombie status); got:\n%s", output)
+	}
+	if !strings.Contains(output, suspectPID) {
+		t.Errorf("suspect PID %s with mismatched dolt.pid should still be flagged as zombie; got:\n%s", suspectPID, output)
+	}
+}
+
+// TestHealthScriptZombieScanExcludesExternallyManagedServers verifies that a
+// dolt sql-server launched with an explicit `--config <path>` whose config
+// directory has NO sibling `dolt.pid` is treated as externally managed (e.g.
+// a launchd-managed server for an unrelated app) and is NOT flagged as a
+// zombie. Regression guard for the bug where a healthy, unrelated dolt server
+// (a separate app's launchd-managed `dolt sql-server` on its own datadir and
+// port) was counted as a zombie because the foreign-managed exclusion only
+// recognized gc-managed siblings (config dir + matching dolt.pid). gc always
+// writes a dolt.pid next to a managed config; the absence of that sibling is
+// positive evidence the process is owned by another tool, not a town stray
+// the deacon patrol may kill. A plain `dolt sql-server` with no `--config`
+// (a genuine unidentified orphan) is still flagged, locking the boundary.
+func TestHealthScriptZombieScanExcludesExternallyManagedServers(t *testing.T) {
+	cityPath := t.TempDir()
+	externalConfigDir := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19905"
+	mainPID := "424501"
+	externalPID := "424502"
+	zombiePID := "424503"
+
+	// External app's dolt config: a config file with NO sibling dolt.pid.
+	// This is the launchd-managed / non-gc shape from the field report.
+	externalConfigPath := filepath.Join(externalConfigDir, "config.yaml")
+	if err := os.WriteFile(externalConfigPath, []byte("# unrelated app dolt config\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID, external PID, and a true zombie PID.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, externalPID, zombiePID))
+
+	// Fake lsof: maps main port to mainPID.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
+	// external PID's args line WITH `--config <path>` so the awk pass extracts
+	// it; its config dir has no dolt.pid sibling, so it must be excluded as an
+	// externally-managed server. The others are plain sql-servers.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-eo" ]; then
+  echo "%s Sl dolt sql-server"
+  echo "%s Sl dolt sql-server --config %s"
+  echo "%s Sl dolt sql-server"
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, mainPID, externalPID, externalConfigPath, zombiePID))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+	output := string(out)
+
+	// Only the true zombie (424503) should be counted; the externally-managed
+	// server is excluded.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+	if strings.Contains(output, externalPID) {
+		t.Errorf("externally-managed Dolt PID %s (--config, no dolt.pid sibling) should not be in zombie_pids; got:\n%s", externalPID, output)
+	}
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
+// TestHealthScriptZombieScanIsBoundedFork is the regression guard for #2482:
+// the zombie scan must enumerate the process table a bounded number of times,
+// independent of how many dolt processes (especially Z-state zombies) exist.
+// The old loop forked one `ps -p <pid> -o args=` per `pgrep -x dolt` match, so
+// under a non-reaping PID 1 it became an O(zombies) `ps` storm re-paid every
+// 30s. We drive the real run.sh with a pgrep that reports many dolt PIDs and a
+// ps shim that logs every invocation, then assert zero per-PID `-o args=`
+// forks while the orphaned sql-servers are still classified.
+func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
+	const candidateCount = 50
+	const firstPID = 500000
+
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+	psLog := filepath.Join(t.TempDir(), "ps_calls")
+
+	mainPort := "19901"
+	serverPID := strconv.Itoa(firstPID) // first candidate is the managed city server
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// pgrep reports candidateCount dolt PIDs — the candidate set the old loop
+	// forked `ps -p <pid> -o args=` over, one per PID.
+	var pgrepBody strings.Builder
+	pgrepBody.WriteString("#!/bin/sh\n")
+	for i := 0; i < candidateCount; i++ {
+		fmt.Fprintf(&pgrepBody, "echo %d\n", firstPID+i)
+	}
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"), pgrepBody.String())
+
+	// gc fails -> metadata_files falls back to find (no rigs here).
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	// lsof maps the city port to the server PID so server_pid resolves.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	// ps shim: log every invocation, answer the port->pid confirmation
+	// (`-p <pid> -o pid=`) and the single process-table pass (`-eo ...`).
+	psShim := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+if [ "$1" = "-eo" ]; then
+  i=0
+  while [ "$i" -lt %d ]; do
+    echo "$((%d + i)) Sl dolt sql-server"
+    i=$((i + 1))
+  done
+  exit 0
+fi
+if [ "$1" = "-p" ] && [ "$3" = "-o" ] && [ "$4" = "pid=" ]; then
+  printf ' %%s\n' "$2"
+  exit 0
+fi
+exit 1
+`, psLog, candidateCount, firstPID)
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), psShim)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	callsRaw, readErr := os.ReadFile(psLog)
+	if readErr != nil {
+		t.Fatalf("read ps log: %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(callsRaw)), "\n")
+	perPIDForks := 0
+	tableForks := 0
+	for _, line := range calls {
+		switch {
+		case strings.Contains(line, "args=") && strings.Contains(line, "-p "):
+			perPIDForks++
+		case strings.HasPrefix(line, "-eo"):
+			tableForks++
+		}
+	}
+	if perPIDForks != 0 {
+		t.Errorf("zombie scan made %d per-PID `ps -p <pid> -o args=` forks across %d candidates; want 0 (must use a single bounded pass)\nps calls:\n%s",
+			perPIDForks, candidateCount, callsRaw)
+	}
+	if tableForks > 1 {
+		t.Errorf("zombie scan ran %d full `ps -eo` passes; want at most 1\nps calls:\n%s", tableForks, callsRaw)
+	}
+	// All candidates are orphaned sql-servers except the managed city server,
+	// which is excluded by the server_pid check.
+	wantCount := fmt.Sprintf(`"zombie_count": %d`, candidateCount-1)
+	if !strings.Contains(string(out), wantCount) {
+		t.Errorf("expected %s (candidates minus the city server); got:\n%s", wantCount, out)
+	}
+}
+
+// TestHealthScriptJSONAlwaysExitsZero guards the JSON-mode exit
+// contract. Automation consumers (notably the deacon patrol formula)
+// parse the JSON payload and key health decisions off `server.reachable`.
+// If `--json` exits non-zero on an unreachable server, a formula
+// step executor may fail the step before stdout is parsed — the
+// exact failure mode this PR was meant to diagnose. The human
+// (non-JSON) form still returns non-zero on unhealthy servers; only
+// `--json` is unconditionally exit 0.
+func TestHealthScriptJSONAlwaysExitsZero(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt not installed; skipping")
+	}
+	if _, errT := exec.LookPath("timeout"); errT != nil {
+		if _, errG := exec.LookPath("gtimeout"); errG != nil {
+			t.Skip("neither timeout nor gtimeout installed; skipping")
+		}
+	}
+
+	// Bind a socket to get a guaranteed-closed port, then release it.
+	// Any residual latency in the OS accepting on a dead port is fine
+	// — the script's 5s bounds dominate.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"at"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	script := filepath.Join(root, healthScript)
+
+	cmd := exec.Command("sh", script, "--json")
+	cmd.Env = append(os.Environ(),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json exited non-zero against unreachable server: %v\n%s", err, out)
+	}
+	// The payload MUST carry server.reachable so consumers can tell
+	// the server is down without needing a non-zero exit code.
+	if !strings.Contains(string(out), `"reachable": false`) {
+		t.Errorf("JSON payload missing expected `\"reachable\": false`; got:\n%s", out)
+	}
+}
+
+// writeQuarantineMarker writes a compaction quarantine marker at the same
+// path gc dolt compact uses: $cityPath/.gc/runtime/packs/dolt/
+// compact-quarantine/<db>, with the line-oriented db=/reason=/created_at=
+// body the compact script emits.
+func writeQuarantineMarker(t *testing.T, cityPath, db, reason, createdAt string) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	body := fmt.Sprintf("db=%s\nreason=%s\ncreated_at=%s\n", db, reason, createdAt)
+	if err := os.WriteFile(filepath.Join(dir, db), []byte(body), 0o644); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+}
+
+// writeQuarantineTransients drops the two transient siblings compact/run.sh
+// leaves in the quarantine directory alongside real markers: the mktemp
+// `<db>.probe.XXXXXX` write test that ensure_compact_marker_writable performs
+// on every flatten (empty), and the `<db>.tmp.XXXXXX` staging file
+// write_compact_marker fills before its atomic rename (full marker body).
+// Neither is a marker; health must ignore both.
+func writeQuarantineTransients(t *testing.T, cityPath, db string) {
+	t.Helper()
+	dir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, db+".probe.AbC123"), nil, 0o644); err != nil {
+		t.Fatalf("write probe sibling: %v", err)
+	}
+	body := fmt.Sprintf("db=%s\nreason=staging write in flight\ncreated_at=%s\n",
+		db, time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	if err := os.WriteFile(filepath.Join(dir, db+".tmp.XyZ789"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write tmp sibling: %v", err)
+	}
+}
+
+// TestHealthScriptSurfacesQuarantineInJSON pins gascity#3729: an active
+// compaction quarantine marker blocks auto-GC indefinitely but was invisible
+// to `gc dolt health`. The JSON report must carry a `quarantine` array naming
+// each quarantined db, its reason, and its age — surfaced independently of
+// server reachability, since the un-GC'd bloat can itself wedge the server.
+func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	created := time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04:05Z")
+	writeQuarantineMarker(t, cityPath, "hq", "post-flatten row count decreased", created)
+	// A concurrent compaction leaves transient siblings in this same
+	// directory; only the real marker may appear in the report.
+	writeQuarantineTransients(t, cityPath, "hq")
+
+	// No live server: lsof/nc/dolt fail so the bounded probe is skipped and the
+	// filesystem-only quarantine scan is exercised in isolation. JSON mode
+	// always exits 0.
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=59998",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Quarantine []struct {
+			DB     string `json:"db"`
+			Reason string `json:"reason"`
+			AgeSec int    `json:"age_sec"`
+		} `json:"quarantine"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	if len(report.Quarantine) != 1 {
+		t.Fatalf("quarantine = %d entries, want 1\n%s", len(report.Quarantine), out)
+	}
+	q := report.Quarantine[0]
+	if q.DB != "hq" {
+		t.Errorf("quarantine db = %q, want hq", q.DB)
+	}
+	if q.Reason != "post-flatten row count decreased" {
+		t.Errorf("quarantine reason = %q, want the marker reason", q.Reason)
+	}
+	// created 2h ago: age must be positive and in a sane window, proving the
+	// RFC3339 created_at was parsed (not the mtime fallback to ~0).
+	if q.AgeSec < 3600 || q.AgeSec > 86400 {
+		t.Errorf("quarantine age_sec = %d, want ~7200 (created_at 2h ago parsed)", q.AgeSec)
+	}
+}
+
+// TestHealthScriptQuarantineHumanExitCode pins the operator-facing half of
+// gascity#3729: with the server reachable, a standing quarantine marker must
+// (a) print a "Compaction quarantine" section naming the db/reason/age and
+// (b) exit with the distinct code 2 so CLI/CI callers catch a blocked
+// compaction without conflating it with an unreachable server (exit 1). With
+// no marker, the command stays silent about quarantine and exits 0.
+func TestHealthScriptQuarantineHumanExitCode(t *testing.T) {
+	root := repoRoot(t)
+
+	// reachableEnv builds an environment in which the health script sees a
+	// reachable server: an inconclusive lsof, an nc that connects to the bound
+	// port, and a dolt whose SELECT 1 succeeds — mirroring
+	// TestHealthScriptReportsRunningWhenLsofIsInconclusive.
+	reachableEnv := func(t *testing.T, cityPath string) []string {
+		t.Helper()
+		return reachableServerEnv(t, root, cityPath)
+	}
+
+	mkCity := func(t *testing.T) string {
+		t.Helper()
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+			[]byte(`{"dolt_database":"hq"}`), 0o644); err != nil {
+			t.Fatalf("write metadata: %v", err)
+		}
+		return cityPath
+	}
+
+	t.Run("marker present exits 2 with section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		created := time.Now().UTC().Add(-49 * time.Hour).Format("2006-01-02T15:04:05Z")
+		writeQuarantineMarker(t, cityPath, "hq", "post-flatten table value hash changed with row-count increase", created)
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("expected ExitError (exit 2), got err=%v\n%s", err, out)
+		}
+		if exitErr.ExitCode() != 2 {
+			t.Fatalf("exit code = %d, want 2 (reachable + quarantine active)\n%s", exitErr.ExitCode(), out)
+		}
+		s := string(out)
+		if !strings.Contains(s, "Compaction quarantine: 1") {
+			t.Errorf("output missing quarantine section:\n%s", s)
+		}
+		if !strings.Contains(s, "hq: post-flatten table value hash changed with row-count increase") {
+			t.Errorf("output missing db/reason line:\n%s", s)
+		}
+		if !strings.Contains(s, "held 2d") {
+			t.Errorf("output missing day-scale age (held 2d...):\n%s", s)
+		}
+	})
+
+	t.Run("no marker exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero with no quarantine: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("unexpected quarantine section with no marker:\n%s", out)
+		}
+	})
+
+	// ensure_compact_marker_writable runs its mktemp probe on EVERY flatten,
+	// so a healthy city with an in-flight compaction routinely has a
+	// `<db>.probe.XXXXXX` sitting in the quarantine directory with no real
+	// marker beside it. Treating it as a marker would alarm operators (and
+	// flip the exit code to 2) during ordinary compaction.
+	t.Run("transient siblings only exits 0 without section", func(t *testing.T) {
+		cityPath := mkCity(t)
+		writeQuarantineTransients(t, cityPath, "hq")
+
+		out, err := newHealthScriptCmd(root, reachableEnv(t, cityPath)).CombinedOutput()
+		if err != nil {
+			t.Fatalf("health.sh exited non-zero for transient compact siblings: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Compaction quarantine") {
+			t.Errorf("transient compact siblings reported as quarantine:\n%s", out)
+		}
+	})
+}
+
+// backupsReport is the `backups` block of `gc dolt health --json`. dolt_stale
+// is a *bool on purpose: the whole point of the block is that an unmeasured
+// probe must be distinguishable from a measured healthy one, and decoding it
+// into a plain bool would collapse null and false back into the same value —
+// reintroducing the defect the tests below exist to catch.
+type backupsReport struct {
+	DoltMeasured bool   `json:"dolt_measured"`
+	DoltFresh    string `json:"dolt_freshness"`
+	DoltAgeSec   int    `json:"dolt_age_sec"`
+	DoltStale    *bool  `json:"dolt_stale"`
+	MigMeasured  bool   `json:"migration_measured"`
+	MigStale     *bool  `json:"migration_stale"`
+	Databases    []struct {
+		Name   string `json:"name"`
+		AgeSec int    `json:"age_sec"`
+		Fresh  string `json:"freshness"`
+		Stale  bool   `json:"stale"`
+	} `json:"dolt_databases"`
+}
+
+// runHealthBackupsJSON runs the health command against cityPath with no live
+// server and returns the decoded backups block. The server is deliberately
+// absent: backup freshness is a filesystem measurement, so this exercises it
+// in isolation, and JSON mode always exits 0.
+func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte) {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range []string{"gc", "lsof", "nc", "dolt"} {
+		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nexit 1\n")
+	}
+	root := repoRoot(t)
+	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "GC_BACKUP_ARTIFACT_DIR", "GC_HEALTH_BACKUP_STALE_S", "GC_DOCTOR_BACKUP_STALE_S", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=59997",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := newHealthScriptCmd(root, env, "--json").Output()
+	if err != nil {
+		t.Fatalf("health run.sh --json failed: %v\n%s", err, out)
+	}
+	var report struct {
+		Backups backupsReport `json:"backups"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("parse health JSON: %v\n%s", err, out)
+	}
+	return report.Backups, out
+}
+
+// TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict pins the property
+// that a backup check which measured nothing must not render as a measured
+// healthy one.
+//
+// The regression: backup_freshness/backup_age_sec/backup_stale were
+// initialized to "", 0 and false, and the block that would overwrite them was
+// skipped whenever no backup was found. JSON mode then emitted a confident
+// "dolt_stale": false for a city whose bead store had no backup at all. One
+// city ran 18 hours with a stale backup while this field reported healthy.
+//
+// The assertion that matters is DoltStale == nil rather than DoltStale ==
+// false: a plain bool cannot tell those apart, which is exactly how the
+// original defect stayed invisible.
+func TestHealthUnmeasuredBackupFreshnessIsNotAHealthyVerdict(t *testing.T) {
+	cityPath := t.TempDir()
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltMeasured {
+		t.Errorf("dolt_measured = true with no backup artifact dir, want false\n%s", out)
+	}
+	if backups.DoltStale != nil {
+		t.Fatalf("dolt_stale = %v on an unmeasured probe, want null; a measurement that never ran must never render as a verdict\n%s", *backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 0 {
+		t.Errorf("dolt_databases = %d entries with no artifact dir, want 0\n%s", len(backups.Databases), out)
+	}
+	// The migration half carries the same contract on the same evidence.
+	if backups.MigMeasured || backups.MigStale != nil {
+		t.Errorf("migration_measured=%v migration_stale=%v, want false/null with no migration-backup-* dirs\n%s", backups.MigMeasured, backups.MigStale, out)
+	}
+	// Raw-text guard: the decoded form above would also be satisfied by the
+	// field being absent, and a consumer reading the document directly sees
+	// the literal. Pin the literal too.
+	if !strings.Contains(string(out), `"dolt_stale": null`) {
+		t.Errorf("JSON must carry an explicit null dolt_stale, got:\n%s", out)
+	}
+}
+
+// TestHealthReportsStaleBackupPerDatabase pins the other half: when backups
+// ARE measured, a stale one is reported as stale and named.
+//
+// This is the reading the old probe could never produce, because it globbed
+// $GC_CITY_PATH/migration-backup-* — the schema-migration rollback snapshots
+// that `gc dolt rollback` restores — while naming its fields dolt_*. It never
+// looked at the backup remotes under .dolt-backup/ at all, so a city whose
+// bead-store backup had stopped six hours earlier looked identical to one
+// backing up on schedule.
+//
+// The aggregate must follow the WORST database. A city where one database
+// syncs and another does not is the exact shape of the incident, and a healthy
+// sibling must not average the stale one away.
+func TestHealthReportsStaleBackupPerDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"hq", "aa"} {
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	stale := filepath.Join(artifactDir, "hq", "manifest")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write hq manifest: %v", err)
+	}
+	staleAt := time.Now().Add(-20 * time.Hour)
+	if err := os.Chtimes(stale, staleAt, staleAt); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	fresh := filepath.Join(artifactDir, "aa", "manifest")
+	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write aa manifest: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false with two populated backup dirs, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v, want true: hq's backup is 20h old\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec < 19*3600 {
+		t.Errorf("dolt_age_sec = %d, want the OLDEST database's age (~72000), not the newest\n%s", backups.DoltAgeSec, out)
+	}
+	byName := map[string]bool{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want one entry per backup dir\n%s", backups.Databases, out)
+	}
+	if !byName["hq"] {
+		t.Errorf("hq reported not stale at 20h; an operator cannot act on an aggregate that does not name the database\n%s", out)
+	}
+	if byName["aa"] {
+		t.Errorf("aa reported stale on a backup written just now\n%s", out)
+	}
+}
+
+// TestHealthReportsNeverBackedUpDatabaseAsStale covers the third state, which
+// is neither fresh nor unknown: the remote is configured and has produced
+// nothing. Never having been backed up is known-bad, so it must read stale
+// rather than unmeasured, and its age must not pass for a recent one.
+func TestHealthReportsNeverBackedUpDatabaseAsStale(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".dolt-backup", "hq"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false for a configured-but-empty backup dir, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a database that has never been backed up, want true\n%s", backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 1 || backups.Databases[0].AgeSec != -1 {
+		t.Fatalf("dolt_databases = %v, want one hq entry with age_sec -1 so no consumer reads 0 as fresh\n%s", backups.Databases, out)
+	}
+	if !backups.Databases[0].Stale {
+		t.Errorf("never-backed-up hq reported not stale\n%s", out)
+	}
+	// The aggregate carries the same convention as the per-database entry. A
+	// consumer graphing dolt_age_sec must not be handed 0 — the best possible
+	// reading — for a city whose bead store has no backup at all.
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d for a city with no backup at all, want -1; 0 is the freshest value there is\n%s", backups.DoltAgeSec, out)
+	}
+}
+
+// TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase pins that -1 beats a
+// finite age in the aggregate rather than losing to it.
+//
+// -1 is a sentinel, not a small number, so a worst-first rule written as a
+// numeric maximum silently picks the healthy sibling. The mixed shape is the
+// one to guard: a city part-way through provisioning has one database syncing
+// and another that has never produced a backup, and reporting the syncing
+// one's age as the aggregate is how the unbacked database disappears.
+func TestHealthAggregateAgeFollowsTheNeverBackedUpDatabase(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	for _, db := range []string{"aa", "hq"} {
+		if err := os.MkdirAll(filepath.Join(artifactDir, db), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	// aa syncs; hq is configured and has produced nothing. aa sorts first, so
+	// the glob hands the finite age to the aggregate before the sentinel.
+	if err := os.WriteFile(filepath.Join(artifactDir, "aa", "manifest"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write aa manifest: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v with one never-backed-up database, want true\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d, want -1: hq has never been backed up and that is worse than aa's age, not smaller than it\n%s", backups.DoltAgeSec, out)
+	}
+	if backups.DoltFresh != "" {
+		t.Errorf("dolt_freshness = %q for a never-backed-up worst database, want empty\n%s", backups.DoltFresh, out)
+	}
+}
+
+// TestHealthReportsFreshnessForABackupWrittenThisSecond pins that an age of 0
+// seeds the aggregate.
+//
+// The clamp above it turns any non-positive age into 0, so 0 is a reachable
+// measured state rather than a theoretical one: a sync finishing in the second
+// the check runs, or a backup file whose mtime is a little ahead of this
+// clock. Seeding the aggregate from a zero rather than comparing against one
+// is what keeps that city from reporting the empty dolt_freshness of a city
+// nothing was measured on.
+func TestHealthReportsFreshnessForABackupWrittenThisSecond(t *testing.T) {
+	cityPath := t.TempDir()
+	manifest := filepath.Join(cityPath, ".dolt-backup", "hq", "manifest")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	ahead := time.Now().Add(5 * time.Second)
+	if err := os.Chtimes(manifest, ahead, ahead); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if backups.DoltStale == nil || *backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a backup written this second, want false\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec != 0 {
+		t.Fatalf("dolt_age_sec = %d, want 0 from the non-negative clamp\n%s", backups.DoltAgeSec, out)
+	}
+	if backups.DoltFresh != "0s" {
+		t.Errorf("dolt_freshness = %q, want \"0s\"; an empty string here is what an unmeasured probe reports\n%s", backups.DoltFresh, out)
+	}
+}
+
+// TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk pins which file
+// in a backup remote carries the freshness reading.
+//
+// `dolt backup sync` writes chunk data first and adopts it by rewriting the
+// manifest last, so a sync the server cuts off in between leaves chunk files
+// newer than anything the manifest references. That is the failure this
+// command exists to report honestly, and it is exactly where the newest file
+// of any kind lies: on the city that produced this test an hq remote held a
+// chunk written at 21:04 beside a manifest still reading 15:04, so a
+// newest-file reading called a six-hour-old backup nine minutes old.
+//
+// Both directions are asserted from one fixture. hq has the fresh chunk and
+// the stale manifest, so a newest-file reading calls it fresh; aa has the
+// fresh manifest and the old chunk, so a reading that took the oldest file
+// instead would call it stale.
+func TestHealthAgesABackupRemoteByItsManifestNotItsNewestChunk(t *testing.T) {
+	cityPath := t.TempDir()
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	stamp := func(path string, at time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatalf("chtimes %s: %v", path, err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-20 * time.Hour)
+	stamp(filepath.Join(artifactDir, "hq", "manifest"), old)
+	stamp(filepath.Join(artifactDir, "hq", "chunk.darc"), now)
+	stamp(filepath.Join(artifactDir, "aa", "manifest"), now)
+	stamp(filepath.Join(artifactDir, "aa", "chunk.darc"), old)
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	byName := map[string]bool{}
+	for _, db := range backups.Databases {
+		byName[db.Name] = db.Stale
+	}
+	if len(byName) != 2 {
+		t.Fatalf("dolt_databases = %v, want one entry per backup remote\n%s", backups.Databases, out)
+	}
+	if !byName["hq"] {
+		t.Errorf("hq reported not stale: its manifest is 20h old and the fresher chunk beside it is not a backup\n%s", out)
+	}
+	if byName["aa"] {
+		t.Errorf("aa reported stale: its manifest was written just now, however old the chunk beside it is\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Errorf("dolt_stale = %v, want true from hq's stale manifest\n%s", backups.DoltStale, out)
+	}
+	if backups.DoltAgeSec < 19*3600 {
+		t.Errorf("dolt_age_sec = %d, want hq's manifest age (~72000), not its newest chunk's\n%s", backups.DoltAgeSec, out)
+	}
+}
+
+// TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp covers the
+// remote a first sync never finished: chunk data landed and no manifest ever
+// adopted it. Nothing in it is restorable, so it reads exactly like an empty
+// remote rather than like a backup as fresh as its newest chunk.
+func TestHealthReportsARemoteWithChunksButNoManifestAsNeverBackedUp(t *testing.T) {
+	cityPath := t.TempDir()
+	chunk := filepath.Join(cityPath, ".dolt-backup", "hq", "chunk.darc")
+	if err := os.MkdirAll(filepath.Dir(chunk), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(chunk, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write chunk: %v", err)
+	}
+
+	backups, out := runHealthBackupsJSON(t, cityPath)
+
+	if !backups.DoltMeasured {
+		t.Fatalf("dolt_measured = false for a configured remote, want true\n%s", out)
+	}
+	if backups.DoltStale == nil || !*backups.DoltStale {
+		t.Fatalf("dolt_stale = %v for a remote with no manifest, want true\n%s", backups.DoltStale, out)
+	}
+	if len(backups.Databases) != 1 || backups.Databases[0].AgeSec != -1 || !backups.Databases[0].Stale {
+		t.Fatalf("dolt_databases = %v, want one hq entry with age_sec -1 and stale true: a chunk without a manifest is not a backup\n%s", backups.Databases, out)
+	}
+	if backups.DoltAgeSec != -1 {
+		t.Errorf("dolt_age_sec = %d, want -1; the chunk's mtime must not pass for a backup age\n%s", backups.DoltAgeSec, out)
+	}
+}

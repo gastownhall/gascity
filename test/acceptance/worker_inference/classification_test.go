@@ -1,0 +1,1759 @@
+//go:build acceptance_c
+
+package workerinference_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gastownhall/gascity/internal/config"
+	workerpkg "github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/internal/worker/workertest"
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
+)
+
+func TestValidateClaudeCredentialsExpired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	writeClaudeCredentials(t, path, time.Now().Add(-time.Minute))
+
+	err := validateClaudeCredentials(path, time.Now())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expired")
+}
+
+func TestValidateClaudeCredentialsExpiredWithRefreshToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	writeClaudeCredentialsWithRefreshToken(t, path, time.Now().Add(-time.Minute))
+
+	err := validateClaudeCredentials(path, time.Now())
+	require.NoError(t, err)
+}
+
+func TestValidateClaudeCredentialsFresh(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	writeClaudeCredentials(t, path, time.Now().Add(10*time.Minute))
+
+	err := validateClaudeCredentials(path, time.Now())
+	require.NoError(t, err)
+}
+
+func TestLiveFailureResultClassifiesAuthErrors(t *testing.T) {
+	result := liveFailureResult(
+		workertest.ProfileID("claude/tmux-cli"),
+		workertest.RequirementInferenceContinuation,
+		"live worker did not complete within timeout",
+		map[string]string{"transcript_tail": "Please run /login · API Error: 401 authentication_error: OAuth token has expired."},
+	)
+
+	require.Equal(t, workertest.ResultEnvironmentErr, result.Status)
+}
+
+func TestLiveFailureResultClassifiesProviderIncidents(t *testing.T) {
+	result := liveFailureResult(
+		workertest.ProfileID("codex/tmux-cli"),
+		workertest.RequirementInferenceFreshTask,
+		"live worker did not complete within timeout",
+		map[string]string{"transcript_tail": "HTTP 429 rate_limit exceeded, try again later"},
+	)
+
+	require.Equal(t, workertest.ResultProviderIssue, result.Status)
+}
+
+func TestLiveFailureResultClassifiesOpenCodeGeminiCapacity(t *testing.T) {
+	result := liveFailureResult(
+		workertest.ProfileID("opencode/tmux-cli"),
+		workertest.RequirementInferenceFreshTask,
+		"live worker did not complete within timeout",
+		map[string]string{"pane_tail": "gemini is way too hot right now (click to expand) [retrying in 31s attempt 4]"},
+	)
+
+	require.Equal(t, workertest.ResultProviderIssue, result.Status)
+}
+
+func TestLiveFailureResultClassifiesAuthErrorsFromPaneTail(t *testing.T) {
+	result := liveFailureResult(
+		workertest.ProfileID("claude/tmux-cli"),
+		workertest.RequirementInferenceContinuation,
+		"worker entered blocked interactive state",
+		map[string]string{"pane_tail": "Please run /login · authentication_error: OAuth token has expired."},
+	)
+
+	require.Equal(t, workertest.ResultEnvironmentErr, result.Status)
+}
+
+func TestClassifyLivePaneBlockedApproval(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+● Bash(ls -la)
+This command requires approval
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "tool_approval", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedIgnoresBypassPermissionsStatusLine(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+╭─── Claude Code v2.1.92 ──────────────────────────────────────────────────────╮
+❯ [at-test] probe • 2026-04-05T08:07:09
+
+✻ Ruminating…
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt      /buddy
+`)
+
+	require.Nil(t, blocked)
+}
+
+func TestClassifyLivePaneBlockedThemePicker(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+Let's get started.
+Choose the text style
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "first_run_picker", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedIgnoresAcceptedCursorWorkspaceTrust(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+⚠ Workspace Trust Required
+Cursor Agent can execute code and access files in this directory.
+Do you trust the contents of this directory?
+[a] Trust this workspace
+⏳ Trusting workspace...
+
+Cursor Agent
+v2026.08.11-e8db854
+
+Create the requested output file.
+⠘⠆ Working
+`)
+
+	require.Nil(t, blocked)
+}
+
+func TestClassifyLivePaneBlockedCodexUsageLimitSwitcher(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
+purchase more credits or try again at 11:26 PM.
+
+  Approaching rate limits
+  Switch to gpt-5.1-codex-mini for lower credit usage?
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedClaudeHitLimit(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+⎿  You've hit your limit · resets May 13, 4am (UTC)
+   /extra-usage to finish what you’re working on.
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
+func TestClassifyLivePaneBlockedOpenCodeGeminiCapacity(t *testing.T) {
+	blocked := classifyLivePaneBlocked(`
+gemini is way too hot right now (click to expand) [retrying in 31s attempt 4]
+`)
+
+	require.NotNil(t, blocked)
+	require.Equal(t, "rate_limit", blocked.Kind)
+}
+
+func TestSessionStateCountsAsRunning(t *testing.T) {
+	require.True(t, sessionStateCountsAsRunning("active"))
+	require.True(t, sessionStateCountsAsRunning("awake"))
+	require.False(t, sessionStateCountsAsRunning("asleep"))
+	require.False(t, sessionStateCountsAsRunning("creating"))
+}
+
+func TestAntigravityProfileSetupUsesAgyBinaryAndBrainSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile(string(workerpkg.ProfileAntigravityTmuxCLI))
+
+	require.Equal(t, workerpkg.ProfileAntigravityTmuxCLI, profile)
+	require.Equal(t, "antigravity", profileProvider(profile))
+	require.Equal(t, "agy", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain")}, profileSearchPaths(gcHome, profile))
+}
+
+func TestCursorProfileSetupUsesCursorAgentAndCaptureSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile("cursor/tmux-cli")
+
+	require.Equal(t, workerpkg.ProfileCursorTmuxCLI, profile)
+	require.Equal(t, "cursor", profileProvider(profile))
+	require.Equal(t, "cursor-agent", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts")}, profileSearchPaths(gcHome, profile))
+}
+
+func TestFreshWorkerTaskTimeoutAntigravity(t *testing.T) {
+	require.Equal(t, 12*time.Minute, freshWorkerTaskTimeout("antigravity"))
+	require.Equal(t, 6*time.Minute, freshWorkerTaskTimeout("gemini"))
+}
+
+func TestChecksResetHistorySubsequenceSkipsAntigravity(t *testing.T) {
+	require.False(t, checksResetHistorySubsequence(workerpkg.ProfileAntigravityTmuxCLI))
+	require.True(t, checksResetHistorySubsequence(workerpkg.ProfileGeminiTmuxCLI))
+}
+
+func TestAntigravityTranscriptCandidatePathsSortsNewestFirst(t *testing.T) {
+	brainRoot := filepath.Join(t.TempDir(), "brain")
+	older := filepath.Join(brainRoot, "older", ".system_generated", "logs", "transcript.jsonl")
+	newer := filepath.Join(brainRoot, "newer", ".system_generated", "logs", "transcript.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(older), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(newer), 0o755))
+	require.NoError(t, os.WriteFile(older, []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(newer, []byte("{}\n"), 0o644))
+
+	baseTime := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, os.Chtimes(older, baseTime, baseTime))
+	require.NoError(t, os.Chtimes(newer, baseTime.Add(time.Minute), baseTime.Add(time.Minute)))
+
+	require.Equal(t, []string{newer, older}, antigravityTranscriptCandidatePaths([]string{brainRoot}))
+}
+
+func TestSelectInferenceSpawnedSessionAcceptsLiveProbeSession(t *testing.T) {
+	session := sessionJSON{
+		Template:    inferenceSlingTarget,
+		SessionName: "probe",
+		State:       "creating",
+	}
+
+	got, ok, err := selectInferenceSpawnedSession([]sessionJSON{session}, inferenceSlingTarget, func(name string) (bool, error) {
+		require.Equal(t, "probe", name)
+		return true, nil
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, "probe", got.SessionName)
+	require.Equal(t, "active", got.State)
+}
+
+func TestSelectInferenceSpawnedSessionFallsBackToNamedProbeSession(t *testing.T) {
+	sessions := []sessionJSON{{
+		Template:    "mayor",
+		SessionName: "mayor",
+		State:       "active",
+	}}
+
+	got, ok, err := selectInferenceSpawnedSession(sessions, inferenceSlingTarget, func(name string) (bool, error) {
+		require.Equal(t, inferenceSlingTarget, name)
+		return true, nil
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, inferenceSlingTarget, got.Template)
+	require.Equal(t, inferenceSlingTarget, got.SessionName)
+	require.Equal(t, "active", got.State)
+}
+
+func TestWaitForTmuxSessionStoppedRetriesUntilSessionExits(t *testing.T) {
+	calls := 0
+	err := waitForTmuxSessionStopped("probe", 50*time.Millisecond, time.Millisecond, func(name string) (bool, error) {
+		require.Equal(t, "probe", name)
+		calls++
+		return calls < 3, nil
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, calls, 3)
+}
+
+func TestWaitForTmuxSessionStoppedFailsWhenSessionStaysLive(t *testing.T) {
+	err := waitForTmuxSessionStopped("probe", 5*time.Millisecond, time.Millisecond, func(string) (bool, error) {
+		return true, nil
+	})
+	require.ErrorContains(t, err, `tmux session "probe" still running after gc stop`)
+}
+
+func TestWaitForTranscriptSucceedsWithoutExpectedNeedles(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "city")
+	searchBase := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(searchBase, slug)
+	require.NoError(t, os.MkdirAll(transcriptDir, 0o755))
+
+	transcriptPath := filepath.Join(transcriptDir, "probe-session.jsonl")
+	writeLines(t, transcriptPath,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"bootstrap prompt"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-probe"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"bootstrap reply"},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-probe"}`,
+	)
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: []string{searchBase}}
+	path, snapshot, evidence, err := waitForTranscript(adapter, workerpkg.ProfileClaudeTmuxCLI, workDir, "", "probe-session", "", "")
+	require.NoError(t, err)
+	require.Equal(t, transcriptPath, path)
+	require.Equal(t, "probe-session", evidence["gc_session_id"])
+	require.NotNil(t, snapshot)
+	require.NotEmpty(t, snapshot.Entries)
+}
+
+func TestWaitForTranscriptSearchesGeminiCandidatesForEvidence(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "city")
+	searchBase := filepath.Join(t.TempDir(), "gemini-tmp")
+	projectDir := filepath.Join(searchBase, "at-test")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "chats"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".project_root"), []byte(workDir), 0o644))
+
+	prompt := `Create a file named worker-inference-continuation-ready-gemini.txt containing exactly "ready" and nothing else.`
+	targetPath := filepath.Join(projectDir, "chats", "session-2026-04-14T19-22-target.json")
+	writeGeminiChat(t, targetPath, "target-session", prompt, "ready")
+
+	newerPath := filepath.Join(projectDir, "chats", "session-2026-04-14T19-23-mayor.json")
+	writeGeminiChat(t, newerPath, "mayor-session", "mayor prompt", "checking bd ready output")
+
+	now := time.Now()
+	require.NoError(t, os.Chtimes(targetPath, now.Add(-time.Minute), now.Add(-time.Minute)))
+	require.NoError(t, os.Chtimes(newerPath, now, now))
+
+	adapter := workerpkg.SessionLogAdapter{SearchPaths: []string{searchBase}}
+	path, snapshot, evidence, err := waitForTranscript(adapter, workerpkg.ProfileGeminiTmuxCLI, workDir, "s-a1-target", "", prompt, "ready")
+	require.NoError(t, err)
+	require.Equal(t, targetPath, path)
+	require.Equal(t, targetPath, evidence["transcript_path"])
+	require.Equal(t, "target-session", snapshot.ProviderSessionID)
+}
+
+func TestBeadStoreNotReadyDetailIncludesInitialStartError(t *testing.T) {
+	detail := beadStoreNotReadyDetail("bead store did not become ready after restart", fmt.Errorf("exit status 1"))
+
+	require.Equal(t, "bead store did not become ready after restart after initial gc start error: exit status 1", detail)
+}
+
+func TestBeadStoreNotReadyDetailIncludesTimeout(t *testing.T) {
+	err := fmt.Errorf("timed out after 90s")
+	detail := beadStoreNotReadyDetail("bead store did not become ready after gc start", err)
+
+	require.Equal(t, "bead store did not become ready after gc start timed out: timed out after 90s", detail)
+}
+
+func TestWaitForManagedDoltStoppedWaitsForStateFile(t *testing.T) {
+	cityDir := t.TempDir()
+	statePath := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
+	writeManagedDoltState(t, statePath, liveManagedDoltState{Running: true, PID: 1234, Port: 0})
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		writeManagedDoltState(t, statePath, liveManagedDoltState{Running: false, PID: 0, Port: 0})
+	}()
+
+	detail, err := waitForManagedDoltStopped(cityDir, 3*time.Second)
+	require.NoError(t, err)
+	require.Contains(t, detail, `"running":false`)
+}
+
+func TestWaitForManagedDoltStoppedWaitsForPortToClose(t *testing.T) {
+	cityDir := t.TempDir()
+	statePath := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "dolt-state.json")
+	portPath := filepath.Join(cityDir, ".beads", "dolt-server.port")
+	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(portPath), 0o755))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+	port := ln.Addr().(*net.TCPAddr).Port
+	writeManagedDoltState(t, statePath, liveManagedDoltState{Running: false, PID: 0, Port: port})
+	require.NoError(t, os.WriteFile(portPath, []byte(strconv.Itoa(port)), 0o644))
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		_ = ln.Close()
+	}()
+
+	detail, err := waitForManagedDoltStopped(cityDir, 3*time.Second)
+	require.NoError(t, err)
+	require.Contains(t, detail, "reachable=false")
+}
+
+func TestStageClaudeAuthFromFiles(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	credsPath := filepath.Join(t.TempDir(), "claude-credentials.json")
+	settingsPath := filepath.Join(t.TempDir(), "claude-settings.json")
+	legacyPath := filepath.Join(t.TempDir(), "claude-legacy.json")
+
+	writeClaudeCredentials(t, credsPath, time.Now().Add(10*time.Minute))
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{"theme":"light"}`), 0o600))
+	require.NoError(t, os.WriteFile(legacyPath, []byte(`{"custom":"value"}`), 0o600))
+
+	t.Setenv("GC_WORKER_INFERENCE_CLAUDE_CREDENTIALS_FILE", credsPath)
+	t.Setenv("GC_WORKER_INFERENCE_CLAUDE_SETTINGS_FILE", settingsPath)
+	t.Setenv("GC_WORKER_INFERENCE_CLAUDE_LEGACY_CONFIG_FILE", legacyPath)
+
+	source, err := stageClaudeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "file-secret:claude", source)
+	require.Equal(t, filepath.Join(gcHome, ".claude"), env.Get("CLAUDE_CONFIG_DIR"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".credentials.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".claude.json"))
+	rootLegacy, err := os.ReadFile(filepath.Join(gcHome, ".claude.json"))
+	require.NoError(t, err)
+	nestedLegacy, err := os.ReadFile(filepath.Join(gcHome, ".claude", ".claude.json"))
+	require.NoError(t, err)
+	require.JSONEq(t, string(rootLegacy), string(nestedLegacy))
+	assertClaudeStateSeeded(t, rootLegacy, map[string]any{"custom": "value"})
+}
+
+func TestStageClaudeAuthFromAuthToken(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-token")
+
+	source, err := stageClaudeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:ANTHROPIC_AUTH_TOKEN", source)
+	require.Equal(t, "synthetic-token", env.Get("ANTHROPIC_AUTH_TOKEN"))
+}
+
+func TestStageClaudeAuthPrefersSourceConfigDir(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	sourceDir := filepath.Join(t.TempDir(), "source-claude")
+	require.NoError(t, os.MkdirAll(sourceDir, 0o755))
+	writeClaudeCredentials(t, filepath.Join(sourceDir, ".credentials.json"), time.Now().Add(10*time.Minute))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "settings.json"), []byte(`{"theme":"dark"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, ".claude.json"), []byte(`{"trusted":true}`), 0o600))
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".claude"), 0o755))
+	writeClaudeCredentials(t, filepath.Join(homeDir, ".claude", ".credentials.json"), time.Now().Add(-time.Minute))
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("CLAUDE_CONFIG_DIR", sourceDir)
+	// stageClaudeAuth prefers a bearer/API key over CLAUDE_CONFIG_DIR, and the
+	// live-suite env allowlist forwards both. On a host that exports either,
+	// this test asserted a branch it never reached.
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	source, err := stageClaudeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:CLAUDE_CONFIG_DIR", source)
+	require.Equal(t, filepath.Join(gcHome, ".claude"), env.Get("CLAUDE_CONFIG_DIR"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".credentials.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude", ".claude.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".claude.json"))
+	rootLegacy, err := os.ReadFile(filepath.Join(gcHome, ".claude.json"))
+	require.NoError(t, err)
+	assertClaudeStateSeeded(t, rootLegacy, map[string]any{"trusted": true})
+}
+
+func TestSeedClaudeProjectOnboardingMarksTrustedProject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".claude.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{"projects":{}}`), 0o600))
+
+	projectDir := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, seedClaudeProjectOnboarding(configPath, projectDir))
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(data, &cfg))
+
+	require.Equal(t, true, cfg["hasCompletedOnboarding"])
+	projects, ok := cfg["projects"].(map[string]any)
+	require.True(t, ok)
+	project, ok := projects[projectDir].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, project["hasCompletedProjectOnboarding"])
+	require.Equal(t, true, project["hasTrustDialogAccepted"])
+	require.Equal(t, float64(1), project["projectOnboardingSeenCount"])
+}
+
+func TestSeedClaudeProjectOnboardingCreatesConfigWhenMissing(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), ".claude", ".claude.json")
+	projectDir := filepath.Join(t.TempDir(), "project")
+
+	require.NoError(t, seedClaudeProjectOnboarding(configPath, projectDir))
+	require.FileExists(t, configPath)
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal(data, &cfg))
+
+	require.Equal(t, true, cfg["hasCompletedOnboarding"])
+	projects, ok := cfg["projects"].(map[string]any)
+	require.True(t, ok)
+	project, ok := projects[projectDir].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, project["hasCompletedProjectOnboarding"])
+	require.Equal(t, true, project["hasTrustDialogAccepted"])
+	require.Equal(t, float64(1), project["projectOnboardingSeenCount"])
+}
+
+func TestSeedCodexProjectTrustMarksTrustedProject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(configPath, []byte("model = \"gpt-5.4\"\n"), 0o600))
+
+	projectDir := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, seedCodexProjectTrust(configPath, projectDir))
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `model = "gpt-5.4"`)
+	require.Contains(t, text, `[projects.`+strconv.Quote(projectDir)+`]`)
+	require.Contains(t, text, `trust_level = "trusted"`)
+}
+
+func TestSeedGeminiFolderTrustMarksTrustedProject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "trustedFolders.json")
+	projectDir := filepath.Join(t.TempDir(), "project")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+
+	require.NoError(t, seedGeminiFolderTrust(configPath, projectDir))
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	var trusted map[string]string
+	require.NoError(t, json.Unmarshal(data, &trusted))
+	require.Equal(t, "TRUST_FOLDER", trusted[projectDir])
+}
+
+func writeManagedDoltState(t *testing.T, path string, state liveManagedDoltState) {
+	t.Helper()
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+}
+
+func TestStageCodexAuthFromFile(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	authPath := filepath.Join(t.TempDir(), "codex-auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"token":"abc"}`), 0o600))
+
+	t.Setenv("GC_WORKER_INFERENCE_CODEX_AUTH_FILE", authPath)
+
+	source, err := stageCodexAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "file-secret:codex", source)
+	require.Equal(t, filepath.Join(gcHome, ".codex"), env.Get("CODEX_HOME"))
+	require.FileExists(t, filepath.Join(gcHome, ".codex", "auth.json"))
+}
+
+func TestStageCursorAuthFromFile(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	keyPath := filepath.Join(t.TempDir(), "cursor-api-key")
+	require.NoError(t, os.WriteFile(keyPath, []byte("cursor-file-key\n"), 0o600))
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", keyPath)
+	t.Setenv("CURSOR_API_KEY", "")
+
+	source, err := stageCursorAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "file-secret:cursor", source)
+	require.Equal(t, "cursor-file-key", env.Get("CURSOR_API_KEY"))
+	require.DirExists(t, filepath.Join(gcHome, ".local", "share", "gascity", "cursor-transcripts"))
+}
+
+func TestStageCursorAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", "")
+	t.Setenv("CURSOR_API_KEY", "cursor-env-key")
+
+	source, err := stageCursorAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:CURSOR_API_KEY", source)
+	require.Equal(t, "cursor-env-key", env.Get("CURSOR_API_KEY"))
+}
+
+func TestStageCursorAuthErrorsWithoutKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY", "")
+	t.Setenv("GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE", "")
+	t.Setenv("CURSOR_API_KEY", "")
+
+	_, err := stageCursorAuth(gcHome, env)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "CURSOR_API_KEY")
+}
+
+func TestStageOpenCodeGeminiAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GEMINI_API_KEY", source)
+	require.Equal(t, "gemini-key", env.Get("GEMINI_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share"), env.Get("XDG_DATA_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".config"), env.Get("XDG_CONFIG_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".cache"), env.Get("XDG_CACHE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "state"), env.Get("XDG_STATE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "opencode-transcripts"), env.Get("GC_OPENCODE_TRANSCRIPT_DIR"))
+}
+
+func TestStageOpenCodeGeminiAuthUsesGoogleGenerativeAIEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GOOGLE_GENERATIVE_AI_API_KEY", "google-generative-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GOOGLE_GENERATIVE_AI_API_KEY", source)
+	require.Equal(t, "google-generative-key", env.Get("GOOGLE_GENERATIVE_AI_API_KEY"))
+}
+
+func TestStageOpenCodeGeminiAuthMapsGoogleAPIKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GOOGLE_API_KEY", "google-key")
+
+	source, err := stageOpenCodeGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GOOGLE_API_KEY", source)
+	require.Equal(t, "google-key", env.Get("GOOGLE_API_KEY"))
+	require.Equal(t, "google-key", env.Get("GEMINI_API_KEY"))
+}
+
+func TestMimoCodeProfileSetupUsesMimoBinaryAndTranscriptMirrorSearchPath(t *testing.T) {
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	profile := resolveProfile(string(workerpkg.ProfileMimoCodeTmuxCLI))
+
+	require.Equal(t, workerpkg.ProfileMimoCodeTmuxCLI, profile)
+	require.Equal(t, "mimocode", profileProvider(profile))
+	require.Equal(t, "mimo", profileExecutable(profile, profileProvider(profile)))
+	require.Equal(t, []string{filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts")}, profileSearchPaths(gcHome, profile))
+}
+
+func TestStageMimoCodeAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("XIAOMI_API_KEY", "xiaomi-key")
+
+	source, err := stageMimoCodeAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:XIAOMI_API_KEY", source)
+	require.Equal(t, "xiaomi-key", env.Get("XIAOMI_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share"), env.Get("XDG_DATA_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".config"), env.Get("XDG_CONFIG_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".cache"), env.Get("XDG_CACHE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "state"), env.Get("XDG_STATE_HOME"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "mimocode-transcripts"), env.Get("GC_MIMOCODE_TRANSCRIPT_DIR"))
+}
+
+func TestStageMimoCodeAuthErrorsWithoutKey(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("XIAOMI_API_KEY", "")
+
+	_, err := stageMimoCodeAuth(gcHome, env)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "XIAOMI_API_KEY")
+}
+
+func TestStagePiOllamaCloudAuthFromEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("OLLAMA_API_KEY", "ollama-key")
+
+	source, err := stagePiOllamaCloudAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:OLLAMA_API_KEY", source)
+	require.Empty(t, env.Get("OLLAMA_API_KEY"))
+	require.Equal(t, filepath.Join(gcHome, ".pi", "agent"), env.Get("PI_CODING_AGENT_DIR"))
+	require.Equal(t, filepath.Join(gcHome, ".pi", "agent", "sessions"), env.Get("PI_CODING_AGENT_SESSION_DIR"))
+	require.Equal(t, filepath.Join(gcHome, ".local", "share", "gascity", "pi-transcripts"), env.Get("GC_PI_TRANSCRIPT_DIR"))
+
+	authPath := filepath.Join(gcHome, ".pi", "agent", "auth.json")
+	authBytes, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var auth map[string]map[string]string
+	require.NoError(t, json.Unmarshal(authBytes, &auth))
+	require.Equal(t, map[string]string{"type": "api_key", "key": "ollama-key"}, auth["ollama-cloud"])
+	info, err := os.Stat(authPath)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestStageAntigravityAuthFromSourceHome(t *testing.T) {
+	sourceHome := t.TempDir()
+	sourceCLI := filepath.Join(sourceHome, ".gemini", "antigravity-cli")
+	sourceCache := filepath.Join(sourceCLI, "cache")
+	sourceConfig := filepath.Join(sourceHome, ".gemini", "config")
+	require.NoError(t, os.MkdirAll(sourceCLI, 0o755))
+	require.NoError(t, os.MkdirAll(sourceCache, 0o755))
+	require.NoError(t, os.MkdirAll(sourceConfig, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "antigravity-oauth-token"), []byte("token"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "settings.json"), []byte(`{"enableTelemetry":false}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "installation_id"), []byte("installation-id"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCLI, "history.jsonl"), []byte(`{"conversationId":"old"}`+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceCache, "onboarding.json"), []byte(`{"enterpriseOnboardingComplete":true}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceConfig, "import_manifest.json"), []byte(`{"imports":[]}`), 0o600))
+
+	gcHome := filepath.Join(t.TempDir(), "gc-home")
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+	t.Setenv("GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", sourceHome)
+
+	source, err := stageAntigravityAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "env:GC_WORKER_INFERENCE_ANTIGRAVITY_HOME", source)
+	require.NotEqual(t, gcHome, env.Get("HOME"))
+	applyLiveProviderRuntimeEnv(gcHome, env, workerpkg.ProfileAntigravityTmuxCLI)
+	require.Equal(t, gcHome, env.Get("HOME"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "installation_id"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "cache", "onboarding.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "config", "import_manifest.json"))
+	require.NoFileExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "history.jsonl"))
+	require.DirExists(t, filepath.Join(gcHome, ".gemini", "antigravity-cli", "brain"))
+}
+
+func TestWaitForBusyTurnStartPiUsesAssistantTranscriptSignal(t *testing.T) {
+	gcHome := t.TempDir()
+	sessionDir := filepath.Join(gcHome, ".pi", "agent", "sessions")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "busy.jsonl"), []byte(strings.Join([]string{
+		`{"type":"session","id":"pi-busy","cwd":"/tmp/project"}`,
+		`{"type":"message","id":"u1","message":{"role":"user","content":"produce interrupt-pi lines"}}`,
+		`{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[{"type":"text","text":"interrupt-pi line 1"}]}}`,
+		"",
+	}, "\n")), 0o600))
+
+	harness := &liveWorkerHandleHarness{
+		profile:    workerpkg.ProfilePiTmuxCLI,
+		provider:   "pi",
+		workDir:    t.TempDir(),
+		gcHome:     gcHome,
+		authSource: "test",
+	}
+
+	evidence, err := harness.waitForBusyTurnStart("missing-session", "interrupt-pi line 1")
+	require.NoError(t, err)
+	require.Equal(t, "pi-transcript-assistant-output", evidence["busy_detection"])
+	require.Equal(t, "interrupt-pi line 1", evidence["busy_output_needle"])
+	require.Equal(t, filepath.Join(sessionDir, "busy.jsonl"), evidence["busy_transcript_path"])
+}
+
+func TestSeedLiveProviderStateCodexMarksTrustedProject(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	prevSetup := liveSetup
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	liveSetup = providerSetup{Profile: workerpkg.ProfileCodexTmuxCLI}
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+		liveSetup = prevSetup
+	})
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	require.NoError(t, seedLiveProviderState(cityDir))
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".codex", "config.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `[projects.`+strconv.Quote(cityDir)+`]`)
+	require.Contains(t, string(data), `trust_level = "trusted"`)
+}
+
+func TestSeedLiveProviderStateGeminiMarksTrustedProject(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	prevSetup := liveSetup
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	liveSetup = providerSetup{Profile: workerpkg.ProfileGeminiTmuxCLI}
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+		liveSetup = prevSetup
+	})
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+	require.NoError(t, seedLiveProviderState(cityDir))
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".gemini", "trustedFolders.json"))
+	require.NoError(t, err)
+	var trusted map[string]string
+	require.NoError(t, json.Unmarshal(data, &trusted))
+	require.Equal(t, "TRUST_FOLDER", trusted[cityDir])
+}
+
+func TestStageGeminiAuthFromFiles(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	settingsPath := filepath.Join(t.TempDir(), "gemini-settings.json")
+	credsPath := filepath.Join(t.TempDir(), "gemini-oauth.json")
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{"theme":"light"}`), 0o600))
+	require.NoError(t, os.WriteFile(credsPath, []byte(`{"refresh_token":"abc"}`), 0o600))
+
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_SETTINGS_FILE", settingsPath)
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_FILE", credsPath)
+
+	source, err := stageGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+	require.Equal(t, "file-secret:gemini", source)
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "settings.json"))
+	require.FileExists(t, filepath.Join(gcHome, ".gemini", "oauth_creds.json"))
+}
+
+func TestStageGeminiAuthStripsHostHooks(t *testing.T) {
+	gcHome := t.TempDir()
+	env := helpers.NewEnv("", gcHome, t.TempDir())
+
+	settingsPath := filepath.Join(t.TempDir(), "gemini-settings.json")
+	credsPath := filepath.Join(t.TempDir(), "gemini-oauth.json")
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{
+  "hooks": {"BeforeTool": [{"matcher": "run_shell_command"}]},
+  "security": {"auth": {"selectedType": "oauth-personal"}}
+}`), 0o600))
+	require.NoError(t, os.WriteFile(credsPath, []byte(`{"refresh_token":"abc"}`), 0o600))
+
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_SETTINGS_FILE", settingsPath)
+	t.Setenv("GC_WORKER_INFERENCE_GEMINI_OAUTH_CREDS_FILE", credsPath)
+
+	_, err := stageGeminiAuth(gcHome, env)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(gcHome, ".gemini", "settings.json"))
+	require.NoError(t, err)
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings))
+	require.NotContains(t, settings, "hooks")
+	require.Contains(t, settings, "security")
+	general, ok := settings["general"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, general["enableAutoUpdate"])
+	require.Equal(t, false, general["enableAutoUpdateNotification"])
+}
+
+func TestCopySanitizedGeminiSettingsIfExistsStripsHooks(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "settings.json")
+	dst := filepath.Join(t.TempDir(), "settings.json")
+	require.NoError(t, os.WriteFile(src, []byte(`{
+  "hooks": {"BeforeTool": [{"matcher": "run_shell_command"}]},
+  "security": {"auth": {"selectedType": "oauth-personal"}}
+}`), 0o600))
+
+	require.NoError(t, copySanitizedGeminiSettingsIfExists(src, dst))
+
+	data, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	var settings map[string]any
+	require.NoError(t, json.Unmarshal(data, &settings))
+	require.NotContains(t, settings, "hooks")
+	require.Contains(t, settings, "security")
+	general, ok := settings["general"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, false, general["enableAutoUpdate"])
+	require.Equal(t, false, general["enableAutoUpdateNotification"])
+}
+
+func TestTmuxSessionLiveUsesCitySocket(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	sessionName := "worker-live"
+	cmd := exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "new-session", "-d", "-s", sessionName, "sleep", "30")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() {
+		exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "kill-server").Run() //nolint:errcheck
+	})
+
+	live, err := tmuxSessionLive(cityDir, sessionName)
+	require.NoError(t, err)
+	require.True(t, live)
+}
+
+func TestTmuxSessionExistsOnCitySocketUsesCitySocket(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	sessionName := "worker-live"
+	cmd := exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "new-session", "-d", "-s", sessionName, "sleep", "30")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() {
+		exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "kill-server").Run() //nolint:errcheck
+	})
+
+	live, err := tmuxSessionExistsOnCitySocket(cityDir, sessionName)
+	require.NoError(t, err)
+	require.True(t, live)
+}
+
+func TestTmuxHelpersUseConfiguredSocketName(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	socketName := "worker-inference-sock"
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "worker-inference-name"
+
+[session]
+socket = "worker-inference-sock"
+`), 0o644))
+
+	sessionName := "worker-live"
+	cmd := exec.Command(tmuxPath, "-L", socketName, "new-session", "-d", "-s", sessionName, "printf 'ready\\n'; sleep 30")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() {
+		exec.Command(tmuxPath, "-L", socketName, "kill-server").Run() //nolint:errcheck
+	})
+
+	exists, err := tmuxSessionExistsOnCitySocket(cityDir, sessionName)
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	live, err := tmuxSessionLive(cityDir, sessionName)
+	require.NoError(t, err)
+	require.True(t, live)
+
+	pane, err := captureTmuxPane(cityDir, sessionName, 20)
+	require.NoError(t, err)
+	require.Contains(t, pane, "ready")
+}
+
+func TestCaptureTmuxPaneReturnsErrorForMissingSessionOnCitySocket(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	sessionName := "worker-live"
+	cmd := exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "new-session", "-d", "-s", sessionName, "sleep", "30")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() {
+		exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "kill-server").Run() //nolint:errcheck
+	})
+
+	_, err = captureTmuxPane(cityDir, "missing-session", 20)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "capture-pane")
+}
+
+func TestCaptureTmuxPaneReturnsErrorWhenSocketServerMissing(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	_, err = captureTmuxPane(cityDir, "worker-live", 20)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "capture-pane")
+	require.True(t, isIgnorableTmuxProbeError(err), "unexpected tmux error: %v", err)
+	_ = tmuxPath
+}
+
+func TestDetectLiveBlockedInteractionIgnoresMissingSocketServer(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	blocked, err := detectLiveBlockedInteraction(cityDir, "worker-live")
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+	_ = tmuxPath
+}
+
+func TestDetectLiveBlockedInteractionIgnoresMissingSessionOnLiveSocket(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not found")
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "at-test-socket")
+	require.NoError(t, os.MkdirAll(cityDir, 0o755))
+
+	cmd := exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "new-session", "-d", "-s", "worker-live", "sleep", "30")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	t.Cleanup(func() {
+		exec.Command(tmuxPath, "-L", filepath.Base(cityDir), "kill-server").Run() //nolint:errcheck
+	})
+
+	blocked, err := detectLiveBlockedInteraction(cityDir, "missing-session")
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+}
+
+func TestInstallInferenceProbeAgentDisablesBackgroundOrders(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[[named_session]]
+template = "probe"`)
+	require.Contains(t, text, "[orders]")
+	require.Contains(t, text, "[session]")
+	require.Contains(t, text, `startup_timeout = "`+liveSessionStartupTimeout+`"`)
+	for _, name := range inferenceDisabledOrders {
+		require.Contains(t, text, `"`+name+`"`)
+	}
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	agentText := string(agentData)
+	require.Contains(t, agentText, `prompt_template = "agents/probe/prompt.template.md"`)
+	require.Contains(t, agentText, `max_active_sessions = 1`)
+	require.FileExists(t, filepath.Join(cityDir, "agents", "probe", "prompt.template.md"))
+}
+
+func TestInstallInferenceProbeAgentEnablesGeminiHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "gemini"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "gemini"
+install_agent_hooks = ["gemini"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["gemini"]`))
+}
+
+func TestInstallInferenceProbeAgentEnablesCursorHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+install_agent_hooks = ["cursor"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["cursor"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallInferenceProbeAgentEnablesOpenCodeHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+install_agent_hooks = ["opencode"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["opencode"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallInferenceProbeAgentEnablesMimoCodeHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "mimocode"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "mimocode"
+install_agent_hooks = ["mimocode"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["mimocode"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallInferenceProbeAgentEnablesPiHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "pi"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "pi"
+install_agent_hooks = ["pi"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["pi"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallInferenceProbeAgentEnablesAntigravityHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+install_agent_hooks = ["antigravity"]`)
+	require.Equal(t, 1, strings.Count(text, `install_agent_hooks = ["antigravity"]`))
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+	require.NoError(t, err)
+	require.Contains(t, string(agentData), `session = "tmux"`)
+}
+
+func TestInstallLiveHandleProviderHooksAntigravity(t *testing.T) {
+	workDir := t.TempDir()
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, t.TempDir(), workerpkg.ProfileAntigravityTmuxCLI))
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".agents", "hooks.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `"gascity-prime"`)
+	require.Contains(t, string(data), `--hook-format antigravity`)
+}
+
+func TestInstallLiveHandleProviderHooksCursor(t *testing.T) {
+	workDir := t.TempDir()
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, t.TempDir(), workerpkg.ProfileCursorTmuxCLI))
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".cursor", "hooks.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" prime --hook`)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" handoff --auto`)
+	require.Contains(t, string(data), `\"${GC_BIN:-gc}\" hook run`)
+}
+
+// TestInstallLiveHandleProviderHooksKimi covers the kimi staging contract:
+// the overlay hook script lands in the work dir (kimi runs hook commands
+// with cwd = the session work dir) and the overlay [[hooks]] block is merged
+// into the share-dir config kimi loads by default, preserving staged auth.
+func TestInstallLiveHandleProviderHooksKimi(t *testing.T) {
+	workDir := t.TempDir()
+	gcHome := t.TempDir()
+	sharePath := filepath.Join(gcHome, ".kimi", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sharePath), 0o755))
+	stagedAuth := "default_model = \"kimi-for-coding\"\n\n[providers.kimi-for-coding]\ntype = \"kimi\"\napi_key = \"fake-kimi-key\"\n"
+	require.NoError(t, os.WriteFile(sharePath, []byte(stagedAuth), 0o600))
+
+	require.NoError(t, installLiveHandleProviderHooks(workDir, gcHome, workerpkg.ProfileKimiTmuxCLI))
+
+	hookScript, err := os.ReadFile(filepath.Join(workDir, ".kimi", "hooks", "gascity-session-start.py"))
+	require.NoError(t, err)
+	require.Contains(t, string(hookScript), "GC_PROVIDER_SESSION_ID")
+	require.Contains(t, string(hookScript), `"gc", "prime", "--hook"`)
+
+	merged, err := os.ReadFile(sharePath)
+	require.NoError(t, err)
+	require.Contains(t, string(merged), `api_key = "fake-kimi-key"`, "staged auth must survive the hook merge")
+	require.Contains(t, string(merged), `event = "SessionStart"`)
+	require.Contains(t, string(merged), "gascity-session-start.py")
+
+	// Idempotent: a second install must not duplicate the hook entry.
+	require.NoError(t, installLiveHandleProviderHooks(workDir, gcHome, workerpkg.ProfileKimiTmuxCLI))
+	again, err := os.ReadFile(sharePath)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(string(again), "gascity-session-start.py"))
+}
+
+// TestInstallLiveHandleProviderHooksKimiRequiresStagedAuth pins the staging
+// order contract: kimi hook staging builds on the share-dir config written by
+// stageKimiAuth, so a missing config is a loud error, not a silent skip.
+func TestInstallLiveHandleProviderHooksKimiRequiresStagedAuth(t *testing.T) {
+	err := installLiveHandleProviderHooks(t.TempDir(), t.TempDir(), workerpkg.ProfileKimiTmuxCLI)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "auth staging must run first")
+}
+
+func TestInstallLiveProviderCommandOverride(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "claude", "/tmp/provider-bin/claude", nil))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.claude]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/claude"`)
+	require.Contains(t, text, `path_check = "/tmp/provider-bin/claude"`)
+}
+
+func TestInstallLiveProviderCommandOverrideIncludesProcessNames(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "claude", "/tmp/provider-bin/claude", []string{"aimux", "claude"}))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `process_names = ["aimux", "claude"]`)
+}
+
+func TestInstallLiveProviderCommandOverrideIncludesArgsAppend(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "opencode"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "opencode", "/tmp/provider-bin/opencode", []string{"opencode", "node", "bun"}, []string{"--model", "google/gemini-2.5-flash"}))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.opencode]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/opencode"`)
+	require.Contains(t, text, `process_names = ["opencode", "node", "bun"]`)
+	require.Contains(t, text, `args_append = ["--model", "google/gemini-2.5-flash"]`)
+}
+
+func TestInstallLiveProviderCommandOverridePatchesExistingAntigravityEnv(t *testing.T) {
+	gcHome := t.TempDir()
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", gcHome, t.TempDir())
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+
+[providers.antigravity]
+command = "agy --dangerously-skip-permissions"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "antigravity", "/tmp/provider-bin/agy", []string{"agy"}, nil))
+	require.NoError(t, installLiveProviderCommandOverrideWithArgs(cityDir, "antigravity", "/tmp/provider-bin/agy", []string{"agy"}, nil))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Equal(t, 1, strings.Count(text, `[providers.antigravity]`))
+	require.Equal(t, 1, strings.Count(text, `[providers.antigravity.env]`))
+	require.Contains(t, text, `HOME = `+strconv.Quote(gcHome))
+	require.Contains(t, text, `command = "agy --dangerously-skip-permissions"`)
+	require.NotContains(t, text, `path_check = "/tmp/provider-bin/agy"`)
+}
+
+func TestInstallLiveWorkspaceBDBinaryPin(t *testing.T) {
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", "/tmp/pinned-bd/bd").
+		With("PATH", "/tmp/pinned-bd:/usr/bin")
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "cursor"
+`), 0o644))
+
+	require.NoError(t, installLiveWorkspaceBDBinaryPin(cityDir))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	cfg, err := config.Parse(data)
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/pinned-bd/bd", cfg.Workspace.Env["BD_BIN"])
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", cfg.Workspace.Env["PATH"])
+}
+
+func TestLiveBDBinaryEnvPropagatesToFreshEnvironmentsAndStoreRunners(t *testing.T) {
+	prevEnv := liveEnv
+	liveEnv = helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", "/tmp/pinned-bd/bd").
+		With("PATH", "/tmp/pinned-bd:/usr/bin")
+	t.Cleanup(func() {
+		liveEnv = prevEnv
+	})
+
+	got := liveBDBinaryEnv()
+	require.Equal(t, map[string]string{
+		"BD_BIN": "/tmp/pinned-bd/bd",
+		"PATH":   "/tmp/pinned-bd:/usr/bin",
+	}, got)
+
+	fresh := helpers.NewEnv("", t.TempDir(), t.TempDir()).With("PATH", "/fresh/bin")
+	applyLiveBDBinaryEnv(fresh)
+	require.Equal(t, "/tmp/pinned-bd/bd", fresh.Get("BD_BIN"))
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", fresh.Get("PATH"))
+
+	storeEnv := liveBeadStoreEnv(t.TempDir())
+	require.Equal(t, "/tmp/pinned-bd/bd", storeEnv["BD_BIN"])
+	require.Equal(t, "/tmp/pinned-bd:/usr/bin", storeEnv["PATH"])
+}
+
+func TestBdCmdWithTimeoutUsesConfiguredBDBinary(t *testing.T) {
+	ambientDir := t.TempDir()
+	pinnedDir := t.TempDir()
+	ambientBD := filepath.Join(ambientDir, "bd")
+	pinnedBD := filepath.Join(pinnedDir, "bd")
+	require.NoError(t, os.WriteFile(ambientBD, []byte("#!/bin/sh\nprintf 'ambient\\n'\n"), 0o755))
+	require.NoError(t, os.WriteFile(pinnedBD, []byte("#!/bin/sh\nprintf 'pinned\\n'\n"), 0o755))
+	t.Setenv("PATH", ambientDir)
+
+	env := helpers.NewEnv("", t.TempDir(), t.TempDir()).
+		With("BD_BIN", pinnedBD).
+		With("PATH", ambientDir)
+	out, err := bdCmdWithTimeout(time.Second, env, t.TempDir(), "version")
+	require.NoError(t, err)
+	require.Equal(t, "pinned", strings.TrimSpace(out))
+}
+
+func TestInstallDefaultPoolInferenceAgentUsesAgentFile(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "antigravity"
+`), 0o644))
+
+	require.NoError(t, installDefaultPoolInferenceAgent(cityDir, "default-pool", "antigravity-default-pool-no-skills"))
+	require.NoError(t, installDefaultPoolInferenceAgent(cityDir, "default-pool", "antigravity-default-pool-no-skills"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	require.NotContains(t, string(data), `[[agent]]`)
+
+	agentData, err := os.ReadFile(filepath.Join(cityDir, "agents", "default-pool", "agent.toml"))
+	require.NoError(t, err)
+	agentText := string(agentData)
+	require.Contains(t, agentText, `provider = "antigravity-default-pool-no-skills"`)
+	require.Contains(t, agentText, `prompt_template = "agents/default-pool/prompt.template.md"`)
+	require.Contains(t, agentText, `default_sling_formula = "mol-do-work"`)
+	require.Contains(t, agentText, `min_active_sessions = 0`)
+	require.Contains(t, agentText, `max_active_sessions = 2`)
+}
+
+func TestNoSkillLiveProviderDefaultsCursorUseSupportedFlags(t *testing.T) {
+	promptMode, promptFlag, readyDelay, args := noSkillLiveProviderDefaults("cursor")
+	require.Equal(t, "arg", promptMode)
+	require.Empty(t, promptFlag)
+	require.Equal(t, 10000, readyDelay)
+	require.Equal(t, []string{"-f", "--trust"}, args)
+}
+
+func TestParseSessionListJSONSkipsStructuredLogPreamble(t *testing.T) {
+	out := strings.Join([]string{
+		`2026/06/07 01:45:13 WARN native_store_unavailable gate=preflight_unavailable`,
+		`{"schema_version":"1","level":"error","code":"session_list_failed","message":"log-only preamble"}`,
+		`{"schema_version":"1","ok":true,"sessions":[{"id":"s1","template":"probe","state":"running","session_name":"probe"}]}`,
+	}, "\n")
+
+	sessions, err := parseSessionListJSON(out)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	require.Equal(t, "s1", sessions[0].ID)
+	require.Equal(t, "probe", sessions[0].Template)
+}
+
+func TestParseSessionListJSONReportsBootstrapSessionListError(t *testing.T) {
+	out := `{"schema_version":"1","ok":false,"error":{"code":"session_list_failed","message":"bd list: invalid issue type \"session\" (valid: bug, feature, task)","exit_code":1}}`
+
+	_, err := parseSessionListJSON(out)
+	require.Error(t, err)
+	require.True(t, isBootstrapSessionListError(err), "err = %v", err)
+}
+
+func TestSetNamedSessionMode(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "claude"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, setNamedSessionMode(cityDir, "mayor", "on_demand"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	require.Contains(t, string(data), `mode = "on_demand"`)
+}
+
+func TestSetNamedSessionModePreservesProviderOverrides(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "codex"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "codex", "/tmp/provider-bin/codex", []string{"codex", "node"}))
+	require.NoError(t, setNamedSessionMode(cityDir, "mayor", "on_demand"))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `mode = "on_demand"`)
+	require.Contains(t, text, `[providers.codex]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
+	require.Contains(t, text, `process_names = ["codex", "node"]`)
+}
+
+func TestLiveHarnessConfigMutationsPreserveProbeOverrides(t *testing.T) {
+	cityDir := t.TempDir()
+	cityToml := filepath.Join(cityDir, "city.toml")
+	require.NoError(t, os.WriteFile(cityToml, []byte(`
+[workspace]
+name = "worker-inference-test"
+provider = "codex"
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+
+[[named_session]]
+template = "mayor"
+mode = "always"
+`), 0o644))
+
+	require.NoError(t, installInferenceProbeAgent(cityDir, true))
+	require.NoError(t, installLiveProviderCommandOverride(cityDir, "codex", "/tmp/provider-bin/codex", []string{"codex", "node"}))
+	require.NoError(t, setNamedSessionMode(cityDir, inferenceSlingTarget, "on_demand"))
+	require.NoError(t, setAgentSuspended(cityDir, "mayor", true))
+
+	data, err := os.ReadFile(cityToml)
+	require.NoError(t, err)
+	text := string(data)
+	require.Contains(t, text, `[providers.codex]`)
+	require.Contains(t, text, `command = "/tmp/provider-bin/codex"`)
+	require.Contains(t, text, `process_names = ["codex", "node"]`)
+	require.Contains(t, text, `[[named_session]]
+template = "probe"
+mode = "on_demand"`)
+	require.Contains(t, text, `[orders]`)
+	require.Contains(t, text, `[session]`)
+	require.Contains(t, text, `suspended = true`)
+	require.FileExists(t, filepath.Join(cityDir, "agents", "probe", "agent.toml"))
+}
+
+func TestEnrichLiveFailureEvidencePrefersSessionKeyTranscript(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "city")
+	searchBase := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(searchBase, slug)
+	require.NoError(t, os.MkdirAll(transcriptDir, 0o755))
+
+	targetPath := filepath.Join(transcriptDir, "probe-session.jsonl")
+	writeLines(t, targetPath,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"probe prompt"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-probe"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"probe reply"},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-probe"}`,
+	)
+	otherPath := filepath.Join(transcriptDir, "latest.jsonl")
+	writeLines(t, otherPath,
+		`{"uuid":"u2","type":"user","message":{"role":"user","content":"mayor prompt"},"timestamp":"2025-01-01T00:00:02Z","sessionId":"provider-mayor"}`,
+		`{"uuid":"a2","parentUuid":"u2","type":"assistant","message":{"role":"assistant","content":"mayor reply"},"timestamp":"2025-01-01T00:00:03Z","sessionId":"provider-mayor"}`,
+	)
+	future := time.Now().Add(2 * time.Minute)
+	require.NoError(t, os.Chtimes(targetPath, future, future))
+	require.NoError(t, os.Chtimes(otherPath, future.Add(time.Minute), future.Add(time.Minute)))
+
+	prev := liveSetup
+	liveSetup = providerSetup{SearchPaths: []string{searchBase}}
+	t.Cleanup(func() { liveSetup = prev })
+
+	enriched := enrichLiveFailureEvidence(workertest.ProfileID("claude/tmux-cli"), map[string]string{
+		"city_dir":    workDir,
+		"session_key": "probe-session",
+		"label":       fmt.Sprintf("workdir=%s", workDir),
+	})
+
+	require.Equal(t, targetPath, enriched["transcript_path"])
+	require.Equal(t, "probe-session", enriched["provider_session_id"])
+	require.Contains(t, enriched["normalized_tail"], "probe reply")
+}
+
+func writeClaudeCredentials(t *testing.T, path string, expiry time.Time) {
+	t.Helper()
+	writeClaudeCredentialsJSON(t, path, expiry, "")
+}
+
+func writeClaudeCredentialsWithRefreshToken(t *testing.T, path string, expiry time.Time) {
+	t.Helper()
+	writeClaudeCredentialsJSON(t, path, expiry, "refresh-token")
+}
+
+func writeClaudeCredentialsJSON(t *testing.T, path string, expiry time.Time, refreshToken string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"claudeAiOauth": map[string]any{
+			"expiresAt":    expiry.UnixMilli(),
+			"refreshToken": refreshToken,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+func assertClaudeStateSeeded(t *testing.T, data []byte, preserved map[string]any) {
+	t.Helper()
+
+	var state map[string]any
+	require.NoError(t, json.Unmarshal(data, &state))
+	require.Equal(t, true, state["hasCompletedOnboarding"])
+	require.Equal(t, "light", state["theme"])
+	for key, want := range preserved {
+		require.Equal(t, want, state[key], "preserved Claude state %s", key)
+	}
+}
+
+func writeGeminiChat(t *testing.T, path, sessionID, userText, assistantText string) {
+	t.Helper()
+
+	data, err := json.MarshalIndent(map[string]any{
+		"sessionId": sessionID,
+		"messages": []map[string]any{
+			{
+				"id":        sessionID + "-user",
+				"timestamp": "2026-04-14T19:22:01Z",
+				"type":      "user",
+				"content": []map[string]string{
+					{"text": userText},
+				},
+			},
+			{
+				"id":        sessionID + "-assistant",
+				"timestamp": "2026-04-14T19:22:02Z",
+				"type":      "gemini",
+				"content":   assistantText,
+			},
+		},
+	}, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+}
+
+func writeLines(t *testing.T, path string, lines ...string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644))
+}
+
+func TestInstallLiveProviderCommandOverrideReplacesInitBuiltinAlias(t *testing.T) {
+	cityDir := t.TempDir()
+	writeLines(t, filepath.Join(cityDir, "city.toml"),
+		"[workspace]",
+		`provider = "mimocode"`,
+		`install_agent_hooks = ["mimocode"]`,
+		"",
+		"[providers]",
+		"[providers.mimocode]",
+		`base = "builtin:mimocode"`,
+		"ready_delay_ms = 0",
+		"",
+		"[daemon]",
+		"formula_v2 = true",
+	)
+
+	err := installLiveProviderCommandOverrideWithArgs(cityDir, "mimocode", "/stage/bin/mimo", []string{"mimo", ".mimocode"}, []string{"--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	require.NoError(t, err)
+	text := string(data)
+	require.Equal(t, 1, strings.Count(text, "[providers.mimocode]"), "exactly one provider section expected:\n%s", text)
+	require.NotContains(t, text, `base = "builtin:mimocode"`, "init alias should be replaced:\n%s", text)
+	require.Contains(t, text, `command = "/stage/bin/mimo"`)
+	require.Contains(t, text, `args_append = ["--model", "xiaomi-token-plan-sgp/mimo-v2.5-pro"]`)
+	require.Contains(t, text, "[daemon]", "unrelated sections must survive:\n%s", text)
+}
+
+func TestInstallLiveProviderCommandOverrideRejectsCustomizedSection(t *testing.T) {
+	cityDir := t.TempDir()
+	writeLines(t, filepath.Join(cityDir, "city.toml"),
+		"[providers]",
+		"[providers.mimocode]",
+		`base = "builtin:mimocode"`,
+		`args = ["--custom-flag"]`,
+	)
+
+	err := installLiveProviderCommandOverrideWithArgs(cityDir, "mimocode", "/stage/bin/mimo", nil, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already defines")
+}

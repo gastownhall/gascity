@@ -2,558 +2,228 @@
 title: "Exec Beads Provider"
 ---
 
-Gas City's bead store is the universal persistence substrate for work units
-(tasks, messages, molecules, convoys). Today it has two providers: `bd`
-(shells out to the `bd` CLI backed by Dolt) and `file` (JSON persistence
-for tutorials). This document designs a third: `exec`, which delegates each
-store operation to a user-supplied script — the same pattern used by the
-exec session provider.
-
-## Motivation
-
-The `bd` provider couples Gas City to a specific technology stack: the Go
-`bd` CLI wrapping a Dolt SQL database. Users may want:
-
-- **beads_rust (`br`)** — SQLite + JSONL hybrid with different performance
-  characteristics and no JVM/Dolt dependency
-- **Custom backup semantics** — bead operations that trigger S3 snapshots,
-  git commits, or other persistence strategies
-- **Alternative databases** — PostgreSQL, SQLite, flat files, or any
-  storage backend accessible via CLI
-
-The exec beads provider makes the bead store a pluggable boundary. If we
-got the layering right, a user can change one config line and point Gas City
-at their own implementation.
-
-## Current Architecture
-
-### Store Interface (9 methods)
-
-`internal/beads/beads.go` defines the `Store` interface — the SDK's
-contract for bead persistence:
-
-```go
-type Store interface {
-    Create(b Bead) (Bead, error)       // persist new bead → fills ID, Status, CreatedAt
-    Get(id string) (Bead, error)       // retrieve by ID
-    Update(id string, opts UpdateOpts) error  // modify fields (Description, ParentID, Labels)
-    Close(id string) error             // set status to "closed"
-    List() ([]Bead, error)             // all beads
-    Ready() ([]Bead, error)            // all open beads
-    Children(parentID string) ([]Bead, error)  // beads with matching ParentID
-    SetMetadata(id, key, value string) error   // key-value metadata on a bead
-    MolCook(formula, title string, vars []string) (string, error)  // instantiate molecule
-}
-```
-
-### Three Implementations
-
-| Provider | Backing | Used By |
-|----------|---------|---------|
-| `BdStore` | `bd` CLI → Dolt SQL | Production (default) |
-| `FileStore` | JSON file, wraps MemStore | Tutorials, lightweight setups |
-| `MemStore` | In-memory map | Unit tests |
-
-### BdStore-Only Methods (Not in Store Interface)
-
-BdStore exposes methods that other subsystems use directly via `*BdStore`:
-
-| Method | Used By | Purpose |
-|--------|---------|---------|
-| `Init(prefix)` | `cmd/gc/beads_provider_lifecycle.go` | Initialize `.beads/` database |
-| `ConfigSet(key, value)` | `cmd/gc/beads_provider_lifecycle.go` | Set bd configuration |
-| `ListByLabel(label, limit)` | `cmd/gc/cmd_order.go` | Query beads by label (order history, cursors) |
-| `Purge(beadsDir, dryRun)` | `cmd/gc/wisp_gc.go` and admin flows | Remove closed ephemeral beads |
-| `SetPurgeRunner(fn)` | Tests only | Test injection |
-
-### Provider Selection
-
-`cmd/gc/providers.go` selects the bead store at runtime:
-
-```go
-func beadsProvider(cityPath string) string {
-    if v := os.Getenv("GC_BEADS"); v != "" {
-        return v
-    }
-    cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-    if err == nil && cfg.Beads.Provider != "" {
-        return cfg.Beads.Provider
-    }
-    return "bd"
-}
-```
-
-Priority: `GC_BEADS` env var → `city.toml [beads].provider` → `"bd"`.
-
-Config:
-```toml
-[beads]
-provider = "bd"    # or "file", or "exec:/path/to/script"
-```
-
-## What Must Change
-
-### 1. Promote ListByLabel to the Store Interface
-
-`ListByLabel` is used by the order subsystem for:
-- **Order history** — list all wisps for a order
-- **Last run time** — find most recent wisp for a order
-- **Event cursor** — find max `seq:` label across order wisps
-
-This is a core query pattern, not a bd-specific feature. Any bead store
-can filter by label. The interface should include it:
-
-```go
-type Store interface {
-    // ... existing 9 methods ...
-
-    // ListByLabel returns beads matching an exact label string.
-    // Limit controls max results (0 = unlimited). Results ordered
-    // newest first.
-    ListByLabel(label string, limit int) ([]Bead, error)
-}
-```
-
-**Impact:** MemStore and FileStore need `ListByLabel` implementations
-(trivial filter over existing data).
-
-### 2. Keep Admin Operations Outside the Store Interface
-
-`Init`, `ConfigSet`, `Purge`, and `SetPurgeRunner` are lifecycle/admin
-operations, not bead CRUD. They belong to the provider implementation,
-not the SDK interface. The exec beads provider handles them as optional
-operations (exit 2 = unsupported).
-
-### 3. Add Exec Beads Provider
-
-New package: `internal/beads/exec/` (mirrors `internal/runtime/exec/`).
-
-## Exec Beads Protocol
-
-### Calling Convention
-
-```
-<script> <operation> [args...]
-```
-
-Data on stdin (JSON). Results on stdout (JSON). Follows the session exec
-provider pattern exactly.
-
-### Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | Failure (stderr contains error message) |
-| 2 | Unknown operation (treated as success — forward compatible) |
-
-### Operations
-
-#### Core Store Operations (10 methods)
-
-| Operation | Invocation | Stdin | Stdout |
-|-----------|-----------|-------|--------|
-| `create` | `script create` | Bead JSON | Bead JSON (with ID, status, created_at) |
-| `get` | `script get <id>` | — | Bead JSON |
-| `update` | `script update <id>` | UpdateOpts JSON | — |
-| `close` | `script close <id>` | — | — |
-| `list` | `script list` | — | Bead JSON array |
-| `ready` | `script ready` | — | Bead JSON array |
-| `children` | `script children <parent-id>` | — | Bead JSON array |
-| `set-metadata` | `script set-metadata <id> <key>` | value on stdin | — |
-| `mol-cook` | `script mol-cook` | MolCookRequest JSON | root bead ID (plain text) |
-| `list-by-label` | `script list-by-label <label> <limit>` | — | Bead JSON array |
-
-#### Admin Operations (Optional)
-
-| Operation | Invocation | Stdin | Stdout |
-|-----------|-----------|-------|--------|
-| `init` | `script init <dir> <prefix>` | — | — |
-| `config-set` | `script config-set <key> <value>` | — | — |
-| `purge` | `script purge <beads-dir>` | PurgeOpts JSON | PurgeResult JSON |
-
-Scripts that don't support admin operations return exit 2 (unknown
-operation). Gas City treats this as success — admin ops are only called
-during `gc init` and `gc dolt sync`, not during normal operation.
-
-#### Lifecycle Operations (Optional)
-
-| Operation | Invocation | Stdin | Stdout | Purpose |
-|-----------|-----------|-------|--------|---------|
-| `ensure-ready` | `script ensure-ready` | — | — | Make backing service usable |
-| `start` | `script start` | — | — | Enhanced start with backoff/health tracking |
-| `stop` | `script stop` | — | — | Enhanced stop with graceful shutdown |
-| `shutdown` | `script shutdown` | — | — | Legacy graceful stop |
-| `init` | `script init <dir> <prefix>` | — | — | First-time setup for a directory |
-| `health` | `script health` | — | — | Check provider health (probe only, no side effects) |
-| `recover` | `script recover` | — | — | Stop, restart, verify health after failure |
-| `probe` | `script probe` | — | — | Check if backing service is available (exit 0 = yes, 2 = not running) |
-
-These operations are called by `gc start` and `gc stop` to manage the
-bead store's backing service — analogous to Docker Compose starting and
-stopping database containers. They are convenience operations, not part
-of the Store interface contract.
-
-Exit code semantics follow the same convention as other operations:
-0 = success, 1 = error, 2 = not needed/not running. Scripts that have
-no backing service (e.g., `br` which uses an embedded SQLite database)
-return exit 2 for all lifecycle operations.
-
-The `health` operation is a read-only probe — it MUST NOT attempt
-recovery or restarts. The SDK calls `recover` separately on health
-failure. The `probe` operation is a lightweight availability check used
-during `gc init` to decide whether bead initialization can proceed now
-or must be deferred to `gc start`.
-
-### Wire Format
-
-#### Bead JSON
-
-The wire format matches `beads.Bead` JSON tags — the same shape that
-`bd` already produces:
-
-```json
-{
-  "id": "WP-42",
-  "title": "digest wisp",
-  "status": "open",
-  "type": "task",
-  "created_at": "2026-02-27T10:00:00Z",
-  "assignee": "",
-  "parent_id": "",
-  "ref": "",
-  "needs": [],
-  "description": "",
-  "labels": ["order-run:digest", "pool:dog"]
-}
-```
-
-Fields omitted from the JSON are treated as zero values. The `id` field
-on `create` input is ignored (the script assigns IDs).
-
-#### Create Request
-
-```json
-{
-  "title": "my task",
-  "type": "task",
-  "labels": ["pool:dog"],
-  "parent_id": "WP-1"
-}
-```
-
-#### UpdateOpts JSON
-
-```json
-{
-  "description": "updated description",
-  "parent_id": "WP-1",
-  "labels": ["new-label"]
-}
-```
-
-Null/missing fields are not applied. `labels` appends (does not replace).
-
-#### MolCookRequest JSON
-
-```json
-{
-  "formula": "mol-digest",
-  "title": "digest run",
-  "vars": ["key=value"]
-}
-```
-
-Stdout: the root bead ID as plain text (e.g., `WP-42\n`).
-
-#### PurgeOpts JSON
-
-```json
-{
-  "dry_run": true
-}
-```
-
-#### PurgeResult JSON
-
-```json
-{
-  "purged_count": 5
-}
-```
-
-### Conventions
-
-- **JSON on stdin for mutations** — avoids shell quoting issues with
-  descriptions, titles, and label values
-- **JSON on stdout for reads** — consistent with bd's `--json` output
-- **Plain text for simple results** — `mol-cook` returns just the ID
-- **Empty array for no results** — `list`, `ready`, `children`,
-  `list-by-label` return `[]`, never null
-- **Idempotent close** — closing an already-closed bead returns exit 0
-- **ErrNotFound → exit 1** — `get`, `update`, `close`, `set-metadata`
-  with unknown ID print error to stderr and exit 1
-
-### Status Mapping
-
-Gas City uses 3 statuses: `open`, `in_progress`, `closed`. The exec
-script must normalize its backend's statuses to these three. For example,
-`bd` maps `blocked`, `review`, and `testing` to `open`.
-
-## Implementation Plan
-
-### Package Structure
-
-```
-internal/beads/exec/
-├── exec.go          # ExecStore implementing Store interface
-├── exec_test.go     # unit tests with fake script
-└── json.go          # wire format types (like session/exec/json.go)
-```
-
-### ExecStore
-
-```go
-// ExecStore implements beads.Store by delegating each operation to a
-// user-supplied script via fork/exec.
-type ExecStore struct {
-    script  string
-    timeout time.Duration
-}
-
-func NewExecStore(script string) *ExecStore {
-    return &ExecStore{script: script, timeout: 30 * time.Second}
-}
-```
-
-The `run` method mirrors `session/exec`'s pattern exactly:
-
-```go
-func (s *ExecStore) run(stdinData []byte, args ...string) (string, error) {
-    ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
-    defer cancel()
-    cmd := exec.CommandContext(ctx, s.script, args...)
-    cmd.WaitDelay = 2 * time.Second
-    // ... same exit code 2 handling as session exec ...
-}
-```
-
-### Provider Selection Update
-
-`cmd/gc/providers.go` adds the exec case:
-
-```go
-func newBeadStore(cityPath, cmdName string, stderr io.Writer) (beads.Store, int) {
-    provider := beadsProvider(cityPath)
-    if strings.HasPrefix(provider, "exec:") {
-        script := strings.TrimPrefix(provider, "exec:")
-        return beadsexec.NewExecStore(script), 0
-    }
-    switch provider {
-    case "file":
-        // ... existing ...
-    default:
-        // ... existing bd ...
-    }
-}
-```
-
-### Config Update
+The Bead is the WHAT primitive — a unit of work — and the bead store is the
+machinery that persists beads (tasks, messages, convoy members, and the
+ephemeral beads a formula run materializes). See
+[How Gas City Works](/getting-started/how-gas-city-works) for where the Bead
+sits among the six. Gas City's exec beads provider delegates each `beads.Store`
+operation to a user-supplied script, the same pattern the
+[exec session provider](/reference/exec-session-provider) uses for sessions. It
+makes the bead store a pluggable boundary: change one config line and Gas City
+persists beads through your script instead of the default `bd` (Dolt-backed)
+store.
+
+## Why
+
+The default `bd` provider couples the store to a specific stack — the Go `bd`
+CLI wrapping a Dolt SQL database. A script backend lets you point Gas City at:
+
+- **A different beads engine** — for example [`beads_rust`](https://github.com/Dicklesworthstone/beads_rust)
+  (`br`), a SQLite + JSONL hybrid with no JVM/Dolt dependency.
+- **Custom persistence** — bead writes that also trigger S3 snapshots, git
+  commits, or other durability strategies.
+- **Alternative databases** — Postgres, SQLite, flat files, or any backend
+  reachable from a CLI.
+
+## Usage
+
+Select the provider in `city.toml`:
 
 ```toml
 [beads]
-provider = "exec:/path/to/gc-beads-br"
+provider = "exec:/path/to/gc-beads-br"   # absolute path
+# provider = "exec:gc-beads-br"          # or a bare name resolved on PATH
 ```
 
-Or via environment:
+`GC_BEADS` overrides the config for a single command:
 
 ```bash
 export GC_BEADS=exec:gc-beads-br
 ```
 
-## Dependency Map: SDK Primitives vs. Provider Operations
+Resolution order is `GC_BEADS` → `[beads] provider` → `bd` (the default).
 
-This table maps every Gas City subsystem to the bead store operations it
-requires. This is how we verify the layering: if every operation in the
-"Uses" column is in the Store interface (or exec protocol), the subsystem
-works with any provider.
+## Calling Convention
 
-| Subsystem | Layer | Uses (Store Interface) | Uses (*BdStore Only) |
-|-----------|-------|----------------------|---------------------|
-| Dispatch (sling) | L3 | Create, Get, Update, Close, MolCook | — |
-| Task loop | L2 | Ready, Get, Update, Close | — |
-| Molecules | L2 | Create, Children, Update, Close, MolCook | — |
-| Messaging | L2 | Create (type=message), List | — |
-| Order check | L3 | — | ListByLabel (→ promote) |
-| Order run | L3 | MolCook | ListByLabel (→ promote) |
-| Order history | L3 | — | ListByLabel (→ promote) |
-| Health patrol | L2 | Ready, SetMetadata | — |
-| Convoy | L3 | Create, Children, Close, Update | — |
-| Rig init | L0 | — | Init, ConfigSet |
-| Dolt sync | L0 | — | Purge |
-| Event cursor | L3 | — | ListByLabel (→ promote) |
+The script receives the operation name as its first argument:
 
-**After promoting ListByLabel:** Only `Init`, `ConfigSet`, and `Purge`
-remain outside the Store interface. These are all admin/lifecycle
-operations called during `gc init` and `gc dolt sync` — not during
-normal agent work loops. The exec protocol handles them as optional
-operations (exit 2).
+```
+<script> <operation> [args...]
+```
 
-## beads_rust (br) Gap Analysis
+The script is exec'd directly — no shell. Mutations pass their payload as JSON
+on **stdin**; reads return JSON on **stdout**. Each invocation has a 30-second
+timeout. The script is spawned fresh per operation; there is no long-lived
+process to manage.
 
-[beads_rust](https://github.com/Dicklesworthstone/beads_rust) is a Rust
-reimplementation of the beads concept using SQLite + JSONL. Here's how it
-maps to Gas City's requirements:
+## Exit Codes
 
-### Supported (Direct Mapping)
+| Code | Meaning |
+|------|---------|
+| 0 | Success (stdout holds the result, when any) |
+| 1 | Failure (stderr holds the error message) |
+| 2 | Unknown operation (treated as success — forward compatible) |
 
-| Store Method | br Command | Notes |
-|-------------|------------|-------|
-| `Create` | `br create --json <title>` | Has `--type`, `--label` |
-| `Get` | `br show --json <id>` | Returns JSON |
-| `Update` | `br update --json <id>` | Has `--description`, `--label` |
-| `Close` | `br close --json <id>` | Direct mapping |
-| `List` | `br list --json` | Has `--limit`, `--all` |
-| `Ready` | `br ready --json` | Open beads |
-| `ListByLabel` | `br list --json --label=X` | Has `--label` filter |
+Exit code 2 is the forward-compatibility mechanism: when Gas City adds an
+operation, an older script returns exit 2 and the provider treats it as a
+no-op success, so scripts only implement the operations they care about.
 
-### Gaps (Script Must Bridge)
+The one exception is `ready` invoked with contract arguments (such as
+`--include-ephemeral`): there, exit 2 is surfaced as an error rather than a
+silent success, so runnable ephemeral beads are never quietly hidden from the
+orchestrator. A script that cannot serve those ready queries should exit 1 with
+a stderr message instead.
 
-| Store Method | Gap | Workaround |
-|-------------|-----|------------|
-| `Children(parentID)` | No `--parent` on create | Script tracks parent→child in sidecar or labels |
-| `SetMetadata(id, key, value)` | No `--set-metadata` | Script uses labels (`meta:key=value`) or sidecar file |
-| `MolCook(formula, title, vars)` | No molecule concept | Script creates root bead + step beads from formula TOML |
+## Operations
 
-### Not Needed by Store Interface
+These are the subcommands a backend implements. Bead reads return a JSON array
+(`[]` when empty, never `null`).
 
-| br Feature | Relevance |
-|-----------|-----------|
-| `br comment` | Not in Store interface — could be future extension |
-| `br search` | Not in Store interface — search is done via List + filter |
-| `br dep-tree` | Interesting for molecules but not required |
-| `br blocked` | Subset of Ready with dependency tracking |
-| `br priority` | Not in Gas City's bead model |
+| Operation | Invocation | Stdin | Stdout |
+|-----------|-----------|-------|--------|
+| `create` | `script create` | create request JSON | bead JSON |
+| `get` | `script get <id>` | — | bead JSON |
+| `update` | `script update <id>` | update request JSON | — |
+| `close` | `script close <id>` | — | — |
+| `reopen` | `script reopen <id>` | — | — |
+| `delete` | `script delete --force <id>` | — | — |
+| `list` | `script list [--status=S] [--assignee=A] [--type=T] [--limit=N]` | — | bead JSON array |
+| `children` | `script children <parent-id>` | — | bead JSON array |
+| `list-by-label` | `script list-by-label <label> 0` | — | bead JSON array |
+| `ready` | `script ready [--include-ephemeral]` | — | bead JSON array |
+| `set-metadata` | `script set-metadata <id> <key>` | value (raw bytes) | — |
+| `dep-add` | `script dep-add <id> <depends-on-id> <type>` | — | — |
+| `dep-remove` | `script dep-remove <id> <depends-on-id>` | — | — |
+| `dep-list` | `script dep-list <id> <down\|up>` | — | dependency JSON array |
 
-### Feasibility Assessment
+The remaining `Store` methods are **composed** by the provider from the
+subcommands above, so a script that implements this table supports them with no
+extra work:
 
-A `gc-beads-br` script wrapping `br` is feasible for **basic bead CRUD**
-(7 of 10 operations map directly). The three gaps (Children, SetMetadata,
-MolCook) require the script to implement bridging logic:
+- `ListOpen`, `ListByAssignee`, `ListByMetadata` route to `list`; the provider
+  applies the status/assignee/metadata filter after the script returns.
+- `CloseAll` is a sequence of `close` calls; `SetMetadataBatch` a sequence of
+  `set-metadata` calls (neither is atomic — design scripts to be idempotent).
+- `Tx` runs its callback sequentially against the same store; writes are not
+  grouped into a single transaction.
+- `Ping` runs `list` to confirm the script is reachable.
 
-- **Children**: Use `br list --label=parent:<id>` (script adds parent
-  label on create)
-- **SetMetadata**: Use `br update --label=meta:key=value` (script
-  convention)
-- **MolCook**: Parse formula TOML, create root + step beads, wire
-  parent links. This is the hardest gap — it requires the script to
-  understand Gas City's formula format.
+### `ready` and ephemeral tiers
 
-A more practical approach: implement `MolCook` in Go within Gas City
-(it already knows formula TOML) and decompose it into `Create` + `Update`
-calls against the Store interface. This makes MolCook a **composed
-operation** rather than a primitive the script must implement.
+`ready` returns open, unblocked beads. The orchestrator's demand scans pass
+`--include-ephemeral`, and the script must then include ephemeral run beads in
+its output; Gas City applies the caller's tier filter after parsing. Future-
+deferred beads (`defer_until` in the future) are filtered at the store boundary,
+so a script may return them and let the provider drop them.
 
-## Design Decision: MolCook as Composed vs. Primitive
+### Wire format
 
-**Option A: MolCook is a primitive in the exec protocol.**
-The script must understand formulas and create molecule bead trees.
-Simple for bd (has `bd mol cook`), hard for custom backends.
+Beads are exchanged as JSON matching the `bd --json` shape:
 
-**Option B: MolCook is composed from Create + Update in Go.**
-Gas City reads the formula TOML, creates the root bead via `Create`,
-creates step beads with ParentID via `Create`, wires dependencies via
-`Update`. The script only needs CRUD primitives.
-
-**Recommendation: Option B.** MolCook is a *mechanism* (Layer 2),
-not a *primitive*. It's composed from Task Store operations + Config
-parsing. Pushing formula knowledge into every backend script violates
-the Bitter Lesson — the SDK should handle composition, scripts handle
-storage.
-
-This means the Store interface becomes:
-
-```go
-type Store interface {
-    Create(b Bead) (Bead, error)
-    Get(id string) (Bead, error)
-    Update(id string, opts UpdateOpts) error
-    Close(id string) error
-    List() ([]Bead, error)
-    Ready() ([]Bead, error)
-    Children(parentID string) ([]Bead, error)
-    SetMetadata(id, key, value string) error
-    ListByLabel(label string, limit int) ([]Bead, error)
-    MolCook(formula, title string, vars []string) (string, error)  // composed internally for exec
+```json
+{
+  "id": "WP-42",
+  "title": "digest run",
+  "status": "open",
+  "type": "task",
+  "created_at": "2026-02-27T10:00:00Z",
+  "updated_at": "2026-02-27T10:00:00Z",
+  "assignee": "",
+  "parent_id": "",
+  "ref": "",
+  "needs": [],
+  "description": "",
+  "labels": ["order-run:digest", "pool:dog"],
+  "metadata": {},
+  "ephemeral": true,
+  "defer_until": "2026-02-27T11:00:00Z"
 }
 ```
 
-For the exec provider, `MolCook` is implemented in Go by the ExecStore
-itself using its own `Create` and `Update` methods + formula parsing.
-BdStore continues to delegate to `bd mol cook`. FileStore/MemStore
-get their own Go implementation.
+The script assigns `id`, `status`, `created_at`, and `updated_at` on `create`.
+On `create` the provider defaults a missing `type` to `task` before calling the
+script; on every read it normalizes a missing or empty `status` to `open`.
+`metadata` values may be any JSON type but are coerced to strings.
+Preserve `ephemeral`, `no_history`, and `defer_until` on every read path so the
+provider can keep run beads out of normal work queries. `no_history=true` marks
+durable work that carries no version-control history: unlike `ephemeral` beads
+it stays visible in issues-tier reads, and also appears in wisps-tier queries.
+Backends without native columns for these bits may store them internally (e.g.
+a private label) but must round-trip them as the matching JSON fields.
 
-## Migration Path
+The **create request** is a subset (`title`, `type`, `priority`, `labels`,
+`parent_id`, `ref`, `needs`, `description`, `assignee`, `from`, `metadata`,
+`ephemeral`, `no_history`, `defer_until`). The **update request** carries only
+the fields being changed (`title`, `status`, `type`, `priority`, `description`,
+`parent_id`, `assignee`, plus `labels`/`remove_labels` and a `metadata`
+overlay); omitted fields are left unchanged, and `labels` appends rather than
+replaces. `dep-list` returns objects of `{ "issue_id", "depends_on_id", "type" }`.
 
-### Phase 1: Interface Promotion (This PR)
-1. Add `ListByLabel(label string, limit int) ([]Bead, error)` to Store
-2. Implement on MemStore and FileStore (filter existing data)
-3. Change `cmd/gc/cmd_order.go` functions from `*BdStore` to `Store`
+### Conventions
 
-### Phase 2: Exec Provider
-1. Create `internal/beads/exec/` package
-2. Implement ExecStore with all Store interface methods
-3. Add `exec:` prefix handling in `beadsProvider()`
-4. Write protocol documentation
+- **JSON on stdin for mutations** avoids shell-quoting issues with titles,
+  descriptions, and labels; `set-metadata` passes its value as raw stdin bytes
+  so it can hold newlines, quotes, or JSON.
+- **Not found → exit 1** with `not found` (or `no issue found`) on stderr;
+  `get`, `close`, and `reopen` map that to the platform's not-found error.
+- **Idempotent writes** — `close` on an already-closed bead should still exit 0;
+  batch and transaction operations are not atomic.
+- **Return supersets** — `list`, `children`, and `list-by-label` should return
+  every matching bead the script can see, including ephemeral ones; the provider
+  applies the caller's tier, query filters, and result limit after parsing (it
+  always passes `list-by-label` a limit of `0`).
+- **Three-state status** — the store vocabulary is `open`, `in_progress`, and
+  `closed`. A backend with a richer status set maps the extras onto these three.
 
-### Phase 3: MolCook Decomposition
-1. Extract formula→bead-tree logic from `bd mol cook` into Go
-2. Implement composed MolCook on ExecStore using Create + Update
-3. Optionally add composed MolCook to FileStore/MemStore
+## Environment Variables
 
-### Phase 4: Reference Script
-1. Write `gc-beads-br` script wrapping beads_rust
-2. Verify all Gas City operations work end-to-end
-3. Document gaps and workarounds
+The provider sets these before exec'ing the script:
 
-## Comparison: Session vs. Beads Exec Pattern
+| Variable | Value |
+|----------|-------|
+| `GC_PROVIDER` | the full `exec:<script>` selector |
+| `GC_STORE_ROOT` | the scope root directory (the city or rig directory) |
+| `GC_STORE_SCOPE` | `city` or `rig` |
+| `GC_BEADS_PREFIX` | the bead-ID prefix for this scope |
+| `GC_RIG` / `GC_RIG_ROOT` | the rig name and root path (rig scope only) |
 
-| Aspect | Session Exec | Beads Exec |
-|--------|-------------|------------|
-| Interface | `runtime.Provider` (14+ methods) | `beads.Store` (10 methods) |
-| Data format | Mixed (JSON for start, text for others) | JSON for all mutations and reads |
-| Selection | `GC_SESSION=exec:<script>` | `GC_BEADS=exec:<script>` |
-| Config | N/A (env var only) | `[beads] provider = "exec:..."` |
-| Forward compat | Exit 2 = unknown op | Exit 2 = unknown op |
-| Wire types | `startConfig` (stable subset) | `beads.Bead` JSON tags (stable) |
-| Timeout | 30s | 30s |
-| Composed ops | None (all primitive) | MolCook (composed from Create+Update) |
+The parent environment is otherwise inherited, except that `BEADS_*` and
+`GC_DOLT_*` keys are stripped so a script cannot accidentally inherit the
+default store's backend configuration.
 
-## Open Questions
+## Writing Your Own Script
 
-1. **Should `Children` use a label convention or a first-class parent
-   field?** If we use labels (`parent:<id>`), the script doesn't need
-   native parent support. But `bd` has native parent support. Decision:
-   keep ParentID as a first-class field in the wire format; scripts that
-   don't support it natively use labels internally.
+1. Start from `contrib/beads-scripts/gc-beads-br` as a template.
+2. Implement the operations your backend supports; let the provider compose the
+   rest.
+3. Return exit 2 for operations you do not implement (but exit 1 for
+   `ready --include-ephemeral` if you cannot serve it).
+4. Test with `GC_BEADS=exec:./your-script gc status`.
 
-2. **Should `ListByLabel` support multiple labels (AND)?** Current
-   BdStore only supports a single label. Keep it simple for now — single
-   label. Multiple-label queries can be composed from single-label
-   results.
+### Minimal script (create / get / list)
 
-3. **Purge semantics for exec provider.** Purge is dolt-specific
-   (removes closed ephemeral beads from the Dolt database). For exec
-   providers, should this be delegated or composed? Recommendation:
-   delegate as optional (exit 2 = no-op). The script can implement its
-   own cleanup strategy.
+```bash
+#!/bin/sh
+op="$1"
+case "$op" in
+  create) payload=$(cat); my-store create "$payload" ;;   # echoes the new bead JSON
+  get)    my-store show "$2" ;;                            # echoes the bead JSON
+  list)   my-store list --json ;;                          # echoes a JSON array
+  *)      exit 2 ;;
+esac
+```
 
 ## Shipped Scripts
 
 See `contrib/beads-scripts/` for maintained implementations:
 
-- **gc-beads-br** — beads_rust (`br`) backend. Wraps the `br` CLI with
-  SQLite + JSONL backing. Dependencies: `br`, `jq`, `bash`.
-- **gc-beads-k8s** — Kubernetes backend. Runs `bd` inside a lightweight
-  "beads runner" pod via `kubectl exec`. The pod connects to Dolt running
-  as a StatefulSet inside the cluster. Dependencies: `kubectl`, `jq`, `bash`.
+- **gc-beads-br** — [`beads_rust`](https://github.com/Dicklesworthstone/beads_rust)
+  (`br`) backend: SQLite + JSONL, no Dolt dependency. Dependencies: `br`, `jq`,
+  `bash`.
+- **gc-beads-k8s** — runs `bd` inside a "beads runner" pod via `kubectl exec`,
+  connecting to Dolt running as a StatefulSet in the cluster. Dependencies:
+  `kubectl`, `jq`, `bash`.
+
+The bundled `bd` provider itself ships an exec script (`gc-beads-bd.sh`) under
+the `bd` pack's assets, which is how the default Dolt-backed store is driven
+through the same protocol.

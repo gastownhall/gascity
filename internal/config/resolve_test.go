@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -31,10 +33,29 @@ func lookPathOnly(bins ...string) LookPathFunc {
 	}
 }
 
+func explicitBuiltins(names ...string) map[string]ProviderSpec {
+	providers := make(map[string]ProviderSpec, len(names))
+	for _, name := range names {
+		base := BasePrefixBuiltin + name
+		providers[name] = ProviderSpec{Base: &base}
+	}
+	return providers
+}
+
 // --- ResolveProvider tests ---
 
 func TestResolveProviderAgentStartCommand(t *testing.T) {
-	agent := &Agent{Name: "mayor", StartCommand: "my-custom-cli --flag"}
+	delay := 1250
+	emitsPermissionWarning := true
+	agent := &Agent{
+		Name:                   "worker",
+		StartCommand:           "my-custom-cli --flag",
+		ReadyDelayMs:           &delay,
+		ReadyPromptPrefix:      "ready> ",
+		ProcessNames:           []string{"my-custom-cli"},
+		EmitsPermissionWarning: &emitsPermissionWarning,
+		ResumeCommand:          "my-custom-cli --resume {{.SessionKey}}",
+	}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
@@ -42,14 +63,73 @@ func TestResolveProviderAgentStartCommand(t *testing.T) {
 	if rp.Command != "my-custom-cli --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-custom-cli --flag")
 	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+	if !reflect.DeepEqual(rp.ProcessNames, []string{"my-custom-cli"}) {
+		t.Errorf("ProcessNames = %v, want [my-custom-cli]", rp.ProcessNames)
+	}
+	if rp.ReadyDelayMs != delay {
+		t.Errorf("ReadyDelayMs = %d, want %d", rp.ReadyDelayMs, delay)
+	}
+	if rp.ReadyPromptPrefix != "ready> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "ready> ")
+	}
+	if !rp.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true")
+	}
+	if rp.ResumeCommand != "my-custom-cli --resume {{.SessionKey}}" {
+		t.Errorf("ResumeCommand = %q, want agent resume command", rp.ResumeCommand)
+	}
+}
+
+func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) {
+	agent := &Agent{
+		Name:         "mayor",
+		StartCommand: "my-custom-cli --flag",
+		PromptMode:   "arg",
+		PromptFlag:   "--prompt",
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
 	if rp.PromptMode != "arg" {
 		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "arg")
+	}
+	if rp.PromptFlag != "--prompt" {
+		t.Errorf("PromptFlag = %q, want %q", rp.PromptFlag, "--prompt")
+	}
+}
+
+func TestResolveProviderForkFlag(t *testing.T) {
+	// claude carries the fork verb; the resolved provider must surface it so the
+	// fork-launch command form (--resume <parent> --fork-session --session-id) is
+	// available.
+	claude := &Agent{Name: "warm", Provider: "claude"}
+	rp, err := ResolveProvider(claude, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(claude): %v", err)
+	}
+	if rp.ForkFlag != "--fork-session" {
+		t.Errorf("claude ForkFlag = %q, want --fork-session", rp.ForkFlag)
+	}
+
+	// codex has no fork verb; ForkFlag must stay empty so a fork launch on codex
+	// fails loud rather than silently degrading to fresh.
+	codex := &Agent{Name: "cold", Provider: "codex"}
+	rpc, err := ResolveProvider(codex, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(codex): %v", err)
+	}
+	if rpc.ForkFlag != "" {
+		t.Errorf("codex ForkFlag = %q, want empty", rpc.ForkFlag)
 	}
 }
 
 func TestResolveProviderAgentProvider(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -80,7 +160,7 @@ func TestResolveProviderAgentProvider(t *testing.T) {
 func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "city", Provider: "codex"}
-	rp, err := ResolveProvider(agent, ws, nil, lookPathOnly("codex"))
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("codex"), lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -92,7 +172,11 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "codex")
 	}
 	defaultArgs := rp.ResolveDefaultArgs()
-	codexWantArgs := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=xhigh"}
+	codexWantArgs := []string{
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--model", "gpt-5.5",
+		"-c", "model_reasoning_effort=xhigh",
+	}
 	if len(defaultArgs) != len(codexWantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
 	} else {
@@ -101,6 +185,109 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 				t.Errorf("ResolveDefaultArgs()[%d] = %q, want %q", i, defaultArgs[i], w)
 			}
 		}
+	}
+	if rp.ResumeFlag != "resume" {
+		t.Errorf("ResumeFlag = %q, want resume", rp.ResumeFlag)
+	}
+	if rp.ResumeStyle != "subcommand" {
+		t.Errorf("ResumeStyle = %q, want subcommand", rp.ResumeStyle)
+	}
+	if rp.ReadyPromptPrefix != "› " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "› ")
+	}
+}
+
+func TestResolveProviderOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := BasePrefixBuiltin + "codex"
+	providers := map[string]ProviderSpec{
+		"codex": {
+			Base:               &base,
+			OptionsSchemaMerge: "by_key",
+			OptionDefaults: map[string]string{
+				"effort": "low",
+				"model":  "gpt-5.4-mini",
+			},
+			OptionsSchema: []ProviderOption{{
+				Key:     "model",
+				Label:   "Model",
+				Type:    "select",
+				Default: "",
+				Choices: []OptionChoice{{
+					Value:       "gpt-5.4-mini",
+					Label:       "GPT-5.4 Mini",
+					FlagArgs:    []string{"--model", "gpt-5.4-mini"},
+					FlagAliases: [][]string{{"-m", "gpt-5.4-mini"}},
+				}},
+			}},
+		},
+	}
+
+	defaultResolved, err := ResolveProvider(&Agent{Name: "worker"}, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider default agent: %v", err)
+	}
+	defaultArgs := strings.Join(defaultResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "--model gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing city-added default model", defaultResolved.ResolveDefaultArgs())
+	}
+
+	optInAgent := &Agent{
+		Name: "polecat",
+		OptionDefaults: map[string]string{
+			"model": "gpt-5.5",
+		},
+	}
+	optInResolved, err := ResolveProvider(optInAgent, &Workspace{Provider: "codex"}, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider opt-in agent: %v", err)
+	}
+	optInArgs := strings.Join(optInResolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(optInArgs, "--model gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing preserved built-in opt-in model", optInResolved.ResolveDefaultArgs())
+	}
+	if strings.Contains(optInArgs, "gpt-5.4-mini") {
+		t.Fatalf("ResolveDefaultArgs() = %v, default model survived agent override", optInResolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderRequiresExplicitBuiltinCatalogEntry(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "claude"}
+	_, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	if err == nil {
+		t.Fatal("expected builtin provider reference to require an explicit catalog entry")
+	}
+	if !strings.Contains(err.Error(), `provider "claude" is not in the explicit provider catalog`) {
+		t.Fatalf("error = %v, want explicit catalog guidance", err)
+	}
+}
+
+func TestAgentProcessNamesResolvesExplicitProvider(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+		Providers: explicitBuiltins("codex"),
+	}
+
+	got := AgentProcessNames(cfg, Agent{Name: "worker"}, lookPathOnly("codex"))
+	want := []string{"codex", "codex-raw"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+}
+
+func TestAgentProcessNamesPrefersAgentOverride(t *testing.T) {
+	agent := Agent{Name: "worker", ProcessNames: []string{"custom-agent"}}
+	cfg := &City{
+		Workspace: Workspace{Name: "city", Provider: "codex"},
+	}
+
+	got := AgentProcessNames(cfg, agent, lookPathNone)
+	want := []string{"custom-agent"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AgentProcessNames() = %v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if agent.ProcessNames[0] != "custom-agent" {
+		t.Fatalf("agent process name mutated to %q", agent.ProcessNames[0])
 	}
 }
 
@@ -114,16 +301,80 @@ func TestResolveProviderWorkspaceStartCommand(t *testing.T) {
 	if rp.Command != "my-agent --flag" {
 		t.Errorf("Command = %q, want %q", rp.Command, "my-agent --flag")
 	}
+	if rp.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", rp.PromptMode, "none")
+	}
+}
+
+// TestResolveProviderWorkspaceStartCommandWithProvider verifies that
+// workspace.start_command overrides the provider command when a provider
+// name is resolved (via workspace.provider or auto-detect), preserving
+// provider settings like PromptMode while clearing schema-managed flags.
+func TestResolveProviderWorkspaceStartCommandWithProvider(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "city", Provider: "claude", StartCommand: "claude --auto"}
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("claude"), lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "claude --auto" {
+		t.Errorf("Command = %q, want %q", rp.Command, "claude --auto")
+	}
+	if rp.CommandString() != "claude --auto" {
+		t.Errorf("CommandString() = %q, want %q (Args should be nil)", rp.CommandString(), "claude --auto")
+	}
+	// Schema-managed defaults must be cleared so they aren't appended.
+	if len(rp.ResolveDefaultArgs()) != 0 {
+		t.Errorf("ResolveDefaultArgs() = %v, want nil (start_command is complete command)", rp.ResolveDefaultArgs())
+	}
+	// Provider settings should be preserved.
+	if rp.Name != "claude" {
+		t.Errorf("Name = %q, want %q (provider settings should be preserved)", rp.Name, "claude")
+	}
+	builtins := BuiltinProviders()
+	claudeSpec := builtins["claude"]
+	if rp.ReadyPromptPrefix != claudeSpec.ReadyPromptPrefix {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, claudeSpec.ReadyPromptPrefix)
+	}
+}
+
+// TestResolveProviderAgentStartCommandWinsOverWorkspace verifies that
+// agent.start_command takes precedence over workspace.start_command.
+func TestResolveProviderAgentStartCommandWinsOverWorkspace(t *testing.T) {
+	agent := &Agent{Name: "worker", StartCommand: "my-agent --custom"}
+	ws := &Workspace{Name: "city", Provider: "claude", StartCommand: "claude --auto"}
+	rp, err := ResolveProvider(agent, ws, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "my-agent --custom" {
+		t.Errorf("Command = %q, want %q (agent.StartCommand should win)", rp.Command, "my-agent --custom")
+	}
+}
+
+func TestResolveProviderAgentLifecycleSurvivesStartCommandEscapeHatch(t *testing.T) {
+	agent := &Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    AgentLifecycleOneShot,
+	}
+	rp, err := ResolveProvider(agent, &Workspace{Name: "city", Provider: "claude"}, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got, want := rp.Lifecycle, AgentLifecycleOneShot; got != want {
+		t.Fatalf("Lifecycle = %q, want %q", got, want)
+	}
 }
 
 func TestResolveProviderAutoDetect(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
-	if err != nil {
-		t.Fatalf("ResolveProvider: %v", err)
+	if err == nil {
+		t.Fatalf("ResolveProvider returned %v, want error without explicit provider", rp)
 	}
-	if rp.Name != "codex" {
-		t.Errorf("Name = %q, want %q", rp.Name, "codex")
+	if !strings.Contains(err.Error(), "provider is required") {
+		t.Fatalf("error = %v, want missing provider error", err)
 	}
 }
 
@@ -138,7 +389,7 @@ func TestResolveProviderAutoDetectNone(t *testing.T) {
 func TestResolveProviderAgentOverridesWorkspace(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
 	ws := &Workspace{Name: "city", Provider: "codex"}
-	rp, err := ResolveProvider(agent, ws, nil, lookPathAll)
+	rp, err := ResolveProvider(agent, ws, explicitBuiltins("claude", "codex"), lookPathAll)
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -188,25 +439,382 @@ func TestResolveProviderUserDefinedProvider(t *testing.T) {
 	agent := &Agent{Name: "scout", Provider: "kiro"}
 	cityProviders := map[string]ProviderSpec{
 		"kiro": {
-			Command:      "kiro",
-			Args:         []string{"--autonomous"},
-			PromptMode:   "arg",
-			ReadyDelayMs: 5000,
-			ProcessNames: []string{"kiro", "node"},
+			Command:          "kiro-cli",
+			Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:       "arg",
+			ReadyDelayMs:     5000,
+			ProcessNames:     []string{"kiro", "node"},
+			SupportsHooks:    boolPtr(true),
+			InstructionsFile: "AGENTS.md",
+			ResumeFlag:       "--resume",
+			ResumeStyle:      "flag",
+			Env:              map[string]string{"KIRO_AGENT_MODE": "headless"},
+			PermissionModes:  map[string]string{"unrestricted": "--trust-mode full"},
 		},
 	}
-	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro"))
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
 	if rp.Name != "kiro" {
 		t.Errorf("Name = %q, want %q", rp.Name, "kiro")
 	}
-	if rp.CommandString() != "kiro --autonomous" {
-		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro --autonomous")
+	if rp.CommandString() != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("CommandString() = %q, want %q", rp.CommandString(), "kiro-cli chat --no-interactive --agent gascity --trust-all-tools")
 	}
 	if rp.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", rp.ReadyDelayMs)
+	}
+	if len(rp.ProcessNames) != 2 || rp.ProcessNames[0] != "kiro" || rp.ProcessNames[1] != "node" {
+		t.Errorf("ProcessNames = %v, want [kiro node]", rp.ProcessNames)
+	}
+	if !rp.SupportsHooks {
+		t.Error("SupportsHooks = false, want true")
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", rp.InstructionsFile, "AGENTS.md")
+	}
+	if rp.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", rp.ResumeFlag, "--resume")
+	}
+	if rp.ResumeStyle != "flag" {
+		t.Errorf("ResumeStyle = %q, want %q", rp.ResumeStyle, "flag")
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.PermissionModes["unrestricted"] != "--trust-mode full" {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", rp.PermissionModes["unrestricted"], "--trust-mode full")
+	}
+}
+
+func TestResolveProviderKimiStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kimi"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kimi"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kimi": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kimi --yolo --no-thinking"},
+			PathCheck: "kimi",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kimi"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kimi" {
+		t.Fatalf("BuiltinAncestor = %q, want kimi", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kimi", rp.AcceptStartupDialogs)
+	}
+}
+
+func TestResolveProviderKiroStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:kiro"
+	agent := &Agent{Name: "scout", Provider: "wrapped-kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-kiro": {
+			Base:      &base,
+			Command:   "sh",
+			Args:      []string{"-c", "exec kiro-cli chat --no-interactive --agent gascity --trust-all-tools"},
+			PathCheck: "kiro-cli",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "kiro" {
+		t.Fatalf("BuiltinAncestor = %q, want kiro", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin kiro", rp.AcceptStartupDialogs)
+	}
+}
+
+func TestResolveProviderKiroAgentArgsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Args:     []string{"chat", "--no-interactive", "--agent", "gascity", "--verbose"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:      "kiro-cli",
+			Args:         []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode:   "arg",
+			ReadyDelayMs: 5000,
+			ProcessNames: []string{"kiro", "node"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.Args) != 5 || rp.Args[4] != "--verbose" {
+		t.Errorf("Args = %v, want [chat --no-interactive --agent gascity --verbose]", rp.Args)
+	}
+	if rp.ReadyDelayMs != 5000 {
+		t.Errorf("ReadyDelayMs = %d, want 5000 (provider default preserved)", rp.ReadyDelayMs)
+	}
+}
+
+func TestResolveProviderKiroProviderArgsOverrideOmitsTrustAllTools(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity"},
+			PromptMode: "arg",
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"chat", "--no-interactive", "--agent", "gascity"}
+	if !reflect.DeepEqual(rp.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", rp.Args, wantArgs)
+	}
+	if strings.Contains(rp.CommandString(), "--trust-all-tools") {
+		t.Fatalf("CommandString() = %q, want provider override without --trust-all-tools", rp.CommandString())
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if strings.Contains(cmd.Command, "--trust-all-tools") {
+		t.Fatalf("tmux launch command = %q, want provider override without --trust-all-tools", cmd.Command)
+	}
+}
+
+func TestResolveProviderBuiltinKiroACPCommand(t *testing.T) {
+	agent := &Agent{Name: "scout", Provider: "kiro"}
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("kiro"), lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if !rp.SupportsACP {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if got := rp.ACPCommandString(); got != "kiro-cli acp --agent gascity" {
+		t.Errorf("ACPCommandString() = %q, want %q", got, "kiro-cli acp --agent gascity")
+	}
+	if got := ResolveSessionCreateTransport("", rp); got != "" {
+		t.Errorf("ResolveSessionCreateTransport(empty) = %q, want empty default transport", got)
+	}
+	cmd, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportTmux)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(tmux): %v", err)
+	}
+	if cmd.Command != "kiro-cli chat --no-interactive --agent gascity --trust-all-tools" {
+		t.Errorf("tmux launch command = %q, want kiro-cli chat --no-interactive --agent gascity --trust-all-tools", cmd.Command)
+	}
+	acp, err := BuildProviderLaunchCommand("/city", rp, nil, SessionTransportACP)
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand(acp): %v", err)
+	}
+	if acp.Command != "kiro-cli acp --agent gascity" {
+		t.Errorf("acp launch command = %q, want kiro-cli acp --agent gascity", acp.Command)
+	}
+}
+
+func TestResolveProviderKiroAgentEnvMerges(t *testing.T) {
+	agent := &Agent{
+		Name:     "scout",
+		Provider: "kiro",
+		Env:      map[string]string{"EXTRA": "yes"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			Env:     map[string]string{"KIRO_AGENT_MODE": "headless"},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Env["KIRO_AGENT_MODE"] != "headless" {
+		t.Errorf("Env[KIRO_AGENT_MODE] = %q, want %q (provider env preserved)", rp.Env["KIRO_AGENT_MODE"], "headless")
+	}
+	if rp.Env["EXTRA"] != "yes" {
+		t.Errorf("Env[EXTRA] = %q, want %q (agent env merged)", rp.Env["EXTRA"], "yes")
+	}
+}
+
+func TestResolveProviderKiroDefaultPromptMode(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q (default)", rp.PromptMode, "arg")
+	}
+}
+
+func TestResolveProviderKiroInstructionsFileDefault(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q (default)", rp.InstructionsFile, "AGENTS.md")
+	}
+}
+
+func TestResolveProviderKiroOptionsSchemaResolveDefaultArgs(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			Args:       []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "default",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "full"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroAgentOptionDefaultsOverride(t *testing.T) {
+	agent := &Agent{
+		Name:           "worker",
+		Provider:       "kiro",
+		OptionDefaults: map[string]string{"permission_mode": "default"},
+	}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command:    "kiro-cli",
+			PromptMode: "arg",
+			OptionDefaults: map[string]string{
+				"permission_mode": "unrestricted",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key:     "permission_mode",
+					Label:   "Trust Mode",
+					Type:    "select",
+					Default: "unrestricted",
+					Choices: []OptionChoice{
+						{Value: "default", Label: "Default", FlagArgs: []string{"--trust-mode", "default"}},
+						{Value: "unrestricted", Label: "Full trust", FlagArgs: []string{"--trust-mode", "full"}},
+					},
+				},
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.EffectiveDefaults["permission_mode"] != "default" {
+		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q (agent override)", rp.EffectiveDefaults["permission_mode"], "default")
+	}
+	defaultArgs := rp.ResolveDefaultArgs()
+	wantArgs := []string{"--trust-mode", "default"}
+	if !reflect.DeepEqual(defaultArgs, wantArgs) {
+		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, wantArgs)
+	}
+}
+
+func TestResolveProviderKiroPermissionModesDeepCopy(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "kiro"}
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {
+			Command: "kiro-cli",
+			PermissionModes: map[string]string{
+				"unrestricted": "--trust-mode full",
+				"default":      "--trust-mode default",
+			},
+		},
+	}
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("kiro-cli"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if len(rp.PermissionModes) != 2 {
+		t.Fatalf("got %d permission modes, want 2", len(rp.PermissionModes))
+	}
+	rp.PermissionModes["injected"] = "malicious"
+	if _, ok := cityProviders["kiro"].PermissionModes["injected"]; ok {
+		t.Error("mutating ResolvedProvider.PermissionModes leaked into city provider")
+	}
+}
+
+func TestAgentHasHooks_KiroViaInstallHooks(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{InstallAgentHooks: []string{"kiro"}}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro in install_agent_hooks should have hooks")
+	}
+}
+
+func TestAgentHasHooks_KiroDefault(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "test"}
+	if AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro without install_agent_hooks or explicit override should not have hooks by default")
+	}
+}
+
+func TestAgentHasHooks_KiroExplicitOverride(t *testing.T) {
+	yes := true
+	agent := &Agent{Name: "worker", HooksInstalled: &yes}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "kiro", nil) {
+		t.Error("kiro with hooks_installed=true should have hooks")
+	}
+}
+
+func TestBuiltinFamilyKiroIsKiro(t *testing.T) {
+	family := BuiltinFamily("kiro", nil)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, nil) = %q, want \"kiro\"", family)
+	}
+}
+
+func TestBuiltinFamilyKiroWithCityProviders(t *testing.T) {
+	cityProviders := map[string]ProviderSpec{
+		"kiro": {Command: "kiro-cli"},
+	}
+	family := BuiltinFamily("kiro", cityProviders)
+	if family != "kiro" {
+		t.Errorf("BuiltinFamily(kiro, city) = %q, want \"kiro\"", family)
 	}
 }
 
@@ -239,7 +847,7 @@ func TestResolveProviderUnknown(t *testing.T) {
 
 func TestResolveProviderNotInPath(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	_, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	_, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathNone)
 	if err == nil {
 		t.Fatal("expected error when provider not in PATH")
 	}
@@ -253,7 +861,7 @@ func TestResolveProviderAgentArgsOverride(t *testing.T) {
 		Provider: "claude",
 		Args:     []string{"--dangerously-skip-permissions", "--verbose"},
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -270,7 +878,7 @@ func TestResolveProviderAgentReadyDelayOverride(t *testing.T) {
 		Provider:     "claude",
 		ReadyDelayMs: &delay,
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -286,7 +894,7 @@ func TestResolveProviderAgentEmitsPermissionWarningOverride(t *testing.T) {
 		Provider:               "claude",
 		EmitsPermissionWarning: &f,
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -345,7 +953,7 @@ func TestResolveProviderAgentEnvOverridesBase(t *testing.T) {
 func TestResolveProviderDefaultPromptMode(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "codex"}
 	// Codex preset has prompt_mode = "arg", so it should stay "arg".
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("codex"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("codex"), lookPathOnly("codex"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -423,6 +1031,593 @@ func TestLookupProviderCityOverride(t *testing.T) {
 	}
 }
 
+// TestLookupProviderBaseChainIntegration verifies the full path from
+// lookupProvider through the chain walker: a wrapper provider with
+// base = "builtin:codex" must come back with inherited PermissionModes
+// and OptionsSchema from the built-in codex. This test would have
+// caught the bug where the runtime launch command for codex-mini was
+// missing --dangerously-bypass-approvals-and-sandbox because
+// lookupProvider ignored the Base field.
+func TestLookupProviderBaseChainIntegration(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	spec, err := lookupProvider("codex-mini", city, lookPathAll)
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	// Leaf-level overrides preserved.
+	if spec.Command != "aimux" {
+		t.Errorf("Command = %q, want aimux (leaf override)", spec.Command)
+	}
+	// Inherited from built-in codex: PermissionModes must contain the
+	// unrestricted key that maps to --dangerously-bypass flag.
+	if spec.PermissionModes == nil {
+		t.Fatal("PermissionModes is nil — built-in codex inheritance did not propagate via lookupProvider")
+	}
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	if got := spec.PermissionModes["unrestricted"]; got != want {
+		t.Errorf("PermissionModes[\"unrestricted\"] = %q, want %q", got, want)
+	}
+	// Inherited OptionsSchema: must contain permission_mode with choices
+	// including unrestricted → FlagArgs [--dangerously-bypass-approvals-and-sandbox].
+	found := false
+	for _, opt := range spec.OptionsSchema {
+		if opt.Key != "permission_mode" {
+			continue
+		}
+		for _, c := range opt.Choices {
+			if c.Value == "unrestricted" {
+				if len(c.FlagArgs) == 0 || c.FlagArgs[0] != want {
+					t.Errorf("permission_mode unrestricted FlagArgs = %v, want %v", c.FlagArgs, []string{want})
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("OptionsSchema did not inherit permission_mode.unrestricted from built-in codex")
+	}
+	// Inherited scalars.
+	if spec.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want arg (inherited)", spec.PromptMode)
+	}
+	if spec.ReadyDelayMs != 3000 {
+		t.Errorf("ReadyDelayMs = %d, want 3000 (inherited)", spec.ReadyDelayMs)
+	}
+}
+
+func TestLookupProviderExplicitEmptyBaseOptsOutOfLegacyMerge(t *testing.T) {
+	empty := ""
+	city := map[string]ProviderSpec{
+		"codex": {
+			Base:    &empty,
+			Command: "codex",
+		},
+	}
+	spec, err := lookupProvider("codex", city, lookPathAll)
+	if err != nil {
+		t.Fatalf("lookupProvider: %v", err)
+	}
+	if spec.Base == nil || *spec.Base != "" {
+		t.Fatalf("Base = %v, want explicit empty", spec.Base)
+	}
+	if len(spec.PermissionModes) != 0 {
+		t.Errorf("explicit base=\"\" should not inherit PermissionModes, got %v", spec.PermissionModes)
+	}
+	if len(spec.OptionsSchema) != 0 {
+		t.Errorf("explicit base=\"\" should not inherit OptionsSchema, got %v", spec.OptionsSchema)
+	}
+}
+
+// TestResolveProviderBaseChainEmitsDangerousBypass verifies that a
+// wrapped codex provider with base = "builtin:codex" produces a
+// ResolvedProvider whose ResolveDefaultArgs() includes
+// --dangerously-bypass-approvals-and-sandbox. This is the end-to-end
+// launch-command invariant for the aimux-codex fix.
+func TestResolveProviderBaseChainEmitsDangerousBypass(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:          &b,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--", "-m", "gpt-5.3"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-mini", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if resolved.BuiltinAncestor != "codex" {
+		t.Errorf("BuiltinAncestor = %q, want codex", resolved.BuiltinAncestor)
+	}
+	if len(resolved.OptionsSchema) == 0 {
+		t.Fatal("OptionsSchema empty — built-in inheritance did not reach ResolvedProvider")
+	}
+	args := resolved.ResolveDefaultArgs()
+	want := "--dangerously-bypass-approvals-and-sandbox"
+	found := false
+	for _, a := range args {
+		if a == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ResolveDefaultArgs() = %v, missing %q — session would hang on first sandboxed command", args, want)
+	}
+}
+
+func TestResolveProviderBaseChainStripsCodexAliases(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-max": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.5",
+				"-c", "model_reasoning_effort=\"xhigh\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.5 resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-max", Provider: "codex-max"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.5" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.5", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "xhigh" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want xhigh", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Count(command, "gpt-5.5") != 1 {
+		t.Fatalf("resolved launch command = %q, want one model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort") != 1 {
+		t.Fatalf("resolved launch command = %q, want one effort flag", command)
+	}
+}
+
+func TestResolveProviderChainArgsAppendAffectsResolvedArgs(t *testing.T) {
+	custom := map[string]ProviderSpec{
+		"codex": {
+			Base:          basePtr("builtin:codex"),
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-max": {
+			Base:       basePtr("codex"),
+			ArgsAppend: []string{"-m", "gpt-5.4"},
+		},
+	}
+	resolved, err := ResolveProviderChain("codex-max", custom["codex-max"], custom)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	want := []string{"run", "codex", "--", "-m", "gpt-5.4"}
+	if !reflect.DeepEqual(resolved.Args, want) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, want)
+	}
+}
+
+func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T) {
+	b := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &b,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+	resolved, err := ResolveProvider(agent, nil, city, lookPathAll)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
+	}
+	if got := resolved.EffectiveDefaults["effort"]; got != "medium" {
+		t.Fatalf("EffectiveDefaults[effort] = %q, want medium", got)
+	}
+	command := resolved.CommandString()
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + strings.Join(defaultArgs, " ")
+	}
+	if strings.Contains(command, "model_reasoning_effort=xhigh") {
+		t.Fatalf("resolved launch command = %q, inherited max effort leaked into mini provider", command)
+	}
+	if strings.Contains(command, "gpt-5.5") {
+		t.Fatalf("resolved launch command = %q, inherited max model leaked into mini provider", command)
+	}
+	if strings.Count(command, "gpt-5.3-codex") != 1 {
+		t.Fatalf("resolved launch command = %q, want one Codex model flag", command)
+	}
+	if strings.Count(command, "model_reasoning_effort=medium") != 1 {
+		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=medium session-123") {
+		t.Fatalf("resolved resume command = %q, missing medium effort default before session key", resumeCommand)
+	}
+}
+
+func TestResolveProviderExplicitBaseArgsOverrideSameLayerOptionDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base: &builtinCodex,
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex",
+			},
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.5",
+			},
+		},
+	}
+	agent := &Agent{Name: "codex-min", Provider: "codex-mini"}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want args-inferred gpt-5.3-codex", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if strings.Contains(defaultLine, "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved stale same-layer option_defaults", resolved.ResolveDefaultArgs())
+	}
+	if !strings.Contains(defaultLine, "gpt-5.3-codex") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args-inferred model", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainChildOptionDefaultsBeatInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	city := map[string]ProviderSpec{
+		"codex-base": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"-m", "gpt-5.5",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-base"),
+			OptionDefaults: map[string]string{
+				"model": "gpt-5.3-codex",
+			},
+		},
+	}
+	resolved, err := ResolveProviderChain("codex-mini", city["codex-mini"], city)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want child option default gpt-5.3-codex", got)
+	}
+	if strings.Contains(strings.Join(resolved.ResolveDefaultArgs(), " "), "gpt-5.5") {
+		t.Fatalf("ResolveDefaultArgs() = %v, inherited parent arg overrode child option_defaults", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderChainArgsAppendInfersSchemaDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:          &builtinCodex,
+			Command:       "aimux",
+			Args:          []string{"run", "codex", "--"},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			ArgsAppend: []string{
+				"-m",
+				"gpt-5.3-codex",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	wantArgs := []string{"run", "codex", "--"}
+	if !reflect.DeepEqual(resolved.Args, wantArgs) {
+		t.Fatalf("Args = %v, want schema-managed args_append stripped to %v", resolved.Args, wantArgs)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
+	}
+	defaultLine := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultLine, "--model gpt-5.3-codex") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing args_append-inferred model", resolved.ResolveDefaultArgs())
+	}
+	optKeys := resolved.Provenance.MapKeyLayer["option_defaults"]
+	if optKeys == nil {
+		t.Fatal("option_defaults provenance missing")
+	}
+	if got := optKeys["model"]; got != "providers.codex-mini" {
+		t.Fatalf("option_defaults[model] layer = %q, want providers.codex-mini", got)
+	}
+}
+
+func TestResolveProviderChainSchemaOnlyChildArgsReplaceInheritedArgs(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-wrapper": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run",
+				"codex",
+				"--",
+				"--parent-non-schema",
+			},
+			ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
+		},
+		"codex-mini": {
+			Base: basePtr("codex-wrapper"),
+			Args: []string{
+				"-m",
+				"gpt-5.3-codex",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-mini", providers["codex-mini"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.Args == nil {
+		t.Fatalf("Args = nil, want non-nil empty slice to preserve child replacement")
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want empty slice with no inherited parent args", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["model"]; got != "gpt-5.3-codex" {
+		t.Fatalf("EffectiveDefaults[model] = %q, want gpt-5.3-codex", got)
+	}
+}
+
+func TestResolveProviderChainCodexSuggestArgsReplaceInheritedUnrestricted(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-suggest": {
+			Base: &builtinCodex,
+			Args: []string{
+				"--ask-for-approval",
+				"untrusted",
+				"--sandbox",
+				"read-only",
+			},
+		},
+	}
+
+	resolved, err := ResolveProviderChain("codex-suggest", providers["codex-suggest"], providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if len(resolved.Args) != 0 {
+		t.Fatalf("Args = %v, want schema-managed args stripped", resolved.Args)
+	}
+	if got := resolved.EffectiveDefaults["permission_mode"]; got != "suggest" {
+		t.Fatalf("EffectiveDefaults[permission_mode] = %q, want suggest", got)
+	}
+	defaultArgs := resolved.ResolveDefaultArgs()
+	defaultLine := strings.Join(defaultArgs, " ")
+	if strings.Contains(defaultLine, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("ResolveDefaultArgs() = %v, preserved inherited unrestricted flag", defaultArgs)
+	}
+	if !strings.Contains(defaultLine, "--ask-for-approval untrusted --sandbox read-only") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing suggest permission flags", defaultArgs)
+	}
+	if strings.Count(defaultLine, "--sandbox read-only") != 1 {
+		t.Fatalf("ResolveDefaultArgs() = %v, want one read-only sandbox flag sequence", defaultArgs)
+	}
+}
+
+func TestResolveProviderAgentOptionDefaultsUpdateWrappedResumeDefaults(t *testing.T) {
+	builtinCodex := "builtin:codex"
+	providers := map[string]ProviderSpec{
+		"codex-mini": {
+			Base:    &builtinCodex,
+			Command: "aimux",
+			Args: []string{
+				"run", "codex", "--",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-m", "gpt-5.3-codex",
+				"-c", "model_reasoning_effort=\"medium\"",
+			},
+			ResumeCommand: "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume {{.SessionKey}}",
+		},
+	}
+	agent := &Agent{
+		Name:     "worker",
+		Provider: "codex-mini",
+		OptionDefaults: map[string]string{
+			"effort": "high",
+		},
+	}
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("aimux"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=high session-123") {
+		t.Fatalf("resolved resume command = %q, missing agent effort default before session key", resumeCommand)
+	}
+	if strings.Contains(resumeCommand, "model_reasoning_effort=medium") {
+		t.Fatalf("resolved resume command = %q, retained provider effort default after agent override", resumeCommand)
+	}
+	defaultArgs := strings.Join(resolved.ResolveDefaultArgs(), " ")
+	if !strings.Contains(defaultArgs, "model_reasoning_effort=high") {
+		t.Fatalf("ResolveDefaultArgs() = %v, missing agent effort default", resolved.ResolveDefaultArgs())
+	}
+}
+
+func TestResolveProviderFlagStyleResumeCommandAppendsDefaults(t *testing.T) {
+	agent := &Agent{Name: "worker", Provider: "custom"}
+	providers := map[string]ProviderSpec{
+		"custom": {
+			Command:       "custom-agent",
+			ResumeFlag:    "--resume",
+			ResumeStyle:   "flag",
+			ResumeCommand: "custom-agent --resume {{.SessionKey}} --safe",
+			OptionDefaults: map[string]string{
+				"model": "opus",
+			},
+			OptionsSchema: []ProviderOption{
+				{
+					Key: "model",
+					Choices: []OptionChoice{
+						{Value: "opus", FlagArgs: []string{"--model", "claude-opus-4-7"}},
+					},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveProvider(agent, nil, providers, lookPathOnly("custom-agent"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	want := "custom-agent --resume {{.SessionKey}} --safe --model claude-opus-4-7"
+	if resolved.ResumeCommand != want {
+		t.Fatalf("ResumeCommand = %q, want %q", resolved.ResumeCommand, want)
+	}
+}
+
+func TestMergeProviderOverBuiltinOptionsSchemaByKeyAndOmit(t *testing.T) {
+	base := ProviderSpec{
+		OptionsSchema: []ProviderOption{
+			{Key: "model", Label: "Model", Default: "old"},
+			{Key: "permission_mode", Label: "Permission", Default: "plan"},
+		},
+		OptionDefaults: map[string]string{
+			"model":           "old",
+			"permission_mode": "plan",
+		},
+	}
+	city := ProviderSpec{
+		OptionsSchemaMerge: "by_key",
+		OptionsSchema: []ProviderOption{
+			{Key: "model", Label: "Model", Default: "new"},
+			{Key: "permission_mode", Omit: true},
+			{Key: "effort", Label: "Effort", Default: "high"},
+		},
+		OptionDefaults: map[string]string{
+			"model":  "new",
+			"effort": "high",
+		},
+	}
+	merged := MergeProviderOverBuiltin(base, city)
+	if got := optionKeys(merged.OptionsSchema); !reflect.DeepEqual(got, []string{"model", "effort"}) {
+		t.Fatalf("option keys = %v, want [model effort]", got)
+	}
+	if merged.OptionsSchema[0].Default != "new" {
+		t.Errorf("model default = %q, want new", merged.OptionsSchema[0].Default)
+	}
+	if _, ok := merged.OptionDefaults["permission_mode"]; ok {
+		t.Errorf("omitted option default survived: %v", merged.OptionDefaults)
+	}
+	if got := merged.OptionDefaults["effort"]; got != "high" {
+		t.Errorf("effort default = %q, want high", got)
+	}
+}
+
+func TestMergeProviderOverBuiltinOptionsSchemaByKeyMergesChoices(t *testing.T) {
+	base := ProviderSpec{
+		OptionsSchema: []ProviderOption{{
+			Key:     "model",
+			Label:   "Base Model",
+			Type:    "select",
+			Default: "opus",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "Old Opus", FlagArgs: []string{"--model", "old-opus"}},
+				{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+			},
+		}},
+	}
+	city := ProviderSpec{
+		OptionsSchemaMerge: "by_key",
+		OptionsSchema: []ProviderOption{{
+			Key: "model",
+			Choices: []OptionChoice{
+				{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+				{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+			},
+		}},
+	}
+
+	merged := MergeProviderOverBuiltin(base, city)
+	if len(merged.OptionsSchema) != 1 {
+		t.Fatalf("option count = %d, want 1", len(merged.OptionsSchema))
+	}
+	model := merged.OptionsSchema[0]
+	if model.Label != "Base Model" {
+		t.Errorf("label = %q, want inherited Base Model", model.Label)
+	}
+	if model.Type != "select" {
+		t.Errorf("type = %q, want inherited select", model.Type)
+	}
+	if model.Default != "opus" {
+		t.Errorf("default = %q, want inherited opus", model.Default)
+	}
+	wantChoices := []OptionChoice{
+		{Value: "opus", Label: "New Opus", FlagArgs: []string{"--model", "new-opus"}},
+		{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "sonnet"}},
+		{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "haiku"}},
+	}
+	if !reflect.DeepEqual(model.Choices, wantChoices) {
+		t.Fatalf("choices = %#v, want %#v", model.Choices, wantChoices)
+	}
+}
+
+func optionKeys(opts []ProviderOption) []string {
+	keys := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		keys = append(keys, opt.Key)
+	}
+	return keys
+}
+
 func TestLookupProviderUnknown(t *testing.T) {
 	_, err := lookupProvider("vim", nil, lookPathAll)
 	if err == nil {
@@ -439,7 +1634,7 @@ func TestLookupProviderNotInPath(t *testing.T) {
 
 func TestLookupProviderCityNotInPath(t *testing.T) {
 	city := map[string]ProviderSpec{
-		"kiro": {Command: "kiro"},
+		"kiro": {Command: "kiro-cli"},
 	}
 	_, err := lookupProvider("kiro", city, lookPathNone)
 	if err == nil {
@@ -491,8 +1686,8 @@ func TestLookupProviderCityInheritsBuiltin(t *testing.T) {
 		t.Errorf("Args = %v, want [--yolo --model claude-haiku-4.5]", spec.Args)
 	}
 	// Should inherit SupportsHooks from built-in copilot.
-	if spec.SupportsHooks != builtinCopilot.SupportsHooks {
-		t.Errorf("SupportsHooks = %v, want %v (inherited)", spec.SupportsHooks, builtinCopilot.SupportsHooks)
+	if derefBool(spec.SupportsHooks) != derefBool(builtinCopilot.SupportsHooks) {
+		t.Errorf("SupportsHooks = %v, want %v (inherited)", derefBool(spec.SupportsHooks), derefBool(builtinCopilot.SupportsHooks))
 	}
 }
 
@@ -541,7 +1736,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 		PromptFlag:        "--prompt",
 		ReadyDelayMs:      5000,
 		ReadyPromptPrefix: "❯ ",
-		SupportsACP:       true,
+		SupportsACP:       boolPtr(true),
 		Env:               map[string]string{"BASE_KEY": "base_val"},
 		PermissionModes:   map[string]string{"unrestricted": "--yolo"},
 	}
@@ -568,7 +1763,7 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	if result.ReadyDelayMs != 5000 {
 		t.Errorf("ReadyDelayMs = %d, want 5000", result.ReadyDelayMs)
 	}
-	if !result.SupportsACP {
+	if !derefBool(result.SupportsACP) {
 		t.Error("SupportsACP should be inherited")
 	}
 	// Env merged additively.
@@ -581,6 +1776,156 @@ func TestMergeProviderOverBuiltin(t *testing.T) {
 	// PermissionModes inherited.
 	if result.PermissionModes["unrestricted"] != "--yolo" {
 		t.Error("PermissionModes not inherited")
+	}
+}
+
+func TestResolveProviderBuiltinOpenCodeCustomCommandKeepsACPArgsOnCustomBinary(t *testing.T) {
+	base := "builtin:opencode"
+	cityProviders := map[string]ProviderSpec{
+		"custom-opencode": {
+			Base:    &base,
+			Command: "custom-opencode",
+		},
+	}
+	agent := &Agent{Name: "worker", Provider: "custom-opencode"}
+
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("custom-opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.Command != "custom-opencode" {
+		t.Fatalf("Command = %q, want custom-opencode", rp.Command)
+	}
+	if rp.ACPCommand != "" {
+		t.Fatalf("ACPCommand = %q, want empty fallback to Command", rp.ACPCommand)
+	}
+	if got := rp.ACPCommandString(); got != "custom-opencode acp" {
+		t.Fatalf("ACPCommandString() = %q, want custom-opencode acp", got)
+	}
+}
+
+func TestResolveProviderOpenCodeStartupDialogPolicyInheritedByWrapper(t *testing.T) {
+	base := "builtin:opencode"
+	agent := &Agent{Name: "worker", Provider: "wrapped-opencode"}
+	cityProviders := map[string]ProviderSpec{
+		"wrapped-opencode": {
+			Base: &base,
+		},
+	}
+
+	rp, err := ResolveProvider(agent, nil, cityProviders, lookPathOnly("opencode"))
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.BuiltinAncestor != "opencode" {
+		t.Fatalf("BuiltinAncestor = %q, want opencode", rp.BuiltinAncestor)
+	}
+	if rp.AcceptStartupDialogs == nil || *rp.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false inherited from builtin opencode", rp.AcceptStartupDialogs)
+	}
+}
+
+// --- Tri-state capability bool tests ---
+//
+// These verify the three-way *bool semantics for SupportsHooks,
+// SupportsACP, and EmitsPermissionWarning per the provider-inheritance
+// design §Tri-state capability bools.
+
+func TestMergeProviderOverBuiltinTriStateChildDisablesParentEnable(t *testing.T) {
+	// Parent sets &true, child explicitly sets &false → final &false.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{SupportsHooks: boolPtr(false)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &false")
+	}
+	if *result.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false (child explicit disable wins)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildNilInheritsParent(t *testing.T) {
+	// Parent sets &true, child absent (nil) → final inherits &true.
+	base := ProviderSpec{Command: "x", SupportsHooks: boolPtr(true)}
+	city := ProviderSpec{}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want inherited &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (inherited)", *result.SupportsHooks)
+	}
+}
+
+func TestMergeProviderOverBuiltinTriStateChildEnablesParentNil(t *testing.T) {
+	// Parent absent (nil), child sets &true → final &true.
+	base := ProviderSpec{Command: "x"}
+	city := ProviderSpec{SupportsHooks: boolPtr(true)}
+	result := MergeProviderOverBuiltin(base, city)
+	if result.SupportsHooks == nil {
+		t.Fatal("SupportsHooks = nil, want &true")
+	}
+	if *result.SupportsHooks != true {
+		t.Errorf("SupportsHooks = %v, want true (child enabled)", *result.SupportsHooks)
+	}
+}
+
+// TestSupportsHooksFalseRegressionTOML verifies that a raw TOML config
+// with supports_hooks = false decodes into *bool = &false and propagates
+// through resolution as a suppression (resolved.SupportsHooks == false).
+// This is the back-compat regression test called out in the migration.
+func TestSupportsHooksFalseRegressionTOML(t *testing.T) {
+	// Parse TOML that sets supports_hooks = false on a custom provider
+	// that inherits from builtin claude (which has SupportsHooks = &true).
+	// The explicit false must win over the inherited true.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[providers.no-hooks-claude]
+base = "builtin:claude"
+supports_hooks = false
+`)
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	spec, ok := cfg.Providers["no-hooks-claude"]
+	if !ok {
+		t.Fatal("provider no-hooks-claude not loaded")
+	}
+	if spec.SupportsHooks == nil {
+		t.Fatal("SupportsHooks decoded as nil, want &false (TOML explicit)")
+	}
+	if *spec.SupportsHooks != false {
+		t.Errorf("SupportsHooks = %v, want false", *spec.SupportsHooks)
+	}
+
+	// Resolve through the chain and confirm the explicit false survives
+	// inheritance from builtin claude (which has SupportsHooks = &true).
+	resolved, err := ResolveProviderChain("no-hooks-claude", spec, cfg.Providers)
+	if err != nil {
+		t.Fatalf("ResolveProviderChain: %v", err)
+	}
+	if resolved.SupportsHooks {
+		t.Error("resolved SupportsHooks = true, want false (explicit disable must win over inherited enable)")
+	}
+}
+
+// TestSupportsHooksComposeFragmentDisables verifies that a fragment with
+// supports_hooks = false, composed over a builtin-derived provider with
+// no local declaration, produces a final &false on the merged spec.
+func TestSupportsHooksComposeFragmentDisables(t *testing.T) {
+	// Fragment that disables hooks on a provider already present in base.
+	base := ProviderSpec{Command: "claude", SupportsHooks: boolPtr(true)}
+	// deepMergeProvider uses fragMeta.IsDefined to detect explicit
+	// presence, so simulate that by merging directly through
+	// MergeProviderOverBuiltin which is the authoritative path.
+	frag := ProviderSpec{SupportsHooks: boolPtr(false)}
+	merged := MergeProviderOverBuiltin(base, frag)
+	if merged.SupportsHooks == nil || *merged.SupportsHooks != false {
+		t.Errorf("merged SupportsHooks = %v, want &false", merged.SupportsHooks)
 	}
 }
 
@@ -612,6 +1957,18 @@ func TestResolveInstallHooksNilWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveInstallHooksControlDispatcherIgnoresWorkspaceHooks(t *testing.T) {
+	agent := &Agent{
+		Name:         ControlDispatcherAgentName,
+		StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+	}
+	ws := &Workspace{InstallAgentHooks: []string{"gemini"}}
+	got := ResolveInstallHooks(agent, ws)
+	if len(got) != 0 {
+		t.Fatalf("ResolveInstallHooks control-dispatcher = %v, want none", got)
+	}
+}
+
 func TestResolveInstallHooksNeitherSet(t *testing.T) {
 	agent := &Agent{Name: "mayor"}
 	ws := &Workspace{Name: "test"}
@@ -626,7 +1983,7 @@ func TestResolveInstallHooksNeitherSet(t *testing.T) {
 func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 	agent := &Agent{Name: "mayor"}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "claude") {
+	if !AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("claude should always have hooks")
 	}
 }
@@ -634,7 +1991,7 @@ func TestAgentHasHooks_ClaudeAlways(t *testing.T) {
 func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"gemini", "opencode"}}
-	if !AgentHasHooks(agent, ws, "gemini") {
+	if !AgentHasHooks(agent, ws, "gemini", nil) {
 		t.Error("gemini with install_agent_hooks should have hooks")
 	}
 }
@@ -642,7 +1999,7 @@ func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex not in install_agent_hooks should not have hooks")
 	}
 }
@@ -650,7 +2007,7 @@ func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 func TestAgentHasHooks_NoHooksByDefault(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "test"}
-	if AgentHasHooks(agent, ws, "codex") {
+	if AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("codex with no install_agent_hooks should not have hooks")
 	}
 }
@@ -659,7 +2016,7 @@ func TestAgentHasHooks_ExplicitOverrideTrue(t *testing.T) {
 	yes := true
 	agent := &Agent{Name: "worker", HooksInstalled: &yes}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "codex") {
+	if !AgentHasHooks(agent, ws, "codex", nil) {
 		t.Error("hooks_installed=true should override to true")
 	}
 }
@@ -669,7 +2026,7 @@ func TestAgentHasHooks_ExplicitOverrideFalse(t *testing.T) {
 	agent := &Agent{Name: "worker", HooksInstalled: &no}
 	ws := &Workspace{Name: "test"}
 	// Even claude should be overridden to false when explicit.
-	if AgentHasHooks(agent, ws, "claude") {
+	if AgentHasHooks(agent, ws, "claude", nil) {
 		t.Error("hooks_installed=false should override even claude")
 	}
 }
@@ -678,11 +2035,27 @@ func TestAgentHasHooks_AgentLevelInstallHooks(t *testing.T) {
 	agent := &Agent{Name: "worker", InstallAgentHooks: []string{"copilot"}}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
 	// Agent-level overrides workspace — only copilot in list.
-	if !AgentHasHooks(agent, ws, "copilot") {
+	if !AgentHasHooks(agent, ws, "copilot", nil) {
 		t.Error("agent install_agent_hooks should be checked")
 	}
-	if AgentHasHooks(agent, ws, "opencode") {
+	if AgentHasHooks(agent, ws, "opencode", nil) {
 		t.Error("opencode not in agent install_agent_hooks")
+	}
+}
+
+// TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily verifies
+// that a wrapped custom provider (e.g. claude-max with base = "builtin:claude")
+// is recognized as claude-family and gets hooks installed by default —
+// matching what literal "claude" would get.
+func TestAgentHasHooks_WrappedClaudeRecognizedViaBuiltinFamily(t *testing.T) {
+	base := "builtin:claude"
+	cityProviders := map[string]ProviderSpec{
+		"claude-max": {Base: &base, Command: "claude-max"},
+	}
+	agent := &Agent{Name: "mayor"}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "claude-max", cityProviders) {
+		t.Error("claude-max (wrapped claude) should be recognized as claude-family and have hooks")
 	}
 }
 
@@ -706,7 +2079,7 @@ func TestResolveProviderInstructionsFileDefault(t *testing.T) {
 func TestResolveProviderInstructionsFileExplicit(t *testing.T) {
 	// Claude's explicit InstructionsFile should be preserved.
 	agent := &Agent{Name: "mayor", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -717,7 +2090,7 @@ func TestResolveProviderInstructionsFileExplicit(t *testing.T) {
 
 func TestResolveProviderPermissionModesDeepCopy(t *testing.T) {
 	agent := &Agent{Name: "worker", Provider: "claude"}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -790,7 +2163,7 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 		Provider:      "claude",
 		ResumeCommand: "claude --resume {{.SessionKey}} --custom-flag",
 	}
-	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
+	rp, err := ResolveProvider(agent, nil, explicitBuiltins("claude"), lookPathOnly("claude"))
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
@@ -815,7 +2188,11 @@ func TestResolveProviderResumeCommandAgentOverride(t *testing.T) {
 // zero value. This catches fields that were added to the struct but not
 // wired into the merge function.
 func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
+	basePtr := "builtin:custom"
 	city := ProviderSpec{
+		Base:                   &basePtr,
+		ArgsAppend:             []string{"--extra"},
+		OptionsSchemaMerge:     "by_key",
 		DisplayName:            "Custom",
 		Command:                "custom-cmd",
 		Args:                   []string{"--flag"},
@@ -824,21 +2201,26 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		ReadyDelayMs:           5000,
 		ReadyPromptPrefix:      "$ ",
 		ProcessNames:           []string{"custom"},
-		EmitsPermissionWarning: true,
+		EmitsPermissionWarning: boolPtr(true),
+		AcceptStartupDialogs:   boolPtr(true),
 		Env:                    map[string]string{"K": "V"},
 		PathCheck:              "custom-bin",
-		SupportsACP:            true,
-		SupportsHooks:          true,
+		SupportsACP:            boolPtr(true),
+		SupportsHooks:          boolPtr(true),
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
 		ResumeCommand:          "custom-cmd --resume {{.SessionKey}}",
 		SessionIDFlag:          "--session-id",
+		ForkFlag:               "--fork-session",
 		PermissionModes:        map[string]string{"yolo": "--yolo"},
 		OptionDefaults:         map[string]string{"permission_mode": "yolo"},
 		OptionsSchema:          []ProviderOption{{Key: "model"}},
+		UpstreamEnv:            UpstreamEnvBinding{BaseURL: "X_BASE_URL", APIKey: "X_API_KEY", AuthToken: "X_AUTH_TOKEN"},
 		PrintArgs:              []string{"-p"},
 		TitleModel:             "haiku",
+		ACPCommand:             "custom-acp",
+		ACPArgs:                []string{"acp-mode"},
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).
@@ -1138,5 +2520,107 @@ permission_mode = "unrestricted"
 	// Schema default "plan" overridden by agent override "unrestricted".
 	if got := rp.EffectiveDefaults["permission_mode"]; got != "unrestricted" {
 		t.Errorf("EffectiveDefaults[permission_mode] = %q, want %q", got, "unrestricted")
+	}
+}
+
+func TestResolveProviderImportedPackProvidersMergeAndCityOverrideWins(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	helperDir := filepath.Join(cityDir, "assets", "helper")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "test-city"
+schema = 2
+
+[imports.helper]
+source = "./assets/helper"
+
+[providers.claude]
+command = "claude"
+args = ["--city"]
+prompt_mode = "flag"
+prompt_flag = "--city-prompt"
+`)
+
+	writeTestFile(t, helperDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 2
+
+[providers.claude]
+command = "claude"
+args = ["--helper"]
+prompt_mode = "none"
+
+[providers.codex]
+command = "codex"
+args = ["--from-helper"]
+prompt_mode = "flag"
+prompt_flag = "--message"
+`)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test-city"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "mayor", "agent.toml"), `
+provider = "claude"
+`)
+	writeTestFile(t, cityDir, filepath.Join("agents", "worker", "agent.toml"), `
+provider = "codex"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if _, ok := cfg.Providers["codex"]; !ok {
+		t.Fatal("codex provider should be merged from imported pack")
+	}
+	if got := cfg.Providers["claude"].Args; !reflect.DeepEqual(got, []string{"--city"}) {
+		t.Fatalf("claude provider args = %v, want city override", got)
+	}
+
+	var mayor, worker *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "mayor":
+			mayor = &cfg.Agents[i]
+		case "worker":
+			worker = &cfg.Agents[i]
+		}
+	}
+	if mayor == nil || worker == nil {
+		t.Fatalf("expected mayor and worker agents, got mayor=%v worker=%v", mayor != nil, worker != nil)
+	}
+
+	mayorProvider, err := ResolveProvider(mayor, &cfg.Workspace, cfg.Providers, lookPathOnly("claude", "codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(mayor): %v", err)
+	}
+	if !reflect.DeepEqual(mayorProvider.Args, []string{"--city"}) {
+		t.Errorf("mayor provider args = %v, want city override", mayorProvider.Args)
+	}
+	if mayorProvider.PromptMode != "flag" {
+		t.Errorf("mayor prompt mode = %q, want %q", mayorProvider.PromptMode, "flag")
+	}
+	if mayorProvider.PromptFlag != "--city-prompt" {
+		t.Errorf("mayor prompt flag = %q, want %q", mayorProvider.PromptFlag, "--city-prompt")
+	}
+
+	workerProvider, err := ResolveProvider(worker, &cfg.Workspace, cfg.Providers, lookPathOnly("claude", "codex"))
+	if err != nil {
+		t.Fatalf("ResolveProvider(worker): %v", err)
+	}
+	if !reflect.DeepEqual(workerProvider.Args, []string{"--from-helper"}) {
+		t.Errorf("worker provider args = %v, want imported provider args", workerProvider.Args)
+	}
+	if workerProvider.PromptMode != "flag" {
+		t.Errorf("worker prompt mode = %q, want %q", workerProvider.PromptMode, "flag")
+	}
+	if workerProvider.PromptFlag != "--message" {
+		t.Errorf("worker prompt flag = %q, want %q", workerProvider.PromptFlag, "--message")
 	}
 }

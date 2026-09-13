@@ -2,6 +2,8 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,26 @@ import (
 
 	"github.com/gastownhall/gascity/internal/mail"
 )
+
+func TestNormalizeMessageErrorRequiresProtocolMarker(t *testing.T) {
+	infrastructureErr := errors.New("message store not found")
+	got := normalizeMessageError("get", infrastructureErr)
+	if !errors.Is(got, infrastructureErr) {
+		t.Fatalf("unmarked error = %v, want original %v", got, infrastructureErr)
+	}
+	if errors.Is(got, mail.ErrNotFound) {
+		t.Fatalf("unmarked error = %v, must not wrap ErrNotFound", got)
+	}
+
+	notFoundErr := errors.New(messageNotFoundMarker + ": message m-1 not found")
+	got = normalizeMessageError("get", notFoundErr)
+	if !errors.Is(got, mail.ErrNotFound) {
+		t.Fatalf("marked error = %v, want ErrNotFound", got)
+	}
+	if !errors.Is(got, notFoundErr) {
+		t.Fatalf("marked error = %v, want original %v", got, notFoundErr)
+	}
+}
 
 // writeScript creates an executable shell script in dir and returns its path.
 func writeScript(t *testing.T, dir, content string) string {
@@ -163,6 +185,62 @@ func TestArchive(t *testing.T) {
 
 	if err := p.Archive("m-1"); err != nil {
 		t.Fatalf("Archive: %v", err)
+	}
+}
+
+func TestArchiveDoesNotConsumeCallerStdin(t *testing.T) {
+	dir := t.TempDir()
+	stdinLog := filepath.Join(dir, "stdin.log")
+	script := writeScript(t, dir, `
+op="$1"
+if IFS= read -r line; then
+  printf '%s:%s\n' "$op" "$line" >> "`+stdinLog+`"
+else
+  printf '%s:EOF\n' "$op" >> "`+stdinLog+`"
+fi
+
+case "$op" in
+  ensure-running|archive) ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	callerStdinPath := filepath.Join(dir, "caller-stdin")
+	if err := os.WriteFile(callerStdinPath, []byte("caller-owned\nsecond-line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	callerStdin, err := os.Open(callerStdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer callerStdin.Close() //nolint:errcheck
+
+	originalStdin := os.Stdin
+	os.Stdin = callerStdin
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+	})
+
+	if err := p.Archive("m-1"); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	data, err := os.ReadFile(stdinLog)
+	if err != nil {
+		t.Fatalf("read stdin log: %v", err)
+	}
+	got := string(data)
+	want := "ensure-running:EOF\narchive:EOF\n"
+	if got != want {
+		t.Fatalf("script stdin log = %q, want %q", got, want)
+	}
+	pos, err := callerStdin.Seek(0, io.SeekCurrent)
+	if err != nil {
+		t.Fatalf("caller stdin position: %v", err)
+	}
+	if pos != 0 {
+		t.Fatalf("caller stdin offset = %d, want 0", pos)
 	}
 }
 

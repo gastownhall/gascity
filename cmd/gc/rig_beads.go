@@ -97,6 +97,9 @@ func collectRigRoutes(cityPath string, cfg *config.City) []rigRoute {
 
 	rigs := []rigRoute{{Prefix: hqPrefix, AbsDir: cityPath}}
 	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
 		rigs = append(rigs, rigRoute{
 			Prefix: cfg.Rigs[i].EffectivePrefix(),
 			AbsDir: cfg.Rigs[i].Path,

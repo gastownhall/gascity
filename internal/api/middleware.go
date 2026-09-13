@@ -5,26 +5,78 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log"
+	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/telemetry"
+)
+
+// problemBody is a pre-serialized RFC 9457 Problem Details response emitted
+// by mux-level gates that run before Huma takes over (withRecovery, the
+// supervisor's service-proxy dispatcher, handler_services' /svc/* gates).
+// Pre-serialization satisfies Principle 8: no runtime json.Marshal on
+// error paths. Huma handlers do not use these — they return typed
+// huma.StatusError values that Huma serializes.
+type problemBody struct {
+	status int
+	body   []byte
+}
+
+func (p problemBody) writeTo(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
+	w.WriteHeader(p.status)
+	_, _ = w.Write(p.body)
+}
+
+var (
+	problemInternalServerError = problemBody{
+		status: http.StatusInternalServerError,
+		body:   []byte(`{"status":500,"title":"Internal Server Error","detail":"internal server error"}`),
+	}
+	problemCityNameRequired = problemBody{
+		status: http.StatusBadRequest,
+		body:   []byte(`{"status":400,"title":"Bad Request","detail":"bad_request: city name required in URL"}`),
+	}
+	problemCityNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: city not found or not running"}`),
+	}
+	problemServiceRouteNotFound = problemBody{
+		status: http.StatusNotFound,
+		body:   []byte(`{"status":404,"title":"Not Found","detail":"not_found: service route not found"}`),
+	}
+	problemServiceReadOnly = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"read_only: service mutations are disabled for unpublished services"}`),
+	}
+	problemServiceCSRFRequired = problemBody{
+		status: http.StatusForbidden,
+		body:   []byte(`{"status":403,"title":"Forbidden","detail":"csrf: X-GC-Request header required on private service mutation endpoints"}`),
+	}
+	problemHostNotAllowed = problemBody{
+		status: http.StatusMisdirectedRequest,
+		body:   []byte(`{"status":421,"title":"Misdirected Request","detail":"host_not_allowed: supervisor Host header is not allowed"}`),
+	}
 )
 
 type dataSourceKey struct{}
 
-// setDataSource annotates the request context with the data source used to
-// fulfill it (e.g., "memory", "cache", "bd_subprocess", "sql"). Handlers
-// call this so the logging middleware can include it in metrics.
-func setDataSource(r *http.Request, source string) {
-	if p, ok := r.Context().Value(dataSourceKey{}).(*string); ok {
-		*p = source
-	}
+type requestAuditConfig struct {
+	recorder       events.Recorder
+	allowedOrigins []string
 }
 
+const (
+	supervisorRequestPhaseStart    = "start"
+	supervisorRequestPhaseComplete = "complete"
+)
+
 // withLogging wraps a handler with request logging and OTel metrics.
-func withLogging(next http.Handler) http.Handler {
+func withLogging(next http.Handler, audit requestAuditConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// Inject a mutable data source slot into the context so handlers
@@ -41,34 +93,66 @@ func withLogging(next http.Handler) http.Handler {
 		if source == "" {
 			source = "memory"
 		}
-		log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+		reqID := rw.Header().Get("X-GC-Request-Id")
+		if reqID != "" {
+			log.Printf("api: %s %s %d %s [%s] req_id=%s", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source, reqID)
+		} else {
+			log.Printf("api: %s %s %d %s [%s]", r.Method, r.URL.Path, rw.status, dur.Round(time.Microsecond), source)
+		}
 		telemetry.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, rw.status, durMs, source)
+		recordSupervisorRequest(audit, r, rw.status, dur, supervisorRequestPhaseComplete, reqID)
 	})
 }
 
-// withRecovery catches panics and returns 500.
+func recordSupervisorRequest(audit requestAuditConfig, r *http.Request, status int, dur time.Duration, phase, requestID string) {
+	if audit.recorder == nil {
+		return
+	}
+	path := sanitizeAuditString(r.URL.Path, 256)
+	EmitTypedEvent(audit.recorder, events.SupervisorRequest, path, SupervisorRequestPayload{
+		Method:          sanitizeAuditString(r.Method, 16),
+		Path:            path,
+		Status:          status,
+		DurationMs:      dur.Milliseconds(),
+		RemoteAddrClass: remoteAddrClass(r.RemoteAddr),
+		Host:            sanitizeAuditString(canonicalHostName(r.Host), 128),
+		OriginAllowed:   originAllowed(r.Header.Get("Origin"), audit.allowedOrigins),
+		Phase:           sanitizeAuditString(phase, 16),
+		RequestID:       sanitizeAuditString(requestID, 64),
+	})
+}
+
+// withRecovery catches panics and returns an RFC 9457 Problem Details 500.
+// Stays outermost at the mux level so it covers non-Huma routes (e.g.
+// /svc/* service proxy) that Huma's own recovery wouldn't reach.
 func withRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
 				log.Printf("api: panic: %v\n%s", err, debug.Stack())
-				writeError(w, http.StatusInternalServerError, "internal", "internal server error")
+				problemInternalServerError.writeTo(w)
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
 }
 
-// withCORS adds restricted CORS headers for localhost dashboard access.
-// Only allows localhost origins to prevent browser-origin attacks on mutation endpoints.
-func withCORS(next http.Handler) http.Handler {
+// withCORSAllowing adds CORS headers for localhost dashboard access plus any
+// explicitly allowed extra origins. Only allows localhost origins by default
+// to prevent browser-origin attacks on mutation endpoints.
+// extra is checked with exact string equality after the localhost check.
+func withCORSAllowing(extra []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The response varies by Origin (ACAO is set only for allowed origins),
+		// so caches must key on it; always advertise that, even when the origin
+		// is not allowed.
+		w.Header().Add("Vary", "Origin")
 		origin := r.Header.Get("Origin")
-		if isLocalhostOrigin(origin) {
+		if originAllowed(origin, extra) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request")
-			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-GC-Request, X-GC-City-Write, X-GC-City-Read")
+			w.Header().Set("Access-Control-Expose-Headers", "X-GC-Index, X-GC-Request-Id, Retry-After")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -76,6 +160,32 @@ func withCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// withHostAllowing rejects DNS-rebinding style requests whose Host header is
+// neither loopback nor explicitly configured by the operator.
+func withHostAllowing(allowAny bool, extra []string, audit requestAuditConfig, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowAny && !isAllowedSupervisorHost(r.Host, extra) {
+			problemHostNotAllowed.writeTo(w)
+			return
+		}
+		if isSupervisorEventsStreamRequest(r) {
+			recordSupervisorRequest(audit, r, 0, 0, supervisorRequestPhaseStart, w.Header().Get("X-GC-Request-Id"))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isSupervisorEventsStreamRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	path := r.URL.Path
+	if path == "/v0/events/stream" {
+		return true
+	}
+	return strings.HasPrefix(path, "/v0/city/") && strings.HasSuffix(path, "/events/stream")
 }
 
 // isMutationMethod returns true for HTTP methods that modify state.
@@ -87,28 +197,19 @@ func isMutationMethod(method string) bool {
 	return false
 }
 
-// withReadOnly rejects all mutation requests. Used when the API server binds
-// to a non-localhost address where mutations would be unauthenticated.
-func withReadOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) {
-			writeError(w, http.StatusForbidden, "read_only", "mutations disabled: server bound to non-localhost address")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func originAllowed(origin string, extra []string) bool {
+	return isLocalhostOrigin(origin) || isAllowedExtraOrigin(origin, extra)
 }
 
-// withCSRFCheck requires a custom X-GC-Request header on mutation requests.
-// Custom headers trigger CORS preflight, preventing simple cross-origin form submissions.
-func withCSRFCheck(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isMutationMethod(r.Method) && r.Header.Get("X-GC-Request") == "" {
-			writeError(w, http.StatusForbidden, "csrf", "X-GC-Request header required on mutation endpoints")
-			return
+// isAllowedExtraOrigin reports whether origin is in the explicit allowlist.
+// Comparison is exact (case-sensitive). An empty allowlist always returns false.
+func isAllowedExtraOrigin(origin string, extra []string) bool {
+	for _, o := range extra {
+		if o == origin {
+			return true
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+	return false
 }
 
 // isLocalhostOrigin checks if an origin is from localhost/127.0.0.1.
@@ -152,6 +253,83 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+func isAllowedSupervisorHost(hostHeader string, extra []string) bool {
+	host := canonicalHostName(hostHeader)
+	if host == "" {
+		return false
+	}
+	if isLoopbackHost(host) {
+		return true
+	}
+	for _, allowed := range extra {
+		if canonicalHostName(allowed) == host {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalHostName(hostHeader string) string {
+	hostHeader = strings.TrimSpace(hostHeader)
+	if hostHeader == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(hostHeader); err == nil {
+		return strings.ToLower(strings.Trim(host, "[]"))
+	}
+	if strings.HasPrefix(hostHeader, "[") && strings.HasSuffix(hostHeader, "]") {
+		hostHeader = strings.TrimPrefix(strings.TrimSuffix(hostHeader, "]"), "[")
+	}
+	return strings.ToLower(hostHeader)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func remoteAddrClass(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "unknown"
+	}
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsPrivate():
+		return "private"
+	default:
+		return "public"
+	}
+}
+
+func sanitizeAuditString(value string, maxRunes int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 // withRequestID adds a unique X-GC-Request-Id header to every response.

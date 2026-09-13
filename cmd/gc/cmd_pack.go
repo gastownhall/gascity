@@ -24,6 +24,8 @@ can be pinned to specific git refs.`,
 			return cmd.Help()
 		},
 	}
+	cmd.AddCommand(newPackRegistryCmd(stdout, stderr))
+	cmd.AddCommand(newPackReleaseCmd(stdout, stderr))
 	cmd.AddCommand(newPackFetchCmd(stdout, stderr))
 	cmd.AddCommand(newPackListCmd(stdout, stderr))
 	return cmd
@@ -56,7 +58,7 @@ func doPackFetch(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack fetch: %v\n", err) //nolint:errcheck
 		return 1
@@ -122,7 +124,7 @@ func doPackList(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	cfg, err := loadCityConfig(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc pack list: %v\n", err) //nolint:errcheck
 		return 1

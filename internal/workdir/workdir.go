@@ -4,30 +4,42 @@ package workdir
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // PathContext holds template variables for work_dir expansion.
 type PathContext struct {
-	Agent     string
-	AgentBase string
-	Rig       string
-	RigRoot   string
-	CityRoot  string
-	CityName  string
+	Agent         string
+	AgentBase     string
+	Rig           string
+	RigRoot       string
+	CityRoot      string
+	CityName      string
+	WorktreesRoot string
+	// DefaultBranch is the rig's configured mainline branch
+	// ([[rig]] default_branch, via config.Rig.EffectiveDefaultBranch). It is
+	// empty when the agent has no rig or the rig records no default_branch.
+	//
+	// Configured value only. This deliberately diverges from the prompt
+	// template's {{.DefaultBranch}}, which additionally falls back to a live
+	// origin/HEAD probe: work_dir, session_setup, and pre_start expansion run
+	// on reconciler hot paths, where a git subprocess per expansion is both a
+	// latency hazard and a resource-census regression. Setup scripts consuming
+	// this value should keep their own origin/HEAD probe as the fallback for
+	// the empty case.
+	DefaultBranch string
 }
 
-// CityName returns the configured workspace name, or the city directory basename
-// when workspace.name is unset.
+// CityName returns the effective workspace name for workdir/template expansion.
 func CityName(cityPath string, cfg *config.City) string {
-	if cfg != nil && cfg.Workspace.Name != "" {
-		return cfg.Workspace.Name
-	}
-	return filepath.Base(filepath.Clean(cityPath))
+	return config.EffectiveCityName(cfg, filepath.Base(filepath.Clean(cityPath)))
 }
 
 // ResolveDirPath returns an absolute path for dir, resolving relative paths
@@ -55,7 +67,7 @@ func ConfiguredRigName(cityPath string, a config.Agent, rigs []config.Rig) strin
 	}
 	abs := ResolveDirPath(cityPath, a.Dir)
 	for _, rig := range rigs {
-		if filepath.Clean(abs) == filepath.Clean(rig.Path) {
+		if samePath(abs, rig.Path) {
 			return rig.Name
 		}
 	}
@@ -72,18 +84,136 @@ func RigRootForName(rigName string, rigs []config.Rig) string {
 	return ""
 }
 
+// DefaultBranchForRigName returns the configured mainline branch for rigName,
+// or "" when rigName is empty or the rig records no default_branch. It never
+// probes git — see the PathContext.DefaultBranch doc comment for why.
+func DefaultBranchForRigName(rigName string, rigs []config.Rig) string {
+	if rigName == "" {
+		return ""
+	}
+	for i := range rigs {
+		if rigs[i].Name == rigName {
+			return rigs[i].EffectiveDefaultBranch()
+		}
+	}
+	return ""
+}
+
+// WorktreesRoot returns the configured root for session worktrees.
+func WorktreesRoot(cityPath string) string {
+	for _, key := range []string{"GC_WORKTREES_DIR", "T3CODE_WORKTREES_DIR"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	if t3Home := strings.TrimSpace(os.Getenv("T3CODE_HOME")); t3Home != "" {
+		return filepath.Join(t3Home, "worktrees")
+	}
+	return filepath.Join(cityPath, ".gc", "worktrees")
+}
+
+// rigNameForQualifiedAgent resolves the rig an agent belongs to. It prefers
+// the dir-based association used by ConfiguredRigName, then falls back to the
+// qualified-name prefix for explicitly rig-scoped agents whose Dir is not
+// stamped or points outside any configured rig path. This keeps
+// GC_RIG/GC_RIG_ROOT populated for rig-scoped agents whose work_dir lands
+// outside the rig filesystem (e.g. a city-level worktree), where the
+// dir heuristic alone returns "" and the rig keys would otherwise leak
+// through as empty values — gascity#2070.
+func rigNameForQualifiedAgent(cityPath, qualifiedName string, a config.Agent, rigs []config.Rig) string {
+	if name := ConfiguredRigName(cityPath, a, rigs); name != "" {
+		return name
+	}
+	if a.Scope != "rig" {
+		return ""
+	}
+	dir, _ := config.ParseQualifiedName(qualifiedName)
+	if dir == "" {
+		return ""
+	}
+	for _, rig := range rigs {
+		if dir == rig.Name {
+			return rig.Name
+		}
+	}
+	return ""
+}
+
 // PathContextForQualifiedName builds template context for work_dir expansion.
 func PathContextForQualifiedName(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) PathContext {
-	rigName := ConfiguredRigName(cityPath, a, rigs)
+	rigName := rigNameForQualifiedAgent(cityPath, qualifiedName, a, rigs)
 	_, agentBase := config.ParseQualifiedName(qualifiedName)
 	return PathContext{
-		Agent:     qualifiedName,
-		AgentBase: agentBase,
-		Rig:       rigName,
-		RigRoot:   RigRootForName(rigName, rigs),
-		CityRoot:  cityPath,
-		CityName:  cityName,
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Rig:           rigName,
+		RigRoot:       RigRootForName(rigName, rigs),
+		CityRoot:      cityPath,
+		CityName:      cityName,
+		WorktreesRoot: WorktreesRoot(cityPath),
+		DefaultBranch: DefaultBranchForRigName(rigName, rigs),
 	}
+}
+
+// ExpandCommandTemplate renders command using the same PathContext surface as
+// work_dir and session_setup templates. When cityName is empty, it falls back
+// to the city directory basename so callers don't have to duplicate that logic.
+func ExpandCommandTemplate(command, cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	if command == "" || !strings.Contains(command, "{{") {
+		return command, nil
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = filepath.Base(filepath.Clean(cityPath))
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	return ExpandTemplateStrict(command, ctx)
+}
+
+// SessionQualifiedName returns the canonical work_dir identity for a concrete
+// session instance. Single-session agents keep their template identity unless
+// an explicit name, such as a resolved tmux_alias, supplies the concrete
+// session identity; pooled agents use the alias or generated explicit name.
+func SessionQualifiedName(cityPath string, a config.Agent, rigs []config.Rig, alias, explicitName string) string {
+	if !a.SupportsMultipleSessions() {
+		if strings.TrimSpace(alias) == "" {
+			if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, explicitName); qualified != "" {
+				return qualified
+			}
+		}
+		return a.QualifiedName()
+	}
+	identity := strings.TrimSpace(alias)
+	if identity == "" {
+		identity = strings.TrimSpace(explicitName)
+	}
+	if qualified := sessionQualifiedNameFromIdentity(cityPath, a, rigs, identity); qualified != "" {
+		return qualified
+	}
+	return a.QualifiedName()
+}
+
+func sessionQualifiedNameFromIdentity(cityPath string, a config.Agent, rigs []config.Rig, identity string) string {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return ""
+	}
+
+	_, instanceName := config.ParseQualifiedName(identity)
+	if instanceName != "" {
+		identity = instanceName
+	}
+	if a.BindingName != "" {
+		prefix := a.BindingName + "."
+		identity = strings.TrimPrefix(identity, prefix)
+	}
+
+	qualified := a.QualifiedInstanceName(identity)
+	rigName := ConfiguredRigName(cityPath, a, rigs)
+	if rigName == "" {
+		return qualified
+	}
+	_, agentBase := config.ParseQualifiedName(qualified)
+	return rigName + "/" + agentBase
 }
 
 // ExpandTemplateStrict expands Go text/template placeholders in a work_dir
@@ -111,6 +241,27 @@ func ExpandTemplate(spec string, ctx PathContext) string {
 		return spec
 	}
 	return expanded
+}
+
+// ResolveTmuxAlias expands the agent's tmux_alias template and sanitizes the
+// result for use as a tmux session name. Returns "" with no error when the
+// agent has no tmux_alias configured. The returned name is suitable for use
+// as a session bead's session_name metadata.
+func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.Rig) (string, error) {
+	spec := strings.TrimSpace(a.TmuxAlias)
+	if spec == "" {
+		return "", nil
+	}
+	ctx := PathContextForQualifiedName(cityPath, cityName, a.QualifiedName(), a, rigs)
+	expanded, err := ExpandTemplateStrict(spec, ctx)
+	if err != nil {
+		return "", fmt.Errorf("expanding tmux_alias %q: %w", spec, err)
+	}
+	resolved := strings.TrimSpace(expanded)
+	if resolved == "" {
+		return "", nil
+	}
+	return agent.SanitizeQualifiedNameForSession(resolved), nil
 }
 
 // ResolveWorkDirPathStrict returns the effective session working directory and
@@ -142,4 +293,95 @@ func ResolveWorkDirPath(cityPath, cityName, qualifiedName string, a config.Agent
 		return ResolveDirPath(cityPath, ExpandTemplate(a.WorkDir, ctx))
 	}
 	return path
+}
+
+func samePath(a, b string) bool {
+	return pathutil.SamePath(a, b)
+}
+
+// ValidateAncestorWorktreesNotStale walks path's ancestor chain and returns
+// an error when any ancestor has a regular-file ".git" worktree pointer
+// whose "gitdir:" target is unusable. The walk stops as soon as it
+// encounters a ".git" marker — any regular file (with or without a usable
+// gitdir pointer) or a real ".git" directory. Reaching the filesystem
+// root without finding a marker is not an error.
+//
+// Failure modes that fail closed (the gitdir pointer is present and parses):
+//   - the gitdir target doesn't exist on disk
+//   - the gitdir target exists but is not a directory (non-worktree-
+//     capable, e.g. a regular file at the expected admin-dir path)
+//
+// Failure modes that fail open (the .git file is present but not a
+// recognizable worktree pointer): unreadable file, missing "gitdir:"
+// prefix. In both cases the walk stops — anything further up belongs
+// to the surrounding repository, and fail-closed here would block
+// legitimate spawns whenever an unrelated ancestor .git file is
+// permission-restricted or non-pointer.
+//
+// Relative gitdir targets are resolved against the directory holding
+// the ".git" file (Git's gitfile format), matching Git's own
+// interpretation rather than the process working directory.
+//
+// This is the spawn-time guard for gascity#1556: a stale worktree pointer
+// on an ancestor lets "git -C <rig-root> worktree add <child>" register a
+// structurally orphaned child that can't be reached from the ancestor
+// itself. Failing closed on stale-pointer cases before invoking "git
+// worktree add" surfaces the stale ancestor to the operator instead of
+// producing dangling content.
+func ValidateAncestorWorktreesNotStale(path string) error {
+	// Walk from path's parent upward. The spawn target itself may not yet
+	// exist (we are typically about to MkdirAll it); only ancestors are
+	// inspected.
+	cur := filepath.Dir(filepath.Clean(path))
+	for {
+		gitPath := filepath.Join(cur, ".git")
+		info, err := os.Lstat(gitPath)
+		if err == nil {
+			if info.Mode().IsRegular() {
+				data, rerr := os.ReadFile(gitPath)
+				if rerr == nil {
+					content := strings.TrimSpace(string(data))
+					if strings.HasPrefix(content, "gitdir:") {
+						target := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
+						// Git's gitfile format: a relative gitdir target
+						// is resolved against the directory containing
+						// the .git file, not the process working
+						// directory.
+						if !filepath.IsAbs(target) {
+							target = filepath.Join(cur, target)
+						}
+						target = filepath.Clean(target)
+						targetInfo, terr := os.Stat(target)
+						if terr != nil {
+							return fmt.Errorf(
+								"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q does not exist): %w",
+								cur, target, terr)
+						}
+						if !targetInfo.IsDir() {
+							return fmt.Errorf(
+								"worktree spawn rejected: ancestor %q has stale .git pointer (gitdir target %q is not a directory)",
+								cur, target)
+						}
+					}
+				}
+				// Either a recognizable worktree pointer with a usable
+				// target, or a .git file we couldn't parse (unreadable
+				// or missing the "gitdir:" prefix). Either way we stop
+				// the walk — anything further up belongs to the
+				// surrounding repository and is git's responsibility,
+				// not ours.
+				return nil
+			}
+			if info.IsDir() {
+				// Reached a real .git directory (main repo root). Stop.
+				return nil
+			}
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without finding a marker.
+			return nil
+		}
+		cur = parent
+	}
 }

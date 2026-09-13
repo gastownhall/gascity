@@ -18,7 +18,7 @@ import (
 
 func TestSlingCommands(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// --- argument validation ---
 
@@ -97,7 +97,7 @@ func TestSlingCommands(t *testing.T) {
 
 func TestSlingDryRun(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	agentName := findFirstAgent(t, c)
 	if agentName == "" {

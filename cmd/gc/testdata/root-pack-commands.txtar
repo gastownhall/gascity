@@ -1,0 +1,31 @@
+# Root city-pack commands are exposed through the root pack name.
+#
+# Tests:
+# - root city-pack commands surface under the root pack name
+# - the namespace help exposes the discovered command
+# - executing the command carries the root pack and city runtime context
+
+env GC_BEADS=file
+env GC_DOLT=skip
+env GC_SESSION=fake
+
+cd $WORK/city
+
+chmod 755 $WORK/city/commands/hello/run.sh
+
+exec gc backstage --help
+stdout 'hello'
+
+exec gc backstage hello alpha beta
+stdout 'root pack=backstage city=dogfood args=alpha beta'
+
+-- city/city.toml --
+[workspace]
+name = "dogfood"
+-- city/pack.toml --
+[pack]
+name = "backstage"
+schema = 2
+-- city/commands/hello/run.sh --
+#!/bin/sh
+echo "root pack=$GC_PACK_NAME city=$GC_CITY_NAME args=$*"

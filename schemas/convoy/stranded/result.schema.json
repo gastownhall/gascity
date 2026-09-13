@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "stranded"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "convoy.stranded" },
+    "action": { "const": "stranded" },
+    "stranded": { "type": "integer", "minimum": 0 }
+  },
+  "additionalProperties": true
+}

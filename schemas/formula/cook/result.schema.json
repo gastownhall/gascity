@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "formula", "mode", "root_id", "created"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "formula": { "type": "string" },
+    "mode": { "enum": ["cook", "attach"] },
+    "attach_bead_id": { "type": "string" },
+    "root_id": { "type": "string" },
+    "workflow_root_id": { "type": "string" },
+    "created": { "type": "integer" },
+    "id_mapping": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

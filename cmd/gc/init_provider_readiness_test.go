@@ -3,17 +3,102 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 )
+
+func disableBootstrapForTests(t *testing.T) {
+	t.Helper()
+	old := bootstrap.BootstrapPacks
+	bootstrap.BootstrapPacks = nil
+	t.Cleanup(func() { bootstrap.BootstrapPacks = old })
+}
+
+// stubInitRemoteImports makes finalizeInit's remote-import install hermetic.
+//
+// A full init clones gascity-packs over the network: the nested bundled source
+// gascity/roles is not recognized as bundled, so it misses the synthetic cache
+// and takes the real clone path (ga-73eoo). That single clone is most of the
+// runtime of every test that runs a real init, and packman performs it while
+// holding the machine-wide repo-cache write lock — so one wedged remote stalls
+// the whole suite and the pre-push hook with it (ga-r0epd).
+//
+// Use this only in tests whose subject is something other than import
+// installation. Tests that assert on the install itself must stub
+// ensureInitRemoteImportsInstalled directly with the behavior they mean to
+// exercise, the way TestFinalizeInitReportsRemoteImportInstallFailure does;
+// routing those through this helper would assert against a no-op.
+func stubInitRemoteImports(t *testing.T) {
+	t.Helper()
+	prev := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prev })
+	ensureInitRemoteImportsInstalled = func(string) error { return nil }
+}
+
+func stubInitDependencyChecks(t *testing.T) {
+	t.Helper()
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "dolt":
+			return "dolt version " + doltMinVersion, nil
+		default:
+			return binary + " version", nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+}
+
+func stubInitDoltAuthorIdentity(t *testing.T, values map[string]string) {
+	t.Helper()
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(key string) (string, error) {
+		value := strings.TrimSpace(values[key])
+		if value == "" {
+			return "", errDoltConfigKeyMissing
+		}
+		return value, nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+}
+
+func writeBootstrappedManagedBdCity(t *testing.T) string {
+	t.Helper()
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "bright-lights"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cityPath
+}
 
 func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	oldProbe := initProbeProvidersReadiness
@@ -44,17 +129,36 @@ func TestMaybePrintWizardProviderGuidanceNeedsAuth(t *testing.T) {
 	}
 }
 
+func TestProviderStatusFixHintIncludesClaudeOAuthToken(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusInvalidConfiguration)
+	for _, want := range []string{"`claude.ai`", "`oauth_token`", "`firstParty`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
+func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T) {
+	got := providerStatusFixHint("claude", api.ProbeStatusNeedsAuth)
+	for _, want := range []string{"`claude auth login`", "`claude setup-token`", "`CLAUDE_CODE_OAUTH_TOKEN`"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("providerStatusFixHint = %q, want %s", got, want)
+		}
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -99,6 +203,9 @@ func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *test
 	if !strings.Contains(stderr.String(), "run `claude auth login`") {
 		t.Fatalf("stderr = %q, want Claude fix hint", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "`claude setup-token`") {
+		t.Fatalf("stderr = %q, want Claude setup-token hint", stderr.String())
+	}
 	if !strings.Contains(stderr.String(), "Override: gc init --skip-provider-readiness") {
 		t.Fatalf("stderr = %q, want init override hint", stderr.String())
 	}
@@ -108,6 +215,7 @@ func TestFinalizeInitWarnsForUnprobeableCustomProviderAndContinues(t *testing.T)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -161,6 +269,7 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -176,6 +285,9 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 		`name = "bright-lights"`,
 		`includes = ["remote-pack"]`,
 		"",
+		"[providers.claude]",
+		`base = "builtin:claude"`,
+		"",
 		"[packs.remote-pack]",
 		`source = "` + remote + `"`,
 		"",
@@ -184,8 +296,10 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	probeCalls := 0
 	oldProbe := initProbeProvidersReadiness
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
@@ -216,6 +330,9 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
 
 	cacheDir := config.PackCachePath(cityPath, "remote-pack", config.PackSource{Source: remote})
 	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
@@ -223,10 +340,259 @@ func TestFinalizeInitFetchesRemotePacksBeforeProviderReadiness(t *testing.T) {
 	}
 }
 
+func TestFinalizeInitChecksRemoteImportProvidersAfterInstall(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("HOME", t.TempDir())
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	remote := initImportBarePackRepo(t, "remote-pack", "", strings.Join([]string{
+		"[pack]",
+		`name = "remote-pack"`,
+		`version = "1.0.0"`,
+		"schema = 1",
+		"",
+		"[providers.claude]",
+		`base = "builtin:claude"`,
+		"",
+		"[[agent]]",
+		`name = "worker"`,
+		`provider = "claude"`,
+		"",
+	}, "\n"))
+	commit := gitOutputImport(t, remote, "rev-parse", "HEAD")
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCityScaffold(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	writeCityToml(t, cityPath, `[workspace]
+name = "bright-lights"
+`)
+	writePackToml(t, cityPath, strings.Join([]string{
+		"[pack]",
+		`name = "bright-lights"`,
+		"schema = 1",
+		"",
+		"[imports.remote]",
+		`source = "file://` + filepath.ToSlash(remote) + `"`,
+		`version = "sha:` + commit + `"`,
+		"",
+	}, "\n"))
+
+	probeCalls := 0
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, providers []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		probeCalls++
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if len(providers) != 1 || providers[0] != "claude" {
+			t.Fatalf("providers = %v, want [claude]", providers)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		t.Fatal("registerCityWithSupervisor should not run when imported provider readiness blocks init")
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName: "gc init",
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if probeCalls != 1 {
+		t.Fatalf("readiness probe calls = %d, want 1", probeCalls)
+	}
+	if !strings.Contains(stderr.String(), "startup is blocked by provider readiness") {
+		t.Fatalf("stderr = %q, want provider readiness block", stderr.String())
+	}
+}
+
+func TestFinalizeInitDoesNotWriteImplicitImportState(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 0 {
+		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
+	}
+
+	implicitPath := filepath.Join(os.Getenv("GC_HOME"), "implicit-import.toml")
+	if _, err := os.Stat(implicitPath); !os.IsNotExist(err) {
+		t.Fatalf("implicit-import.toml should not be created during finalizeInit, stat err = %v", err)
+	}
+}
+
+func TestInstallInitRemoteImportsSyncsRemoteImports(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "`+config.PublicGastownPackVersion+`"
+`)
+
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+
+	lock := &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			config.PublicGastownPackSource: {
+				Version: config.PublicGastownPackVersion,
+				Commit:  strings.TrimPrefix(config.PublicGastownPackVersion, "sha:"),
+			},
+		},
+	}
+	syncImports = func(cityRoot string, imports map[string]config.Import, mode packman.InstallMode) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("sync cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		if mode != packman.InstallResolveIfNeeded {
+			t.Fatalf("sync mode = %v, want InstallResolveIfNeeded", mode)
+		}
+		if got := imports["pack:gastown"]; got.Source != config.PublicGastownPackSource {
+			t.Fatalf("pack:gastown import = %+v, want public gastown source", got)
+		}
+		return lock, nil
+	}
+	installLockedImports = func(cityRoot string) (*packman.Lockfile, error) {
+		if cityRoot != cityDir {
+			t.Fatalf("install cityRoot = %q, want %q", cityRoot, cityDir)
+		}
+		return lock, nil
+	}
+
+	if err := installInitRemoteImports(cityDir); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, packman.LockfileName)); err != nil {
+		t.Fatalf("expected %s to be written: %v", packman.LockfileName, err)
+	}
+}
+
+func TestInstallInitRemoteImportsSkipsLocalOnlyImports(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.local]
+source = "./packs/local"
+`)
+
+	prevSync := syncImports
+	t.Cleanup(func() { syncImports = prevSync })
+	syncImports = func(string, map[string]config.Import, packman.InstallMode) (*packman.Lockfile, error) {
+		t.Fatal("syncImports should not run for local-only imports")
+		return nil, nil
+	}
+
+	if err := installInitRemoteImports(cityDir); err != nil {
+		t.Fatalf("installInitRemoteImports: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, packman.LockfileName)); !os.IsNotExist(err) {
+		t.Fatalf("%s should not be written for local-only imports, stat err = %v", packman.LockfileName, err)
+	}
+}
+
+func TestFinalizeInitReportsRemoteImportInstallFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	prevInstall := ensureInitRemoteImportsInstalled
+	t.Cleanup(func() { ensureInitRemoteImportsInstalled = prevInstall })
+	ensureInitRemoteImportsInstalled = func(string) error {
+		return errors.New("sync failed")
+	}
+
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		t.Fatal("registerCityWithSupervisor should not run when import install fails")
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "installing imports: sync failed") {
+		t.Fatalf("stderr = %q, want import install failure", stderr.String())
+	}
+}
+
 func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	if err := os.MkdirAll(cityPath, 0o755); err != nil {
@@ -258,13 +624,14 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "minimal",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -305,7 +672,7 @@ func TestFinalizeInitWithoutProgressSkipsStepCounter(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("finalizeInit = %d, want 0: %s", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), "[8/8]") {
+	if strings.Contains(stdout.String(), "[9/9]") {
 		t.Fatalf("stdout = %q, want no progress counter", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "Waiting for supervisor to start city...") {
@@ -317,13 +684,14 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
 		configName: "gastown",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -374,17 +742,43 @@ func TestCmdInitResumesFinalizeForExistingCity(t *testing.T) {
 	}
 }
 
-func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
+func TestLoadInitProviderPreflightConfigFallsBackForUninstalledRemoteImports(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
 
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
-		configName: "tutorial",
+		configName: "gastown",
 		provider:   "claude",
-	}, "", &initStdout, &initStderr)
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	cfg, err := loadInitProviderPreflightConfig(cityPath)
+	if err != nil {
+		t.Fatalf("loadInitProviderPreflightConfig: %v", err)
+	}
+	if got := cfg.Workspace.Provider; got != "claude" {
+		t.Fatalf("Workspace.Provider = %q, want claude", got)
+	}
+}
+
+func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
 	if code != 0 {
 		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
 	}
@@ -413,7 +807,7 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
 
 	var stdout, stderr bytes.Buffer
-	code = cmdInitWithOptions([]string{cityPath}, "", "", "", &stdout, &stderr, true)
+	code = cmdInitWithOptions([]string{cityPath}, "", "", &stdout, &stderr, true)
 	if code != 0 {
 		t.Fatalf("cmdInitWithOptions = %d, want 0: %s", code, stderr.String())
 	}
@@ -425,6 +819,90 @@ func TestCmdInitSkipProviderReadinessBypassesBlockedProvider(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Skipping provider readiness checks") {
 		t.Fatalf("stdout = %q, want skip readiness progress", stdout.String())
+	}
+}
+
+// TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe verifies that
+// --skip-provider-readiness lets --default-provider select any builtin
+// provider, not just the subset with a readiness probe. "omp" (Oh My Pi) is
+// a real builtin (internal/worker/builtin/profiles.go) with no readiness
+// probe registered, so normalizeInitProvider's readiness-only allowlist
+// rejects it even when the caller explicitly asked to skip readiness checks
+// (#4392). ("pi" was the original exemplar but now has a probe of its own;
+// swap in another probe-less builtin if omp ever gains one too.)
+func TestCmdInitSkipProviderReadinessAllowsBuiltinWithoutProbe(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	if api.SupportsProviderReadiness("omp") {
+		t.Fatal("test assumption broken: \"omp\" now has a readiness probe, pick a different probe-less builtin")
+	}
+	found := false
+	for _, name := range config.BuiltinProviderOrder() {
+		if name == "omp" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("test assumption broken: \"omp\" is no longer a builtin provider")
+	}
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--default-provider", "omp", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc init --default-provider omp --skip-provider-readiness = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stderr.String(), "unknown provider") {
+		t.Fatalf("stderr = %q, want no unknown-provider rejection for a skipped-readiness builtin", stderr.String())
+	}
+}
+
+// TestNormalizeInitProviderAcceptsPiWithoutSkip locks in the payoff of
+// probePi: now that pi has a readiness probe, --default-provider pi is
+// accepted by the readiness-aware allowlist on its own, so `gc init
+// --default-provider pi` stops needing --skip-provider-readiness.
+func TestNormalizeInitProviderAcceptsPiWithoutSkip(t *testing.T) {
+	got, err := normalizeInitProvider("pi", false)
+	if err != nil {
+		t.Fatalf("normalizeInitProvider(pi, false) = %q, %v; want %q, nil", got, err, "pi")
+	}
+	if got != "pi" {
+		t.Fatalf("normalizeInitProvider(pi, false) = %q, want %q", got, "pi")
+	}
+}
+
+func TestCmdInitNoStartSkipsSupervisorRegistration(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	disableBootstrapForTests(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	calledRegister := false
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		calledRegister = true
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--provider", "claude", "--skip-provider-readiness", "--no-start", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("gc init --no-start = %d, want 0; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if calledRegister {
+		t.Fatal("registerCityWithSupervisor should not run when --no-start is set")
+	}
+	if !strings.Contains(stdout.String(), "Skipping supervisor startup") {
+		t.Fatalf("stdout = %q, want no-start progress", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Next: cd ") {
+		t.Fatalf("stdout = %q, want next start command", stdout.String())
 	}
 }
 
@@ -451,6 +929,41 @@ func TestShellQuotePathForOSWindows(t *testing.T) {
 	}
 }
 
+func TestInitRunVersionTimesOutHungVersionCommand(t *testing.T) {
+	oldCommandContext := initRunVersionCommandContext
+	oldTimeout := initRunVersionTimeout
+	initRunVersionTimeout = 50 * time.Millisecond
+	initRunVersionCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperProcessInitRunVersionHang", "--")
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		initRunVersionCommandContext = oldCommandContext
+		initRunVersionTimeout = oldTimeout
+	})
+
+	start := time.Now()
+	line, err := initRunVersion("hung-binary")
+	if err == nil {
+		t.Fatal("initRunVersion error = nil, want timeout")
+	}
+	if line != "" {
+		t.Fatalf("initRunVersion line = %q, want empty on timeout", line)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("initRunVersion elapsed = %v, want timeout-bound execution", elapsed)
+	}
+}
+
+func TestHelperProcessInitRunVersionHang(_ *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
+}
+
 func initBareProviderPackRepo(t *testing.T, name, provider string) string {
 	t.Helper()
 
@@ -465,6 +978,9 @@ func initBareProviderPackRepo(t *testing.T, name, provider string) string {
 		`version = "1.0.0"`,
 		"schema = 1",
 		"",
+		"[providers." + provider + "]",
+		`base = "builtin:` + provider + `"`,
+		"",
 		"[[agent]]",
 		`name = "worker"`,
 		`provider = "` + provider + `"`,
@@ -477,4 +993,924 @@ func initBareProviderPackRepo(t *testing.T, name, provider string) string {
 	mustGit(t, workDir, "commit", "-m", "initial")
 	mustGit(t, workDir, "clone", "--bare", workDir, bareDir)
 	return bareDir
+}
+
+func TestCheckHardDependenciesTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
+	t.Setenv("GC_BEADS", "exec:/tmp/gc-beads-bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only dolt", missing)
+	}
+	if missing[0].name != "dolt" {
+		t.Fatalf("missing dep = %#v, want dolt", missing[0])
+	}
+}
+
+func TestCheckHardDependenciesRequiresBoundedRunnerForBdContract(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		switch name {
+		case "timeout", "gtimeout", "python3":
+			return "", os.ErrNotExist
+		default:
+			return "/usr/bin/" + name, nil
+		}
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only bounded runner", missing)
+	}
+	if missing[0].name != "timeout/gtimeout/python3" {
+		t.Fatalf("missing dep = %#v, want timeout/gtimeout/python3", missing[0])
+	}
+}
+
+func TestCheckHardDependenciesAcceptsPythonFallbackForBdContract(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		switch name {
+		case "timeout", "gtimeout":
+			return "", os.ErrNotExist
+		default:
+			return "/usr/bin/" + name, nil
+		}
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	if missing := checkHardDependencies(t.TempDir()); len(missing) != 0 {
+		t.Fatalf("missing deps = %#v, want python3 fallback to satisfy bounded runner", missing)
+	}
+}
+
+func TestCheckHardDependenciesRejectsBdBelowExplicitIDSupport(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version 1.0.3", nil
+		case "dolt":
+			return "dolt version " + doltMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only bd version rejection", missing)
+	}
+	for _, want := range []string{"bd", "1.0.3", "1.0.4"} {
+		if !strings.Contains(missing[0].name, want) {
+			t.Fatalf("missing dep = %#v, want %q", missing[0], want)
+		}
+	}
+}
+
+func TestCheckHardDependenciesRejectsDoltPreReleaseAtFloor(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "dolt":
+			return "dolt version 2.0.7-rc1", nil
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(t.TempDir())
+	if len(missing) != 1 {
+		t.Fatalf("missing deps = %#v, want only dolt prerelease rejection", missing)
+	}
+	if !strings.Contains(missing[0].name, "dolt") || !strings.Contains(missing[0].name, "2.0.7-rc1") {
+		t.Fatalf("missing dep = %#v, want dolt prerelease version in dependency name", missing[0])
+	}
+}
+
+func TestCheckHardDependenciesRequiresBdToolsForBdRigUnderFileCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(cityDir)
+	if len(missing) != 1 || missing[0].name != "dolt" {
+		t.Fatalf("missing deps = %#v, want only dolt for bd-backed rig", missing)
+	}
+}
+
+func TestCheckHardDependenciesRequiresBdToolsForSiteBoundBdRigUnderFileCity(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte(`[[rig]]
+name = "frontend"
+path = "frontend"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "flock", "tmux", "jq", "git", "pgrep", "lsof":
+			return binary + " version", nil
+		default:
+			return binary + " version " + doltMinVersion, nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	missing := checkHardDependencies(cityDir)
+	if len(missing) != 1 || missing[0].name != "dolt" {
+		t.Fatalf("missing deps = %#v, want only dolt for site-bound bd-backed rig", missing)
+	}
+}
+
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	calledRegister := false
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		calledRegister = true
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if calledRegister {
+		t.Fatal("registerCityWithSupervisor should not run when provider readiness blocks init")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	}
+}
+
+func TestFinalizeInitBlocksManagedBdWhenDoltIdentityMissing(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "")
+	disableBootstrapForTests(t)
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{})
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(context.Context, []string, bool) (map[string]api.ReadinessItem, error) {
+		t.Fatal("provider readiness should not run before Dolt identity is configured")
+		return nil, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"startup is blocked by Dolt author identity",
+		"user.name",
+		"user.email",
+		`dolt config --global --add user.name "Your Name"`,
+		`dolt config --global --add user.email "you@example.com"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDoStartBlocksManagedBdWhenDoltIdentityMissingBeforeSupervisorRegistration(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{})
+
+	cityPath := writeBootstrappedManagedBdCity(t)
+
+	calledRegister := false
+	oldRegister := registerCityWithSupervisorTestHook
+	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {
+		calledRegister = true
+		return true, 0
+	}
+	t.Cleanup(func() { registerCityWithSupervisorTestHook = oldRegister })
+
+	var stdout, stderr bytes.Buffer
+	code := doStart([]string{cityPath}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doStart code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if calledRegister {
+		t.Fatal("registerCityWithSupervisor should not run before Dolt identity is configured")
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"gc start: city created, but startup is blocked by Dolt author identity",
+		"user.name",
+		"user.email",
+		`dolt config --global --add user.name "Your Name"`,
+		`dolt config --global --add user.email "you@example.com"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDoStartForegroundBlocksManagedBdWhenDoltIdentityMissingBeforeLifecycle(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{})
+
+	cityPath := writeBootstrappedManagedBdCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doStart([]string{cityPath}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doStart --foreground code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"gc start: city created, but startup is blocked by Dolt author identity",
+		"user.name",
+		"user.email",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, `hint: run "gc doctor"`) {
+		t.Fatalf("stderr shows lifecycle failure instead of identity preflight:\n%s", text)
+	}
+}
+
+func TestDoStartForegroundReportsHardDependenciesBeforeDoltIdentity(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_DOLT", "")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "bd" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	oldRunVersion := initRunVersion
+	initRunVersion = func(binary string) (string, error) {
+		switch binary {
+		case "bd":
+			return "bd version " + bdMinVersion, nil
+		case "dolt":
+			return "dolt version " + doltMinVersion, nil
+		default:
+			return binary + " version", nil
+		}
+	}
+	t.Cleanup(func() { initRunVersion = oldRunVersion })
+
+	oldDoltConfigGet := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("Dolt identity should not be probed before hard dependency failures are reported")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = oldDoltConfigGet })
+
+	cityPath := writeBootstrappedManagedBdCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := doStart([]string{cityPath}, true, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doStart --foreground code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	text := stderr.String()
+	for _, want := range []string{
+		"gc start: missing required dependencies:",
+		"bd",
+		"gc start: install the missing dependencies, then try again",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "startup is blocked by Dolt author identity") {
+		t.Fatalf("stderr reports identity before hard dependencies:\n%s", text)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsWhenGCDoltSkip(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", " skip ")
+	stubInitDependencyChecks(t)
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("Dolt identity should not be probed when GC_DOLT=skip")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(t.TempDir()); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked with GC_DOLT=skip: %#v", status)
+	}
+}
+
+func TestGCDoltSkipTrimsWhitespace(t *testing.T) {
+	t.Setenv("GC_DOLT", " skip ")
+
+	if !gcDoltSkip() {
+		t.Fatal("gcDoltSkip() = false, want true for whitespace-padded skip")
+	}
+}
+
+func TestCheckDoltAuthorIdentityReportsPartialMissingKey(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{"user.name": "Test User"})
+
+	status := checkDoltAuthorIdentity(t.TempDir())
+	if len(status.probeErrors) != 0 {
+		t.Fatalf("probe errors = %#v, want none", status.probeErrors)
+	}
+	if got, want := strings.Join(status.missingKeys, ","), "user.email"; got != want {
+		t.Fatalf("missing keys = %q, want %q", got, want)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsWhenDoltMissing(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	oldLookPath := initLookPath
+	initLookPath = func(name string) (string, error) {
+		if name == "dolt" {
+			return "", os.ErrNotExist
+		}
+		return "/usr/bin/" + name, nil
+	}
+	t.Cleanup(func() { initLookPath = oldLookPath })
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("Dolt identity should not be probed when dolt is not on PATH")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(t.TempDir()); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked without dolt on PATH: %#v", status)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsRigExternalDoltUnderFileCity(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	stubInitDependencyChecks(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+dolt_host = "rig-db.example.com"
+dolt_port = "3307"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("rig-only external Dolt should not require local identity")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked for rig external Dolt: %#v", status)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsCityExternalDoltFromConfig(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+host = "city-db.example.com"
+port = 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("city external Dolt should not require local identity")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked for city external Dolt: %#v", status)
+	}
+}
+
+func TestCheckDoltAuthorIdentitySkipsABoundCityWithManagedDoltConfig(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeOpaqueBindingScopeFixture(t, cityDir)
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(string) (string, error) {
+		t.Fatal("a city gc does not serve must not require a local Dolt identity")
+		return "", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	if status := checkDoltAuthorIdentity(cityDir); status.blocked() {
+		t.Fatalf("checkDoltAuthorIdentity blocked for a city gc does not serve: %#v", status)
+	}
+}
+
+func TestCheckDoltAuthorIdentityUsesCanonicalManagedCityOverStaleExternalConfig(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+
+[dolt]
+host = "stale-db.example.com"
+port = 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubInitDoltAuthorIdentity(t, map[string]string{})
+
+	status := checkDoltAuthorIdentity(cityDir)
+	if got, want := strings.Join(status.missingKeys, ","), "user.name,user.email"; got != want {
+		t.Fatalf("missing keys = %q, want %q", got, want)
+	}
+	if len(status.probeErrors) != 0 {
+		t.Fatalf("probe errors = %#v, want none", status.probeErrors)
+	}
+}
+
+func TestCheckDoltAuthorIdentityReportsProbeErrorsSeparately(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+	stubInitDependencyChecks(t)
+
+	old := initRunDoltConfigGet
+	initRunDoltConfigGet = func(key string) (string, error) {
+		if key == "user.name" {
+			return "", fmt.Errorf("dolt config probe timed out after 2s")
+		}
+		return "test@example.com", nil
+	}
+	t.Cleanup(func() { initRunDoltConfigGet = old })
+
+	status := checkDoltAuthorIdentity(t.TempDir())
+	if len(status.missingKeys) != 0 {
+		t.Fatalf("missing keys = %#v, want none", status.missingKeys)
+	}
+	if len(status.probeErrors) != 1 || status.probeErrors[0].key != "user.name" {
+		t.Fatalf("probe errors = %#v, want user.name probe error", status.probeErrors)
+	}
+
+	var stderr bytes.Buffer
+	printDoltAuthorIdentityBlock(&stderr, "gc init", status)
+	text := stderr.String()
+	for _, want := range []string{
+		"Could not verify Dolt identity:",
+		"user.name: dolt config probe timed out after 2s",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Missing Dolt config:") {
+		t.Fatalf("stderr misreported probe error as missing config:\n%s", text)
+	}
+}
+
+func TestInitRunDoltConfigGetReportsExitStderrAsProbeError(t *testing.T) {
+	binDir := t.TempDir()
+	doltPath := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\necho 'unreadable global config' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := initRunDoltConfigGet("user.name")
+	if value != "" {
+		t.Fatalf("value = %q, want empty", value)
+	}
+	if err == nil {
+		t.Fatal("initRunDoltConfigGet error = nil, want probe error")
+	}
+	if errors.Is(err, errDoltConfigKeyMissing) {
+		t.Fatalf("initRunDoltConfigGet error = %v, want probe error not missing-key sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "unreadable global config") {
+		t.Fatalf("initRunDoltConfigGet error = %v, want stderr detail", err)
+	}
+}
+
+func TestInitRunDoltConfigGetTreatsSilentEmptyExitAsMissingKey(t *testing.T) {
+	binDir := t.TempDir()
+	doltPath := filepath.Join(binDir, "dolt")
+	if err := os.WriteFile(doltPath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	value, err := initRunDoltConfigGet("user.name")
+	if value != "" {
+		t.Fatalf("value = %q, want empty", value)
+	}
+	if !errors.Is(err, errDoltConfigKeyMissing) {
+		t.Fatalf("initRunDoltConfigGet error = %v, want missing-key sentinel", err)
+	}
+}
+
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{
+		"user.name":  "gc-test",
+		"user.email": "gc-test@test.local",
+	})
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("metadata.json missing before readiness block: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+			t.Fatalf("config.yaml missing before readiness block: %v", err)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("metadata.json missing after readiness block: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+		t.Fatalf("config.yaml missing after readiness block: %v", err)
+	}
+}
+
+func TestFinalizeInitDoesNotRunBdProviderBeforeProviderReadinessBlock(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_DOLT", "")
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{
+		"user.name":  "gc-test",
+		"user.email": "gc-test@test.local",
+	})
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	spyDir := t.TempDir()
+	callLog := filepath.Join(spyDir, "gc-beads-bd.calls")
+	spy := filepath.Join(spyDir, "gc-beads-bd")
+	scriptBody := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\nexit 0\n", callLog)
+	if err := os.WriteFile(spy, []byte(scriptBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "")
+	cityConfigPath := filepath.Join(cityPath, "city.toml")
+	cityConfig, err := os.ReadFile(cityConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	cityConfig = append(cityConfig, []byte(fmt.Sprintf("\n[beads]\nprovider = %q\n", "exec:"+spy))...)
+	if err := os.WriteFile(cityConfigPath, cityConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if data, err := os.ReadFile(callLog); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("gc-beads-bd should not run before provider readiness passes, got:\n%s", data)
+	}
 }

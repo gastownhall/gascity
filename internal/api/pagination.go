@@ -16,13 +16,23 @@ type pageParams struct {
 // maxPaginationLimit caps the maximum page size to prevent oversized responses.
 const maxPaginationLimit = 1000
 
+// defaultPaginationLimit is THE server default page size, unified across
+// every keyset list (S4 of the cursor program; previously 50 on beads/
+// convoys/mail, 1000 on sessions, 100 on events). PaginationParam's
+// default:"100" tag documents it in the spec and the pagination dialect
+// guard pins the two values together.
+const defaultPaginationLimit = 100
+
 // parsePagination extracts cursor and limit from query parameters.
 // The cursor is an opaque string that encodes an offset into the result set.
 // Limit is capped at maxPaginationLimit regardless of the requested value.
-func parsePagination(r *http.Request, defaultLimit int) pageParams {
+func parsePagination(r *http.Request, defaultLimit ...int) pageParams {
 	q := r.URL.Query()
 	isPaging := q.Has("cursor")
-	limit := defaultLimit
+	limit := defaultPaginationLimit
+	if len(defaultLimit) > 0 && defaultLimit[0] > 0 {
+		limit = defaultLimit[0]
+	}
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			if n == 0 {

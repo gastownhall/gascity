@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -155,43 +159,194 @@ func TestDoEventEmitPayloadInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestEventEmitViaCLI(t *testing.T) {
+func TestEventPayloadForEmitFallsBackToStoreBead(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_SESSION", "fake")
 	configureIsolatedRuntimeEnv(t)
 
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(dir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore: %v", err)
+	}
+	store, err := openStoreAtForCity(dir, dir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity: %v", err)
+	}
+	created, err := store.Create(beads.Bead{Title: "hook-created task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	var stderr bytes.Buffer
+	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want none", stderr.String())
+	}
+	if !json.Valid([]byte(payload)) {
+		t.Fatalf("payload is not valid JSON: %q", payload)
+	}
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
+	}
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
+	}
+	if decoded.Title != "hook-created task" {
+		t.Fatalf("payload bead title = %q, want hook-created task", decoded.Title)
+	}
+}
+
+func TestEventPayloadForEmitUsesInheritedBeadsDirOutsideRig(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	configureIsolatedRuntimeEnv(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rigDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	created, err := rigStore.Create(beads.Bead{Title: "rig hook-created task", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(rig): %v", err)
+	}
+
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("BEADS_DIR", filepath.Join(rigDir, ".beads"))
+	t.Chdir(t.TempDir())
+
+	var stderr bytes.Buffer
+	payload := eventPayloadForEmit(`{"bead":}`, created.ID, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want none", stderr.String())
+	}
+	decoded, ok := beads.DecodeBeadEventPayload(json.RawMessage(payload))
+	if !ok {
+		t.Fatalf("payload is not a raw canonical bead snapshot: %s", payload)
+	}
+	if decoded.ID != created.ID {
+		t.Fatalf("payload bead ID = %q, want %q", decoded.ID, created.ID)
+	}
+	if decoded.Title != "rig hook-created task" {
+		t.Fatalf("payload bead title = %q, want rig hook-created task", decoded.Title)
+	}
+}
+
+// TestEventEmitViaCLI exercises the full `gc event emit` CLI path: flag
+// parsing, city discovery, event-provider open, and local events.jsonl
+// write. The matching read path (`gc events`) now goes through the
+// supervisor/controller API and is covered by TestDoEvents* against a
+// mock API server, so this test focuses on the emit CLI's end-to-end
+// behavior without needing a live controller.
+//
+// Pre-migration this test did an emit-then-read roundtrip via `gc events`,
+// but that readback is incompatible with the API-first contract — `gc
+// events` no longer reads local files. Splitting emit and read into
+// their own tests keeps each side focused without needing a fake
+// controller harness in the cmd/gc test tree.
+func TestEventEmitViaCLI(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_SESSION", "fake")
+	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
+
+	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"init", dir}, &stdout, &stderr)
+	code := run([]string{"init", "--skip-provider-readiness", "--provider", "claude", dir}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("gc init = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Use --city flag in args (run() creates fresh cobra root, resetting cityFlag).
+	// Emit two events via the CLI. `gc event emit` is best-effort and
+	// always returns 0, but it should still write the events locally.
 	stdout.Reset()
 	stderr.Reset()
 	code = run([]string{"--city", dir, "event", "emit", "bead.created", "--subject", "gc-1", "--message", "Build Hanoi"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("gc event emit = %d; stderr: %s", code, stderr.String())
+		t.Fatalf("gc event emit bead.created = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Verify via gc events.
-	stdout.Reset()
-	stderr.Reset()
-	code = run([]string{"--city", dir, "events"}, &stdout, &stderr)
+	code = run([]string{"--city", dir, "event", "emit", "bead.closed", "--subject", "gc-1", "--message", "Done"}, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("gc events = %d; stderr: %s", code, stderr.String())
+		t.Fatalf("gc event emit bead.closed = %d; stderr: %s", code, stderr.String())
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "bead.created") {
-		t.Errorf("gc events output missing 'bead.created': %q", out)
+
+	// Verify events landed in the local JSONL file. Parse line-by-line
+	// because the file is append-only JSONL, not a JSON array.
+	eventsPath := filepath.Join(dir, ".gc", "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("reading events.jsonl: %v", err)
 	}
-	if !strings.Contains(out, "gc-1") {
-		t.Errorf("gc events output missing 'gc-1': %q", out)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("events.jsonl has %d lines, want 2; content:\n%s", len(lines), string(data))
 	}
-	if !strings.Contains(out, "Build Hanoi") {
-		t.Errorf("gc events output missing 'Build Hanoi': %q", out)
+
+	var created, closed events.Event
+	if err := json.Unmarshal([]byte(lines[0]), &created); err != nil {
+		t.Fatalf("unmarshal line 0: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &closed); err != nil {
+		t.Fatalf("unmarshal line 1: %v", err)
+	}
+
+	if created.Type != "bead.created" {
+		t.Errorf("line 0 type = %q, want bead.created", created.Type)
+	}
+	if created.Subject != "gc-1" {
+		t.Errorf("line 0 subject = %q, want gc-1", created.Subject)
+	}
+	if created.Message != "Build Hanoi" {
+		t.Errorf("line 0 message = %q, want Build Hanoi", created.Message)
+	}
+	if created.Seq != 1 {
+		t.Errorf("line 0 seq = %d, want 1", created.Seq)
+	}
+
+	if closed.Type != "bead.closed" {
+		t.Errorf("line 1 type = %q, want bead.closed", closed.Type)
+	}
+	if closed.Seq != 2 {
+		t.Errorf("line 1 seq = %d, want 2", closed.Seq)
 	}
 }
 

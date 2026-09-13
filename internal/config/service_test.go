@@ -218,7 +218,7 @@ contract = "`+builtinHealthzContract+`"
 	cfg := &City{
 		Workspace: Workspace{Includes: []string{"packs/review"}},
 	}
-	if _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
+	if _, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir); err != nil {
 		t.Fatalf("ExpandCityPacks: %v", err)
 	}
 	if len(cfg.Services) != 1 {

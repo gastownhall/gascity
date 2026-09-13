@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/git"
 )
 
 // packCacheDir is the subdirectory under .gc/cache/ where remote packs are cached.
@@ -220,30 +221,15 @@ func packDirHash(dir string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// gitEnvBlacklist lists git environment variables that must be stripped
-// so subprocess git commands use the intended workDir, not a parent repo.
-var fetchGitEnvBlacklist = map[string]bool{
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-}
-
-// runGit executes a git command with a clean environment.
-// If dir is non-empty, the command runs in that directory.
+// runGit executes a git command with a sanitized environment, so leaked GIT_*
+// variables from a parent repository or a pre-commit hook cannot redirect it
+// away from dir. If dir is non-empty, the command runs in that directory.
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Build clean env: inherit everything except git-specific vars.
-	for _, e := range os.Environ() {
-		if k, _, ok := strings.Cut(e, "="); ok && fetchGitEnvBlacklist[k] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, e)
-	}
+	cmd.Env = git.SanitizedEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)

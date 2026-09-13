@@ -1,0 +1,7 @@
+scope = "rig"
+start_command = "gc agent-script --script {{.ConfigDir}}/assets/scripts/lifecycle-polecat-claim-handoff.yaml"
+lifecycle = "one_shot"
+nudge = "Find work, create a branch, implement, push, hand off to refinery."
+idle_timeout = "5m"
+min_active_sessions = 0
+max_active_sessions = 5

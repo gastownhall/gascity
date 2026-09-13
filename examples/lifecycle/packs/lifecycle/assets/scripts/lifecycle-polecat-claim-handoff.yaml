@@ -1,0 +1,93 @@
+description: |
+  Lifecycle demo polecat — migrated from mock-polecat.sh.
+
+  Claims a routed pool bead, creates an isolated worktree on a feature
+  branch, commits an implementation file, and hands the bead off to
+  the lifecycle refinery for merge. The deterministic, no-LLM
+  equivalent of mock-polecat.sh's claim -> branch -> commit -> handoff.
+
+  One process = one turn. The polecat probes its hook once, runs the
+  full handoff, and exits; gc's reconciler re-spawns it while pool work
+  remains. This replaces mock-polecat.sh's 30-attempt claim loop.
+
+schema_version: v1
+
+setup:
+  # Containers lack the host GPG keys and may lack a git identity.
+  - shell: "git config --global commit.gpgsign false 2>/dev/null || true"
+  # Fail fast: missing credential setup silently corrupts later git fetch/push operations.
+  - shell: >
+      set -eu;
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        NETRC="$HOME/.netrc";
+        umask 077;
+        printf 'machine github.com login x-access-token password %s\n' "$GITHUB_TOKEN" > "$NETRC";
+        chmod 600 "$NETRC";
+      fi
+  - shell: "git config --global user.email >/dev/null 2>&1 || git config --global user.email gc-agent@gascity.local"
+  - shell: "git config --global user.name >/dev/null 2>&1 || git config --global user.name gc-agent"
+
+turns:
+  - when:
+      hook: has_work
+    do:
+      - bd_claim: "{bead.id}"
+      - mail_send:
+          to: "{rig}/lifecycle.refinery"
+          subject: "CLAIMED: {bead.title} ({bead.id})"
+          body: "scripted polecat {alias} claimed {bead.id}; branch polecat/{bead.id}."
+      - sleep_ms: 50
+      - shell: >
+          set -eu;
+          BEAD_ID="${GC_SCRIPT_BEAD_ID:-}";
+          case "$BEAD_ID" in
+            ""|*[!A-Za-z0-9-]*) echo "unsafe bead id: $BEAD_ID" >&2; exit 1 ;;
+          esac;
+          WT="/tmp/gc-scripted-wt/$BEAD_ID";
+          BRANCH="polecat/$BEAD_ID";
+          if git remote | grep -q '^origin$' &&
+             git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH";
+            git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
+          else
+            rm -rf "$WT";
+            git worktree prune;
+            git branch -D "$BRANCH" 2>/dev/null || true;
+            GIT_LFS_SKIP_SMUDGE=1 git worktree add "$WT" -b "$BRANCH" HEAD;
+            printf 'Implementation of %s\n' "$BEAD_ID" > "$WT/$BEAD_ID.txt";
+            git -C "$WT" add "$BEAD_ID.txt";
+            git -C "$WT" commit -m "feat: $BEAD_ID";
+            git worktree remove --force "$WT";
+          fi
+      - shell: >
+          set -eu;
+          BEAD_ID="${GC_SCRIPT_BEAD_ID:-}";
+          case "$BEAD_ID" in
+            ""|*[!A-Za-z0-9-]*) echo "unsafe bead id: $BEAD_ID" >&2; exit 1 ;;
+          esac;
+          BRANCH="polecat/$BEAD_ID";
+          if git remote | grep -q '^origin$'; then
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+              git fetch origin "$BRANCH";
+              git update-ref "refs/heads/$BRANCH" FETCH_HEAD;
+            else
+              git push origin "$BRANCH:refs/heads/$BRANCH";
+            fi;
+          fi;
+          HEAD_SHA="$(git rev-parse "$BRANCH")";
+          bd update "$BEAD_ID" --set-metadata branch="$BRANCH" --set-metadata branch_head="$HEAD_SHA"
+      - bd_update:
+          id: "{bead.id}"
+          assignee: "{rig}/lifecycle.refinery"
+          notes: "scripted polecat: implemented {bead.id}, handed off to refinery"
+      - mail_send:
+          to: "{rig}/lifecycle.refinery"
+          subject: "READY FOR MERGE: polecat/{bead.id} ({bead.id})"
+          body: "scripted polecat {alias} pushed polecat/{bead.id} for {rig}/lifecycle.refinery."
+      - log: "handed off {bead.id} to {rig}/lifecycle.refinery"
+      - exit: 0
+  - when:
+      hook: empty
+    do:
+      - log: "hook empty; no pool work to claim"
+      - exit: 0

@@ -121,6 +121,39 @@ func TestDedupePreservesOrder(t *testing.T) {
 	}
 }
 
+func TestExpandIncludesNixProfileBin(t *testing.T) {
+	home := t.TempDir()
+	nixProfileBin := filepath.Join(home, ".nix-profile", "bin")
+	if err := os.MkdirAll(nixProfileBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirs := Expand(home, "darwin", "/usr/bin")
+	if !slices.Contains(dirs, nixProfileBin) {
+		t.Fatalf("expected %q in dirs: %v", nixProfileBin, dirs)
+	}
+}
+
+func TestExpandIncludesNixProfileInstallBin(t *testing.T) {
+	home := t.TempDir()
+	nixProfileInstallBin := filepath.Join(home, ".local", "state", "nix", "profiles", "profile", "bin")
+	if err := os.MkdirAll(nixProfileInstallBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dirs := Expand(home, "linux", "/usr/bin")
+	if !slices.Contains(dirs, nixProfileInstallBin) {
+		t.Fatalf("expected %q in dirs: %v", nixProfileInstallBin, dirs)
+	}
+}
+
+func TestExpandOmitsAbsentNixProfileBin(t *testing.T) {
+	home := t.TempDir()
+	dirs := Expand(home, "darwin", "/usr/bin")
+	nixProfileBin := filepath.Join(home, ".nix-profile", "bin")
+	if slices.Contains(dirs, nixProfileBin) {
+		t.Fatalf("did not expect absent %q in dirs: %v", nixProfileBin, dirs)
+	}
+}
+
 func TestExpandNVMVersionsReverseSorted(t *testing.T) {
 	home := t.TempDir()
 	// Create two nvm version dirs.
@@ -182,5 +215,60 @@ func TestExpandUserManagedDirsOnlyExisting(t *testing.T) {
 	}
 	if slices.Contains(dirs, goBin) {
 		t.Fatalf("did not expect non-existent %q in dirs: %v", goBin, dirs)
+	}
+}
+
+// TestExpandIncludesJSPackageManagerGlobalBins is a regression test for
+// gastownhall/gascity#3001. CLIs installed via pnpm (XDG-relative PNPM_HOME),
+// npm with a user-prefix global, or yarn global must be discoverable by the
+// provider-readiness probes — they use this deterministic search order
+// instead of the ambient shell PATH.
+func TestExpandIncludesJSPackageManagerGlobalBins(t *testing.T) {
+	home := t.TempDir()
+
+	pnpmBin := filepath.Join(home, ".local", "share", "pnpm", "bin")
+	pnpmHome := filepath.Join(home, ".local", "share", "pnpm")
+	npmGlobalBin := filepath.Join(home, ".npm-global", "bin")
+	yarnBin := filepath.Join(home, ".yarn", "bin")
+	yarnClassicGlobalBin := filepath.Join(home, ".config", "yarn", "global", "node_modules", ".bin")
+
+	for _, dir := range []string{pnpmBin, npmGlobalBin, yarnBin, yarnClassicGlobalBin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	dirs := Expand(home, "linux", "/usr/bin")
+	for _, want := range []string{pnpmBin, pnpmHome, npmGlobalBin, yarnBin, yarnClassicGlobalBin} {
+		if !slices.Contains(dirs, want) {
+			t.Errorf("expected %q in dirs: %v", want, dirs)
+		}
+	}
+}
+
+// TestExpandJSPackageManagerDirsOnlyWhenExisting verifies the same
+// gating as TestExpandUserManagedDirsOnlyExisting — the new pnpm/npm/yarn
+// entries are included only when the directory actually exists, so we
+// don't pollute the search path with phantom user-managed install locations.
+func TestExpandJSPackageManagerDirsOnlyWhenExisting(t *testing.T) {
+	home := t.TempDir()
+	// Create only the pnpm bin layout; leave npm and yarn absent.
+	pnpmBin := filepath.Join(home, ".local", "share", "pnpm", "bin")
+	if err := os.MkdirAll(pnpmBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs := Expand(home, "linux", "/usr/bin")
+	if !slices.Contains(dirs, pnpmBin) {
+		t.Fatalf("expected %q in dirs: %v", pnpmBin, dirs)
+	}
+	for _, absent := range []string{
+		filepath.Join(home, ".npm-global", "bin"),
+		filepath.Join(home, ".yarn", "bin"),
+		filepath.Join(home, ".config", "yarn", "global", "node_modules", ".bin"),
+	} {
+		if slices.Contains(dirs, absent) {
+			t.Errorf("did not expect non-existent %q in dirs: %v", absent, dirs)
+		}
 	}
 }

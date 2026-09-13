@@ -14,21 +14,51 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                   sync.Mutex
-	sessions             map[string]Config            // live sessions
-	meta                 map[string]map[string]string // session → key → value
-	Calls                []Call                       // recorded calls in order
-	broken               bool                         // when true, all ops fail
-	Zombies              map[string]bool              // sessions with dead agent processes
-	Attached             map[string]bool              // sessions with attached terminals
-	PeekOutput           map[string]string            // session → canned peek output
-	Activity             map[string]time.Time         // session → last activity time
-	StartErrors          map[string]error             // per-session Start errors for testing
-	PendingInteractions  map[string]*PendingInteraction
-	Responses            map[string][]InteractionResponse
-	SleepCapabilityValue SessionSleepCapability
-	WaitForIdleErrors    map[string]error
+	mu                      sync.Mutex
+	sessions                map[string]Config            // live sessions
+	meta                    map[string]map[string]string // session → key → value
+	Calls                   []Call                       // recorded calls in order
+	broken                  bool                         // when true, all ops fail
+	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
+	Zombies                 map[string]bool              // sessions with dead agent processes
+	Attached                map[string]bool              // sessions with attached terminals
+	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
+	PeekOutput              map[string]string            // session → canned peek output
+	Activity                map[string]time.Time         // session → last activity time
+	StartErrors             map[string]error             // per-session Start errors for testing
+	StopErrors              map[string]error             // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
+	PendingInteractions     map[string]*PendingInteraction
+	Responses               map[string][]InteractionResponse
+	SleepCapabilityValue    SessionSleepCapability
+	WaitForIdleErrors       map[string]error
+	WaitForIdleSequence     map[string][]error
+	DialogErrors            map[string]error
+	ResetTurnErrors         map[string]error
+	InterruptBoundaryErrors map[string]error
+	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
+	// caller closes it. A nil or absent entry returns the configured
+	// WaitForIdleErrors value immediately. The gate is read under f.mu
+	// and the lock is released before the block, so other Fake methods
+	// remain callable while a probe is gated.
+	WaitForIdleGates map[string]chan struct{}
+	// WaitForIdleStarted signals when WaitForIdle has recorded its call and is
+	// about to consult configured results. Tests use this to coordinate
+	// cancellation without relying on wall-clock sleeps.
+	WaitForIdleStarted map[string]chan struct{}
+	// ExecResults configures Fake.Exec output/code/err per session name; an
+	// absent entry returns empty success.
+	ExecResults map[string]FakeExecResult
+	// RelaunchErrors configures Fake.Relaunch errors per session name; an absent
+	// entry relaunches successfully (records the call, updates the live config).
+	RelaunchErrors map[string]error
 }
+
+var (
+	_ ProcessTableScanner = (*Fake)(nil)
+	_ RelaunchProvider    = (*Fake)(nil)
+)
 
 // Call records a single method invocation on [Fake].
 type Call struct {
@@ -45,18 +75,62 @@ type Call struct {
 	Action    string         // only set for Respond calls
 }
 
+// FakeExecResult configures one [Fake.Exec] outcome.
+type FakeExecResult struct {
+	Output string
+	Code   int
+	Err    error
+}
+
+// CountCalls returns the number of recorded calls matching method and name.
+func (f *Fake) CountCalls(method, name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, call := range f.Calls {
+		if call.Method == method && call.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+// SnapshotCalls returns a copy of the recorded calls taken under lock. Range
+// over this instead of the exported Calls field when other goroutines may
+// still be invoking the fake; reading Calls directly while a concurrent
+// method appends to it is a data race.
+func (f *Fake) SnapshotCalls() []Call {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Call, len(f.Calls))
+	copy(out, f.Calls)
+	return out
+}
+
 // NewFake returns a ready-to-use [Fake].
 func NewFake() *Fake {
 	return &Fake{
-		sessions:             make(map[string]Config),
-		meta:                 make(map[string]map[string]string),
-		Zombies:              make(map[string]bool),
-		Attached:             make(map[string]bool),
-		StartErrors:          make(map[string]error),
-		PendingInteractions:  make(map[string]*PendingInteraction),
-		Responses:            make(map[string][]InteractionResponse),
-		SleepCapabilityValue: SessionSleepCapabilityFull,
-		WaitForIdleErrors:    make(map[string]error),
+		sessions:                make(map[string]Config),
+		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
+		Zombies:                 make(map[string]bool),
+		Attached:                make(map[string]bool),
+		AttachedSequence:        make(map[string][]bool),
+		StartErrors:             make(map[string]error),
+		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
+		PendingInteractions:     make(map[string]*PendingInteraction),
+		Responses:               make(map[string][]InteractionResponse),
+		SleepCapabilityValue:    SessionSleepCapabilityFull,
+		WaitForIdleErrors:       make(map[string]error),
+		WaitForIdleSequence:     make(map[string][]error),
+		DialogErrors:            make(map[string]error),
+		ResetTurnErrors:         make(map[string]error),
+		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
+		WaitForIdleGates:        make(map[string]chan struct{}),
+		WaitForIdleStarted:      make(map[string]chan struct{}),
+		RelaunchErrors:          make(map[string]error),
 	}
 }
 
@@ -65,16 +139,27 @@ func NewFake() *Fake {
 // session-dependent commands.
 func NewFailFake() *Fake {
 	return &Fake{
-		sessions:             make(map[string]Config),
-		meta:                 make(map[string]map[string]string),
-		Zombies:              make(map[string]bool),
-		Attached:             make(map[string]bool),
-		StartErrors:          make(map[string]error),
-		PendingInteractions:  make(map[string]*PendingInteraction),
-		Responses:            make(map[string][]InteractionResponse),
-		SleepCapabilityValue: SessionSleepCapabilityFull,
-		WaitForIdleErrors:    make(map[string]error),
-		broken:               true,
+		sessions:                make(map[string]Config),
+		meta:                    make(map[string]map[string]string),
+		OrphanedRuntimes:        make(map[string]LiveRuntime),
+		Zombies:                 make(map[string]bool),
+		Attached:                make(map[string]bool),
+		StartErrors:             make(map[string]error),
+		StopErrors:              make(map[string]error),
+		StopLeavesRunning:       make(map[string]bool),
+		PendingInteractions:     make(map[string]*PendingInteraction),
+		Responses:               make(map[string][]InteractionResponse),
+		SleepCapabilityValue:    SessionSleepCapabilityFull,
+		WaitForIdleErrors:       make(map[string]error),
+		WaitForIdleSequence:     make(map[string][]error),
+		DialogErrors:            make(map[string]error),
+		ResetTurnErrors:         make(map[string]error),
+		InterruptBoundaryErrors: make(map[string]error),
+		RemoveMetaErrors:        make(map[string]map[string]error),
+		WaitForIdleGates:        make(map[string]chan struct{}),
+		WaitForIdleStarted:      make(map[string]chan struct{}),
+		RelaunchErrors:          make(map[string]error),
+		broken:                  true,
 	}
 }
 
@@ -106,7 +191,35 @@ func (f *Fake) Stop(name string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if err, ok := f.StopErrors[name]; ok {
+		return err
+	}
+	if f.StopLeavesRunning[name] {
+		return nil
+	}
 	delete(f.sessions, name)
+	return nil
+}
+
+// Relaunch records a warm-box agent relaunch and, on success, updates the live
+// session config without a Stop+Start cycle (the box is reused). Returns
+// ErrSessionNotFound when no session exists (no warm box to relaunch into), a
+// configured RelaunchErrors entry, or — when broken — a generic error. Tests
+// assert a Relaunch call (vs Stop+Start) to verify launch-only drift handling.
+func (f *Fake) Relaunch(_ context.Context, name string, cfg Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Relaunch", Name: name, Config: cfg})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.RelaunchErrors[name]; ok && err != nil {
+		return err
+	}
+	if _, exists := f.sessions[name]; !exists {
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, name)
+	}
+	f.sessions[name] = cfg
 	return nil
 }
 
@@ -118,6 +231,53 @@ func (f *Fake) Interrupt(name string) error {
 	f.Calls = append(f.Calls, Call{Method: "Interrupt", Name: name})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+// DismissKnownDialogs records the call and returns the configured result.
+func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String()})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.DialogErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// ResetInterruptedTurn records the call and returns the configured result.
+func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.ResetTurnErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// WaitForInterruptBoundary records the call and returns the configured result.
+func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since time.Time, timeout time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{
+		Method: "WaitForInterruptBoundary",
+		Name:   name,
+		Key:    since.UTC().Format(time.RFC3339Nano),
+		Value:  timeout.String(),
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.InterruptBoundaryErrors[name]; ok {
+		return err
 	}
 	return nil
 }
@@ -146,6 +306,16 @@ func (f *Fake) SetAttached(name string, val bool) {
 	f.Attached[name] = val
 }
 
+// SetAttachedSequence scripts successive IsAttached results for a session.
+func (f *Fake) SetAttachedSequence(name string, values ...bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.AttachedSequence == nil {
+		f.AttachedSequence = make(map[string][]bool)
+	}
+	f.AttachedSequence[name] = append([]bool(nil), values...)
+}
+
 // IsAttached reports whether the fake session has an attached terminal.
 // When broken, always returns false.
 func (f *Fake) IsAttached(name string) bool {
@@ -154,6 +324,15 @@ func (f *Fake) IsAttached(name string) bool {
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
 	if f.broken {
 		return false
+	}
+	if seq := f.AttachedSequence[name]; len(seq) > 0 {
+		next := seq[0]
+		if len(seq) == 1 {
+			delete(f.AttachedSequence, name)
+		} else {
+			f.AttachedSequence[name] = seq[1:]
+		}
+		return next
 	}
 	return f.Attached[name]
 }
@@ -168,7 +347,7 @@ func (f *Fake) Attach(name string) error {
 		return fmt.Errorf("session unavailable")
 	}
 	if _, exists := f.sessions[name]; !exists {
-		return fmt.Errorf("session %q not found", name)
+		return fmt.Errorf("%w: %q", ErrSessionNotFound, name)
 	}
 	return nil
 }
@@ -323,6 +502,11 @@ func (f *Fake) RemoveMeta(name, key string) error {
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
+	if keyed := f.RemoveMetaErrors[name]; keyed != nil {
+		if err := keyed[key]; err != nil {
+			return err
+		}
+	}
 	delete(f.meta[name], key)
 	return nil
 }
@@ -367,6 +551,67 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 	return names, nil
 }
 
+// FindRuntimesBySessionID returns fake tracked and orphaned runtimes matching
+// a GC_SESSION_ID. Empty id returns all runtimes with a session ID.
+func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "FindRuntimesBySessionID", Name: id})
+	if f.broken {
+		return nil, fmt.Errorf("finding runtimes for session %q: session unavailable", id)
+	}
+
+	var out []LiveRuntime
+	for sid, runtime := range f.OrphanedRuntimes {
+		sessionID := runtime.SessionID
+		if sessionID == "" {
+			sessionID = sid
+		}
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		runtime.SessionID = sessionID
+		runtime.IsTracked = false
+		out = append(out, runtime)
+	}
+	for name, cfg := range f.sessions {
+		sessionID := cfg.Env["GC_SESSION_ID"]
+		if sessionID == "" {
+			continue
+		}
+		if id != "" && sessionID != id {
+			continue
+		}
+		city := cfg.Env["GC_CITY_PATH"]
+		if city == "" {
+			city = cfg.Env["GC_CITY"]
+		}
+		out = append(out, LiveRuntime{
+			SessionID:    sessionID,
+			City:         city,
+			ProviderName: name,
+			IsTracked:    true,
+		})
+	}
+	return out, nil
+}
+
+// TerminateRuntime records a process-table termination and removes the fake
+// orphan entry for the runtime's session ID. Missing entries are already gone.
+func (f *Fake) TerminateRuntime(runtime LiveRuntime) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TerminateRuntime", Name: runtime.SessionID})
+	if f.broken {
+		return fmt.Errorf("terminating runtime %q: session unavailable", runtime.SessionID)
+	}
+	delete(f.OrphanedRuntimes, runtime.SessionID)
+	return nil
+}
+
 // SetActivity sets the canned last activity time for the named session.
 // Used in test setup.
 func (f *Fake) SetActivity(name string, t time.Time) {
@@ -401,17 +646,40 @@ func (f *Fake) ClearScrollback(name string) error {
 	return nil
 }
 
-// WaitForIdle records the call and returns the configured result.
-func (f *Fake) WaitForIdle(_ context.Context, name string, _ time.Duration) error {
+// WaitForIdle records the call and returns the configured result. When
+// WaitForIdleGates[name] is set, the method releases f.mu and blocks on
+// the gate (or ctx cancellation) before returning, giving tests
+// deterministic control over when the call completes.
+func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "WaitForIdle", Name: name})
+	if started := f.WaitForIdleStarted[name]; started != nil {
+		close(started)
+		delete(f.WaitForIdleStarted, name)
+	}
 	if f.broken {
+		f.mu.Unlock()
 		return fmt.Errorf("session unavailable")
+	}
+	if seq := f.WaitForIdleSequence[name]; len(seq) > 0 {
+		err := seq[0]
+		f.WaitForIdleSequence[name] = append([]error(nil), seq[1:]...)
+		f.mu.Unlock()
+		return err
 	}
 	err, ok := f.WaitForIdleErrors[name]
 	if !ok {
+		f.mu.Unlock()
 		return ErrInteractionUnsupported
+	}
+	gate := f.WaitForIdleGates[name]
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return err
 }
@@ -436,6 +704,25 @@ func (f *Fake) SendKeys(name string, keys ...string) error {
 		return fmt.Errorf("session unavailable")
 	}
 	return nil
+}
+
+// Fake implements the optional connection primitive.
+var _ ExecProvider = (*Fake)(nil)
+
+// Exec records the call and returns the configured result for name, or empty
+// success. Implements [ExecProvider]. Tests that need a specific output/exit
+// code set ExecResults[name]; a broken fake returns a transport error.
+func (f *Fake) Exec(_ context.Context, name string, argv []string) ([]byte, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "Exec", Name: name, Message: strings.Join(argv, " ")})
+	if f.broken {
+		return nil, -1, fmt.Errorf("session unavailable")
+	}
+	if res, ok := f.ExecResults[name]; ok {
+		return []byte(res.Output), res.Code, res.Err
+	}
+	return nil, 0, nil
 }
 
 // Capabilities returns the fake provider's capabilities.
@@ -464,6 +751,20 @@ func (f *Fake) LastStartConfig(name string) *Config {
 	defer f.mu.Unlock()
 	for i := len(f.Calls) - 1; i >= 0; i-- {
 		if f.Calls[i].Method == "Start" && f.Calls[i].Name == name {
+			cfg := f.Calls[i].Config
+			return &cfg
+		}
+	}
+	return nil
+}
+
+// LastRelaunchConfig returns the Config used in the most recent Relaunch call
+// for the named session, or nil if no Relaunch was recorded for that name.
+func (f *Fake) LastRelaunchConfig(name string) *Config {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.Calls) - 1; i >= 0; i-- {
+		if f.Calls[i].Method == "Relaunch" && f.Calls[i].Name == name {
 			cfg := f.Calls[i].Config
 			return &cfg
 		}

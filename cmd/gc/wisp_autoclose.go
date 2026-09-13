@@ -5,7 +5,11 @@ import (
 	"io"
 	"os"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +26,7 @@ func newWispCmd(stdout, stderr io.Writer) *cobra.Command {
 func newWispAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:    "autoclose <bead-id>",
-		Short:  "Auto-close open molecule children of a closed bead",
+		Short:  "Auto-close open molecule descendants of a closed bead",
 		Hidden: true,
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -33,38 +37,218 @@ func newWispAutocloseCmd(stdout, stderr io.Writer) *cobra.Command {
 }
 
 // doWispAutoclose is the CLI entry point for wisp autoclose.
-// It creates a cwd-rooted BdStore (matching the bd process that invoked
-// the hook) and delegates to the testable core.
+// It resolves the current store through the provider-aware resolver using the
+// projected store-root environment and delegates to the testable core.
 func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return
 	}
-	store := bdStoreForDir(cwd)
-	doWispAutocloseWith(store, beadID, stdout)
-}
+	storeRoot := convoyAutocloseStoreRoot(cwd)
+	cityPath := autocloseCityPathForStoreRoot(storeRoot)
 
-// doWispAutocloseWith closes any open attached molecule/workflow roots for the
-// given bead. Metadata-based attachments are preferred, with child traversal as
-// a fallback for legacy data. Called from the bd on_close hook to ensure
-// attached wisps don't outlive their parent work bead. All errors are silently
-// swallowed — this is best-effort infrastructure.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
-	parent, err := store.Get(beadID)
+	// See doConvoyAutoclose: the bd on_close hook inherits the supervisor's
+	// (city) cwd/env, so resolve the store that actually owns the bead across
+	// the city and every rig, so rig-store closes autoclose their attached
+	// wisps instead of silently no-op'ing (#3411).
+	// Attachments are ClassGraph wherever the just-closed bead lives; without
+	// this the hook reads an empty graph on a migrated city and reports success.
+	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
+		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		return
+	}
+
+	store, err := openStoreAtForCity(storeRoot, cityPath)
 	if err != nil {
 		return
 	}
-	attachments, err := collectAttachedBeads(parent, store, store)
-	if err != nil && len(attachments) == 0 {
+	doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+}
+
+// doWispAutocloseWith closes any open attached molecule/workflow roots and
+// their descendants for the given bead. Metadata-based attachments are
+// preferred, with child traversal as a fallback for legacy data. Called from
+// the bd on_close hook to ensure attached wisps don't outlive their parent work
+// bead. All errors are silently swallowed — this is best-effort infrastructure.
+// Parent lookup and child traversal both read through the Live handle: the
+// hook fires for closed and ephemeral-tier beads that cached or tier-narrow
+// raw reads can miss, and an attachment missed here outlives its parent — the
+// leak class this hook exists to drain.
+// doWispAutocloseWith reads the just-closed bead from store (the store that owns
+// it) and resolves/closes its attached molecule/workflow roots through the
+// graph-class store. A closed work bead in a rig store can own graph-workflow
+// attachments that live in the graph store, so the attachment collection,
+// parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
+// graph store. It is required rather than variadic: as a variadic with a
+// collapse-to-store default, both hook-path callers silently omitted it.
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) {
+	// Unwrapped for internal use: the helpers below assert optional store
+	// capabilities, which do not promote through the class wrapper.
+	graphStore := graphClassStore.Store
+	if graphStore == nil {
+		graphStore = store
+	}
+	parent, err := beads.HandlesFor(store).Live.Get(beadID)
+	if err != nil {
 		return
 	}
+	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
+	seen := make(map[string]bool, len(attachments))
 	for _, attached := range attachments {
-		if attached.Status == "closed" {
-			continue
-		}
-		if err := store.Close(attached.ID); err != nil {
-			continue
-		}
-		fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
+		seen[attached.ID] = true
 	}
+	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)...)
+	if err == nil || len(attachments) > 0 {
+		for _, attached := range attachments {
+			if attachedMoleculeIsParked(graphStore, attached) {
+				continue
+			}
+			closed, err := closeAttachedWispSubtree(graphStore, attached)
+			if err != nil || closed == 0 {
+				continue
+			}
+			fmt.Fprintf(stdout, "Auto-closed %s %s on %s\n", attachmentLabel(attached), attached.ID, beadID) //nolint:errcheck // best-effort stdout
+		}
+	}
+	if parent.Status != "closed" || !sourceworkflow.IsWorkflowRoot(parent) {
+		return
+	}
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
+	if err != nil || closed == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "Auto-closed %d generated spec bead(s) on %s\n", closed, beadID) //nolint:errcheck // best-effort stdout
+}
+
+// attachedMoleculeIsParked reports whether the attached root is a live molecule
+// deliberately parked at an open descendant — e.g. a human-gate step plus the
+// finalize step it blocks. Such a subtree is designed to outlive the owner
+// dispatch/loop bead whose close triggered this hook, so force-closing it here
+// would steamroll the human checkpoint before the maintainer acts (the #3474
+// finalize defect).
+//
+// The predicate mirrors the terminality guard the sibling `gc molecule
+// autoclose` path applies (autocloseMoleculeIfComplete leaves a non-terminal
+// subtree open), so the two close-time auto-closers agree. We additionally
+// require the attached root itself to still be open: an already-terminal root
+// with leftover open steps is an orphan, not a parked checkpoint, and still
+// reaps — preserving the descendant-cleanup intent this hook was built for.
+//
+// subtreeTerminalExcludingRoot returns (true, 0) for a stepless/ephemeral wisp
+// (terminal, so not parked -> still reaped) and (false, 0) on a subtree-walk
+// error. We deliberately treat that walk error as parked, matching the
+// sibling's fail-safe `if !terminal { return }`: force-closing a possibly
+// human-pending subtree because a transient store read failed is the very
+// destructive behavior #3474 removes, and a genuinely complete wisp left open
+// on a read error is still reaped by the redundant later close paths.
+func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) bool {
+	if convoycore.IsTerminalStatus(attached.Status) {
+		return false
+	}
+	terminal, _ := subtreeTerminalExcludingRoot(store, attached.ID)
+	return !terminal
+}
+
+// collectInputConvoyWorkflowRoots finds open graph.v2 workflow roots that were
+// dispatched over a synthetic input convoy tracking the just-closed bead. A
+// root-only in-session wisp -- mol-focus-review and peers routed to a pool --
+// runs every formula step in one worker session, so it materializes no step
+// beads and no workflow-finalize control bead to close its root. sling also
+// clears gc.source_bead_id for graph workflows (internal/sling/sling.go), so
+// such a wisp carries no source-bead attachment for collectAttachedBeads to
+// follow. Its only durable link back to the work issue is gc.input_convoy_id ->
+// the tracking convoy whose member is the issue. Without reaping the root here,
+// it outlives its closed issue, re-routes to the pool, and churns a fresh worker
+// (the gastownhall/gascity review-pool spawn-churn finalize-gap).
+//
+// This is discovery only: the caller runs each root through the shared
+// attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
+// are still in flight stays open and closes later via its workflow-finalize
+// control instead.
+func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+	// The tracks edge is co-resident with the tracking convoy, and the two
+	// owning candidates differ on a split city: every convoy is WORK class
+	// (coordclass), minted co-resident with the issue it tracks, so a
+	// post-split launch leaves the convoy + edge in the work store — while a
+	// store migrated from the single-store era can hold them on the graph
+	// side. TrackingConvoysForItem is single-store by contract, so probe both.
+	// On a single-store city graphStore == workStore and this collapses to
+	// the pre-split single read.
+	convoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
+	if err != nil {
+		return nil
+	}
+	if graphStore != workStore {
+		graphConvoys, gerr := convoycore.TrackingConvoysForItem(graphStore, parent.ID)
+		if gerr != nil {
+			// Fail closed, matching the workStore posture above: on a partial
+			// view we decline to force-close anything. Leaving the root for a
+			// later close is the recoverable direction — the redundant close
+			// paths reap it once the view is whole again — while silently
+			// narrowing this read to the work leg would force-close a root we
+			// could not fully see. This is also the refused-binding arm: a city
+			// whose split this build must not serve delivers the refusal AS the
+			// graph store (cli_storage_routes.go), so every probe errors here.
+			// The refusal itself was printed once when the verdict was taken;
+			// narrowing to the work leg would be exactly the
+			// looks-like-success answer that file exists to close.
+			return nil
+		}
+		convoys = dedupeConvoysByID(convoys, graphConvoys)
+	}
+	var roots []beads.Bead
+	for _, convoy := range convoys {
+		// Roots are graph-class, so the root lookup stays on the graph store
+		// regardless of which store owned the tracking convoy.
+		matches, err := graphStore.ListByMetadata(
+			map[string]string{beadmeta.InputConvoyIDMetadataKey: convoy.ID},
+			0, beads.WithBothTiers,
+		)
+		if err != nil {
+			continue
+		}
+		for _, root := range matches {
+			if seen[root.ID] {
+				continue
+			}
+			if convoycore.IsTerminalStatus(root.Status) || !sourceworkflow.IsWorkflowRoot(root) {
+				continue
+			}
+			// Restrict to graph.v2 roots, matching the documented intent and
+			// formulaCookLiveInputConvoyGraphRoots: only graph workflows clear
+			// gc.source_bead_id and link back solely through gc.input_convoy_id,
+			// so a legacy gc.kind=workflow root is reaped via its source-bead
+			// attachment instead and must not be force-closed here.
+			if root.Metadata[beadmeta.FormulaContractMetadataKey] != "graph.v2" {
+				continue
+			}
+			seen[root.ID] = true
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// dedupeConvoysByID merges tracking-convoy lists from the work and graph
+// stores, keeping the first occurrence of each convoy id. A convoy lives in
+// exactly one store, so overlap only happens when the two probes read the same
+// handle — the dedupe keeps the union honest there too.
+func dedupeConvoysByID(lists ...[]beads.Bead) []beads.Bead {
+	seen := make(map[string]bool)
+	var out []beads.Bead
+	for _, list := range lists {
+		for _, c := range list {
+			if seen[c.ID] {
+				continue
+			}
+			seen[c.ID] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {
+	return sling.CloseAttachedSubtree(store, attached)
 }

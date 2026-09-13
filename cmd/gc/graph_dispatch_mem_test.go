@@ -1,15 +1,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -19,14 +26,16 @@ func builtinFormulaDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	return filepath.Join(cwd, "formulas")
+	// Built-in formulas now live in the core bootstrap pack. cwd is cmd/gc,
+	// so walk up to the repo root and into the core pack's formulas dir.
+	return filepath.Join(cwd, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")
 }
 
 func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
 	t.Helper()
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{
-			FormulaV2: true,
+			FormulaV2: boolPtr(true),
 		},
 		Workspace: config.Workspace{Name: "test-city"},
 		FormulaLayers: config.FormulaLayers{
@@ -36,10 +45,55 @@ func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
 			{Name: "worker", MaxActiveSessions: intPtr(1)},
 		},
 	}
+	addTestControlDispatcherAgents(cfg, "")
 	applyFeatureFlags(cfg)
 	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
-	config.InjectImplicitAgents(cfg)
 	return cfg
+}
+
+func addTestControlDispatcherAgents(cfg *config.City, dirs ...string) {
+	if cfg == nil {
+		return
+	}
+	for _, dir := range dirs {
+		if hasTestControlDispatcherAgent(cfg, dir) {
+			continue
+		}
+		cfg.Agents = append(cfg.Agents, testControlDispatcherAgent(dir))
+	}
+}
+
+func hasTestControlDispatcherAgent(cfg *config.City, dir string) bool {
+	for _, agent := range cfg.Agents {
+		if agent.Name == config.ControlDispatcherAgentName && agent.Dir == dir {
+			return true
+		}
+	}
+	return false
+}
+
+func testControlDispatcherAgent(dir string) config.Agent {
+	return config.Agent{
+		Name:              config.ControlDispatcherAgentName,
+		Dir:               dir,
+		StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+		ProcessNames:      []string{"gc"},
+		MaxActiveSessions: intPtr(1),
+	}
+}
+
+func testControlDispatcherAgentTOML(dir string) string {
+	var b strings.Builder
+	b.WriteString("\n[[agent]]\n")
+	b.WriteString("name = \"control-dispatcher\"\n")
+	if dir != "" {
+		fmt.Fprintf(&b, "dir = %q\n", dir)
+	}
+	b.WriteString("start_command = \"gc convoy control --serve --follow {{.Agent}}\"\n")
+	b.WriteString("prompt_mode = \"none\"\n")
+	b.WriteString("process_names = [\"gc\"]\n")
+	b.WriteString("max_active_sessions = 1\n")
+	return b.String()
 }
 
 func mustGetMemBead(t *testing.T, store beads.Store, id string) beads.Bead {
@@ -65,7 +119,7 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 		}
 		kind := bead.Metadata["gc.kind"]
 		switch {
-		case isControlDispatcherKind(kind):
+		case graphroute.IsControlDispatcherKind(kind):
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed control bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
 		case kind == "workflow" || kind == "scope" || kind == "ralph" || kind == "retry":
 			return beads.Bead{}, false, fmt.Errorf("worker queue exposed latch bead %s kind=%s ref=%s", bead.ID, kind, beadRef(bead))
@@ -80,24 +134,24 @@ func selectExecutableGraphWorkerBead(ready []beads.Bead, assignee string) (beads
 	return beads.Bead{}, false, nil
 }
 
-func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead, sourceID, cityPath, mode string) {
+func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead, targetID, cityPath, mode string) {
 	t.Helper()
 
 	ref := beadRef(bead)
 	switch {
 	case strings.Contains(ref, ".workspace-setup"):
-		workDir := filepath.Join(cityPath, "worktrees", sourceID)
+		workDir := filepath.Join(cityPath, "worktrees", targetID)
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", workDir, err)
 		}
-		if err := store.SetMetadata(sourceID, "work_dir", workDir); err != nil {
+		if err := store.SetMetadata(targetID, "work_dir", workDir); err != nil {
 			t.Fatalf("SetMetadata(work_dir): %v", err)
 		}
 	case strings.Contains(ref, ".implement"):
-		source := mustGetMemBead(t, store, sourceID)
-		workDir := source.Metadata["work_dir"]
+		target := mustGetMemBead(t, store, targetID)
+		workDir := target.Metadata["work_dir"]
 		if workDir == "" {
-			t.Fatalf("implement step missing work_dir on source bead %s", sourceID)
+			t.Fatalf("implement step missing work_dir on target convoy %s", targetID)
 		}
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", workDir, err)
@@ -106,16 +160,16 @@ func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead,
 			t.Fatalf("WriteFile(implemented.txt): %v", err)
 		}
 	case strings.Contains(ref, ".submit"):
-		if err := store.SetMetadata(sourceID, "submitted", "true"); err != nil {
+		if err := store.SetMetadata(targetID, "submitted", "true"); err != nil {
 			t.Fatalf("SetMetadata(submitted): %v", err)
 		}
 	case strings.Contains(ref, ".cleanup-worktree"):
-		source := mustGetMemBead(t, store, sourceID)
-		workDir := source.Metadata["work_dir"]
+		target := mustGetMemBead(t, store, targetID)
+		workDir := target.Metadata["work_dir"]
 		if workDir != "" {
 			_ = os.RemoveAll(workDir)
 		}
-		if err := store.SetMetadata(sourceID, "work_dir", ""); err != nil {
+		if err := store.SetMetadata(targetID, "work_dir", ""); err != nil {
 			t.Fatalf("SetMetadata(clear work_dir): %v", err)
 		}
 	case strings.Contains(ref, ".preflight-tests") && mode == "fail-preflight":
@@ -139,7 +193,47 @@ func executeMemGraphWorkerBead(t *testing.T, store beads.Store, bead beads.Bead,
 	}
 }
 
-func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, sourceID, workerSession, cityPath, mode string) {
+func memGraphReady(t *testing.T, store beads.Store) []beads.Bead {
+	t.Helper()
+
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("List(graph ready): %v", err)
+	}
+	statusByID := make(map[string]string, len(all))
+	for _, bead := range all {
+		statusByID[bead.ID] = bead.Status
+	}
+
+	var ready []beads.Bead
+	for _, bead := range all {
+		if bead.Status != "open" || beads.IsReadyExcludedType(bead.Type) {
+			continue
+		}
+		deps, err := store.DepList(bead.ID, "down")
+		if err != nil {
+			t.Fatalf("DepList(%s, down): %v", bead.ID, err)
+		}
+		blocked := false
+		for _, dep := range deps {
+			switch dep.Type {
+			case "blocks", "waits-for", "conditional-blocks":
+			default:
+				continue
+			}
+			if statusByID[dep.DependsOnID] != "closed" {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			ready = append(ready, bead)
+		}
+	}
+	return ready
+}
+
+func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID, targetID, workerSession, cityPath, mode string) {
 	t.Helper()
 
 	for step := 0; step < 200; step++ {
@@ -148,14 +242,11 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			return
 		}
 
-		ready, err := store.Ready()
-		if err != nil {
-			t.Fatalf("Ready(): %v", err)
-		}
+		ready := memGraphReady(t, store)
 
 		progressed := false
 		for _, bead := range ready {
-			if !isControlDispatcherKind(bead.Metadata["gc.kind"]) {
+			if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 				continue
 			}
 			result, err := dispatch.ProcessControl(store, bead, dispatch.ProcessOptions{CityPath: cityPath})
@@ -165,10 +256,7 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			progressed = progressed || result.Processed
 		}
 
-		ready, err = store.Ready()
-		if err != nil {
-			t.Fatalf("Ready() after control: %v", err)
-		}
+		ready = memGraphReady(t, store)
 		for {
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, workerSession)
 			if err != nil {
@@ -177,12 +265,9 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 			if !ok {
 				break
 			}
-			executeMemGraphWorkerBead(t, store, bead, sourceID, cityPath, mode)
+			executeMemGraphWorkerBead(t, store, bead, targetID, cityPath, mode)
 			progressed = true
-			ready, err = store.Ready()
-			if err != nil {
-				t.Fatalf("Ready() after worker step: %v", err)
-			}
+			ready = memGraphReady(t, store)
 		}
 
 		if progressed {
@@ -207,12 +292,25 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	runner := newFakeRunner()
 	cfg := buildMemGraphWorkflowConfig(t)
 	store := beads.NewMemStore()
-	issue, err := store.Create(beads.Bead{Title: "Run scoped workflow", Type: "task"})
+	first, err := store.Create(beads.Bead{Title: "Run scoped workflow part one", Type: "task"})
 	if err != nil {
-		t.Fatalf("Create(issue): %v", err)
+		t.Fatalf("Create(first issue): %v", err)
+	}
+	second, err := store.Create(beads.Bead{Title: "Run scoped workflow part two", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create(second issue): %v", err)
+	}
+	convoy, err := store.Create(beads.Bead{Title: "Run scoped workflow", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if err := convoycore.TrackItem(store, convoy.ID, id); err != nil {
+			t.Fatalf("TrackItem(%s, %s): %v", convoy.ID, id, err)
+		}
 	}
 
-	deps, _, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.Store = store
 	deps.CityPath = t.TempDir()
 
@@ -225,19 +323,20 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	slingPokeController = func(string) error { return nil }
 	t.Cleanup(func() { slingPokeController = oldPoke })
 
-	opts := testOpts(worker, issue.ID)
+	opts := testOpts(worker, convoy.ID)
 	opts.OnFormula = "mol-scoped-work"
-	opts.Vars = []string{"issue=" + issue.ID}
-	if code := doSling(opts, deps, store); code != 0 {
+	if code := doSling(opts, deps, store, stdout, stderr); code != 0 {
 		t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
 	}
 
-	source := mustGetMemBead(t, store, issue.ID)
-	workflowID := source.Metadata["workflow_id"]
-	if workflowID == "" {
-		t.Fatal("source bead workflow_id missing")
+	roots, err := store.ListByMetadata(map[string]string{"gc.input_convoy_id": convoy.ID, "gc.kind": "workflow"}, 1)
+	if err != nil {
+		t.Fatalf("ListByMetadata(workflow root): %v", err)
 	}
-	return store, issue.ID, workflowID
+	if len(roots) != 1 {
+		t.Fatalf("workflow root count = %d, want 1", len(roots))
+	}
+	return store, convoy.ID, roots[0].ID
 }
 
 func TestSelectExecutableGraphWorkerBeadRejectsControlKinds(t *testing.T) {
@@ -309,10 +408,10 @@ func TestSelectExecutableGraphWorkerBeadSkipsForeignAndSkippedWork(t *testing.T)
 }
 
 func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
 	cityPath := t.TempDir()
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", cityPath, "success")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", cityPath, "success")
 
 	root := mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" {
@@ -322,20 +421,20 @@ func TestGraphWorkflowInMemorySuccessPath(t *testing.T) {
 		t.Fatalf("root outcome = %q, want pass", got)
 	}
 
-	issue := mustGetMemBead(t, store, issueID)
-	if got := issue.Metadata["submitted"]; got != "true" {
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["submitted"]; got != "true" {
 		t.Fatalf("submitted = %q, want true", got)
 	}
-	if got := issue.Metadata["work_dir"]; got != "" {
+	if got := convoy.Metadata["work_dir"]; got != "" {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 }
 
 func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
 	cityPath := t.TempDir()
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", cityPath, "fail-preflight")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", cityPath, "fail-preflight")
 
 	root := mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" {
@@ -345,15 +444,19 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("root outcome = %q, want fail", got)
 	}
 
-	issue := mustGetMemBead(t, store, issueID)
-	if got := issue.Metadata["submitted"]; got != "" {
+	convoy := mustGetMemBead(t, store, convoyID)
+	if got := convoy.Metadata["submitted"]; got != "" {
 		t.Fatalf("submitted = %q, want empty on failed workflow", got)
 	}
-	if got := issue.Metadata["work_dir"]; got != "" {
+	if got := convoy.Metadata["work_dir"]; got != "" {
 		t.Fatalf("work_dir = %q, want empty after cleanup", got)
 	}
 
-	all, err := store.ListByMetadata(map[string]string{"gc.root_bead_id": workflowID}, 0, beads.IncludeClosed)
+	all, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": workflowID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	})
 	if err != nil {
 		t.Fatalf("ListByMetadata(gc.root_bead_id=%q): %v", workflowID, err)
 	}
@@ -383,9 +486,9 @@ func TestGraphWorkflowInMemoryFailureRunsCleanup(t *testing.T) {
 }
 
 func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
-	store, issueID, workflowID := startMemScopedWorkflow(t)
-	if issueID == "" || workflowID == "" {
-		t.Fatalf("issue/workflow ids must be non-empty: issue=%q workflow=%q", issueID, workflowID)
+	store, convoyID, workflowID := startMemScopedWorkflow(t)
+	if convoyID == "" || workflowID == "" {
+		t.Fatalf("convoy/workflow ids must be non-empty: convoy=%q workflow=%q", convoyID, workflowID)
 	}
 
 	root := mustGetMemBead(t, store, workflowID)
@@ -395,11 +498,14 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 	if root.Status != "in_progress" {
 		t.Fatalf("root status = %q, want in_progress", root.Status)
 	}
-	if root.Metadata["gc.source_bead_id"] != issueID {
-		t.Fatalf("root source_bead_id = %q, want %q", root.Metadata["gc.source_bead_id"], issueID)
+	if root.Metadata["gc.source_bead_id"] != "" {
+		t.Fatalf("root source_bead_id = %q, want empty", root.Metadata["gc.source_bead_id"])
+	}
+	if root.Metadata["gc.input_convoy_id"] != convoyID {
+		t.Fatalf("root input_convoy_id = %q, want %q", root.Metadata["gc.input_convoy_id"], convoyID)
 	}
 
-	runMemGraphWorkflowToCompletion(t, store, workflowID, issueID, "worker", t.TempDir(), "success")
+	runMemGraphWorkflowToCompletion(t, store, workflowID, convoyID, "worker", t.TempDir(), "success")
 
 	root = mustGetMemBead(t, store, workflowID)
 	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
@@ -410,7 +516,7 @@ func TestGraphWorkflowInMemoryCreateExecuteWaitFlow(t *testing.T) {
 func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testing.T) {
 	store, _, workflowID := startMemScopedWorkflow(t)
 
-	all, err := store.ListOpen()
+	all, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
 	if err != nil {
 		t.Fatalf("List(): %v", err)
 	}
@@ -419,19 +525,418 @@ func TestGraphWorkflowInMemoryRouteUsesControlDispatcherForControlBeads(t *testi
 		if bead.Metadata["gc.root_bead_id"] != workflowID {
 			continue
 		}
-		if !isControlDispatcherKind(bead.Metadata["gc.kind"]) {
+		if !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
 			continue
 		}
 		foundControl = true
-		if bead.Assignee != config.ControlDispatcherAgentName {
-			t.Fatalf("control bead %s assignee = %q, want %q", bead.ID, bead.Assignee, config.ControlDispatcherAgentName)
+		if bead.Assignee != "" {
+			t.Fatalf("control bead %s assignee = %q, want empty routed control-dispatcher queue", bead.ID, bead.Assignee)
 		}
-		if bead.Metadata["gc.routed_to"] != config.ControlDispatcherAgentName {
-			t.Fatalf("control bead %s gc.routed_to = %q, want %q", bead.ID, bead.Metadata["gc.routed_to"], config.ControlDispatcherAgentName)
+		if got := bead.Metadata["gc.routed_to"]; got != config.ControlDispatcherAgentName {
+			t.Fatalf("control bead %s gc.routed_to = %q, want %q", bead.ID, got, config.ControlDispatcherAgentName)
 		}
 	}
 	if !foundControl {
 		t.Fatal("expected at least one control-dispatcher bead")
+	}
+}
+
+func TestGraphWorkflowControlLaneUsesOwningStoreScope(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		rigContext      string
+		storeRef        string
+		wantDispatcher  string
+		otherDispatcher string
+	}{
+		{
+			name:            "city graph",
+			storeRef:        "city:test-city",
+			wantDispatcher:  "core.control-dispatcher",
+			otherDispatcher: "fixture/core.control-dispatcher",
+		},
+		{
+			name:            "rig graph",
+			rigContext:      "fixture",
+			storeRef:        "rig:fixture",
+			wantDispatcher:  "fixture/core.control-dispatcher",
+			otherDispatcher: "core.control-dispatcher",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := buildMemGraphWorkflowConfig(t)
+			cfg.Workspace.Prefix = "hq"
+			cfg.Rigs = []config.Rig{{Name: "fixture", Path: t.TempDir(), Prefix: "gc"}}
+			cityDispatcher := testControlDispatcherAgent("")
+			cityDispatcher.BindingName = "core"
+			rigDispatcher := testControlDispatcherAgent("fixture")
+			rigDispatcher.BindingName = "core"
+			cfg.Agents = []config.Agent{
+				{Name: "worker", MaxActiveSessions: intPtr(1)},
+				{Name: "worker", Dir: "fixture", MaxActiveSessions: intPtr(1)},
+				cityDispatcher,
+				rigDispatcher,
+			}
+
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			ownerStore := beads.Store(cityStore)
+			otherStore := beads.Store(rigStore)
+			if tt.rigContext != "" {
+				ownerStore, otherStore = rigStore, cityStore
+			}
+
+			item, err := ownerStore.Create(beads.Bead{Title: "Run scoped workflow", Type: "task"})
+			if err != nil {
+				t.Fatalf("Create(item): %v", err)
+			}
+			convoy, err := ownerStore.Create(beads.Bead{Title: "Run scoped workflow", Type: "convoy"})
+			if err != nil {
+				t.Fatalf("Create(convoy): %v", err)
+			}
+			if err := convoycore.TrackItem(ownerStore, convoy.ID, item.ID); err != nil {
+				t.Fatalf("TrackItem: %v", err)
+			}
+
+			worker, ok := resolveAgentIdentity(cfg, "worker", tt.rigContext)
+			if !ok {
+				t.Fatalf("resolveAgentIdentity(worker, %q) failed", tt.rigContext)
+			}
+			runner := newFakeRunner()
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			deps.Store = ownerStore
+			deps.StoreRef = tt.storeRef
+			deps.CityPath = t.TempDir()
+
+			oldPoke := slingPokeController
+			slingPokeController = func(string) error { return nil }
+			t.Cleanup(func() { slingPokeController = oldPoke })
+
+			opts := testOpts(worker, convoy.ID)
+			opts.OnFormula = "mol-scoped-work"
+			if code := doSling(opts, deps, ownerStore, stdout, stderr); code != 0 {
+				t.Fatalf("doSling returned %d; stderr=%s", code, stderr.String())
+			}
+
+			roots, err := ownerStore.ListByMetadata(map[string]string{
+				"gc.input_convoy_id": convoy.ID,
+				"gc.kind":            "workflow",
+			}, 1)
+			if err != nil {
+				t.Fatalf("ListByMetadata(workflow root): %v", err)
+			}
+			if len(roots) != 1 {
+				t.Fatalf("workflow root count = %d, want 1", len(roots))
+			}
+			if got := roots[0].Metadata["gc.root_store_ref"]; got != tt.storeRef {
+				t.Fatalf("root gc.root_store_ref = %q, want %q", got, tt.storeRef)
+			}
+
+			otherBeads, err := otherStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+			if err != nil {
+				t.Fatalf("List(other store): %v", err)
+			}
+			if len(otherBeads) != 0 {
+				t.Fatalf("other store contains %d beads, want none before reconciliation", len(otherBeads))
+			}
+
+			graphBeads, err := ownerStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+			if err != nil {
+				t.Fatalf("List(owner store): %v", err)
+			}
+			controlCount := 0
+			for _, bead := range graphBeads {
+				if bead.Metadata["gc.root_bead_id"] != roots[0].ID || !graphroute.IsControlDispatcherKind(bead.Metadata["gc.kind"]) {
+					continue
+				}
+				controlCount++
+				if got := bead.Metadata["gc.routed_to"]; got != tt.wantDispatcher {
+					t.Fatalf("control bead %s gc.routed_to = %q, want %q", bead.ID, got, tt.wantDispatcher)
+				}
+			}
+			if controlCount == 0 {
+				t.Fatal("expected graph control beads")
+			}
+
+			result := buildDesiredStateWithSessionBeads(
+				"test-city",
+				deps.CityPath,
+				time.Now().UTC(),
+				cfg,
+				runtime.NewFake(),
+				cityStore,
+				map[string]beads.Store{"fixture": rigStore},
+				newSessionBeadSnapshot(nil),
+				nil,
+				io.Discard,
+			)
+			if got := result.ScaleCheckCounts[tt.wantDispatcher]; got != 1 {
+				t.Fatalf("ScaleCheckCounts[%q] = %d, want 1", tt.wantDispatcher, got)
+			}
+			if got := result.ScaleCheckCounts[tt.otherDispatcher]; got != 0 {
+				t.Fatalf("ScaleCheckCounts[%q] = %d, want 0", tt.otherDispatcher, got)
+			}
+			dispatcherTemplates := make(map[string]bool)
+			for _, desired := range result.State {
+				if strings.HasSuffix(desired.TemplateName, "control-dispatcher") {
+					dispatcherTemplates[desired.TemplateName] = true
+				}
+			}
+			if len(dispatcherTemplates) != 1 || !dispatcherTemplates[tt.wantDispatcher] {
+				t.Fatalf("desired dispatcher templates = %v, want only %q", dispatcherTemplates, tt.wantDispatcher)
+			}
+		})
+	}
+}
+
+func TestRigGraphControlLaneMaterializeServeAndAdvanceEndToEnd(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fixture")
+	cfg := buildMemGraphWorkflowConfig(t)
+	cfg.Rigs = []config.Rig{{Name: "fixture", Path: rigPath}}
+	cityDispatcher := testControlDispatcherAgent("")
+	cityDispatcher.BindingName = "core"
+	rigDispatcher := testControlDispatcherAgent("fixture")
+	rigDispatcher.BindingName = "core"
+	cfg.Agents = []config.Agent{cityDispatcher, rigDispatcher}
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name: "rig-control-e2e",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "rig-control-e2e",
+				Title:  "Rig workflow",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "rig-control-e2e.workflow-finalize",
+				Title: "Finalize rig workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind": "workflow-finalize",
+				},
+			},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "rig-control-e2e.workflow-finalize", DependsOnID: "rig-control-e2e", Type: "parent-child"},
+			{StepID: "rig-control-e2e", DependsOnID: "rig-control-e2e.workflow-finalize", Type: "blocks"},
+		},
+	}
+	if err := graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
+		recipe,
+		nil,
+		"",
+		"",
+		"",
+		"rig:fixture",
+		graphroute.GraphRouteBinding{},
+		rigStore,
+		cfg.Workspace.Name,
+		cfg,
+		cliGraphrouteDeps(cityPath),
+	); err != nil {
+		t.Fatalf("decorate rig graph: %v", err)
+	}
+	inst, err := molecule.Instantiate(context.Background(), rigStore, recipe, molecule.Options{})
+	if err != nil {
+		t.Fatalf("instantiate rig graph: %v", err)
+	}
+	finalizerID := inst.IDMapping["rig-control-e2e.workflow-finalize"]
+	finalizer := mustGetMemBead(t, rigStore, finalizerID)
+	if got := finalizer.Metadata["gc.root_store_ref"]; got != "rig:fixture" {
+		t.Fatalf("finalizer root store ref = %q, want rig:fixture", got)
+	}
+	wantRoute := rigDispatcher.QualifiedName()
+	if got := finalizer.Metadata["gc.routed_to"]; got != wantRoute {
+		t.Fatalf("finalizer route = %q, want %q", got, wantRoute)
+	}
+	cityBeads, err := cityStore.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list city store: %v", err)
+	}
+	if len(cityBeads) != 0 {
+		t.Fatalf("city store has %d graph beads, want graph wholly in rig store", len(cityBeads))
+	}
+
+	// A city-routed control bead in the rig store is deliberately unreachable
+	// from the rig dispatcher's query. It makes any accidental cross-scope alias
+	// broadening observable: the serve pass would select this malformed decoy and
+	// fail instead of quietly passing after advancing the real finalizer.
+	decoy, err := rigStore.Create(beads.Bead{
+		Title:  "Wrongly city-routed control decoy",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			"gc.kind":      "workflow-finalize",
+			"gc.routed_to": "core.control-dispatcher",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create city-route decoy: %v", err)
+	}
+
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	wantBareRoute := "fixture/control-dispatcher"
+	serveQuery := workflowServeControlReadyQuery(rigDispatcher)
+	queryCalls := 0
+	workflowServeList = func(workQuery, dir string, _ map[string]string) ([]hookBead, error) {
+		queryCalls++
+		if canonicalTestPath(dir) != canonicalTestPath(rigPath) {
+			t.Fatalf("serve query dir = %q, want rig store %q", dir, rigPath)
+		}
+		for _, want := range []string{
+			"GC_CONTROL_TARGET='" + wantRoute + "'",
+			"GC_CONTROL_BARE_TARGET='" + wantBareRoute + "'",
+		} {
+			if !strings.Contains(workQuery, want) {
+				t.Fatalf("rig serve query missing %q: %q", want, workQuery)
+			}
+		}
+		for _, forbidden := range []string{
+			"GC_CONTROL_TARGET='core.control-dispatcher'",
+			"GC_CONTROL_BARE_TARGET='control-dispatcher'",
+		} {
+			if strings.Contains(workQuery, forbidden) {
+				t.Fatalf("rig serve query contains city alias %q: %q", forbidden, workQuery)
+			}
+		}
+		ready := memGraphReady(t, rigStore)
+		var selected []hookBead
+		for _, candidate := range ready {
+			if !graphroute.IsControlDispatcherKind(candidate.Metadata["gc.kind"]) {
+				continue
+			}
+			route := candidate.Metadata["gc.routed_to"]
+			if route != wantRoute && route != wantBareRoute {
+				continue
+			}
+			selected = append(selected, hookBead{ID: candidate.ID, Metadata: hookBeadMetadata(candidate.Metadata)})
+		}
+		return selected, nil
+	}
+	controlDispatcherServe = func(gotCityPath, storePath, beadID string, _ io.Writer, _ io.Writer) error {
+		if canonicalTestPath(gotCityPath) != canonicalTestPath(cityPath) {
+			return fmt.Errorf("control city path = %q, want %q", gotCityPath, cityPath)
+		}
+		if canonicalTestPath(storePath) != canonicalTestPath(rigPath) {
+			return fmt.Errorf("control store path = %q, want %q", storePath, rigPath)
+		}
+		bead, getErr := rigStore.Get(beadID)
+		if getErr != nil {
+			return getErr
+		}
+		_, processErr := dispatch.ProcessControl(rigStore, bead, dispatch.ProcessOptions{CityPath: cityPath})
+		return processErr
+	}
+
+	if _, err := drainWorkflowServeWork(rigDispatcher, cityPath, rigPath, serveQuery, nil, io.Discard); err != nil {
+		t.Fatalf("drain rig workflow serve: %v", err)
+	}
+	if queryCalls < 2 {
+		t.Fatalf("serve query calls = %d, want selection plus empty confirmation", queryCalls)
+	}
+	root := mustGetMemBead(t, rigStore, inst.RootID)
+	if root.Status != "closed" || root.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("rig workflow root = status %q outcome %q, want closed/pass", root.Status, root.Metadata["gc.outcome"])
+	}
+	finalizer = mustGetMemBead(t, rigStore, finalizerID)
+	if finalizer.Status != "closed" || finalizer.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("rig finalizer = status %q outcome %q, want closed/pass", finalizer.Status, finalizer.Metadata["gc.outcome"])
+	}
+	decoy = mustGetMemBead(t, rigStore, decoy.ID)
+	if decoy.Status != "open" {
+		t.Fatalf("city-routed rig-store decoy status = %q, want open/unclaimed", decoy.Status)
+	}
+}
+
+func TestGraphWorkflowRoutingLeavesSpecBeadsUnrouted(t *testing.T) {
+	cfg := buildMemGraphWorkflowConfig(t)
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	worker, ok := resolveAgentIdentity(cfg, "worker", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(worker) failed")
+	}
+
+	recipe := &formula.Recipe{
+		Name: "wf",
+		Steps: []formula.RecipeStep{
+			{
+				ID:     "wf",
+				Title:  "Workflow",
+				Type:   "task",
+				IsRoot: true,
+				Metadata: map[string]string{
+					"gc.kind":             "workflow",
+					"gc.formula_contract": "graph.v2",
+				},
+			},
+			{
+				ID:    "wf.review",
+				Title: "Review",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.run_target": "worker",
+				},
+			},
+			{
+				ID:          "wf.review.spec",
+				Title:       "Review spec",
+				Type:        "spec",
+				Description: `{"id":"review"}`,
+				Metadata: map[string]string{
+					"gc.kind":     "spec",
+					"gc.spec_for": "review",
+				},
+			},
+			{ID: "wf.workflow-finalize", Title: "Finalize", Type: "task", Metadata: map[string]string{"gc.kind": "workflow-finalize"}},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "wf.workflow-finalize", DependsOnID: "wf.review", Type: "blocks"},
+			{StepID: "wf", DependsOnID: "wf.workflow-finalize", Type: "blocks"},
+		},
+	}
+
+	if err := applyGraphRouting(recipe, &worker, worker.QualifiedName(), nil, "", "", "city:test-city", store, cfg.Workspace.Name, cityPath, cfg); err != nil {
+		t.Fatalf("applyGraphRouting: %v", err)
+	}
+
+	var spec *formula.RecipeStep
+	for i := range recipe.Steps {
+		if recipe.Steps[i].ID == "wf.review.spec" {
+			spec = &recipe.Steps[i]
+			break
+		}
+	}
+	if spec == nil {
+		t.Fatal("missing spec step")
+	}
+	if spec.Assignee != "" {
+		t.Fatalf("spec Assignee = %q, want empty", spec.Assignee)
+	}
+	for _, key := range []string{"gc.routed_to", graphroute.GraphExecutionRouteMetaKey, "gc.run_target"} {
+		if spec.Metadata[key] != "" {
+			t.Fatalf("spec metadata %s = %q, want empty; full metadata: %#v", key, spec.Metadata[key], spec.Metadata)
+		}
 	}
 }
 

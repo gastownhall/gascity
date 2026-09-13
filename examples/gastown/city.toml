@@ -1,19 +1,22 @@
 # Gas Town — expressed as a Gas City configuration.
 #
 # This proves the Gas City thesis: any orchestration pack is pure config.
-# Three composable packs:
-#   maintenance  — generic infrastructure: dog pool, shutdown dance, exec
-#                  orders (gate-sweep, orphan-sweep, prune-branches,
-#                  wisp-compact)
-#   dolt         — reusable Dolt database management (dog formulas + exec
-#                  orders + CLI commands), requires a dog pool from
-#                  maintenance
-#   gastown      — domain-specific coding workflow: mayor, deacon, boot,
-#                  witness, refinery, polecat, crew + digest orders
+# Composable packs:
+#   core (builtin) — gc skills, default prompts, core formulas, mechanical
+#                    housekeeping orders (gate/orphan/wisp sweeps, branch
+#                    pruning, nudge relays); included explicitly below
+#   bd (builtin)   — Dolt-backed beads provider; pulls in the dolt pack
+#                    (server lifecycle, dog formulas + exec orders + CLI
+#                    commands, with its own dolt dog pool)
+#   gastown        — domain-specific coding workflow: mayor, deacon, boot,
+#                    dog utility pool, witness, refinery, polecat, crew +
+#                    digest orders
 #
-# City-scoped agents come from both packs: dog (maintenance) + mayor,
-# deacon, boot (gastown). Rig-scoped agents (witness, refinery, polecat)
-# are stamped per-rig.
+# City-scoped agents: mayor, deacon, boot, and the gastown-owned dog.
+# Rig-scoped agents (witness, refinery, polecat) are stamped per-rig.
+#
+# The sibling pack.toml owns the Gastown import. This city owns the default
+# rig binding used by `gc rig add`.
 #
 # To use: gc start examples/gastown/
 # Requires rigs to be registered: gc rig add <path>
@@ -21,36 +24,57 @@
 [workspace]
 name = "gastown"
 provider = "claude"
-includes = ["packs/gastown"]
 global_fragments = ["command-glossary", "operational-awareness"]
+
+[providers.claude]
+base = "builtin:claude"
+
+[defaults.rig.imports.gastown]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
 
 [daemon]
 patrol_interval = "30s"
 max_restarts = 5
 restart_window = "1h"
 shutdown_timeout = "5s"
+# Enable compiler-v2 formulas from imported packs. Legacy molecule formulas keep
+# molecule_id attachment semantics unless they declare a compiler-v2 requirement.
+formula_v2 = true
 
 # Register a rig to activate per-rig agents (witness, refinery, polecat):
 # [[rigs]]
 # name = "myproject"
 # path = "/path/to/your/project"
-# includes = ["packs/gastown"]
 
-# Crew members are individually named, so they can't be pack-stamped:
-# [[agent]]
-# name = "wolf"
+# Crew members are persistent, individually named workers, so they can't be
+# pack-stamped. Each one is a directory agent under agents/<name>/ plus a
+# named session that keeps it alive. To add a crew member "wolf" bound to a
+# registered rig "myproject":
+#
+#   1. Create agents/wolf/agent.toml (relative paths resolve against this
+#      city directory):
+#
+#        scope = "rig"
+#        dir = "myproject"
+#        nudge = "Check your hook and mail, then act accordingly."
+#        work_dir = ".gc/worktrees/myproject/crew/wolf"
+#        idle_timeout = "4h"
+#        prompt_template = "prompts/crew.template.md"
+#        pre_start = ["{{.CityRoot}}/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+#
+#      Copy assets/prompts/crew.template.md and assets/scripts/worktree-setup.sh
+#      out of the imported gastown pack into city-local prompts/ and scripts/
+#      first — the pack itself lives in the import cache, not the city tree.
+#
+#      tmux theming comes from the gastown pack's [global] session_live hooks,
+#      so crew members need no session_setup wiring of their own.
+#
+#   2. Keep the crew session alive by declaring a named session here. The
+#      dir must match the agent's so the session resolves to "myproject/wolf":
+#
+# [[named_session]]
+# template = "wolf"
 # dir = "myproject"
-# pre_start = ["packs/gastown/scripts/worktree-setup.sh /path/to/myproject /path/to/city/.gc/worktrees/myproject/wolf wolf --sync"]
-# prompt_template = "packs/gastown/prompts/crew.md.tmpl"
-# nudge = "Check your hook and mail, then act accordingly."
-# overlay_dir = "packs/gastown/overlays/crew"
-# idle_timeout = "4h"
-# session_setup_script = "packs/gastown/scripts/tmux-theme.sh"
-# session_setup = [
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right-length 80",
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-interval 5",
-#     "tmux ${GC_TMUX_SOCKET:+-L $GC_TMUX_SOCKET} set-option -t {{.Session}} status-right '#({{.ConfigDir}}/scripts/status-line.sh {{.Agent}}) %H:%M'",
-#     "{{.ConfigDir}}/scripts/bind-key.sh n \"run-shell '{{.ConfigDir}}/scripts/cycle.sh next #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/scripts/bind-key.sh p \"run-shell '{{.ConfigDir}}/scripts/cycle.sh prev #{session_name} #{client_tty}'\"",
-#     "{{.ConfigDir}}/scripts/bind-key.sh g \"run-shell '{{.ConfigDir}}/scripts/agent-menu.sh #{client_tty}'\"",
-# ]
+# scope = "rig"
+# mode = "always"

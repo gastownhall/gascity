@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "hook",
+    "content",
+    "bytes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "agent": {
+      "type": "string"
+    },
+    "hook": {
+      "type": "boolean"
+    },
+    "hook_format": {
+      "type": "string"
+    },
+    "content": {
+      "type": "string"
+    },
+    "bytes": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true
+}

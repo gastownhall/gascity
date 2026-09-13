@@ -1,30 +1,30 @@
 package acp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // shortTempDir returns a temp directory short enough for Unix socket paths
 // (macOS limit is 104 bytes). t.TempDir() paths often exceed this.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "gc-t-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	return testutil.ShortTempDir(t, "gc-t-")
 }
 
 // newTestProvider creates an ACP provider with an isolated temp directory.
@@ -83,15 +83,17 @@ for line in sys.stdin:
         respond(msg_id, {"sessionId": session_id})
     elif method == "session/prompt":
         params = msg.get("params", {})
-        messages = params.get("messages", [])
+        blocks = params.get("prompt", [])
         text = ""
-        for m in messages:
-            for c in m.get("content", []):
-                text += c.get("text", "")
+        for b in blocks:
+            text += b.get("text", "")
         # Send update notification with echoed text
         notify("session/update", {
             "sessionId": session_id,
-            "content": [{"type": "text", "text": "echo: " + text}]
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "echo: " + text}
+            }
         })
         # Send prompt response
         respond(msg_id, {})
@@ -112,6 +114,85 @@ func TestStart_HandshakeSuccess(t *testing.T) {
 
 	if !p.IsRunning(name) {
 		t.Error("IsRunning = false after Start, want true")
+	}
+}
+
+func TestStart_EmptyEnvOverrideIsAbsentFromAgent(t *testing.T) {
+	t.Setenv("BEADS_DB", "ambient-database")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	marker := filepath.Join(t.TempDir(), "env.txt")
+	command := `env | sort > "$GC_ENV_MARKER"; ` + fakeACPShellCommand()
+	p := newTestProvider(t)
+	name := testName()
+	if err := p.Start(context.Background(), name, runtime.Config{
+		Command: command,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"BEADS_DB":               "",
+			"BEADS_DOLT_SERVER_HOST": "",
+			"BEADS_DIR":              "/selected/.beads",
+			"GC_ENV_MARKER":          marker,
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if strings.Contains(got, "BEADS_DB=") || strings.Contains(got, "BEADS_DOLT_SERVER_HOST=") {
+		t.Fatalf("withheld variables reached agent: %q", got)
+	}
+	if !strings.Contains(got, "BEADS_DIR=/selected/.beads\n") {
+		t.Fatalf("explicit environment did not reach agent: %q", got)
+	}
+}
+
+func TestStart_StagesKiroPackOverlayBeforeLaunch(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	agentConfig := filepath.Join(packOverlay, "per-provider", "kiro", ".kiro", "agents", "gascity.json")
+	if err := os.MkdirAll(filepath.Dir(agentConfig), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(agentConfig), err)
+	}
+	if err := os.WriteFile(agentConfig, []byte(`{"name":"gascity"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", agentConfig, err)
+	}
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", fallbackInstructions, err)
+	}
+	projectInstructions := filepath.Join(workDir, "AGENTS.md")
+	if err := os.WriteFile(projectInstructions, []byte("project instructions"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", projectInstructions, err)
+	}
+
+	command := "test -f .kiro/agents/gascity.json && grep -q 'project instructions' AGENTS.md && " + fakeACPShellCommand()
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command:         command,
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	if _, err := os.Stat(filepath.Join(workDir, ".kiro", "agents", "gascity.json")); err != nil {
+		t.Fatalf("expected Kiro ACP agent config to be staged: %v", err)
+	}
+	data, err := os.ReadFile(projectInstructions)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(data) != "project instructions" {
+		t.Fatalf("AGENTS.md = %q, want project instructions preserved", string(data))
 	}
 }
 
@@ -225,8 +306,9 @@ func TestNudge_SendsPrompt(t *testing.T) {
 
 func TestNudge_MissingSession(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.Nudge("nonexistent", runtime.TextContent("hello")); err != nil {
-		t.Errorf("Nudge on missing session should not error: %v", err)
+	err := p.Nudge("nonexistent", runtime.TextContent("hello"))
+	if !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Nudge missing session error = %v, want ErrSessionNotFound", err)
 	}
 }
 
@@ -363,6 +445,89 @@ func TestMeta_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMetaPath_HashesUntrustedNameAndKey(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "acp")
+	p := NewProviderWithDir(dir, Config{})
+
+	path := p.metaPath("../escape", "../key")
+	if filepath.Dir(path) != dir {
+		t.Fatalf("metaPath escaped provider dir: %q", path)
+	}
+	if base := filepath.Base(path); strings.Contains(base, "..") || strings.ContainsAny(base, `/\`) {
+		t.Fatalf("metaPath base = %q, want hashed file name without path tokens", base)
+	}
+
+	if err := p.SetMeta("../escape", "../key", "secret"); err != nil {
+		t.Fatalf("SetMeta with untrusted tokens: %v", err)
+	}
+	got, err := p.GetMeta("../escape", "../key")
+	if err != nil {
+		t.Fatalf("GetMeta with untrusted tokens: %v", err)
+	}
+	if got != "secret" {
+		t.Fatalf("GetMeta = %q, want secret", got)
+	}
+	if err := p.RemoveMeta("../escape", "../key"); err != nil {
+		t.Fatalf("RemoveMeta with untrusted tokens: %v", err)
+	}
+}
+
+func TestStartStagesSingleFileCopyIntoWorkDirRoot(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	p := newTestProvider(t)
+	name := testName()
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command:   fakeACPShellCommand(),
+		WorkDir:   workDir,
+		CopyFiles: []runtime.CopyEntry{{Src: src}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+
+	data, err := os.ReadFile(filepath.Join(workDir, "seed.txt"))
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(data) != "seed data" {
+		t.Fatalf("staged file = %q, want %q", string(data), "seed data")
+	}
+}
+
+func TestStartFailsWhenCopyFileCannotBeStaged(t *testing.T) {
+	workDir := t.TempDir()
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "seed.txt")
+	if err := os.WriteFile(src, []byte("seed data"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	blocker := filepath.Join(workDir, "blocked")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+
+	p := newTestProvider(t)
+	name := testName()
+	err := p.Start(context.Background(), name, runtime.Config{
+		Command: fakeACPShellCommand(),
+		WorkDir: workDir,
+		CopyFiles: []runtime.CopyEntry{{
+			Src:    src,
+			RelDst: filepath.Join("blocked", "seed.txt"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("Start should fail when staging a copy file fails")
+	}
+}
+
 func TestAttach_ReturnsError(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Attach("any"); err == nil {
@@ -401,14 +566,35 @@ func TestBusyState_SetAndCleared(t *testing.T) {
 	}
 
 	// Simulate receiving a response that matches the active prompt.
-	sc.mu.Lock()
-	id := int64(42)
-	sc.activePromptID = 0 // as dispatch would do
-	_ = id
-	sc.mu.Unlock()
+	sc.clearActivePrompt(42)
 
 	if sc.isBusy() {
 		t.Error("should not be busy after clearing activePromptID")
+	}
+}
+
+func TestWaitIdleUnblocksPromptlyWhenBusyStateClears(t *testing.T) {
+	sc := &sessionConn{
+		outputBufMax: 100,
+		pending:      make(map[int64]chan JSONRPCMessage),
+	}
+	sc.setActivePrompt(42)
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sc.waitIdle(2 * time.Second)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	sc.clearActivePrompt(42)
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("waitIdle returned false, want true after busy state clears")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("waitIdle did not unblock promptly after busy state cleared")
 	}
 }
 
@@ -466,9 +652,13 @@ func TestDispatch_RoutesUpdateNotification(t *testing.T) {
 		pending:      make(map[int64]chan JSONRPCMessage),
 	}
 
+	contentJSON, _ := json.Marshal(ContentBlock{Type: "text", Text: "hello"})
 	params, _ := json.Marshal(SessionUpdateParams{
 		SessionID: "s1",
-		Content:   []ContentBlock{{Type: "text", Text: "hello"}},
+		Update: SessionUpdateContent{
+			Type:    "agent_message_chunk",
+			Content: contentJSON,
+		},
 	})
 	sc.dispatch(JSONRPCMessage{
 		JSONRPC: "2.0",
@@ -483,6 +673,158 @@ func TestDispatch_RoutesUpdateNotification(t *testing.T) {
 
 	if sc.getLastActivity().IsZero() {
 		t.Error("lastActivity should be set after update")
+	}
+}
+
+func TestHandleUpdate_Variants(t *testing.T) {
+	tests := []struct {
+		name       string
+		update     map[string]any
+		wantOutput string
+		wantActive bool
+	}{
+		{
+			name: "agent_message_chunk with text",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "hello"},
+			},
+			wantOutput: "hello",
+			wantActive: true,
+		},
+		{
+			name: "tool_call with title",
+			update: map[string]any{
+				"sessionUpdate": "tool_call",
+				"title":         "Read",
+			},
+			wantOutput: "[tool: Read]",
+			wantActive: true,
+		},
+		{
+			name: "agent_message_chunk with multiline text",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "line1\nline2\nline3"},
+			},
+			wantOutput: "line1\nline2\nline3",
+			wantActive: true,
+		},
+		{
+			name: "tool_call_update with title and content",
+			update: map[string]any{
+				"sessionUpdate": "tool_call_update",
+				"title":         "Bash",
+				"content": []map[string]any{{
+					"type":    "content",
+					"content": map[string]any{"type": "text", "text": "output"},
+				}},
+			},
+			wantOutput: "[tool: Bash]\noutput",
+			wantActive: true,
+		},
+		{
+			name: "tool_call content without title",
+			update: map[string]any{
+				"sessionUpdate": "tool_call",
+				"content": []map[string]any{{
+					"type":    "content",
+					"content": map[string]any{"type": "text", "text": "first\nsecond"},
+				}},
+			},
+			wantOutput: "first\nsecond",
+			wantActive: true,
+		},
+		{
+			name: "unknown variant still updates lastActivity",
+			update: map[string]any{
+				"sessionUpdate": "usage_update",
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "agent_thought_chunk",
+			update: map[string]any{
+				"sessionUpdate": "agent_thought_chunk",
+				"content":       map[string]any{"type": "text", "text": "thinking..."},
+			},
+			wantOutput: "thinking...",
+			wantActive: true,
+		},
+		{
+			name: "non-text content block ignored",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       map[string]any{"type": "image", "data": "base64..."},
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "null content on chunk type",
+			update: map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+			},
+			wantOutput: "",
+			wantActive: true,
+		},
+		{
+			name: "user_message_chunk with text",
+			update: map[string]any{
+				"sessionUpdate": "user_message_chunk",
+				"content":       map[string]any{"type": "text", "text": "user input"},
+			},
+			wantOutput: "user input",
+			wantActive: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &sessionConn{outputBufMax: 100}
+			params, _ := json.Marshal(map[string]any{
+				"sessionId": "s1",
+				"update":    tt.update,
+			})
+			sc.dispatch(JSONRPCMessage{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  params,
+			})
+
+			output := sc.peekLines(0)
+			if output != tt.wantOutput {
+				t.Errorf("output = %q, want %q", output, tt.wantOutput)
+			}
+			if tt.wantActive && sc.getLastActivity().IsZero() {
+				t.Error("lastActivity should be set")
+			}
+		})
+	}
+}
+
+func TestHandleUpdate_LegacyContentFallback(t *testing.T) {
+	sc := &sessionConn{outputBufMax: 100}
+	params, _ := json.Marshal(map[string]any{
+		"sessionId": "s1",
+		"content": []map[string]any{{
+			"type": "text",
+			"text": "legacy line1\nlegacy line2",
+		}},
+	})
+	sc.dispatch(JSONRPCMessage{
+		JSONRPC: "2.0",
+		Method:  "session/update",
+		Params:  params,
+	})
+
+	output := sc.peekLines(0)
+	if output != "legacy line1\nlegacy line2" {
+		t.Errorf("output = %q, want %q", output, "legacy line1\nlegacy line2")
+	}
+	if sc.getLastActivity().IsZero() {
+		t.Error("lastActivity should be set")
 	}
 }
 
@@ -566,27 +908,31 @@ func TestListRunning_FindsSessions(t *testing.T) {
 }
 
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
-	root, err := os.MkdirTemp("", "gc-acp-sock-")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root := shortTempDir(t)
 	const name = "control-dispatcher"
+	// Unix socket sun_path is 104 bytes on macOS / 108 on Linux. Use the
+	// macOS limit so the constructed path binds on either platform.
+	const sockPathLimit = 104
+	// Step by a single byte per iteration: the valid window (legacy too
+	// long, short fits) is only a few bytes wide, so a 10-byte step (as the
+	// original "deep-path-" repeater used) can skip past it entirely
+	// depending on len(root) — root length varies because os.MkdirTemp's
+	// random suffix is a uint32 stringified to a variable number of digits.
 	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
+	for i := 1; i <= 128; i++ {
+		candidate := filepath.Join(root, strings.Repeat("x", i), "acp")
 		p := NewProviderWithDir(candidate, Config{
 			HandshakeTimeout:  5 * time.Second,
 			NudgeBusyTimeout:  2 * time.Second,
 			OutputBufferLines: 100,
 		})
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
+		if len(p.legacySockPath(name)) > sockPathLimit && len(p.sockPath(name)) < sockPathLimit {
 			longDir = candidate
 			break
 		}
 	}
 	if longDir == "" {
-		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+		t.Skipf("cannot construct path where legacy socket exceeds %d bytes but short socket fits; len(root)=%d (likely TMPDIR=%q too long)", sockPathLimit, len(root), os.TempDir())
 	}
 	if err := os.MkdirAll(longDir, 0o755); err != nil {
 		t.Fatalf("mkdir longDir: %v", err)
@@ -623,6 +969,148 @@ func TestSendKeysAndRunLive_NoOp(t *testing.T) {
 	}
 	if err := p.RunLive("any", runtime.Config{}); err != nil {
 		t.Errorf("RunLive: %v", err)
+	}
+}
+
+func TestStopBySocket_ReturnsErrorWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	gotCommand := make(chan string, 1)
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotCommand <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.stopBySocket(name)
+	if err == nil {
+		t.Fatal("stopBySocket succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("stopBySocket error = %v, want unexpected response", err)
+	}
+	if got := <-gotCommand; got != "stop" {
+		t.Fatalf("socket command = %q, want stop", got)
+	}
+	if _, statErr := os.Stat(p.sockPath(name)); statErr != nil {
+		t.Fatalf("socket path err = %v, want socket preserved after failed stop", statErr)
+	}
+	if _, statErr := os.Stat(p.sockNamePath(name)); statErr != nil {
+		t.Fatalf("socket name path err = %v, want socket name preserved after failed stop", statErr)
+	}
+}
+
+func TestStopBySocket_FallsBackToLegacySocketWhenCanonicalRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	canonical, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen canonical: %v", err)
+	}
+	t.Cleanup(func() { _ = canonical.Close() })
+
+	legacy, err := net.Listen("unix", p.legacySockPath(name))
+	if err != nil {
+		t.Fatalf("Listen legacy: %v", err)
+	}
+	t.Cleanup(func() { _ = legacy.Close() })
+
+	go func() {
+		conn, acceptErr := canonical.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	gotLegacy := make(chan string, 1)
+	go func() {
+		conn, acceptErr := legacy.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		line, readErr := bufio.NewReader(conn).ReadString('\n')
+		if readErr == nil {
+			gotLegacy <- strings.TrimSpace(line)
+		}
+		_, _ = conn.Write([]byte("ok\n"))
+	}()
+
+	if err := p.stopBySocket(name); err != nil {
+		t.Fatalf("stopBySocket error = %v, want legacy fallback success", err)
+	}
+	if got := <-gotLegacy; got != "stop" {
+		t.Fatalf("legacy socket command = %q, want stop", got)
+	}
+}
+
+func TestStop_PreservesMetadataWhenSocketRejectsStop(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+
+	if err := p.SetMeta(name, "key1", "val1"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	if err := os.WriteFile(p.sockNamePath(name), []byte(name), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	lis, err := net.Listen("unix", p.sockPath(name))
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
+		_, _ = conn.Write([]byte("nope\n"))
+	}()
+
+	err = p.Stop(name)
+	if err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected response") {
+		t.Fatalf("Stop error = %v, want unexpected response", err)
+	}
+
+	val, err := p.GetMeta(name, "key1")
+	if err != nil {
+		t.Fatalf("GetMeta after failed stop: %v", err)
+	}
+	if val != "val1" {
+		t.Fatalf("GetMeta after failed stop = %q, want val1", val)
 	}
 }
 
@@ -737,5 +1225,105 @@ func TestStderrCaptured_InHandshakeError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "fatal: bad config") {
 		t.Errorf("error should contain stderr output, got: %v", err)
+	}
+}
+
+// closedPipeStdin models a stdin pipe whose agent end has exited: the first
+// Write signals that the recovery path is about to run, then returns
+// io.ErrClosedPipe. Subsequent writes are idempotent.
+type closedPipeStdin struct {
+	writeCalled chan struct{}
+	once        sync.Once
+}
+
+func (c *closedPipeStdin) Write(_ []byte) (int, error) {
+	c.once.Do(func() { close(c.writeCalled) })
+	return 0, io.ErrClosedPipe
+}
+
+func (*closedPipeStdin) Close() error { return nil }
+
+// erroringStdin returns a fixed error on every Write — used to model a
+// non-lifecycle failure (e.g. the equivalent of a marshal error) that must
+// bypass the sc.done drain path.
+type erroringStdin struct{ err error }
+
+func (e *erroringStdin) Write(_ []byte) (int, error) { return 0, e.err }
+func (*erroringStdin) Close() error                  { return nil }
+
+// TestNudge_ReturnsNilWhenAgentExitsDuringSend pins the recovery branch in
+// Provider.Nudge: when sendRequest fails with a pipe-write error and the
+// monitor goroutine closes sc.done shortly after, Nudge honors its
+// best-effort nil contract instead of surfacing a spurious error. This is
+// independent of fakeacp's SIGINT handling, so a future refactor of either
+// cannot silently undo the fix.
+func TestNudge_ReturnsNilWhenAgentExitsDuringSend(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{NudgeBusyTimeout: 2 * time.Second})
+	name := testName()
+
+	stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
+	sc.sessionID = "session-1"
+
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+
+	// Mimic the monitor goroutine converging lifecycle state after the
+	// child exits: close sc.done as soon as the failing write is observed.
+	go func() {
+		<-stdin.writeCalled
+		close(sc.done)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected nil error when agent exits during send, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Nudge did not return within 3s — recovery select likely timed out")
+	}
+}
+
+// TestNudge_NonPipeErrorSurfacesImmediately verifies that sendRequest
+// failures unrelated to the agent lifecycle (modeled here by a writer
+// returning a non-pipe error) do NOT stall on sc.done and instead surface
+// immediately — the pipe-origin gate is doing its job.
+func TestNudge_NonPipeErrorSurfacesImmediately(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{NudgeBusyTimeout: 2 * time.Second})
+	name := testName()
+
+	stubErr := errors.New("disk quota exceeded")
+	sc := newSessionConn(nil, &erroringStdin{err: stubErr}, nil, 100, nil)
+	sc.sessionID = "session-1"
+
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+
+	// sc.done is intentionally left open: if the new branch mis-routes
+	// non-pipe errors through the select, the call will hang until
+	// nudgePostWriteDrainTimeout and the test will fail.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Nudge(name, []runtime.ContentBlock{{Type: "text", Text: "hi"}})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected non-pipe error to surface, got nil")
+		}
+		if !errors.Is(err, stubErr) {
+			t.Fatalf("expected wrapped %v, got %v", stubErr, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Nudge stalled on non-pipe error — origin gate should have bypassed sc.done wait")
 	}
 }

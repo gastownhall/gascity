@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc import status --json result",
+  "description": "Machine-readable drift surface for pack imports: every declared import binding across scopes, the packs.lock pin closure, and the lockfile content hash.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "root",
+    "packs_lock_path",
+    "imports",
+    "locked_packs"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for this command output."
+    },
+    "ok": {
+      "const": true
+    },
+    "root": {
+      "type": "string",
+      "description": "Absolute city or pack root the status was computed from."
+    },
+    "packs_lock_path": {
+      "type": "string",
+      "description": "Absolute path of the packs.lock file (which may not exist)."
+    },
+    "packs_lock_sha256": {
+      "type": "string",
+      "description": "Hex-encoded SHA-256 digest of the raw packs.lock contents. Omitted when the file does not exist."
+    },
+    "imports": {
+      "type": "array",
+      "description": "Every declared import binding, sorted by name.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "source",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Scoped binding key: \"pack:<name>\" for root-pack imports, \"default-rig:<name>\" for default rig imports, and \"rig:<rig>:<name>\" for rig-scoped imports."
+          },
+          "source": {
+            "type": "string",
+            "description": "Declared source exactly as authored in TOML."
+          },
+          "constraint": {
+            "type": "string",
+            "description": "Declared version constraint, when present."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "remote",
+              "path"
+            ],
+            "description": "\"remote\" for git-backed sources and \"path\" for local directory sources."
+          },
+          "path": {
+            "type": "string",
+            "description": "Resolved absolute path for kind \"path\" entries."
+          },
+          "pin": {
+            "type": "object",
+            "description": "packs.lock resolution for kind \"remote\" entries. Omitted when the source has no lock entry (unlocked).",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "commit"
+            ],
+            "properties": {
+              "version": {
+                "type": "string",
+                "description": "Pinned version."
+              },
+              "commit": {
+                "type": "string",
+                "description": "Pinned commit."
+              },
+              "fetched": {
+                "type": "string",
+                "description": "RFC 3339 UTC fetch timestamp, when recorded."
+              }
+            }
+          }
+        }
+      }
+    },
+    "locked_packs": {
+      "type": "array",
+      "description": "Full packs.lock closure (direct and transitive pins), sorted by source.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "version",
+          "commit"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Locked pack source."
+          },
+          "version": {
+            "type": "string",
+            "description": "Pinned version."
+          },
+          "commit": {
+            "type": "string",
+            "description": "Pinned commit."
+          },
+          "fetched": {
+            "type": "string",
+            "description": "RFC 3339 UTC fetch timestamp, when recorded."
+          }
+        }
+      }
+    }
+  }
+}

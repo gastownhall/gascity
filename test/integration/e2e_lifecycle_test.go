@@ -117,13 +117,8 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 	safeName := strings.ReplaceAll("suspendee", "/", "__")
 	_ = removeFile(cityDir + "/.gc-reports/" + safeName + ".report")
 
-	// Reconcile (gc start) — suspended agent should NOT restart.
-	out, err = gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start after suspend failed: %v\noutput: %s", err, out)
-	}
-
-	// Brief wait — no report should appear.
+	// The controller is already running. Brief wait — no report should appear
+	// while the agent remains suspended.
 	time.Sleep(1 * time.Second)
 	reportPath := cityDir + "/.gc-reports/" + safeName + ".report"
 	if fileExists(reportPath) {
@@ -136,12 +131,8 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 		t.Fatalf("gc agent resume failed: %v\noutput: %s", err, out)
 	}
 
-	// Reconcile again — agent should restart.
-	out, err = gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start after resume failed: %v\noutput: %s", err, out)
-	}
-
+	// The controller is already running, so resume alone should let it wake
+	// the agent again.
 	report := waitForReport(t, cityDir, "suspendee", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("resumed agent did not restart")
@@ -175,12 +166,8 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 	safeName := strings.ReplaceAll("citysus", "/", "__")
 	_ = removeFile(cityDir + "/.gc-reports/" + safeName + ".report")
 
-	// Reconcile — should NOT start agents while city is suspended.
-	out, err = gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start after city suspend failed: %v\noutput: %s", err, out)
-	}
-
+	// The controller is already running. While the city is suspended it
+	// should not restart agents on its own.
 	time.Sleep(1 * time.Second)
 	reportPath := cityDir + "/.gc-reports/" + safeName + ".report"
 	if fileExists(reportPath) {
@@ -193,21 +180,16 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 		t.Fatalf("gc resume failed: %v\noutput: %s", err, out)
 	}
 
-	// Reconcile — agents should restart.
-	out, err = gc("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start after resume failed: %v\noutput: %s", err, out)
-	}
-
+	// Resume should allow the running controller to restart the agent.
 	report := waitForReport(t, cityDir, "citysus", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("agent did not restart after city resume")
 	}
 }
 
-// TestE2E_StartIdempotent verifies that running gc start twice is a no-op
-// for already-running agents.
-func TestE2E_StartIdempotent(t *testing.T) {
+// TestE2E_StartIsIdempotentForSupervisorManagedCity verifies that gc start
+// succeeds when the city is already running under the supervisor.
+func TestE2E_StartIsIdempotentForSupervisorManagedCity(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
 			{Name: "idem", StartCommand: e2eReportScript()},
@@ -215,19 +197,17 @@ func TestE2E_StartIdempotent(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	// Wait for initial report.
+	// Wait for initial report so the city is fully up.
 	waitForReport(t, cityDir, "idem", e2eDefaultTimeout())
 
-	// Start again — should be a no-op.
+	// Start again. setupE2ECity creates a supervisor-managed city, and
+	// re-registering an already managed city is intentionally idempotent.
 	out, err := gc("", "start", cityDir)
 	if err != nil {
 		t.Fatalf("gc start (second) failed: %v\noutput: %s", err, out)
 	}
-
-	// Agent should still have its original report (not restarted).
-	report := waitForReport(t, cityDir, "idem", e2eDefaultTimeout())
-	if report.get("STATUS") != "complete" {
-		t.Error("agent lost its report after idempotent start")
+	if !strings.Contains(out, "City started under supervisor.") {
+		t.Fatalf("gc start (second) output = %q, want supervisor start success", out)
 	}
 }
 

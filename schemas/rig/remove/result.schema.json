@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "name", "rig"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "rig remove" },
+    "action": { "const": "remove" },
+    "name": { "type": "string" },
+    "rig": { "type": "string" }
+  },
+  "additionalProperties": true
+}

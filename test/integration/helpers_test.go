@@ -6,11 +6,16 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -26,18 +31,22 @@ func usingSubprocess() bool {
 }
 
 // uniqueCityName generates a random city name for test isolation.
+//
+// Names like "gctest-{hex}" all derive to Dolt DB prefix "gc" via
+// DeriveBeadsPrefix, causing dirty-table schema migration failures when
+// tests share a Dolt server and a prior run crashes. Instead, generate
+// a 6-letter random name: DeriveBeadsPrefix returns the first 2 chars,
+// giving 26² = 676 distinct prefixes across the test suite.
 func uniqueCityName() string {
-	b := make([]byte, 4)
+	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		panic("generating random city name: " + err.Error())
 	}
-	hex := fmt.Sprintf("%x", b)
-	parts := make([]string, 0, len(hex)+1)
-	parts = append(parts, "gctest")
-	for _, r := range hex {
-		parts = append(parts, string(r))
+	name := make([]byte, 6)
+	for i, c := range b {
+		name[i] = 'a' + c%26
 	}
-	return strings.Join(parts, "-")
+	return string(name)
 }
 
 // setupCity creates a city directory, initializes it, writes a city.toml
@@ -48,6 +57,7 @@ func uniqueCityName() string {
 // subprocess, guard may be nil (cleanup is via gc stop in t.Cleanup).
 func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	var cityName string
 	if guard != nil {
@@ -58,25 +68,27 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
-	// gc init — front door. Skip provider readiness because CI
-	// doesn't have claude/codex/gemini installed.
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+	configPath := filepath.Join(t.TempDir(), cityName+".toml")
+	writeAgentsToml(t, filepath.Dir(configPath), cityName, agents)
+	if err := os.Rename(filepath.Join(filepath.Dir(configPath), "city.toml"), configPath); err != nil {
+		t.Fatalf("moving config template: %v", err)
 	}
 
-	// Overwrite city.toml with our agent config.
-	writeAgentsToml(t, cityDir, cityName, agents)
-
-	// gc start — front door.
-	out, err = gc("", "start", cityDir)
+	// gc init --file seeds the city directly from the intended config instead
+	// of creating the minimal scaffold and mutating it afterward.
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
+
+	waitForExpectedTmuxSessions(t, cityDir, agentNames(agents))
 
 	// Register cleanup: gc stop on test end.
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
 	// Give sessions a moment to register.
@@ -102,13 +114,153 @@ func setupRunningCity(t *testing.T, guard *tmuxtest.Guard) string {
 	})
 }
 
+func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cityDir string) {
+	t.Helper()
+
+	var (
+		out          string
+		err          error
+		sawTransient bool
+	)
+	for attempt := 1; attempt <= 2; attempt++ {
+		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+		if err == nil {
+			if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr != nil {
+				t.Fatalf("gc init succeeded but managed Dolt city never became ready: %v\nlast bd output: %s", readyErr, readyOut)
+			}
+			return
+		}
+
+		transient := isTransientManagedDoltInitFailure(out)
+		alreadyInitialized := isAlreadyInitializedGCInitFailure(out)
+		if !transient && !(sawTransient && alreadyInitialized) {
+			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+		}
+		sawTransient = sawTransient || transient
+
+		if attempt < 2 {
+			t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+	}
+
+	startOut, startErr := runGCDoltWithEnv(env, "", "start", cityDir)
+	if startErr != nil && !isGCStartAlreadyRunning(startOut) && !isTransientManagedDoltInitFailure(startOut) {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
+	}
+	if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr == nil {
+		t.Log("recovered partially initialized city after transient managed Dolt startup failure")
+		return
+	} else {
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s\ncity never became ready: %v\nlast bd output: %s", err, out, startErr, startOut, readyErr, readyOut)
+	}
+}
+
+func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var (
+		lastOut string
+		lastErr error
+	)
+	for time.Now().Before(deadline) {
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+			)
+			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out after %s waiting for managed Dolt city readiness", timeout)
+	}
+	return lastOut, lastErr
+}
+
+func isTransientManagedDoltInitFailure(out string) bool {
+	msg := strings.ToLower(out)
+	return strings.Contains(msg, "dolt server exited during startup") ||
+		strings.Contains(msg, "did not become query-ready after 30s") ||
+		strings.Contains(msg, "supervisor did not become ready") ||
+		strings.Contains(msg, "supervisor did not start") ||
+		strings.Contains(msg, "supervisor stopped before city became ready")
+}
+
+func isAlreadyInitializedGCInitFailure(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already initialized")
+}
+
+func isGCStartAlreadyRunning(out string) bool {
+	return strings.Contains(strings.ToLower(out), "already running")
+}
+
+func agentNames(agents []agentConfig) []string {
+	names := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		names = append(names, agent.Name)
+	}
+	return names
+}
+
+func waitForExpectedTmuxSessions(t *testing.T, cityDir string, expectedAgents []string) {
+	t.Helper()
+
+	if usingSubprocess() {
+		time.Sleep(500 * time.Millisecond)
+		return
+	}
+
+	socketName := filepath.Base(cityDir)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
+		listOut, listErr := cmd.CombinedOutput()
+		if listErr == nil {
+			sessions := string(listOut)
+			allPresent := true
+			for _, agent := range expectedAgents {
+				expected := strings.ReplaceAll(agent, "/", "--")
+				if !strings.Contains(sessions, expected) {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	cmd := exec.Command("tmux", "-L", socketName, "list-sessions", "-F", "#{session_name}")
+	listOut, _ := cmd.CombinedOutput()
+	sessionOut, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("expected tmux sessions never appeared on socket %q\nsessions:\n%s\ntmux:\n%s", socketName, sessionOut, listOut)
+}
+
 // writeAgentsToml writes a city.toml with the given agents.
 func writeAgentsToml(t *testing.T, cityDir, cityName string, agents []agentConfig) {
 	t.Helper()
-	content := "[workspace]\nname = " + quote(cityName) + "\n"
+	content := "[workspace]\nname = " + quote(cityName) + "\n\n[beads]\nprovider = \"file\"\n"
 	for _, a := range agents {
 		content += fmt.Sprintf("\n[[agent]]\nname = %s\nstart_command = %s\n",
 			quote(a.Name), quote(a.StartCommand))
+		content += fmt.Sprintf("\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n",
+			quote(a.Name))
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
@@ -133,5 +285,77 @@ func writeCityToml(t *testing.T, cityDir, cityName, startCommand string) {
 
 // quote returns a TOML-safe quoted string.
 func quote(s string) string {
-	return "\"" + s + "\""
+	return strconv.Quote(s)
+}
+
+func packTomlWithCoreImport(t testing.TB, packName string) string {
+	t.Helper()
+
+	source, ok := builtinpacks.Source("core")
+	if !ok {
+		t.Fatal("builtin core pack source is not registered")
+	}
+	return fmt.Sprintf("[pack]\nname = %s\nschema = 2\n\n[imports.core]\nsource = %s\nversion = %s\n",
+		quote(packName),
+		quote(source),
+		quote(config.BundledSourcePinnedVersion(source)),
+	)
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	return findModuleRoot()
+}
+
+func filterEnvMany(env []string, prefixes ...string) []string {
+	if len(prefixes) == 0 {
+		return append([]string(nil), env...)
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		keep := true
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry, prefix+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// extractBeadID parses a bead ID from bd or gc output.
+func extractBeadID(t *testing.T, output string) string {
+	t.Helper()
+
+	re := regexp.MustCompile(`\b(?:bd|gc|mc)-[A-Za-z0-9]+\b`)
+	if match := re.FindString(output); match != "" {
+		return match
+	}
+
+	for _, prefix := range []string{"Created bead: ", "Created issue: "} {
+		if idx := strings.Index(output, prefix); idx >= 0 {
+			rest := output[idx+len(prefix):]
+			fields := strings.Fields(rest)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "bd-") || strings.HasPrefix(line, "gc-") || strings.HasPrefix(line, "mc-") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+
+	t.Fatalf("could not parse bead ID from output: %s", output)
+	return ""
 }

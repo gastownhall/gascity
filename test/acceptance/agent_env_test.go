@@ -24,7 +24,7 @@ import (
 // without errors and produces city-scoped agents.
 func TestConfigLoad_GastownCityAgents(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil {
@@ -43,11 +43,11 @@ func TestConfigLoad_GastownCityAgents(t *testing.T) {
 	}
 }
 
-// TestConfigLoad_TutorialAgent verifies the tutorial config produces
+// TestConfigLoad_MinimalAgent verifies the minimal config produces
 // at least one agent.
-func TestConfigLoad_TutorialAgent(t *testing.T) {
+func TestConfigLoad_MinimalAgent(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestConfigLoad_TutorialAgent(t *testing.T) {
 	}
 
 	if !strings.Contains(out, "Agent:") {
-		t.Fatal("config explain shows no agents for tutorial config")
+		t.Fatal("config explain shows no agents for minimal config")
 	}
 }
 
@@ -63,16 +63,13 @@ func TestConfigLoad_TutorialAgent(t *testing.T) {
 // rig loads without pack errors.
 func TestConfigLoad_GastownWithRig(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rigDir := filepath.Join(c.Dir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"myrig\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/gastown\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/gastown")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
@@ -88,7 +85,7 @@ func TestConfigLoad_SwarmConfig(t *testing.T) {
 	}
 
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(swarmDir)
+	c.InitFromNoStart(swarmDir)
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created for swarm config")
@@ -98,13 +95,14 @@ func TestConfigLoad_SwarmConfig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"swarm\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/swarm\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/swarm")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {
 		t.Fatalf("swarm config has missing pack references:\n%s", out)
+	}
+	if !strings.Contains(out, "mayor") {
+		t.Fatalf("swarm config explain missing swarm mayor:\n%s", out)
 	}
 }
 
@@ -117,7 +115,7 @@ func TestConfigLoad_LifecycleWithRig(t *testing.T) {
 	}
 
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(lifecycleDir)
+	c.InitFromNoStart(lifecycleDir)
 
 	if !c.HasFile("city.toml") {
 		t.Fatal("city.toml not created for lifecycle config")
@@ -127,9 +125,7 @@ func TestConfigLoad_LifecycleWithRig(t *testing.T) {
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := c.ReadFile("city.toml")
-	toml += "\n[[rigs]]\nname = \"lifecycle\"\npath = \"" + rigDir + "\"\nincludes = [\"packs/lifecycle\"]\n"
-	c.WriteConfig(toml)
+	c.RigAdd(rigDir, "packs/lifecycle")
 
 	out, err := c.GC("config", "explain", "--city", c.Dir)
 	if err != nil && strings.Contains(out, "pack.toml: no such file") {

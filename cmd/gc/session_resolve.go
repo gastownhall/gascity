@@ -25,8 +25,9 @@ func resolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 }
 
 type namedSessionResolveOptions struct {
-	allowClosed bool
-	materialize bool
+	allowClosed         bool
+	materialize         bool
+	materializeMetadata map[string]string
 }
 
 const templateTargetPrefix = "template:"
@@ -37,21 +38,6 @@ type templateTarget struct {
 }
 
 var errNamedSessionConflict = errors.New("configured named session conflict")
-
-func resolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
-	if store == nil {
-		return "", fmt.Errorf("session store unavailable")
-	}
-	b, err := store.Get(identifier)
-	if err == nil && session.IsSessionBeadOrRepairable(b) {
-		session.RepairEmptyType(store, &b)
-		return b.ID, nil
-	}
-	if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return "", fmt.Errorf("looking up session %q: %w", identifier, err)
-	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-}
 
 func resolveConfiguredNamedSessionID(
 	cityPath string,
@@ -64,36 +50,38 @@ func resolveConfiguredNamedSessionID(
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
-	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, store, identifier)
+	spec, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier)
 	if err != nil {
 		return "", false, err
 	}
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	snapshot, err := loadSessionBeadSnapshot(store)
+	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
-		return "", true, err
+		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
-	if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-		return bead.ID, true, nil
+	if lookup.HasCanonical {
+		return lookup.Canonical.ID, true, nil
 	}
 	// When materializing, check for a closed bead with this identity and
 	// reopen it (preserves bead ID for reference continuity).
 	if opts.materialize {
-		if bead, ok := reopenClosedConfiguredNamedSessionBead(
-			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), io.Discard,
+		if bead, _, ok := reopenClosedConfiguredNamedSessionBead(
+			cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, io.Discard,
 		); ok {
 			return bead.ID, true, nil
 		}
 	}
-	if bead, conflict := findNamedSessionConflict(snapshot, spec); conflict {
-		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, bead.ID)
+	if lookup.HasConflict {
+		return "", true, fmt.Errorf("%w: %q conflicts with configured named session %q via live bead %s", errNamedSessionConflict, identifier, spec.Identity, lookup.Conflict.ID)
 	}
 	if !opts.materialize {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	id, err := ensureSessionIDForTemplate(cityPath, cfg, store, spec.Identity, io.Discard)
+	id, err := ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, spec.Identity, io.Discard, ensureSessionForTemplateOptions{
+		materializeMetadata: opts.materializeMetadata,
+	})
 	return id, true, err
 }
 
@@ -109,15 +97,11 @@ func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
 }
 
-func allowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
-	if cfg == nil {
-		return true
-	}
-	agentCfg, ok := resolveSessionTemplate(cfg, identifier, currentRigContext(cfg))
-	if !ok {
-		return true
-	}
-	return !isMultiSessionCfgAgent(&agentCfg)
+func resolveSessionIDMaterializingNamedWithMetadata(cityPath string, cfg *config.City, store beads.Store, identifier string, metadata map[string]string) (string, error) {
+	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{
+		materialize:         true,
+		materializeMetadata: metadata,
+	})
 }
 
 func parseTemplateTarget(identifier string) (templateTarget, bool) {
@@ -145,40 +129,43 @@ func resolveSessionIDWithOptions(
 	if store == nil {
 		return "", fmt.Errorf("session store unavailable")
 	}
-	if tmpl, ok := parseTemplateTarget(identifier); ok {
-		if !opts.materialize {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-		}
-		return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, tmpl.template, io.Discard, ensureSessionForTemplateOptions{forceFresh: tmpl.forceFresh})
+	if _, ok := parseTemplateTarget(identifier); ok {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if id, err := resolveSessionIDByExactID(store, identifier); err == nil {
+	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if opts.materialize {
-		if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
+	if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
+		return id, nil
+	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
+		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
 	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+		if cfg != nil {
+			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
+				if isNamedSessionInfo(info) {
+					identity := namedSessionIdentityInfo(info)
+					if identity != "" && config.FindNamedSession(cfg, identity) == nil {
+						return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+					}
+				}
+			}
+		}
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if !opts.materialize {
-		if id, matched, err := resolveConfiguredNamedSessionID(cityPath, cfg, store, identifier, opts); err == nil {
-			return id, nil
-		} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
-		}
+	if id, err := resolveOpenQualifiedAliasBasename(store, identifier); err == nil {
+		return id, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
 	}
 	if opts.allowClosed {
 		if cfg != nil {
 			cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
-			if _, ok, err := findNamedSessionSpecForTarget(cfg, cityName, store, identifier); err != nil {
+			if _, ok, err := findNamedSessionSpecForTarget(cfg, cityName, identifier); err != nil {
 				return "", err
 			} else if ok {
 				return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
@@ -190,18 +177,45 @@ func resolveSessionIDWithOptions(
 			return "", err
 		}
 	}
-	if !opts.materialize {
+	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+}
+
+func resolveOpenQualifiedAliasBasename(store beads.Store, identifier string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if store == nil || identifier == "" || strings.Contains(identifier, "/") {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	if !allowImplicitTemplateMaterialization(cfg, identifier) {
+	sessFront := sessionFrontDoor(store)
+	all, err := sessFront.ListAll(session.ListAllOptions{})
+	if err != nil {
+		return "", fmt.Errorf("listing sessions: %w", err)
+	}
+	matches := make([]session.Info, 0, 1)
+	for _, info := range all {
+		// ListAll already filters via IsSessionBeadOrRepairable and excludes
+		// closed beads; the info.Closed guard is kept defensively.
+		if info.Closed {
+			continue
+		}
+		if info.Type == "" {
+			sessFront.RepairTypeBestEffort(info.ID)
+		}
+		alias := strings.TrimSpace(info.Alias)
+		if alias == "" || !strings.Contains(alias, "/") || session.TargetBasename(alias) != identifier {
+			continue
+		}
+		matches = append(matches, info)
+	}
+	switch len(matches) {
+	case 0:
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		labels := make([]string, 0, len(matches))
+		for _, match := range matches {
+			labels = append(labels, fmt.Sprintf("%s (%s)", match.ID, strings.TrimSpace(match.Alias)))
+		}
+		return "", fmt.Errorf("%w: %q matches %d sessions: %s", session.ErrAmbiguous, identifier, len(matches), strings.Join(labels, ", "))
 	}
-	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, io.Discard)
-	if err == nil {
-		return sessionID, nil
-	}
-	if errors.Is(err, errTemplateTargetNotFound) {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
-	}
-	return "", err
 }

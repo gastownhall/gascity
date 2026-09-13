@@ -116,6 +116,48 @@ func TestExpandStep(t *testing.T) {
 	}
 }
 
+func TestExpandStepSubstitutesStepTimeout(t *testing.T) {
+	target := &Step{
+		ID:    "build",
+		Title: "Build",
+	}
+	template := []*Step{
+		{
+			ID:      "{target}.check",
+			Title:   "Check {target.title}",
+			Timeout: "{step_timeout}",
+			Ralph: &RalphSpec{
+				MaxAttempts: 2,
+				Check: &RalphCheckSpec{
+					Mode:    "exec",
+					Path:    "checks/{target.id}.sh",
+					Timeout: "{check_timeout}",
+				},
+			},
+		},
+	}
+
+	result, err := expandStep(target, template, 0, map[string]string{
+		"step_timeout":  "10m",
+		"check_timeout": "30s",
+	})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if result[0].Timeout != "10m" {
+		t.Fatalf("Timeout = %q, want 10m", result[0].Timeout)
+	}
+	if result[0].Ralph == nil || result[0].Ralph.Check == nil {
+		t.Fatal("expanded Ralph check is nil")
+	}
+	if result[0].Ralph.Check.Timeout != "30s" {
+		t.Fatalf("Ralph.Check.Timeout = %q, want 30s", result[0].Ralph.Check.Timeout)
+	}
+}
+
 func TestExpandStepDepthLimit(t *testing.T) {
 	target := &Step{
 		ID:          "root",
@@ -371,6 +413,178 @@ func TestApplyExpansions(t *testing.T) {
 	})
 }
 
+// TestApplyExpansionsPreservesOversizedDescriptionFileStubPath pins
+// gastownhall/gascity#4860: an expansion template step whose description_file
+// is too large to inline (> descriptionFileInlineMaxBytes) gets its
+// Description replaced with an external-prompt stub that embeds the resolved
+// on-disk path. That resolved path is computed once, at parse time, against
+// the LITERAL description_file value — including any "{target}" placeholder
+// text the on-disk asset name itself still contains. Expansion then
+// substitutes "{target}" throughout the template's Description text for
+// every other legitimate use of the placeholder, which — before the fix —
+// also corrupted the already-resolved path embedded in the stub, redirecting
+// the agent at a file that was never shipped (ENOENT).
+func TestApplyExpansionsPreservesOversizedDescriptionFileStubPath(t *testing.T) {
+	tmp := t.TempDir()
+	formulasDir := filepath.Join(tmp, "pack", "formulas")
+	assetsDir := filepath.Join(tmp, "pack", "assets")
+	for _, dir := range []string{formulasDir, assetsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// The shipped asset is literally named "{target}.md" (braces included) —
+	// exactly the gastownhall/gascity#4860 reproduction. Content must exceed
+	// descriptionFileInlineMaxBytes so resolveDescriptionFiles emits the
+	// external-prompt stub instead of inlining the content.
+	largeContent := strings.Repeat("large prompt body\n", descriptionFileInlineMaxBytes/16+128)
+	if len(largeContent) <= descriptionFileInlineMaxBytes {
+		t.Fatalf("test asset length = %d, want > %d", len(largeContent), descriptionFileInlineMaxBytes)
+	}
+	assetPath := filepath.Join(assetsDir, "{target}.md")
+	if err := os.WriteFile(assetPath, []byte(largeContent), 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	expansionFormula := `{
+		"formula": "review-pass",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"audience": {"default": "operators"}
+		},
+		"template": [
+			{"id": "{target}.review", "title": "Review {target.title}", "description_file": "../assets/{target}.md"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(formulasDir, "review-pass.formula.json"), []byte(expansionFormula), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	parser := NewParser(formulasDir)
+	steps := []*Step{{ID: "contract", Title: "Contract"}}
+	compose := &ComposeRules{
+		Expand: []*ExpandRule{
+			{
+				Target: "contract",
+				With:   "review-pass",
+				Vars:   map[string]string{"audience": "security reviewers"},
+			},
+		},
+	}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 expanded step, got %d", len(result))
+	}
+	if result[0].ID != "contract.review" {
+		t.Fatalf("result[0].ID = %q, want contract.review", result[0].ID)
+	}
+
+	wantDescription := descriptionFileReferenceDescription(
+		"../assets/contract.md",
+		assetPath,
+		len(largeContent),
+		map[string]*VarDef{"audience": {}},
+	)
+	wantDescription = strings.ReplaceAll(wantDescription, "{{audience}}", "security reviewers")
+	if result[0].Description != wantDescription {
+		t.Fatalf("Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", result[0].Description, wantDescription)
+	}
+	if result[0].DescriptionFileResolvedPath != assetPath {
+		t.Fatalf("DescriptionFileResolvedPath = %q, want %q", result[0].DescriptionFileResolvedPath, assetPath)
+	}
+}
+
+func TestExpandStepPreservesProtectedStubThroughTargetDescription(t *testing.T) {
+	resolvedPath := "/tmp/pack/assets/{audience}.md"
+	target := &Step{
+		ID:                          "contract",
+		Title:                       "Contract",
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, nil),
+		DescriptionFileResolvedPath: resolvedPath,
+	}
+
+	first, err := expandStep(target, []*Step{{
+		ID:          "{target}.wrapped",
+		Title:       "Wrap {target.title}",
+		Description: "Wrapper:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "security"})
+	if err != nil {
+		t.Fatalf("first expandStep: %v", err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("first expansion produced %d steps, want 1", len(first))
+	}
+	wantWrapped := "Wrapper:\n\n" + descriptionFileReferenceDescription(
+		"../assets/security.md",
+		resolvedPath,
+		5000,
+		nil,
+	)
+	if first[0].Description != wantWrapped {
+		t.Fatalf("first Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", first[0].Description, wantWrapped)
+	}
+	if first[0].DescriptionFileResolvedPath != resolvedPath {
+		t.Fatalf("first DescriptionFileResolvedPath = %q, want %q", first[0].DescriptionFileResolvedPath, resolvedPath)
+	}
+
+	second, err := expandStep(first[0], []*Step{{
+		ID:          "{target}.outer",
+		Title:       "Outer {target.title}",
+		Description: "Outer:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "platform"})
+	if err != nil {
+		t.Fatalf("second expandStep: %v", err)
+	}
+	if len(second) != 1 {
+		t.Fatalf("second expansion produced %d steps, want 1", len(second))
+	}
+	wantNested := "Outer:\n\n" + wantWrapped
+	if second[0].Description != wantNested {
+		t.Fatalf("nested Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", second[0].Description, wantNested)
+	}
+	if second[0].DescriptionFileResolvedPath != resolvedPath {
+		t.Fatalf("nested DescriptionFileResolvedPath = %q, want %q", second[0].DescriptionFileResolvedPath, resolvedPath)
+	}
+}
+
+func TestExpandStepPreservesFormulaVarsThroughTargetDescription(t *testing.T) {
+	resolvedPath := "/tmp/pack/assets/{audience}.md"
+	varDefs := map[string]*VarDef{"audience": {}}
+	target := &Step{
+		ID:                          "contract",
+		Description:                 descriptionFileReferenceDescription("../assets/{audience}.md", resolvedPath, 5000, varDefs),
+		DescriptionFileResolvedPath: resolvedPath,
+	}
+
+	result, err := expandStep(target, []*Step{{
+		ID:          "{target}.wrapped",
+		Description: "Wrapper:\n\n{target.description}",
+	}}, 0, map[string]string{"audience": "security reviewers"})
+	if err != nil {
+		t.Fatalf("expandStep: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expandStep produced %d steps, want 1", len(result))
+	}
+
+	want := "Wrapper:\n\n" + descriptionFileReferenceDescription(
+		"../assets/security reviewers.md",
+		resolvedPath,
+		5000,
+		varDefs,
+	)
+	want = strings.ReplaceAll(want, "{{audience}}", "security reviewers")
+	if result[0].Description != want {
+		t.Fatalf("Description mismatch:\n--- got ---\n%s\n--- want ---\n%s", result[0].Description, want)
+	}
+}
+
 func TestBuildStepMap(t *testing.T) {
 	steps := []*Step{
 		{
@@ -558,6 +772,33 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	conditionalDuplicateExpansion := `{
+		"formula": "conditional-duplicate-expand",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	err = os.WriteFile(filepath.Join(tmpDir, "conditional-duplicate-expand.formula.json"), []byte(conditionalDuplicateExpansion), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unresolvedConditionExpansion := `{
+		"formula": "unresolved-condition-expand",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.maybe", "title": "Maybe", "condition": "{{flag}}"}
+		]
+	}`
+	err = os.WriteFile(filepath.Join(tmpDir, "unresolved-condition-expand.formula.json"), []byte(unresolvedConditionExpansion), 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	parser := NewParser(tmpDir)
 
 	t.Run("expand with var overrides", func(t *testing.T) {
@@ -670,7 +911,7 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		}
 	})
 
-	t.Run("expand preserves condition expressions for later filtering", func(t *testing.T) {
+	t.Run("expand materializes condition expressions with caller vars", func(t *testing.T) {
 		steps := []*Step{{ID: "release", Title: "Release"}}
 		compose := &ComposeRules{
 			Expand: []*ExpandRule{
@@ -681,8 +922,65 @@ func TestApplyExpansionsWithVars(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyExpansionsWithVars failed: %v", err)
 		}
+		if got := result[0].Condition; got != "" {
+			t.Fatalf("condition = %q, want empty after vars-aware materialization", got)
+		}
+	})
+
+	t.Run("expand preserves condition expressions without vars or defaults", func(t *testing.T) {
+		steps := []*Step{{ID: "release", Title: "Release"}}
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "release", With: "conditional-expand"},
+			},
+		}
+		result, err := ApplyExpansions(steps, compose, parser)
+		if err != nil {
+			t.Fatalf("ApplyExpansions failed: %v", err)
+		}
 		if got := result[0].Condition; got != "!{{skip}}" {
-			t.Fatalf("condition = %q, want %q", got, "!{{skip}}")
+			t.Fatalf("condition = %q, want !{{skip}} preserved when unresolved", got)
+		}
+	})
+
+	t.Run("expand preserves unresolved condition expressions for later filtering", func(t *testing.T) {
+		steps := []*Step{{ID: "release", Title: "Release"}}
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "release", With: "unresolved-condition-expand"},
+			},
+		}
+		result, err := ApplyExpansionsWithVars(steps, compose, parser, map[string]string{"mode": "fast"})
+		if err != nil {
+			t.Fatalf("ApplyExpansionsWithVars failed: %v", err)
+		}
+		if len(result) != 1 {
+			t.Fatalf("len(result) = %d, want 1", len(result))
+		}
+		if got := result[0].Condition; got != "{{flag}}" {
+			t.Fatalf("condition = %q, want unresolved condition preserved", got)
+		}
+	})
+
+	t.Run("expand allows conditionally exclusive duplicate template ids", func(t *testing.T) {
+		steps := []*Step{{ID: "release", Title: "Release"}}
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{
+				{Target: "release", With: "conditional-duplicate-expand"},
+			},
+		}
+		result, err := ApplyExpansionsWithVars(steps, compose, parser, map[string]string{"mode": "fast"})
+		if err != nil {
+			t.Fatalf("ApplyExpansionsWithVars failed: %v", err)
+		}
+		if len(result) != 1 {
+			t.Fatalf("len(result) = %d, want 1", len(result))
+		}
+		if got := result[0].ID; got != "release.attempt" {
+			t.Fatalf("result[0].ID = %q, want release.attempt", got)
+		}
+		if got := result[0].Condition; got != "" {
+			t.Fatalf("result[0].Condition = %q, want empty after materialization", got)
 		}
 	})
 
@@ -1031,6 +1329,376 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 	})
 }
 
+func TestApplyInlineExpansionsAllowsLegacyRetryTemplateWithoutRequirement(t *testing.T) {
+	enableV2ForTest(t)
+
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-legacy-retry",
+		"type": "expansion",
+		"template": [
+			{
+				"id": "{target}.attempt",
+				"title": "Attempt",
+				"retry": {"max_attempts": 2}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-legacy-retry.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work", Expand: "inline-legacy-retry"},
+	}
+
+	got, err := ApplyInlineExpansions(steps, parser)
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions: %v", err)
+	}
+	if len(got) != 1 || got[0].Retry == nil {
+		t.Fatalf("expanded steps = %+v, want retry template preserved", got)
+	}
+}
+
+func TestApplyExpansionsAllowsLegacyRetryTemplateWithoutRequirement(t *testing.T) {
+	enableV2ForTest(t)
+
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "compose-legacy-retry",
+		"type": "expansion",
+		"template": [
+			{
+				"id": "{target}.attempt",
+				"title": "Attempt",
+				"retry": {"max_attempts": 2}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "compose-legacy-retry.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work"},
+	}
+	compose := &ComposeRules{
+		Expand: []*ExpandRule{
+			{Target: "work", With: "compose-legacy-retry"},
+		},
+	}
+
+	got, err := ApplyExpansions(steps, compose, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions: %v", err)
+	}
+	if len(got) != 1 || got[0].Retry == nil {
+		t.Fatalf("expanded steps = %+v, want retry template preserved", got)
+	}
+}
+
+func TestApplyInlineExpansionsResolvesExtendedExpansionTemplate(t *testing.T) {
+	enableV2ForTest(t)
+
+	tmpDir := t.TempDir()
+
+	parent := `{
+		"formula": "inline-exp-parent",
+		"type": "expansion",
+		"version": 2,
+		"contract": "graph.v2"
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-exp-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	child := `{
+		"formula": "inline-exp-child",
+		"type": "expansion",
+		"version": 2,
+		"extends": ["inline-exp-parent"],
+		"template": [
+			{
+				"id": "{target}.attempt",
+				"title": "Attempt",
+				"retry": {"max_attempts": 2}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-exp-child.formula.json"), []byte(child), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work", Expand: "inline-exp-child"},
+	}
+
+	result, err := ApplyInlineExpansions(steps, parser)
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansions failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].ID; got != "work.attempt" {
+		t.Fatalf("result[0].ID = %q, want work.attempt", got)
+	}
+	if result[0].Retry == nil {
+		t.Fatal("result[0].Retry = nil, want retry spec preserved")
+	}
+}
+
+func TestApplyExpansionsResolvesExtendedExpansionTemplate(t *testing.T) {
+	enableV2ForTest(t)
+
+	tmpDir := t.TempDir()
+
+	parent := `{
+		"formula": "compose-exp-parent",
+		"type": "expansion",
+		"version": 2,
+		"contract": "graph.v2"
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "compose-exp-parent.formula.json"), []byte(parent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	child := `{
+		"formula": "compose-exp-child",
+		"type": "expansion",
+		"version": 2,
+		"extends": ["compose-exp-parent"],
+		"template": [
+			{
+				"id": "{target}.attempt",
+				"title": "Attempt",
+				"retry": {"max_attempts": 2}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "compose-exp-child.formula.json"), []byte(child), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work"},
+	}
+	compose := &ComposeRules{
+		Expand: []*ExpandRule{
+			{Target: "work", With: "compose-exp-child"},
+		},
+	}
+
+	result, err := ApplyExpansions(steps, compose, parser)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].ID; got != "work.attempt" {
+		t.Fatalf("result[0].ID = %q, want work.attempt", got)
+	}
+	if result[0].Retry == nil {
+		t.Fatal("result[0].Retry = nil, want retry spec preserved")
+	}
+}
+
+func TestApplyInlineExpansionsDetectsConflictingParentTemplateIDs(t *testing.T) {
+	enableV2ForTest(t)
+
+	tmpDir := t.TempDir()
+
+	parentA := `{
+		"formula": "inline-parent-a",
+		"type": "expansion",
+		"version": 2,
+		"contract": "graph.v2",
+		"template": [
+			{"id": "{target}.attempt", "title": "Attempt A"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-parent-a.formula.json"), []byte(parentA), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parentB := `{
+		"formula": "inline-parent-b",
+		"type": "expansion",
+		"version": 2,
+		"contract": "graph.v2",
+		"template": [
+			{"id": "{target}.attempt", "title": "Attempt B"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-parent-b.formula.json"), []byte(parentB), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	child := `{
+		"formula": "inline-exp-conflict",
+		"type": "expansion",
+		"version": 2,
+		"extends": ["inline-parent-a", "inline-parent-b"]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-exp-conflict.formula.json"), []byte(child), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work", Expand: "inline-exp-conflict"},
+	}
+
+	_, err := ApplyInlineExpansions(steps, parser)
+	if err == nil {
+		t.Fatal("ApplyInlineExpansions succeeded, want duplicate step ID error")
+	}
+	if !strings.Contains(err.Error(), "duplicate step IDs after inline expansion") {
+		t.Fatalf("ApplyInlineExpansions error = %v, want duplicate step ID error", err)
+	}
+}
+
+func TestApplyInlineExpansionsWithVarsAllowsConditionallyExclusiveDuplicateTemplateIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-conditional-duplicate",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-conditional-duplicate.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work", Expand: "inline-conditional-duplicate"},
+	}
+
+	result, err := ApplyInlineExpansionsWithVars(steps, parser, map[string]string{"mode": "fast"})
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansionsWithVars failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].ID; got != "work.attempt" {
+		t.Fatalf("result[0].ID = %q, want work.attempt", got)
+	}
+	if got := result[0].Condition; got != "" {
+		t.Fatalf("result[0].Condition = %q, want empty after materialization", got)
+	}
+}
+
+func TestApplyInlineExpansionsWithVarsResolvesForwardedParentVarOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	expansion := `{
+		"formula": "inline-route-target",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"implementation_run_target": {"default": "default-worker"}
+		},
+		"template": [
+			{
+				"id": "{target}.fix",
+				"title": "Fix",
+				"metadata": {"gc.run_target": "{implementation_run_target}"}
+			}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inline-route-target.formula.json"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{
+			ID:     "review",
+			Title:  "Review",
+			Expand: "inline-route-target",
+			ExpandVars: map[string]string{
+				"implementation_run_target": "{{worker_target}}",
+			},
+		},
+	}
+
+	result, err := ApplyInlineExpansionsWithVars(steps, parser, map[string]string{"worker_target": "custom-worker"})
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansionsWithVars failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].Metadata["gc.run_target"]; got != "custom-worker" {
+		t.Fatalf("gc.run_target = %q, want custom-worker", got)
+	}
+}
+
+func TestApplyInlineExpansionsWithVarsCarriesExpansionVarsIntoNestedInlineExpansions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	inner := `{
+		"formula": "inner-nested-conditional",
+		"type": "expansion",
+		"version": 1,
+		"template": [
+			{"id": "{target}.attempt", "title": "Fast attempt", "condition": "{{mode}} == fast"},
+			{"id": "{target}.attempt", "title": "Slow attempt", "condition": "{{mode}} == slow"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "inner-nested-conditional.formula.json"), []byte(inner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outer := `{
+		"formula": "outer-nested-conditional",
+		"type": "expansion",
+		"version": 1,
+		"vars": {
+			"mode": {"default": "fast"}
+		},
+		"template": [
+			{"id": "{target}.worker", "title": "Worker", "expand": "inner-nested-conditional"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "outer-nested-conditional.formula.json"), []byte(outer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := NewParser(tmpDir)
+	steps := []*Step{
+		{ID: "work", Title: "Work", Expand: "outer-nested-conditional"},
+	}
+
+	result, err := ApplyInlineExpansionsWithVars(steps, parser, nil)
+	if err != nil {
+		t.Fatalf("ApplyInlineExpansionsWithVars failed: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+	if got := result[0].ID; got != "work.worker.attempt" {
+		t.Fatalf("result[0].ID = %q, want work.worker.attempt", got)
+	}
+	if got := result[0].Condition; got != "" {
+		t.Fatalf("result[0].Condition = %q, want empty after nested materialization", got)
+	}
+}
+
 func TestFindDuplicateStepIDs(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1264,6 +1932,95 @@ func TestMaterializeExpansion(t *testing.T) {
 		}
 		if f.Steps[0].Description != "Build {{feature}} with brief: {{brief}}" {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
+		}
+	})
+
+	t.Run("invalid template timeout rejected", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			timeout string
+		}{
+			{name: "invalid format", timeout: "bogus"},
+			{name: "zero duration", timeout: "0s"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := &Formula{
+					Formula: "exp-timeout",
+					Type:    TypeExpansion,
+					Template: []*Step{
+						{
+							ID:      "{target}.check",
+							Title:   "Check",
+							Timeout: tt.timeout,
+							Ralph: &RalphSpec{
+								MaxAttempts: 1,
+								Check: &RalphCheckSpec{
+									Mode: "exec",
+									Path: "checks/pass.sh",
+								},
+							},
+						},
+					},
+				}
+
+				err := MaterializeExpansion(f, "main", nil)
+				if err == nil {
+					t.Fatal("MaterializeExpansion succeeded, want timeout validation error")
+				}
+				if !strings.Contains(err.Error(), "timeout") {
+					t.Fatalf("MaterializeExpansion error = %v, want timeout validation error", err)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid template ralph check timeout rejected", func(t *testing.T) {
+		f := &Formula{
+			Formula: "exp-check-timeout",
+			Type:    TypeExpansion,
+			Template: []*Step{
+				{
+					ID:    "{target}.check",
+					Title: "Check",
+					Ralph: &RalphSpec{
+						MaxAttempts: 1,
+						Check: &RalphCheckSpec{
+							Mode:    "exec",
+							Path:    "checks/pass.sh",
+							Timeout: "{check_timeout}",
+						},
+					},
+				},
+			},
+		}
+
+		err := MaterializeExpansion(f, "main", map[string]string{"check_timeout": "0s"})
+		if err == nil {
+			t.Fatal("MaterializeExpansion succeeded, want check timeout validation error")
+		}
+		if !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("MaterializeExpansion error = %v, want timeout validation error", err)
+		}
+	})
+
+	t.Run("duplicate template IDs rejected", func(t *testing.T) {
+		f := &Formula{
+			Formula: "exp-duplicate",
+			Type:    TypeExpansion,
+			Template: []*Step{
+				{ID: "{target}.attempt", Title: "Attempt A"},
+				{ID: "{target}.attempt", Title: "Attempt B"},
+			},
+		}
+
+		err := MaterializeExpansion(f, "main", nil)
+		if err == nil {
+			t.Fatal("MaterializeExpansion succeeded, want duplicate step ID error")
+		}
+		if !strings.Contains(err.Error(), "duplicate step IDs after expansion") {
+			t.Fatalf("MaterializeExpansion error = %v, want duplicate step ID error", err)
 		}
 	})
 }

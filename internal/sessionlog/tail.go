@@ -4,8 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // TailMeta holds metadata extracted from the tail of a session file.
@@ -13,6 +18,9 @@ type TailMeta struct {
 	Model        string
 	ContextUsage *ContextUsage
 	Activity     string // "idle", "in-turn", or "" (unknown)
+	// MalformedTail is a tail-chunk heuristic. Full-file parser diagnostics
+	// are authoritative for normalized history degradation.
+	MalformedTail bool
 }
 
 // ContextUsage holds computed context usage data.
@@ -35,36 +43,129 @@ func ExtractTailMeta(path string) (*TailMeta, error) {
 	}
 	defer f.Close() //nolint:errcheck // best-effort close on read-only file
 
-	data, err := readTail(f, tailChunkSize)
+	data, startsMidLine, err := readTail(f)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := splitLines(data)
-	return extractFromLines(lines), nil
+	lines, err := splitLines(data)
+	if err != nil {
+		return nil, err
+	}
+	return extractFromLines(lines, startsMidLine), nil
 }
 
-// readTail reads the last n bytes of r (or the whole thing if smaller).
-func readTail(r io.ReadSeeker, n int64) ([]byte, error) {
-	size, err := r.Seek(0, io.SeekEnd)
+// ExtractTailMetaFromSearchPaths reads tail metadata only after verifying
+// path resolves under one of the configured session-log search roots.
+func ExtractTailMetaFromSearchPaths(searchPaths []string, path string) (*TailMeta, error) {
+	safePath, err := validateSearchPathFile(searchPaths, path)
 	if err != nil {
 		return nil, err
 	}
+	return ExtractTailMeta(safePath)
+}
+
+func validateSearchPathFile(searchPaths []string, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty session log path")
+	}
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("resolving session log path: %w", err)
+	}
+	for _, root := range searchPaths {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		cleanRoot, err := filepath.Abs(filepath.Clean(root))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(cleanRoot, cleanPath)
+		if err != nil || rel == "." || filepath.IsAbs(rel) || pathutil.IsOutsideDir(rel) {
+			continue
+		}
+		return cleanPath, nil
+	}
+	return "", fmt.Errorf("session log path is outside configured search paths")
+}
+
+// readTail reads the last tailChunkSize bytes of r (or the whole thing if smaller).
+func readTail(r io.ReadSeeker) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindow(r, tailChunkSize)
+	return data, startsMidLine, err
+}
+
+// readTailAt is readTail against a size snapshot the caller already took. A
+// caller that scans two windows of the same file uses it so both windows are
+// derived from one Seek: two independent SeekEnd snapshots of a file being
+// appended to disagree, leaving the bytes written in between in neither window.
+func readTailAt(r io.ReadSeeker, size, n int64) ([]byte, bool, error) {
+	data, startsMidLine, _, err := readTailWindowAt(r, size, n)
+	return data, startsMidLine, err
+}
+
+// readTailWindow also reports whether bytes before the returned window were
+// omitted. A truncated window can begin exactly on a line boundary, so that
+// state cannot be inferred from startsMidLine.
+func readTailWindow(r io.ReadSeeker, n int64) ([]byte, bool, bool, error) {
+	size, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, false, false, err
+	}
+	return readTailWindowAt(r, size, n)
+}
+
+// readTailWindowAt is readTailWindow against a size snapshot the caller already
+// took.
+func readTailWindowAt(r io.ReadSeeker, size, n int64) ([]byte, bool, bool, error) {
 	offset := size - n
 	if offset < 0 {
 		offset = 0
 	}
 	if _, err := r.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
+		return nil, false, false, err
 	}
-	return io.ReadAll(r)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, false, false, err
+	}
+	startsMidLine := false
+	if offset > 0 {
+		if _, err := r.Seek(offset-1, io.SeekStart); err == nil {
+			var prev [1]byte
+			if _, err := io.ReadFull(r, prev[:]); err == nil {
+				startsMidLine = prev[0] != '\n'
+			}
+		}
+	}
+	return data, startsMidLine, offset > 0, nil
 }
+
+// maxTailTokenBytes bounds a single JSONL line during a tail scan. Claude
+// entries can be large (tool results with full file contents, base64 images),
+// so the tail path uses the same 50MB ceiling the full-file reader adopted for
+// exactly that reason (parseFileDetailed).
+//
+// No current caller can reach this ceiling. The fixed-window paths scan
+// tailChunkSize (64KB), and ExtractTailUsageSince's growth loop stops at
+// maxUsageScanBytes (16MB), so the widest window any caller hands to splitLines
+// is three times below this bound and cannot hold a token that exceeds it. The
+// error return below is defense-in-depth against a future cap change, not a
+// live path — maxUsageScanBytes documents what raising the growth cap past this
+// constant would cost.
+const maxTailTokenBytes = 50 * 1024 * 1024
 
 // splitLines splits data into JSONL lines. Partial lines from a mid-file
 // read are tolerated — they fail json.Unmarshal silently in the caller.
-func splitLines(data []byte) [][]byte {
+//
+// A line longer than maxTailTokenBytes is reported rather than dropped:
+// bufio.Scanner stops permanently on bufio.ErrTooLong, so swallowing that
+// error would silently return a prefix of the window and hide every entry
+// after the oversized line — including the newest ones the caller came for.
+func splitLines(data []byte) ([][]byte, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(make([]byte, 0, 256*1024), maxTailTokenBytes)
 	var lines [][]byte
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -75,13 +176,17 @@ func splitLines(data []byte) [][]byte {
 		copy(cp, line)
 		lines = append(lines, cp)
 	}
-	return lines
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("splitting session log tail: %w", err)
+	}
+	return lines, nil
 }
 
 // tailEntry is the minimal structure we decode from each JSONL line.
 type tailEntry struct {
 	Type    string          `json:"type"`
 	Subtype string          `json:"subtype,omitempty"`
+	UUID    string          `json:"uuid"`
 	Message json.RawMessage `json:"message"`
 }
 
@@ -196,27 +301,36 @@ func unwrapJSONString(raw json.RawMessage) json.RawMessage {
 
 // assistantMessage is the structure inside the "message" field for assistant entries.
 type assistantMessage struct {
+	// ID is the provider message identifier (msg_*). Claude Code writes one
+	// assistant entry per content block of a single API response; every
+	// block entry repeats the same message ID and usage object.
+	ID    string `json:"id"`
 	Role  string `json:"role"`
 	Model string `json:"model"`
 	Usage *struct {
 		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
 }
 
 // extractFromLines walks lines backwards to find model, context usage, and activity.
-func extractFromLines(lines [][]byte) *TailMeta {
+func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 	var (
-		model     string
-		lastUsage *assistantMessage
-		activity  string
+		model         string
+		lastUsage     *assistantMessage
+		activity      string
+		malformedTail bool
 	)
 
 	// Walk backwards — we want the last entries.
 	for i := len(lines) - 1; i >= 0; i-- {
 		var entry tailEntry
 		if err := json.Unmarshal(lines[i], &entry); err != nil {
+			if i == len(lines)-1 && (i != 0 || !startsMidLine) {
+				malformedTail = true
+			}
 			continue
 		}
 
@@ -229,6 +343,9 @@ func extractFromLines(lines [][]byte) *TailMeta {
 		// Infer activity from the last valid entry (first hit walking backwards).
 		if activity == "" {
 			activity = InferActivity(entry.Type, entry.Subtype, rawMsg)
+			if activity == "" {
+				activity = kimiCodeTailActivity(entry.Type, lines[i])
+			}
 		}
 
 		// Check for assistant message with model/usage.
@@ -251,11 +368,11 @@ func extractFromLines(lines [][]byte) *TailMeta {
 		}
 	}
 
-	if model == "" && lastUsage == nil && activity == "" {
+	if model == "" && lastUsage == nil && activity == "" && !malformedTail {
 		return nil
 	}
 
-	result := &TailMeta{Model: model, Activity: activity}
+	result := &TailMeta{Model: model, Activity: activity, MalformedTail: malformedTail}
 
 	if lastUsage != nil && lastUsage.Usage != nil {
 		effectiveModel := model

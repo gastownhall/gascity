@@ -19,6 +19,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const (
@@ -28,6 +29,12 @@ const (
 )
 
 var errProxyProcessExitedEarly = errors.New("process exited before listener became ready")
+
+// extraHelperEnv is an env-list builder that proxy_process tests can augment
+// to inject additional KEY=VALUE entries into the helper subprocess
+// environment (e.g. GC_TESTENV_PASSTHROUGH for internal/testenv). Production
+// leaves it nil. Tests are serial so no locking is needed.
+var extraHelperEnv []string
 
 type proxyProcessInstance struct {
 	rt           RuntimeContext
@@ -112,17 +119,17 @@ func (p *proxyProcessInstance) HandleHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	target := &url.URL{Scheme: "http", Host: "gc-service"}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
-	}
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = subpath
-		req.URL.RawPath = subpath
-		req.Host = ""
+	proxy := &httputil.ReverseProxy{
+		Transport: transport,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, fmt.Sprintf("service unavailable: %v", err), http.StatusBadGateway)
+		},
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(target)
+			req.Out.URL.Path = subpath
+			req.Out.URL.RawPath = subpath
+			req.Out.Host = ""
+		},
 	}
 	proxy.ServeHTTP(w, r)
 	return true
@@ -184,6 +191,12 @@ func (p *proxyProcessInstance) Close() error {
 }
 
 func (p *proxyProcessInstance) start(now time.Time) error {
+	// Survivors of a previous supervisor hard exit keep running re-parented
+	// to init; spawning next to them accumulates duplicates (ga-mukg0s).
+	// Best-effort sweep before every spawn, scoped to this instance's state
+	// root so sibling cities' orphans are untouched; see orphan_reap.go.
+	reapOrphanedServiceProcesses(newOrphanIdentity(p.svc.Name, p.absStateRoot, p.svc.Process.Command))
+
 	logFile, err := os.OpenFile(filepath.Join(p.absStateRoot, "logs", "service.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
 	if err != nil {
 		return fmt.Errorf("open service log: %w", err)
@@ -192,20 +205,25 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 
 	cmd := exec.Command(p.svc.Process.Command[0], p.svc.Process.Command[1:]...)
 	cmd.Dir = p.commandDir()
-	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnv(p.rt.CityPath())...)
+	cmd.Env = append(os.Environ(), citylayout.CityRuntimeEnvForRuntimeDir(p.rt.CityPath(), citylayout.TrustedAmbientCityRuntimeDir(p.rt.CityPath()))...)
 	cmd.Env = append(cmd.Env,
 		"GC_SERVICE_NAME="+p.svc.Name,
 		"GC_SERVICE_STATE_ROOT="+p.absStateRoot,
+		// Scaffolded at 0700 by ensureStateRoot; the sanctioned home for
+		// pack-managed credentials (bot tokens etc.).
+		"GC_SERVICE_SECRETS_DIR="+filepath.Join(p.absStateRoot, "secrets"),
 		"GC_SERVICE_RUN_ROOT="+filepath.Join(p.absStateRoot, "run"),
 		"GC_SERVICE_SOCKET="+p.socketPath,
-		"GC_SERVICE_URL_PREFIX="+p.svc.MountPathOrDefault(),
+		"GC_SERVICE_URL_PREFIX="+citylayout.PublicServiceMountPath(p.rt.CityName(), p.svc.Name),
 		"GC_SERVICE_PUBLIC_URL="+p.publication.URL,
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),
 	)
+	cmd.Env = append(cmd.Env, extraHelperEnv...)
+	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = proxyProcessSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		return fmt.Errorf("start process: %w", err)

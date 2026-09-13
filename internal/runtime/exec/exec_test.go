@@ -7,12 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+)
+
+const (
+	startupWatchNoHangTestTimeout = 10 * time.Second
+	startupWatchBlockingSleep     = "30"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -51,6 +57,180 @@ esac
 `
 }
 
+// separableScript declares proc.exec + proc.provision and logs each op (and the
+// exec command from stdin) to logFile. The `exec` op simulates the in-box tmux:
+// has-session exits 1 (no session yet) so launch picks new-session.
+func separableScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"
+             case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+// separableWarmScript is separableScript but the in-box tmux session ALREADY
+// exists (has-session exits 0), so launchAgent takes the WARM-box relaunch path
+// (respawn-pane -k) instead of new-session.
+func separableWarmScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+// weldedScript declares proc.exec only (NOT proc.provision): the welded `start`
+// op provisions and launches, so the controller must not provision/launch.
+func weldedScript(logFile string) string {
+	return `
+op="$1"; name="$2"
+case "$op" in
+  protocol)  echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  provision) cat >/dev/null; echo "provision $name" >> "` + logFile + `" ;;
+  start)     cat >/dev/null; echo "start $name"     >> "` + logFile + `" ;;
+  exec)      cmd="$(cat)"; echo "exec: $cmd" >> "` + logFile + `"; exit 0 ;;
+  is-running) echo true ;;
+  stop)      ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func readLog(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "" // not yet written
+	}
+	return string(b)
+}
+
+// A pack that declares proc.provision un-welds: a full Start through the seam
+// adapter provisions the box (the `provision` op, NOT welded `start`) and then
+// launches the agent via `tmux new-session` over the `exec` op.
+func TestSeparableLaunch_ProvisionsThenLaunchesAgent(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	_, tp := p.Seams()
+	if !tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = false; want true for a proc.provision pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent --serve"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "provision s") {
+		t.Errorf("missing box-only provision op:\n%s", log)
+	}
+	if strings.Contains(log, "start s") {
+		t.Errorf("welded start op must NOT be used for a separable pack:\n%s", log)
+	}
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("launch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --serve") {
+		t.Errorf("launch should new-session the agent command:\n%s", log)
+	}
+	if pi, ni := strings.Index(log, "provision s"), strings.Index(log, "new-session"); pi < 0 || ni < 0 || pi > ni {
+		t.Errorf("Provision must precede Launch:\n%s", log)
+	}
+}
+
+// A welded pack (no proc.provision) keeps the old behavior: the `start` op
+// provisions+launches, and the controller issues no provision/launch.
+func TestSeparableLaunch_WeldedPackUsesStartOnly(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, weldedScript(logf)))
+
+	_, tp := p.Seams()
+	if tp.Capabilities().SeparableLaunch {
+		t.Fatal("SeparableLaunch = true; want false for a welded pack")
+	}
+
+	prov := runtime.NewProviderFromSeams(p.Seams())
+	if err := prov.Start(context.Background(), "s", runtime.Config{Command: "agent"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	log := readLog(t, logf)
+	if !strings.Contains(log, "start s") {
+		t.Errorf("welded pack must use the start op:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") {
+		t.Errorf("welded pack must not use the provision op:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("welded pack: controller must not launch the agent:\n%s", log)
+	}
+}
+
+// Relaunch on a separable pack respawns/launches the agent over the exec op
+// (warm-box relaunch) — it does NOT reprovision the box (no provision/start op).
+func TestRelaunch_SeparablePackLaunchesOverExec(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "new-session") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("Relaunch should launch the agent over exec:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("separable Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
+// Relaunch when the in-box tmux session ALREADY exists takes the warm-box path:
+// it RESPAWNS the pane (respawn-pane -k) rather than creating a new session, and
+// still does not reprovision. Guards the B2/B3b warm-relaunch payoff — the
+// cold-path tests (has-session exit 1) never reach respawn-pane.
+func TestRelaunch_WarmBoxRespawnsPane(t *testing.T) {
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "ops.log")
+	p := NewProvider(writeScript(t, dir, separableWarmScript(logf)))
+
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent --resume"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	log := readLog(t, logf)
+	if !strings.Contains(log, "has-session") {
+		t.Errorf("Relaunch should probe has-session first:\n%s", log)
+	}
+	if !strings.Contains(log, "respawn-pane") || !strings.Contains(log, "-k") || !strings.Contains(log, "agent --resume") {
+		t.Errorf("warm-box Relaunch should respawn-pane -k the agent command:\n%s", log)
+	}
+	if strings.Contains(log, "new-session") {
+		t.Errorf("warm-box Relaunch must NOT create a new session:\n%s", log)
+	}
+	if strings.Contains(log, "provision s") || strings.Contains(log, "start s") {
+		t.Errorf("warm-box Relaunch must not reprovision the box:\n%s", log)
+	}
+}
+
 func TestStart(t *testing.T) {
 	dir := t.TempDir()
 	script := writeScript(t, dir, allOpsScript())
@@ -63,6 +243,808 @@ func TestStart(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+}
+
+// startFailureScript fails the start op with the given stderr message after the
+// adapter has already created the box (recorded in createFile), and logs every
+// stop call to stopFile. This is the shape of the sandbox leak: the box exists
+// by the time start reports failure.
+func startFailureScript(createFile, stopFile, startStderr string) string {
+	return `
+op="$1"
+name="$2"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    echo "$name" >> "` + createFile + `"
+    echo "` + startStderr + `" >&2
+    exit 1
+    ;;
+  stop) echo "stop $name" >> "` + stopFile + `" ;;
+  *) exit 2 ;;
+esac
+`
+}
+
+func TestStartTearsDownBoxWhenStartOpFails(t *testing.T) {
+	dir := t.TempDir()
+	createFile := filepath.Join(dir, "create.log")
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, startFailureScript(createFile, stopFile, "readiness timeout"))
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Fatalf("Start error = %v, want the adapter's start failure", err)
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+	}
+	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
+		t.Fatalf("stop log = %q, want the box torn down after start failure", got)
+	}
+}
+
+// TestStartDoesNotTearDownWhenSessionAlreadyExists is the guard on the teardown
+// above: an "already exists" collision means a LIVE session owns that name, so
+// tearing down would destroy a healthy session's box. mockProviderScript makes
+// that observable — its stop op removes the running marker, so a teardown here
+// would leave the first session dead.
+func TestStartDoesNotTearDownWhenSessionAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	script := writeScript(t, dir, mockProviderScript(stateDir))
+	p := NewProvider(script)
+
+	if err := p.Start(context.Background(), "test-sess", runtime.Config{}); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("second Start error = %v, want ErrSessionExists", err)
+	}
+	if !p.IsRunning("test-sess") {
+		t.Fatal("colliding Start tore down the live session's box; ErrSessionExists must skip cleanup")
+	}
+}
+
+// TestStartCollisionPhrasingsSkipTeardown pins the collision vocabulary the
+// teardown guard depends on. exec is the only provider that INFERS
+// ErrSessionExists from the adapter's stderr rather than returning it
+// structurally, and real packs phrase the collision differently ("already
+// running" is the wording of a live pack whose start op refuses to double-start
+// a session). Any phrasing that is not recognized gets the live session's box
+// torn down, so under-matching here is a session-killing bug, not cosmetics.
+func TestStartCollisionPhrasingsSkipTeardown(t *testing.T) {
+	phrasings := map[string]string{
+		"exists":  `session "test-sess" already exists`,
+		"running": `session "test-sess" already running`,
+	}
+	for name, stderr := range phrasings {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			createFile := filepath.Join(dir, "create.log")
+			stopFile := filepath.Join(dir, "stop.log")
+			script := writeScript(t, dir, startFailureScript(createFile, stopFile, stderr))
+			p := NewProvider(script)
+
+			err := p.Start(context.Background(), "test-sess", runtime.Config{})
+			if !errors.Is(err, runtime.ErrSessionExists) {
+				t.Errorf("Start error = %v, want ErrSessionExists for %q", err, stderr)
+			}
+			if got := readLog(t, stopFile); got != "" {
+				t.Errorf("stop log = %q, want no teardown of a live session's box", got)
+			}
+		})
+	}
+}
+
+// TestStartTearsDownBoxWhenStartOpIsCanceled covers the production failure path:
+// the adapter creates the box and then blocks past gc's own start deadline. The
+// teardown must still run even though the caller's context is already dead.
+func TestStartTearsDownBoxWhenStartOpIsCanceled(t *testing.T) {
+	dir := t.TempDir()
+	createFile := filepath.Join(dir, "create.log")
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+name="$2"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    echo "$name" >> "`+createFile+`"
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  stop) echo "stop $name" >> "`+stopFile+`" ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	p.startTimeout = 200 * time.Millisecond
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want deadline failure")
+	}
+	if got := readLog(t, createFile); !strings.Contains(got, "test-sess") {
+		t.Fatalf("create log = %q, want the adapter to have created the box", got)
+	}
+	if got := readLog(t, stopFile); !strings.Contains(got, "stop test-sess") {
+		t.Fatalf("stop log = %q, want the box torn down after a canceled start", got)
+	}
+}
+
+func TestStartReportsCleanupFailureAlongsideStartFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null; echo "readiness timeout" >&2; exit 1 ;;
+  stop)  echo "sandbox delete refused" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{})
+	if err == nil {
+		t.Fatal("Start succeeded, want start-op failure")
+	}
+	if !strings.Contains(err.Error(), "readiness timeout") {
+		t.Errorf("Start error = %v, want the original start failure preserved", err)
+	}
+	if !strings.Contains(err.Error(), "sandbox delete refused") {
+		t.Errorf("Start error = %v, want the cleanup failure reported too", err)
+	}
+}
+
+func TestStart_ReturnsDialogDismissalError(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start) cat > /dev/null ;;
+  stop) echo "$*" >> "`+stopFile+`" ;;
+  peek) echo "Bypass Permissions mode" ;;
+  send-keys) echo "failed to dismiss dialog" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err == nil {
+		t.Fatal("Start succeeded, want dialog dismissal error")
+	}
+	if !strings.Contains(err.Error(), "failed to dismiss dialog") {
+		t.Fatalf("Start error = %v, want dialog dismissal context", err)
+	}
+	data, readErr := os.ReadFile(stopFile)
+	if readErr != nil {
+		t.Fatalf("read stop log: %v", readErr)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
+	}
+}
+
+func TestStartPrefersWatchStartupOverPeekPolling(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"user@host $"}'
+    ;;
+  peek)
+    echo "peek" >> "`+peekFile+`"
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if data, err := os.ReadFile(peekFile); err == nil && strings.TrimSpace(string(data)) != "" {
+		t.Fatalf("peek should not be called when watch-startup is supported, got %q", string(data))
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read peek log: %v", err)
+	}
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal", string(data))
+	}
+}
+
+func TestStartAcceptStartupDialogsOnlyDismissesDialogs(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"user@host $"}'
+    ;;
+  peek)
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	accept := true
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		AcceptStartupDialogs: &accept,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal", string(data))
+	}
+}
+
+func TestStartHandlesDelayedBypassDialogAfterInitialWatchPrompt(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"user@host $"}'
+    sleep 0.02
+    printf '%s\n' '{"content":"Bypass Permissions mode"}'
+    ;;
+  peek)
+    echo "peek" >> "`+peekFile+`"
+    echo "user@host $"
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+	`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if _, err := os.ReadFile(peekFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read peek log: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want delayed bypass dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenStartupWatchClosesBeforeReadinessAfterDialog(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ "$(wc -l < "`+sendKeysFile+`" 2>/dev/null || echo 0)" -ge 2 ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+	`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek calls after watch closes early", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	for _, want := range []string{
+		"send-keys test-sess Enter",
+		"send-keys test-sess Down",
+	} {
+		if !strings.Contains(string(sendData), want) {
+			t.Fatalf("send-keys log = %q, want %q", string(sendData), want)
+		}
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    exit 2
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want separate Down and Enter dismissal calls", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupDoesNotEmitInitialEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    sleep 5
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Do you trust the contents of this directory?"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	oldTimeout := startupWatchFirstEventTimeout
+	startupWatchFirstEventTimeout = func() time.Duration { return 50 * time.Millisecond }
+	t.Cleanup(func() {
+		startupWatchFirstEventTimeout = oldTimeout
+	})
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal after peek fallback", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupLeavesStdoutOpenWithoutInitialEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    sh -c 'sleep `+startupWatchBlockingSleep+`' &
+    exit 0
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Do you trust the contents of this directory?"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	oldTimeout := startupWatchFirstEventTimeout
+	startupWatchFirstEventTimeout = func() time.Duration { return 50 * time.Millisecond }
+	t.Cleanup(func() {
+		startupWatchFirstEventTimeout = oldTimeout
+	})
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
+		t.Fatal("Start() hung while cleaning up a no-event watch-startup child")
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want Enter dismissal after peek fallback", string(data))
+	}
+}
+
+func TestStartReturnsPromptlyWhenWatchStartupFirstEventIsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	stopFile := filepath.Join(dir, "stop.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  stop)
+    echo "$*" >> "`+stopFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start succeeded, want startup watcher decode error")
+		}
+		if !strings.Contains(err.Error(), "startup watcher decode") {
+			t.Fatalf("Start error = %v, want startup watcher decode context", err)
+		}
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
+		t.Fatal("Start() hung after malformed first watch-startup event")
+	}
+
+	data, err := os.ReadFile(stopFile)
+	if err != nil {
+		t.Fatalf("read stop log: %v", err)
+	}
+	if !strings.Contains(string(data), "stop test-sess") {
+		t.Fatalf("stop log = %q, want cleanup stop call", string(data))
+	}
+}
+
+func TestStartStartupWatchReturnsMalformedFirstEventError(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  watch-startup)
+    printf '%s\n' 'not-json'
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	snapshots, closeWatch, ok, err := p.startStartupWatch(context.Background(), "test-sess", startupWatchNoHangTestTimeout)
+	if err == nil {
+		t.Fatal("startStartupWatch succeeded, want malformed first event error")
+	}
+	if !strings.Contains(err.Error(), "startup watcher decode") {
+		t.Fatalf("startStartupWatch error = %v, want startup watcher decode context", err)
+	}
+	if ok {
+		t.Fatal("startStartupWatch ok = true, want false on malformed first event")
+	}
+	if snapshots != nil {
+		t.Fatal("startStartupWatch returned snapshots, want nil on malformed first event")
+	}
+	if closeWatch != nil {
+		t.Fatal("startStartupWatch returned closeWatch, want nil on malformed first event")
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupFailsAfterFirstEvent(t *testing.T) {
+	dir := t.TempDir()
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    printf '%s\n' 'not-json'
+    exit 1
+    ;;
+  peek)
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(data), "send-keys test-sess Down") ||
+		!strings.Contains(string(data), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want peek fallback dismissal", string(data))
+	}
+}
+
+func TestStartFallsBackToPeekWhenWatchStartupOnlyEmitsIrrelevantSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	peekFile := filepath.Join(dir, "peek.log")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"starting up"}'
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  peek)
+    echo "$*" >> "`+peekFile+`"
+    if [ -f "`+sendKeysFile+`" ]; then
+      echo "user@host $"
+    else
+      echo "Bypass Permissions mode"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
+		t.Fatal("Start() hung while falling back from an irrelevant watch-startup snapshot")
+	}
+
+	peekData, err := os.ReadFile(peekFile)
+	if err != nil {
+		t.Fatalf("read peek log: %v", err)
+	}
+	if strings.TrimSpace(string(peekData)) == "" {
+		t.Fatalf("peek log = %q, want fallback peek call", string(peekData))
+	}
+
+	sendData, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log: %v", err)
+	}
+	if !strings.Contains(string(sendData), "send-keys test-sess Down") ||
+		!strings.Contains(string(sendData), "send-keys test-sess Enter") {
+		t.Fatalf("send-keys log = %q, want fallback dismissal", string(sendData))
+	}
+}
+
+func TestStartDoesNotHangWhenWatchStartupKeepsStreamingPromptSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    i=0
+    while [ "$i" -lt 2000 ]; do
+      printf '%s\n' '{"content":"user@host $"}'
+      i=$((i+1))
+    done
+    sleep `+startupWatchBlockingSleep+`
+    ;;
+  send-keys)
+    ;;
+  peek)
+    echo "peek should not be used"
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{
+			EmitsPermissionWarning: true,
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start() error = %v, want nil", err)
+		}
+	case <-time.After(startupWatchNoHangTestTimeout):
+		cancel()
+		t.Fatal("Start() hung while cleaning up watch-startup stream")
 	}
 }
 
@@ -221,6 +1203,8 @@ func TestNudge(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "nudge.txt")
 
+	// This pack implements only the dedicated nudge op (no exec), so Nudge falls
+	// back to it after the carrier reports the exec op unsupported.
 	script := writeScript(t, dir, `
 case "$1" in
   nudge) cat > "`+outFile+`" ;;
@@ -239,6 +1223,42 @@ esac
 	}
 	if string(data) != "wake up!" {
 		t.Errorf("nudge message = %q, want %q", string(data), "wake up!")
+	}
+}
+
+func TestDrivingOverExecWhenSupported(t *testing.T) {
+	// A pack that implements the exec op (tmux-in-box) is driven over the
+	// carrier: the verbs ship tmux commands through exec, never the dedicated
+	// nudge/peek/... ops (which here fail loudly if mistakenly used).
+	dir := t.TempDir()
+	execLog := filepath.Join(dir, "exec.log")
+	script := writeScript(t, dir, `
+case "$1" in
+  exec) cmd=$(cat); echo "$cmd" >> "`+execLog+`"
+        case "$cmd" in *capture-pane*) echo "PANE" ;; esac ;;
+  nudge|peek|send-keys|interrupt|clear-scrollback) echo "legacy op used" >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	if err := p.Nudge("s", runtime.TextContent("hi")); err != nil {
+		t.Fatalf("Nudge: %v", err)
+	}
+	out, err := p.Peek("s", 5)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if !strings.Contains(out, "PANE") {
+		t.Errorf("Peek over exec = %q, want capture-pane output", out)
+	}
+	data, _ := os.ReadFile(execLog)
+	logged := string(data)
+	if !strings.Contains(logged, "send-keys") || !strings.Contains(logged, "hi") {
+		t.Errorf("exec log = %q, want a send-keys carrying the message", logged)
+	}
+	if !strings.Contains(logged, "capture-pane") {
+		t.Errorf("exec log = %q, want a capture-pane for Peek", logged)
 	}
 }
 
@@ -441,6 +1461,141 @@ func TestUnknownOperation_exit2(t *testing.T) {
 	}
 }
 
+func TestProvider_StartCancellationInterruptsCooperativeScript(t *testing.T) {
+	for _, interruptExitCode := range []int{0, 2} {
+		t.Run(fmt.Sprintf("interrupt_exit_%d", interruptExitCode), func(t *testing.T) {
+			dir := t.TempDir()
+			readyFile := filepath.Join(dir, "ready")
+			interruptFile := filepath.Join(dir, "interrupted")
+			script := writeScript(t, dir, fmt.Sprintf(`
+case "$1" in
+  start)
+    trap 'printf "%%s\n" interrupted > "%s"; exit %d' INT
+    : > "%s"
+    while :; do :; done
+    ;;
+  *) exit 2 ;;
+esac
+	`, interruptFile, interruptExitCode, readyFile))
+			p := NewProvider(script)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- p.Start(ctx, "test-sess", runtime.Config{})
+			}()
+
+			readyDeadline := time.NewTimer(5 * time.Second)
+			defer readyDeadline.Stop()
+			readyPoll := time.NewTicker(10 * time.Millisecond)
+			defer readyPoll.Stop()
+			for {
+				if _, err := os.Stat(readyFile); err == nil {
+					break
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stat readiness marker: %v", err)
+				}
+				select {
+				case err := <-done:
+					t.Fatalf("Start returned before readiness marker: %v", err)
+				case <-readyPoll.C:
+				case <-readyDeadline.C:
+					t.Fatal("timed out waiting for readiness marker")
+				}
+			}
+
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Start error = %v, want context.Canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Start did not return after cancellation")
+			}
+
+			data, err := os.ReadFile(interruptFile)
+			if err != nil {
+				t.Fatalf("read interrupt marker: %v", err)
+			}
+			if got := strings.TrimSpace(string(data)); got != "interrupted" {
+				t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+			}
+		})
+	}
+}
+
+// TestProvider_StartCancellationInterruptsForegroundChild proves cooperative
+// cancellation reaches a foreground child of the adapter, not just the shell
+// leader. The adapter shell blocks in a foreground `sleep` far longer than the
+// provider's WaitDelay (mimicking a `ready_delay_ms` readiness delay). A
+// process-only interrupt would be deferred by the shell until the child
+// returned, so WaitDelay would force-kill the shell before its rollback trap
+// ran and the resource the adapter created would leak. Signaling the process
+// group unblocks the child so the trap runs inside the grace window.
+func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "ready")
+	interruptFile := filepath.Join(dir, "interrupted")
+	script := writeScript(t, dir, fmt.Sprintf(`
+case "$1" in
+  start)
+    trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
+    : > "%s"
+    sleep 30
+    ;;
+  *) exit 2 ;;
+esac
+	`, interruptFile, readyFile))
+	p := NewProvider(script)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start(ctx, "test-sess", runtime.Config{})
+	}()
+
+	// Wait until the adapter is blocked in the foreground sleep.
+	readyDeadline := time.NewTimer(5 * time.Second)
+	defer readyDeadline.Stop()
+	readyPoll := time.NewTicker(10 * time.Millisecond)
+	defer readyPoll.Stop()
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat readiness marker: %v", err)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Start returned before readiness marker: %v", err)
+		case <-readyPoll.C:
+		case <-readyDeadline.C:
+			t.Fatal("timed out waiting for readiness marker")
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Start error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
+	}
+
+	data, err := os.ReadFile(interruptFile)
+	if err != nil {
+		t.Fatalf("read interrupt marker (rollback trap never ran): %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "interrupted" {
+		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow test")
@@ -583,21 +1738,96 @@ esac
 `
 }
 
-func TestExecConformance(t *testing.T) {
-	stateDir := t.TempDir()
-	dir := t.TempDir()
-	script := writeScript(t, dir, mockProviderScript(stateDir))
-	p := NewProvider(script)
-	p.timeout = 5 * time.Second
-	p.startTimeout = 5 * time.Second
+type execConformanceFixture struct {
+	once   sync.Once
+	script string
+	err    error
+}
 
+func execConformanceScript(caseT, ownerT *testing.T, fixture *execConformanceFixture) string {
+	caseT.Helper()
+	fixture.once.Do(func() {
+		fixtureRoot, err := os.MkdirTemp("", "gc-exec-conformance-")
+		if err != nil {
+			fixture.err = fmt.Errorf("create exec conformance fixture: %w", err)
+			return
+		}
+		ownerT.Cleanup(func() {
+			if err := os.RemoveAll(fixtureRoot); err != nil {
+				ownerT.Errorf("remove exec conformance fixture %q: %v", fixtureRoot, err)
+			}
+		})
+
+		stateDir := filepath.Join(fixtureRoot, "state")
+		if err := os.Mkdir(stateDir, 0o755); err != nil {
+			fixture.err = fmt.Errorf("create exec conformance state: %w", err)
+			return
+		}
+
+		fixture.script = filepath.Join(fixtureRoot, "provider")
+		content := "#!/bin/sh\n" + mockProviderScript(stateDir)
+		if err := os.WriteFile(fixture.script, []byte(content), 0o755); err != nil {
+			fixture.err = fmt.Errorf("write exec conformance provider: %w", err)
+		}
+	})
+	if fixture.err != nil {
+		caseT.Fatal(fixture.err)
+	}
+	return fixture.script
+}
+
+func TestExecConformance(t *testing.T) {
+	var fixture execConformanceFixture
 	var counter int64
 
-	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
-		id := atomic.AddInt64(&counter, 1)
-		name := fmt.Sprintf("exec-conform-%d", id)
-		return p, runtime.Config{WorkDir: t.TempDir()}, name
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(execConformanceScript(caseT, t, &fixture)),
+			runtime.Config{WorkDir: caseT.TempDir()},
+			fmt.Sprintf("exec-conform-%06d", atomic.AddInt64(&counter, 1))
 	})
+}
+
+func TestProcessAlive_unimplemented(t *testing.T) {
+	dir := t.TempDir()
+	// A pack that does not implement process-alive (exit 2) must read as ALIVE,
+	// not dead — liveness for such packs is gated by IsRunning, and a false
+	// "dead" would make ObserveLiveness reap a live session.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if !p.ProcessAlive("test-sess", []string{"claude", "node"}) {
+		t.Error("ProcessAlive on a pack without process-alive should be true")
+	}
+}
+
+func TestExec_ExitTwoIsCommandCodeWhenExecDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// protocol declares proc.exec, so an exec-op exit of 2 is the in-box
+	// command's own exit code (2), NOT ErrExecUnsupported.
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  exec) echo "out"; exit 2 ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+	_, code, err := p.Exec(context.Background(), "s", []string{"cmd"})
+	if err != nil {
+		t.Fatalf("Exec with exec declared + command exit 2 should not error, got %v", err)
+	}
+	if code != 2 {
+		t.Errorf("code = %d, want 2 (the in-box command's exit code)", code)
+	}
+}
+
+func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// No protocol/exec op: exit 2 means the op is unimplemented -> fall back.
+	script := writeScript(t, dir, `exit 2`)
+	p := NewProvider(script)
+	if _, _, err := p.Exec(context.Background(), "s", []string{"cmd"}); !errors.Is(err, runtime.ErrExecUnsupported) {
+		t.Errorf("err = %v, want ErrExecUnsupported when exec is not declared", err)
+	}
 }
 
 // --- Compile-time interface check ---

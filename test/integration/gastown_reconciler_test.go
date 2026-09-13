@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,13 +22,11 @@ import (
 // verifies the desired state is reached.
 // ---------------------------------------------------------------------------
 
-// writeReconcilerToml writes a city.toml configured for fast reconciler
+// renderReconcilerToml returns a city.toml configured for fast reconciler
 // ticks and the file bead store (no dolt dependency). The patrol_interval
 // is set to 100ms so convergence happens quickly in tests.
-func writeReconcilerToml(t *testing.T, cityDir, cityName string, agentBlocks string) {
-	t.Helper()
-
-	toml := fmt.Sprintf(`[workspace]
+func renderReconcilerToml(cityName string, agentBlocks string) string {
+	return fmt.Sprintf(`[workspace]
 name = %s
 
 [beads]
@@ -36,10 +36,55 @@ provider = "file"
 patrol_interval = "100ms"
 
 %s
-`, quote(cityName), agentBlocks)
+%s
+`, quote(cityName), agentBlocks, reconcilerNamedSessions(agentBlocks))
+}
+
+var (
+	reconcilerAgentNamePattern         = regexp.MustCompile(`(?m)^name = "([^"]+)"$`)
+	reconcilerMaxActiveSessionsPattern = regexp.MustCompile(`(?m)^max_active_sessions = (-?\d+)$`)
+)
+
+func reconcilerNamedSessions(agentBlocks string) string {
+	parts := strings.Split(agentBlocks, "[[agent]]")
+	var named strings.Builder
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || reconcilerPoolAgentBlock(part) {
+			continue
+		}
+		match := reconcilerAgentNamePattern.FindStringSubmatch(part)
+		if len(match) != 2 {
+			continue
+		}
+		fmt.Fprintf(&named, "\n[[named_session]]\ntemplate = %s\nmode = \"always\"\n", quote(match[1]))
+	}
+	return named.String()
+}
+
+func reconcilerPoolAgentBlock(part string) bool {
+	if strings.Contains(part, "[agent.pool]") {
+		return true
+	}
+	if strings.Contains(part, "scale_check =") {
+		return true
+	}
+	match := reconcilerMaxActiveSessionsPattern.FindStringSubmatch(part)
+	if len(match) != 2 {
+		return false
+	}
+	max, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	return max == -1 || max > 1
+}
+
+func writeReconcilerToml(t *testing.T, cityDir, cityName string, agentBlocks string) {
+	t.Helper()
 
 	tomlPath := filepath.Join(cityDir, "city.toml")
-	if err := os.WriteFile(tomlPath, []byte(toml), 0o644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(renderReconcilerToml(cityName, agentBlocks)), 0o644); err != nil {
 		t.Fatalf("writing city.toml: %v", err)
 	}
 }
@@ -52,30 +97,35 @@ patrol_interval = "100ms"
 // fail with "standalone controller already running".
 func setupReconcilerCity(t *testing.T, agentBlocks string) string {
 	t.Helper()
+	env := newIsolatedCommandEnv(t, false)
 
 	cityName := uniqueCityName()
 	cityDir := filepath.Join(t.TempDir(), cityName)
-
-	// gc init — creates the city scaffold without starting a controller.
-	out, err := gc("", "init", "--skip-provider-readiness", cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+	configPath := filepath.Join(t.TempDir(), cityName+".toml")
+	if err := os.WriteFile(configPath, []byte(renderReconcilerToml(cityName, agentBlocks)), 0o644); err != nil {
+		t.Fatalf("writing init config: %v", err)
 	}
 
-	// Copy e2e scripts into the city so report/sleep scripts work.
+	// Copy e2e scripts into the city before init so the first launch sees the
+	// final filesystem layout.
 	copyE2EScripts(t, cityDir)
 
-	// Overwrite city.toml with our custom agent config BEFORE starting.
-	writeReconcilerToml(t, cityDir, cityName, agentBlocks)
-
-	// gc start — single start, no stop/restart dance.
-	out, err = gc("", "start", cityDir)
+	out, err := runGCWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
+		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
+	registerCityCommandEnv(cityDir, env)
 
 	t.Cleanup(func() {
-		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		if out, err := runGCWithEnv(env, "", "stop", cityDir); err != nil {
+			t.Logf("cleanup: gc stop %s: %v\n%s", cityDir, err, out)
+		}
+		// --wait so the supervisor and its controller subprocesses are
+		// confirmed exited before t.TempDir() / fixRootOwnedFiles run.
+		if out, err := runGCWithEnv(env, "", "supervisor", "stop", "--wait"); err != nil {
+			t.Logf("cleanup: gc supervisor stop --wait: %v\n%s", err, out)
+		}
 		fixRootOwnedFiles(cityDir)
 	})
 
@@ -224,11 +274,9 @@ func TestGastown_Reconciler_PoolScaling(t *testing.T) {
 	agentBlocks := fmt.Sprintf(`[[agent]]
 name = "scaler"
 start_command = %s
-
-[agent.pool]
-min = 1
-max = 3
-check = "echo 2"
+min_active_sessions = 1
+max_active_sessions = 3
+scale_check = "echo 2"
 `, quote("bash $GC_CITY/.gc/scripts/stuck-agent.sh"))
 
 	cityDir := setupReconcilerCity(t, agentBlocks)

@@ -405,6 +405,27 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		}
 	})
 
+	t.Run("Thread_ReturnsAllForMessageID", func(t *testing.T) {
+		p := newProvider(t)
+		sent, err := p.Send("alice", "bob", "Hello", "first")
+		if err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		reply, err := p.Reply(sent.ID, "bob", "RE: Hello", "second")
+		if err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		for _, id := range []string{sent.ID, reply.ID} {
+			msgs, err := p.Thread(id)
+			if err != nil {
+				t.Fatalf("Thread(%q): %v", id, err)
+			}
+			if len(msgs) != 2 {
+				t.Fatalf("Thread(%q) = %d messages, want 2", id, len(msgs))
+			}
+		}
+	})
+
 	t.Run("Thread_Empty", func(t *testing.T) {
 		p := newProvider(t)
 		msgs, err := p.Thread("nonexistent-thread")
@@ -455,42 +476,18 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 
 	// --- Group 10: Delete ---
 
-	t.Run("Delete_RemovesFromAll", func(t *testing.T) {
-		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "", "delete me")
-		if err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		if err := p.Delete(sent.ID); err != nil {
-			t.Fatalf("Delete: %v", err)
-		}
-		msgs, err := p.Inbox("bob")
-		if err != nil {
-			t.Fatalf("Inbox: %v", err)
-		}
-		if len(msgs) != 0 {
-			t.Errorf("Inbox after Delete = %d, want 0", len(msgs))
-		}
+	t.Run("Delete_RemovesMessageFromEveryView", func(t *testing.T) {
+		runRemovalVisibilityContract(t, newProvider(t), func(p mail.Provider, id string) error {
+			return p.Delete(id)
+		})
 	})
 
 	// --- Group 11: Archive ---
 
-	t.Run("Archive_RemovesFromInbox", func(t *testing.T) {
-		p := newProvider(t)
-		sent, err := p.Send("alice", "bob", "", "archive me")
-		if err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		if err := p.Archive(sent.ID); err != nil {
-			t.Fatalf("Archive: %v", err)
-		}
-		msgs, err := p.Inbox("bob")
-		if err != nil {
-			t.Fatalf("Inbox: %v", err)
-		}
-		if len(msgs) != 0 {
-			t.Errorf("Inbox after Archive = %d messages, want 0", len(msgs))
-		}
+	t.Run("Archive_RemovesMessageFromEveryView", func(t *testing.T) {
+		runRemovalVisibilityContract(t, newProvider(t), func(p mail.Provider, id string) error {
+			return p.Archive(id)
+		})
 	})
 
 	t.Run("Archive_AlreadyArchivedReturnsError", func(t *testing.T) {
@@ -513,6 +510,183 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 		err := p.Archive("nonexistent")
 		if err == nil {
 			t.Error("Archive(nonexistent) should return error")
+		}
+	})
+
+	t.Run("ArchiveMany_AllSucceed", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "batch")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		results, err := p.ArchiveMany(ids)
+		if err != nil {
+			t.Fatalf("ArchiveMany: %v", err)
+		}
+		if len(results) != len(ids) {
+			t.Fatalf("results = %d, want %d", len(results), len(ids))
+		}
+		for i, r := range results {
+			if r.ID != ids[i] {
+				t.Errorf("results[%d].ID = %q, want %q", i, r.ID, ids[i])
+			}
+			if r.Err != nil {
+				t.Errorf("results[%d].Err = %v, want nil", i, r.Err)
+			}
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after ArchiveMany = %d, want 0", len(msgs))
+		}
+	})
+
+	t.Run("ArchiveMany_EmptyReturnsNil", func(t *testing.T) {
+		p := newProvider(t)
+		results, err := p.ArchiveMany(nil)
+		if err != nil {
+			t.Fatalf("ArchiveMany(nil): %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("results = %d, want 0", len(results))
+		}
+	})
+
+	t.Run("ArchiveMany_PreservesInputOrder", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "order")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		reversed := []string{ids[2], ids[0], ids[1]}
+		results, err := p.ArchiveMany(reversed)
+		if err != nil {
+			t.Fatalf("ArchiveMany: %v", err)
+		}
+		for i, r := range results {
+			if r.ID != reversed[i] {
+				t.Errorf("results[%d].ID = %q, want %q", i, r.ID, reversed[i])
+			}
+		}
+	})
+
+	t.Run("ArchiveMany_MixedOpenClosed", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "mixed")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		if err := p.Archive(ids[1]); err != nil {
+			t.Fatalf("pre-Archive middle: %v", err)
+		}
+		results, err := p.ArchiveMany(ids)
+		if err != nil {
+			t.Fatalf("ArchiveMany: %v", err)
+		}
+		if len(results) != len(ids) {
+			t.Fatalf("results = %d, want %d", len(results), len(ids))
+		}
+		if results[0].Err != nil {
+			t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+		}
+		if !errors.Is(results[1].Err, mail.ErrAlreadyArchived) {
+			t.Errorf("results[1].Err = %v, want ErrAlreadyArchived", results[1].Err)
+		}
+		if results[2].Err != nil {
+			t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after ArchiveMany = %d, want 0", len(msgs))
+		}
+	})
+
+	t.Run("DeleteMany_AllSucceed", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "delete batch")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		results, err := p.DeleteMany(ids)
+		if err != nil {
+			t.Fatalf("DeleteMany: %v", err)
+		}
+		if len(results) != len(ids) {
+			t.Fatalf("results = %d, want %d", len(results), len(ids))
+		}
+		for i, r := range results {
+			if r.ID != ids[i] {
+				t.Errorf("results[%d].ID = %q, want %q", i, r.ID, ids[i])
+			}
+			if r.Err != nil {
+				t.Errorf("results[%d].Err = %v, want nil", i, r.Err)
+			}
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after DeleteMany = %d, want 0", len(msgs))
+		}
+	})
+
+	t.Run("DeleteMany_MixedOpenClosed", func(t *testing.T) {
+		p := newProvider(t)
+		var ids []string
+		for i := 0; i < 3; i++ {
+			m, err := p.Send("alice", "bob", "", "mixed delete")
+			if err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+			ids = append(ids, m.ID)
+		}
+		if err := p.Delete(ids[1]); err != nil {
+			t.Fatalf("pre-Delete middle: %v", err)
+		}
+		results, err := p.DeleteMany(ids)
+		if err != nil {
+			t.Fatalf("DeleteMany: %v", err)
+		}
+		if len(results) != len(ids) {
+			t.Fatalf("results = %d, want %d", len(results), len(ids))
+		}
+		if results[0].Err != nil {
+			t.Errorf("results[0].Err = %v, want nil", results[0].Err)
+		}
+		if !errors.Is(results[1].Err, mail.ErrAlreadyArchived) {
+			t.Errorf("results[1].Err = %v, want ErrAlreadyArchived", results[1].Err)
+		}
+		if results[2].Err != nil {
+			t.Errorf("results[2].Err = %v, want nil", results[2].Err)
+		}
+		msgs, err := p.Inbox("bob")
+		if err != nil {
+			t.Fatalf("Inbox: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("Inbox after DeleteMany = %d, want 0", len(msgs))
 		}
 	})
 
@@ -629,4 +803,100 @@ func RunProviderTests(t *testing.T, newProvider func(t *testing.T) mail.Provider
 			t.Errorf("Inbox after MarkUnread = %d, want 1", len(msgs))
 		}
 	})
+}
+
+func runRemovalVisibilityContract(t *testing.T, p mail.Provider, remove func(mail.Provider, string) error) {
+	t.Helper()
+
+	target, err := p.Send("alice", "bob", "archive target", "remove this message")
+	if err != nil {
+		t.Fatalf("Send target: %v", err)
+	}
+	reply, err := p.Reply(target.ID, "bob", "RE: archive target", "keep this reply")
+	if err != nil {
+		t.Fatalf("Reply before removal: %v", err)
+	}
+	survivor, err := p.Send("alice", "bob", "survivor", "keep this message")
+	if err != nil {
+		t.Fatalf("Send survivor: %v", err)
+	}
+	if err := remove(p, target.ID); err != nil {
+		t.Fatalf("remove target: %v", err)
+	}
+	if _, err := p.Get(target.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Get(removed message) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Read(target.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Read(removed message) error = %v, want ErrNotFound", err)
+	}
+	if _, err := p.Reply(target.ID, "bob", "too late", "must not create"); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("Reply(removed message) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkRead(target.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkRead(removed message) error = %v, want ErrNotFound", err)
+	}
+	if err := p.MarkUnread(target.ID); !errors.Is(err, mail.ErrNotFound) {
+		t.Errorf("MarkUnread(removed message) error = %v, want ErrNotFound", err)
+	}
+
+	inbox, err := p.Inbox("bob")
+	if err != nil {
+		t.Fatalf("Inbox after removal: %v", err)
+	}
+	assertOnlyMessage(t, "Inbox after removal", inbox, survivor.ID)
+
+	checked, err := p.Check("bob")
+	if err != nil {
+		t.Fatalf("Check after removal: %v", err)
+	}
+	assertOnlyMessage(t, "Check after removal", checked, survivor.ID)
+
+	all, err := p.All("bob")
+	if err != nil {
+		t.Fatalf("All after removal: %v", err)
+	}
+	assertOnlyMessage(t, "All after removal", all, survivor.ID)
+
+	total, unread, err := p.Count("bob")
+	if err != nil {
+		t.Fatalf("Count after removal: %v", err)
+	}
+	if total != 1 || unread != 1 {
+		t.Errorf("Count after removal = (%d, %d), want (1, 1)", total, unread)
+	}
+
+	thread, err := p.Thread(target.ThreadID)
+	if err != nil {
+		t.Fatalf("Thread(stable ID) after removal: %v", err)
+	}
+	assertOnlyMessage(t, "Thread(stable ID) after removal", thread, reply.ID)
+
+	threadByRemovedID, err := p.Thread(target.ID)
+	if err != nil {
+		t.Fatalf("Thread(removed message ID): %v", err)
+	}
+	for _, msg := range threadByRemovedID {
+		if msg.ID == target.ID {
+			t.Errorf("Thread(removed message ID) returned removed message %q", target.ID)
+		}
+	}
+}
+
+func assertOnlyMessage(t *testing.T, operation string, messages []mail.Message, wantID string) {
+	t.Helper()
+	if len(messages) != 1 {
+		t.Errorf("%s returned IDs %v, want [%s]", operation, messageIDs(messages), wantID)
+		return
+	}
+	if messages[0].ID != wantID {
+		t.Errorf("%s returned ID %q, want %q", operation, messages[0].ID, wantID)
+	}
+}
+
+func messageIDs(messages []mail.Message) []string {
+	ids := make([]string, len(messages))
+	for i, msg := range messages {
+		ids[i] = msg.ID
+	}
+	return ids
 }

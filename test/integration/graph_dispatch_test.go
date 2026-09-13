@@ -10,19 +10,32 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 type graphBead struct {
-	ID       string         `json:"id"`
-	Ref      string         `json:"ref"`
-	Status   string         `json:"status"`
-	Type     string         `json:"type"`
-	Metadata map[string]any `json:"metadata"`
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Ref       string         `json:"ref"`
+	Status    string         `json:"status"`
+	Type      string         `json:"type"`
+	IssueType string         `json:"issue_type"`
+	Metadata  map[string]any `json:"metadata"`
+}
+
+type graphConvoyCreateResult struct {
+	ConvoyID string `json:"convoy_id"`
+}
+
+func beadType(bead graphBead) string {
+	if bead.Type != "" {
+		return bead.Type
+	}
+	return bead.IssueType
 }
 
 func metaValue(bead graphBead, key string) string {
@@ -45,28 +58,11 @@ func metaValue(bead graphBead, key string) string {
 	}
 }
 
-var graphWorkflowSupervisorOnce sync.Once
-
-func ensureGraphWorkflowSupervisor(t *testing.T) {
-	t.Helper()
-
-	graphWorkflowSupervisorOnce.Do(func() {
-		out, err := gcDolt("", "supervisor", "start")
-		if err == nil {
-			return
-		}
-		if strings.Contains(out, "already running") {
-			return
-		}
-		t.Fatalf("gc supervisor start failed: %v\noutput: %s", err, out)
-	})
-}
-
 func TestGraphWorkflowSuccessPath(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "success")
-	issueID, workflowID := startScopedWorkflow(t, cityDir)
+	convoyID, workflowID := startScopedWorkflow(t, cityDir)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 180*time.Second)
+	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "pass" {
 		t.Fatalf("workflow outcome = %q, want pass", got)
 	}
@@ -76,15 +72,15 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("body outcome = %q, want pass", got)
 	}
 
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Fatalf("issue work_dir = %q, want unset after cleanup", got)
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
-	if got := metaValue(issue, "submitted"); got != "true" {
-		t.Fatalf("issue submitted = %q, want true", got)
+	if got := metaValue(convoy, "submitted"); got != "true" {
+		t.Fatalf("convoy submitted = %q, want true", got)
 	}
 
-	worktreePath := filepath.Join(cityDir, "worktrees", issueID)
+	worktreePath := filepath.Join(cityDir, "worktrees", convoyID)
 	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
 		t.Fatalf("worktree path %s should be removed, stat err=%v", worktreePath, err)
 	}
@@ -109,9 +105,9 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 
 func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	cityDir := setupGraphWorkflowCity(t, "fail-preflight")
-	issueID, workflowID := startScopedWorkflow(t, cityDir)
+	convoyID, workflowID := startScopedWorkflow(t, cityDir)
 
-	workflow := waitForBeadClosed(t, cityDir, workflowID, 180*time.Second)
+	workflow := waitForBeadClosed(t, cityDir, workflowID, graphWorkflowCloseTimeout())
 	if got := metaValue(workflow, "gc.outcome"); got != "fail" {
 		t.Fatalf("workflow outcome = %q, want fail", got)
 	}
@@ -121,12 +117,12 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
 
-	issue := showBead(t, cityDir, issueID)
-	if got := metaValue(issue, "work_dir"); got != "" {
-		t.Fatalf("issue work_dir = %q, want unset after cleanup", got)
+	convoy := showBead(t, cityDir, convoyID)
+	if got := metaValue(convoy, "work_dir"); got != "" {
+		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
 	}
-	if got := metaValue(issue, "submitted"); got != "" {
-		t.Fatalf("issue submitted = %q, want unset on failed workflow", got)
+	if got := metaValue(convoy, "submitted"); got != "" {
+		t.Fatalf("convoy submitted = %q, want unset on failed workflow", got)
 	}
 
 	for _, suffix := range []string{".implement", ".self-review", ".submit"} {
@@ -157,9 +153,22 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	t.Helper()
 
-	workflowTrace := readOptionalFile(filepath.Join(cityDir, "control-dispatcher-trace.log"))
-	if !strings.Contains(workflowTrace, "serve process bead=") {
-		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", workflowTrace)
+	tracePaths := []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	}
+	var traces []string
+	foundControlTrace := false
+	for _, path := range tracePaths {
+		trace := readOptionalFile(path)
+		if strings.Contains(trace, "serve process bead=") {
+			foundControlTrace = true
+			break
+		}
+		traces = append(traces, fmt.Sprintf("%s:\n%s", path, trace))
+	}
+	if !foundControlTrace {
+		t.Fatalf("control-dispatcher trace missing processed control bead evidence:\n%s", strings.Join(traces, "\n\n"))
 	}
 
 	workerTrace := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
@@ -168,10 +177,13 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	}
 }
 
+func graphWorkflowCloseTimeout() time.Duration {
+	return 6 * time.Minute
+}
+
 func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	t.Helper()
-
-	ensureGraphWorkflowSupervisor(t)
+	env := newIsolatedCommandEnv(t, true)
 
 	var cityName string
 	if usingSubprocess() {
@@ -181,23 +193,35 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 	}
 	cityDir := filepath.Join(t.TempDir(), cityName)
 
-	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-workflow.sh")
-	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nstart_command = %q\n", cityName, startCommand)
+	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
+	cityToml := fmt.Sprintf(
+		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+		cityName, startCommand,
+	)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
 	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatalf("writing graph workflow config: %v", err)
 	}
 
-	out, err := gcDolt("", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
+	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
 	if err != nil {
 		t.Fatalf("gc init --file failed: %v\noutput: %s", err, out)
 	}
-	out, err = gcDolt("", "start", cityDir)
-	if err != nil {
-		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
-	}
+	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
-		gcDolt("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			cleanupTestCityDir(cityDir)
+			if _, err := os.Stat(cityDir); os.IsNotExist(err) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		beadsEntries, _ := os.ReadDir(filepath.Join(cityDir, ".beads"))
+		t.Fatalf("graph workflow city cleanup did not quiesce; .beads entries=%v", beadsEntries)
 	})
 
 	return cityDir
@@ -206,54 +230,110 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 func startScopedWorkflow(t *testing.T, cityDir string) (string, string) {
 	t.Helper()
 
-	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow")
+	out, err := bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part one")
 	if err != nil {
 		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
 	}
-	var created graphBead
-	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
-		t.Fatalf("unmarshal created issue: %v\njson: %s", err, out)
+	var first graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &first); err != nil {
+		t.Fatalf("unmarshal first issue: %v\njson: %s", err, out)
 	}
-	issueID := created.ID
-	if issueID == "" {
-		t.Fatalf("bd create returned empty issue id\njson: %s", out)
+	if first.ID == "" {
+		t.Fatalf("bd create returned empty first issue id\njson: %s", out)
 	}
 
-	out, err = gcDolt(cityDir, "sling", "worker", issueID, "--on=mol-scoped-work", "--var", "issue="+issueID)
+	out, err = bdDolt(cityDir, "create", "--json", "Run built-in scoped workflow part two")
+	if err != nil {
+		t.Fatalf("bd create failed: %v\noutput: %s", err, out)
+	}
+	var second graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &second); err != nil {
+		t.Fatalf("unmarshal second issue: %v\njson: %s", err, out)
+	}
+	if second.ID == "" {
+		t.Fatalf("bd create returned empty second issue id\njson: %s", out)
+	}
+
+	out, err = gcDolt(cityDir, "convoy", "create", "Run built-in scoped workflow", first.ID, second.ID, "--json")
+	if err != nil {
+		t.Fatalf("gc convoy create failed: %v\noutput: %s", err, out)
+	}
+	var created graphConvoyCreateResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &created); err != nil {
+		t.Fatalf("unmarshal created convoy: %v\njson: %s", err, out)
+	}
+	convoyID := created.ConvoyID
+	if convoyID == "" {
+		t.Fatalf("gc convoy create returned empty convoy id\njson: %s", out)
+	}
+
+	out, err = gcDolt(cityDir, "sling", "worker", convoyID, "--on=mol-scoped-work")
 	if err != nil {
 		t.Fatalf("gc sling failed: %v\noutput: %s", err, out)
 	}
 	slingOutput := out
 
-	deadline := time.Now().Add(10 * time.Second)
+	workflowID := waitForGraphWorkflowRootForInputConvoy(t, cityDir, convoyID, slingOutput, 10*time.Second)
+	return convoyID, workflowID
+}
+
+func waitForGraphWorkflowRootForInputConvoy(t *testing.T, cityDir, inputConvoyID, slingOutput string, timeout time.Duration) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	var lastList string
 	for time.Now().Before(deadline) {
-		issue := showBead(t, cityDir, issueID)
-		if workflowID := metaValue(issue, "workflow_id"); workflowID != "" {
-			return issueID, workflowID
+		workflowID, rawList, err := findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID)
+		if err == nil && workflowID != "" {
+			return workflowID
 		}
+		lastErr = err
+		lastList = rawList
 		time.Sleep(200 * time.Millisecond)
 	}
+	inputConvoy := showBead(t, cityDir, inputConvoyID)
+	t.Fatalf("timed out waiting for graph.v2 workflow root for input convoy %s: %v\ngc sling output:\n%s\ninput convoy:\n%+v\nbd list:\n%s", inputConvoyID, lastErr, slingOutput, inputConvoy, lastList)
+	return ""
+}
 
-	issue := showBead(t, cityDir, issueID)
-	t.Fatalf("timed out waiting for workflow_id on source bead %s\ngc sling output:\n%s\nsource bead:\n%+v", issueID, slingOutput, issue)
-	return "", ""
+func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string, string, error) {
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	if err != nil {
+		return "", out, fmt.Errorf("bd list --json failed: %w", err)
+	}
+	var beads []graphBead
+	if err := json.Unmarshal([]byte(strings.TrimSpace(extractJSONPayload(out))), &beads); err != nil {
+		return "", out, fmt.Errorf("unmarshal bead list: %w", err)
+	}
+
+	for _, bead := range beads {
+		if bead.ID == inputConvoyID && beadType(bead) != "convoy" {
+			return "", out, fmt.Errorf("input target %s is type %q, want convoy", inputConvoyID, beadType(bead))
+		}
+	}
+	for _, bead := range beads {
+		if metaValue(bead, "gc.kind") != "workflow" {
+			continue
+		}
+		if metaValue(bead, "gc.input_convoy_id") == inputConvoyID {
+			return bead.ID, out, nil
+		}
+	}
+	return "", out, fmt.Errorf("no workflow root found for input convoy %s", inputConvoyID)
 }
 
 func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Duration) graphBead {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		bead, err := tryShowBead(cityDir, beadID)
-		if err != nil {
-			t.Logf("bd show error (retrying): %v", err)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		if bead.Status == "closed" {
-			return bead
-		}
-		time.Sleep(200 * time.Millisecond)
+	var waitErr error
+	if bead, err := waitForBeadCondition(t, cityDir, beadID, timeout, func(bead graphBead) bool {
+		return bead.Status == "closed"
+	}); err == nil {
+		return bead
+	} else {
+		waitErr = err
+		t.Logf("waitForBeadClosed(%s) ended with %v; collecting diagnostics", beadID, err)
 	}
 
 	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
@@ -277,10 +357,22 @@ func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Durati
 		sessionPeekOut = fmt.Sprintf("gc session peek worker failed: %v\noutput: %s", sessionPeekErr, sessionPeekOut)
 	}
 	traceOut := readOptionalFile(filepath.Join(cityDir, "graph-workflow-trace.log"))
-	workflowTraceOut := readOptionalFile(filepath.Join(cityDir, "control-dispatcher-trace.log"))
-	t.Fatalf("timed out waiting for bead %s to close\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
-		beadID, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
+	workflowTraceOut := readGraphWorkflowTraceFiles(cityDir)
+	t.Fatalf("waiting for bead %s to close failed: %v\nready:\n%s\nready worker:\n%s\nsessions:\n%s\nworker peek:\n%s\ntrace:\n%s\nworkflow trace:\n%s\nbeads:\n%s",
+		beadID, waitErr, readyOut, readyAssigneeOut, sessionListOut, sessionPeekOut, traceOut, workflowTraceOut, out)
 	return graphBead{}
+}
+
+func readGraphWorkflowTraceFiles(cityDir string) string {
+	tracePaths := []string{
+		citylayout.ControlDispatcherTraceDefaultPath(cityDir),
+		citylayout.ControlDispatcherTraceDefaultPathFor(cityDir, "core.control-dispatcher"),
+	}
+	var traces []string
+	for _, path := range tracePaths {
+		traces = append(traces, fmt.Sprintf("%s:\n%s", path, readOptionalFile(path)))
+	}
+	return strings.Join(traces, "\n\n")
 }
 
 func readOptionalFile(path string) string {

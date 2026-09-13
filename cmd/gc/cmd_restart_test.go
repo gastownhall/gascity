@@ -253,6 +253,253 @@ func TestDoRigRestart_UsesUnlimitedPoolSessionBeadsForCustomSessionNames(t *test
 	}
 }
 
+func TestDoRigRestart_UsesBoundPoolSlotOnlySessionBeadForCustomSessionName(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "frontend/ops.furiosa",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/ops.worker",
+			"session_name": "custom-ops-furiosa",
+			"pool_slot":    "1",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "custom-ops-furiosa", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	agents := []config.Agent{{
+		Name:              "worker",
+		Dir:               "frontend",
+		BindingName:       "ops",
+		NamepoolNames:     []string{"furiosa", "nux"},
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if sp.IsRunning("custom-ops-furiosa") {
+		t.Fatal("custom bound pool session still running after rig restart")
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(rec.Events))
+	}
+	if rec.Events[0].Subject != "frontend/ops.furiosa" {
+		t.Fatalf("event subject = %q, want %q", rec.Events[0].Subject, "frontend/ops.furiosa")
+	}
+}
+
+func TestDoRigRestart_UsesTemplateIdentityPoolSlotSessionBeadForCustomSessionName(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "frontend/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/worker",
+			"agent_name":   "frontend/worker",
+			"session_name": "custom-worker-7",
+			"pool_slot":    "7",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "custom-worker-7", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	agents := []config.Agent{{
+		Name:              "worker",
+		Dir:               "frontend",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(10), ScaleCheck: "echo 1",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if sp.IsRunning("custom-worker-7") {
+		t.Fatal("template-identity pool session still running after rig restart")
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(rec.Events))
+	}
+	if rec.Events[0].Subject != "frontend/worker-7" {
+		t.Fatalf("event subject = %q, want %q", rec.Events[0].Subject, "frontend/worker-7")
+	}
+}
+
+func TestDoRigRestart_DoesNotTargetOutOfBoundsAliasOnlyBoundedPoolIdentity(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "stale out-of-bounds pool instance",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":     "frontend/worker",
+			"alias":        "frontend/worker-7",
+			"session_name": "custom-worker-7",
+			"state":        "awake",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "custom-worker-7", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	agents := []config.Agent{{
+		Name:              "worker",
+		Dir:               "frontend",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 1",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !sp.IsRunning("custom-worker-7") {
+		t.Fatal("out-of-bounds pool session should not have been restarted")
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("got %d events, want 0", len(rec.Events))
+	}
+}
+
+func TestDoRigRestart_PrefersLiveFallbackCandidateOncePerLogicalInstance(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-worker-7",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live legacy",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sp.Start(context.Background(), "worker-7", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := events.NewFake()
+	agents := []config.Agent{{
+		Name:              "worker",
+		Dir:               "frontend",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(10), ScaleCheck: "echo 1",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if sp.IsRunning("worker-7") {
+		t.Fatal("live fallback session still running after rig restart")
+	}
+	if len(rec.Events) != 1 {
+		t.Fatalf("got %d events, want 1", len(rec.Events))
+	}
+	if rec.Events[0].Subject != "frontend/worker-7" {
+		t.Fatalf("event subject = %q, want %q", rec.Events[0].Subject, "frontend/worker-7")
+	}
+}
+
+func TestDoRigRestart_StopsAllLiveCandidatesForLogicalInstance(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "stale duplicate",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "s-stale-worker-7",
+				"pool_slot":    "7",
+			},
+		},
+		{
+			Title:  "live legacy",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"common_name":  "worker",
+				"session_name": "worker-7",
+				"alias":        "frontend/worker-7",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sessionName := range []string{"s-stale-worker-7", "worker-7"} {
+		if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "echo"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := events.NewFake()
+	agents := []config.Agent{{
+		Name:              "worker",
+		Dir:               "frontend",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(10), ScaleCheck: "echo 1",
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, sessionName := range []string{"s-stale-worker-7", "worker-7"} {
+		if sp.IsRunning(sessionName) {
+			t.Fatalf("%s still running after rig restart", sessionName)
+		}
+	}
+	if len(rec.Events) != 2 {
+		t.Fatalf("got %d events, want 2", len(rec.Events))
+	}
+	for _, event := range rec.Events {
+		if event.Subject != "frontend/worker-7" {
+			t.Fatalf("event subject = %q, want %q", event.Subject, "frontend/worker-7")
+		}
+	}
+}
+
 func TestDoRigRestart_UsesLegacyPoolAgentLabelForCustomSessionNames(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()

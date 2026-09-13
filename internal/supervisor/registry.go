@@ -5,6 +5,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,12 +15,17 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // validCityName matches names safe for use in URL path segments.
 // Must start with alphanumeric and contain only alphanumerics, hyphens,
 // underscores, and dots.
 var validCityName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// ErrPendingCityRequestExists indicates a city path already has an in-flight
+// async request waiting for a terminal request-result event.
+var ErrPendingCityRequestExists = errors.New("pending city request already exists")
 
 // CityEntry is one registered city in the supervisor registry.
 type CityEntry struct {
@@ -40,10 +46,18 @@ type RigEntry struct {
 	DefaultCity string `toml:"default_city,omitempty"` // absolute path to default city (empty = unset)
 }
 
+// PendingCityRequestEntry stores async request correlation while the
+// supervisor reconciler completes city-scoped infrastructure work.
+type PendingCityRequestEntry struct {
+	Path      string `toml:"path"`
+	RequestID string `toml:"request_id"`
+}
+
 // registryFile is the TOML structure of ~/.gc/cities.toml.
 type registryFile struct {
-	Cities []CityEntry `toml:"cities"`
-	Rigs   []RigEntry  `toml:"rigs,omitempty"`
+	Cities              []CityEntry               `toml:"cities"`
+	Rigs                []RigEntry                `toml:"rigs,omitempty"`
+	PendingCityRequests []PendingCityRequestEntry `toml:"pending_city_requests,omitempty"`
 }
 
 // Registry manages the set of registered cities. Thread-safe.
@@ -57,6 +71,18 @@ type Registry struct {
 // The file need not exist yet — it will be created on first write.
 func NewRegistry(path string) *Registry {
 	return &Registry{path: path}
+}
+
+func (r *Registry) refuseHostRegistryDuringTests() {
+	if !isTestBinary() {
+		return
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		hostRegistry := filepath.Join(home, ".gc")
+		if strings.HasPrefix(r.path, hostRegistry+string(filepath.Separator)) || r.path == hostRegistry {
+			panic("supervisor.Registry: refusing to write to host registry during tests")
+		}
+	}
 }
 
 // List returns all registered cities. Returns an empty slice (not nil)
@@ -74,23 +100,11 @@ func (r *Registry) List() ([]CityEntry, error) {
 // a different city with the same effective name is already registered.
 // Uses file-level locking for cross-process safety.
 func (r *Registry) Register(cityPath, effectiveName string) error {
-	// Guard: refuse to write to the host registry during tests.
-	if isTestBinary() {
-		if home, err := os.UserHomeDir(); err == nil {
-			hostRegistry := filepath.Join(home, ".gc")
-			if strings.HasPrefix(r.path, hostRegistry+string(filepath.Separator)) || r.path == hostRegistry {
-				panic("supervisor.Registry.Register: refusing to write to host registry during tests")
-			}
-		}
-	}
+	r.refuseHostRegistryDuringTests()
 
-	abs, err := filepath.Abs(cityPath)
+	abs, err := resolveAbsPath(cityPath)
 	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	abs, err = filepath.EvalSymlinks(abs)
-	if err != nil {
-		return fmt.Errorf("resolving symlinks: %w", err)
+		return err
 	}
 	if effectiveName == "" {
 		effectiveName = filepath.Base(abs)
@@ -114,21 +128,21 @@ func (r *Registry) Register(cityPath, effectiveName string) error {
 	}
 
 	for i, e := range entries {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			if e.Name == effectiveName {
 				return nil // already registered with same name — idempotent
 			}
 			// Name changed — check for conflicts with other entries, then update.
 			for j, other := range entries {
 				if j != i && other.EffectiveName() == effectiveName {
-					return fmt.Errorf("city name %q already registered at %s (set a unique workspace.name)", effectiveName, other.Path)
+					return fmt.Errorf("city name %q already registered at %s (choose a unique registration name, for example with gc register --name)", effectiveName, other.Path)
 				}
 			}
 			entries[i].Name = effectiveName
 			return r.saveLocked(entries)
 		}
 		if e.EffectiveName() == effectiveName {
-			return fmt.Errorf("city name %q already registered at %s (set a unique workspace.name)", effectiveName, e.Path)
+			return fmt.Errorf("city name %q already registered at %s (choose a unique registration name, for example with gc register --name)", effectiveName, e.Path)
 		}
 	}
 
@@ -140,15 +154,11 @@ func (r *Registry) Register(cityPath, effectiveName string) error {
 // error if the city is not registered. The path is resolved to
 // absolute before comparison. Uses file-level locking for cross-process safety.
 func (r *Registry) Unregister(cityPath string) error {
-	abs, err := filepath.Abs(cityPath)
+	r.refuseHostRegistryDuringTests()
+
+	abs, err := resolveAbsPath(cityPath)
 	if err != nil {
-		return fmt.Errorf("resolving path: %w", err)
-	}
-	// Best-effort symlink resolution: if the directory was deleted before
-	// unregister, EvalSymlinks fails. Fall back to the absolute path so
-	// stale entries can still be removed.
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
+		return err
 	}
 
 	r.mu.Lock()
@@ -168,7 +178,7 @@ func (r *Registry) Unregister(cityPath string) error {
 	found := false
 	filtered := entries[:0]
 	for _, e := range entries {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			found = true
 			continue
 		}
@@ -178,6 +188,129 @@ func (r *Registry) Unregister(cityPath string) error {
 		return fmt.Errorf("city at %s is not registered", abs)
 	}
 	return r.saveLocked(filtered)
+}
+
+// LookupCityByName finds a registered city by its effective name. Returns the
+// matching entry and true, or a zero entry and false if no registered city has
+// that name (or on a registry read error). The match is exact and
+// case-sensitive, mirroring the uniqueness Register enforces on names and the
+// LookupRigByName behavior; because Register rejects duplicate names, at most
+// one entry can match. Callers that must distinguish an unreadable registry
+// from a genuine miss should use LookupCityByNameE.
+func (r *Registry) LookupCityByName(name string) (CityEntry, bool) {
+	entry, ok, _ := r.LookupCityByNameE(name)
+	return entry, ok
+}
+
+// LookupCityByNameE is like LookupCityByName but also returns any registry read
+// error, so callers can surface a corrupt or unreadable registry instead of
+// silently collapsing it into a "not registered" miss. The bool is true only on
+// an exact, case-sensitive name match; on a read error it is false and the
+// error is non-nil.
+func (r *Registry) LookupCityByNameE(name string) (CityEntry, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entries, err := r.loadLocked()
+	if err != nil {
+		return CityEntry{}, false, err
+	}
+	for _, e := range entries {
+		if e.EffectiveName() == name {
+			return e, true, nil
+		}
+	}
+	return CityEntry{}, false, nil
+}
+
+// IsValidCityName reports whether s is shaped like a registered city name and
+// therefore can never denote a filesystem path: city names match validCityName
+// (a leading alphanumeric followed by alphanumerics, dots, underscores, and
+// hyphens), so they contain no path separators, leading dot, or tilde. CLI
+// callers use this to classify a city reference as a name vs a path before
+// resolving it. Surrounding whitespace is ignored.
+func IsValidCityName(s string) bool {
+	return validCityName.MatchString(strings.TrimSpace(s))
+}
+
+// StorePendingCityRequestID records a request_id for later supervisor
+// reconciliation. The entry is persisted in the supervisor registry so a
+// restarted supervisor can still emit the terminal async result event.
+func (r *Registry) StorePendingCityRequestID(cityPath, requestID string) error {
+	r.refuseHostRegistryDuringTests()
+
+	abs, err := resolveAbsPath(cityPath)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return err
+	}
+	for _, pending := range rf.PendingCityRequests {
+		if sameRegistryPath(pending.Path, abs) {
+			return fmt.Errorf("%w: %s", ErrPendingCityRequestExists, abs)
+		}
+	}
+	rf.PendingCityRequests = append(rf.PendingCityRequests, PendingCityRequestEntry{
+		Path:      abs,
+		RequestID: requestID,
+	})
+	return r.saveAllLocked(rf)
+}
+
+// ConsumePendingCityRequestID returns and removes the pending request_id for a
+// city path from the persisted supervisor registry.
+func (r *Registry) ConsumePendingCityRequestID(cityPath string) (string, bool, error) {
+	r.refuseHostRegistryDuringTests()
+
+	abs, err := resolveAbsPath(cityPath)
+	if err != nil {
+		return "", false, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	unlock, err := r.fileLock()
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+
+	rf, err := r.loadAllLocked()
+	if err != nil {
+		return "", false, err
+	}
+	kept := rf.PendingCityRequests[:0]
+	var requestID string
+	found := false
+	for _, pending := range rf.PendingCityRequests {
+		if sameRegistryPath(pending.Path, abs) {
+			requestID = pending.RequestID
+			found = true
+			continue
+		}
+		kept = append(kept, pending)
+	}
+	if !found {
+		return "", false, nil
+	}
+	rf.PendingCityRequests = kept
+	if err := r.saveAllLocked(rf); err != nil {
+		return "", false, err
+	}
+	return requestID, true, nil
 }
 
 // loadAllLocked reads the full registry file. Caller must hold at least r.mu.RLock.
@@ -287,6 +420,8 @@ func (r *Registry) ListRigs() ([]RigEntry, error) {
 // already exists, the entry is updated. Uses file-level locking for
 // cross-process safety.
 func (r *Registry) RegisterRig(rigPath, name, defaultCity string) error {
+	r.refuseHostRegistryDuringTests()
+
 	abs, err := resolveAbsPath(rigPath)
 	if err != nil {
 		return err
@@ -313,7 +448,7 @@ func (r *Registry) RegisterRig(rigPath, name, defaultCity string) error {
 	}
 
 	for i, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			// Same path — update name and default if needed.
 			if e.Name != name {
 				// Check new name doesn't conflict.
@@ -345,6 +480,8 @@ func (r *Registry) RegisterRig(rigPath, name, defaultCity string) error {
 // UnregisterRig removes a rig from the registry by path. Returns an error
 // if the rig is not registered. Uses file-level locking for cross-process safety.
 func (r *Registry) UnregisterRig(rigPath string) error {
+	r.refuseHostRegistryDuringTests()
+
 	abs, err := resolveAbsPath(rigPath)
 	if err != nil {
 		return err
@@ -367,7 +504,7 @@ func (r *Registry) UnregisterRig(rigPath string) error {
 	found := false
 	filtered := rf.Rigs[:0]
 	for _, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			found = true
 			continue
 		}
@@ -400,9 +537,11 @@ func (r *Registry) LookupRigByPath(dir string) (RigEntry, bool) {
 	var best RigEntry
 	bestLen := 0
 	for _, e := range rf.Rigs {
-		if pathHasPrefix(abs, e.Path) && len(e.Path) > bestLen {
+		entryPath := pathutil.NormalizePathForCompare(e.Path)
+		if pathHasPrefix(abs, entryPath) && len(entryPath) > bestLen {
+			e.Path = entryPath
 			best = e
-			bestLen = len(e.Path)
+			bestLen = len(entryPath)
 		}
 	}
 	return best, bestLen > 0
@@ -430,6 +569,8 @@ func (r *Registry) LookupRigByName(name string) (RigEntry, bool) {
 // SetRigDefault sets the default city for a rig. The rig must already be
 // registered. Uses file-level locking for cross-process safety.
 func (r *Registry) SetRigDefault(rigPath, defaultCity string) error {
+	r.refuseHostRegistryDuringTests()
+
 	abs, err := resolveAbsPath(rigPath)
 	if err != nil {
 		return err
@@ -450,12 +591,17 @@ func (r *Registry) SetRigDefault(rigPath, defaultCity string) error {
 	}
 
 	for i, e := range rf.Rigs {
-		if e.Path == abs {
+		if sameRegistryPath(e.Path, abs) {
 			rf.Rigs[i].DefaultCity = defaultCity
 			return r.saveAllLocked(rf)
 		}
 	}
 	return fmt.Errorf("rig at %s is not registered", abs)
+}
+
+type rigState struct {
+	name   string
+	cities map[string]bool
 }
 
 // ReconcileRigs rebuilds the rig index from city configurations. For each
@@ -464,6 +610,8 @@ func (r *Registry) SetRigDefault(rigPath, defaultCity string) error {
 // default_city if the referenced city no longer contains the rig. Removes
 // rig entries that no longer belong to any city.
 func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
+	r.refuseHostRegistryDuringTests()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -479,10 +627,6 @@ func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
 	}
 
 	// Build desired state: rig path → {name, set of cities}.
-	type rigState struct {
-		name   string
-		cities map[string]bool
-	}
 	desired := make(map[string]*rigState)
 	for _, m := range rigCityMap {
 		rigPath, err := resolveAbsPath(m.RigPath)
@@ -505,16 +649,22 @@ func (r *Registry) ReconcileRigs(rigCityMap []RigCityMapping) error {
 	seen := make(map[string]bool)
 	kept := rf.Rigs[:0]
 	for _, e := range rf.Rigs {
-		s, ok := desired[e.Path]
+		desiredPath, s, ok := desiredRigStateForEntry(desired, e.Path)
 		if !ok {
 			// Rig no longer in any city — drop it.
 			continue
 		}
-		seen[e.Path] = true
+		seen[desiredPath] = true
+		e.Path = desiredPath
 		e.Name = s.name
 		// Clear stale default.
-		if e.DefaultCity != "" && !s.cities[e.DefaultCity] {
-			e.DefaultCity = ""
+		if e.DefaultCity != "" {
+			defaultCity := pathutil.NormalizePathForCompare(e.DefaultCity)
+			if !s.cities[defaultCity] {
+				e.DefaultCity = ""
+			} else {
+				e.DefaultCity = defaultCity
+			}
 		}
 		// Auto-set default when exactly one city.
 		if e.DefaultCity == "" && len(s.cities) == 1 {
@@ -551,21 +701,36 @@ type RigCityMapping struct {
 	CityPath string
 }
 
-// resolveAbsPath resolves a path to absolute, following symlinks.
+// resolveAbsPath resolves a path to an absolute canonical comparison form.
 func resolveAbsPath(p string) (string, error) {
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", fmt.Errorf("resolving path: %w", err)
 	}
-	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
-		abs = resolved
+	return pathutil.NormalizePathForCompare(abs), nil
+}
+
+func sameRegistryPath(a, b string) bool {
+	return pathutil.SamePath(a, b)
+}
+
+func desiredRigStateForEntry(desired map[string]*rigState, entryPath string) (string, *rigState, bool) {
+	if s, ok := desired[entryPath]; ok {
+		return entryPath, s, true
 	}
-	return abs, nil
+	for path, s := range desired {
+		if sameRegistryPath(path, entryPath) {
+			return path, s, true
+		}
+	}
+	return "", nil, false
 }
 
 // pathHasPrefix reports whether path starts with prefix as a directory
 // boundary (not just a string prefix). e.g. /a/bc is not under /a/b.
 func pathHasPrefix(path, prefix string) bool {
+	path = pathutil.NormalizePathForCompare(path)
+	prefix = pathutil.NormalizePathForCompare(prefix)
 	if path == prefix {
 		return true
 	}

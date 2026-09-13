@@ -3,43 +3,17 @@ package testutil
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
-// CanonicalPath returns a cleaned absolute path, resolving symlinks when the
-// target exists. This keeps tests stable on macOS where /tmp and parts of
-// /var are symlinked into /private.
+// CanonicalPath returns the production path-normalized form used for
+// comparisons. This keeps tests stable on macOS where /tmp and /var can be
+// reported through /private aliases.
 func CanonicalPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	path = filepath.Clean(path)
-	path = canonicalizeExistingPathPrefix(path)
-	return filepath.Clean(path)
-}
-
-func canonicalizeExistingPathPrefix(path string) string {
-	current := path
-	var suffix []string
-	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			for i := len(suffix) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, suffix[i])
-			}
-			return resolved
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return path
-		}
-		suffix = append(suffix, filepath.Base(current))
-		current = parent
-	}
+	return pathutil.NormalizePathForCompare(path)
 }
 
 // AssertSamePath compares two filesystem paths after canonicalization.

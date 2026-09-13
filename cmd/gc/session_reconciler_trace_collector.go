@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -73,6 +74,7 @@ type SessionReconcilerTraceCycle struct {
 	recordCount        int
 	droppedRecords     int
 	droppedBatches     int
+	ended              bool
 	dropReasons        map[string]int
 	completionStatus   TraceCompletionStatus
 	traceMode          TraceMode
@@ -117,11 +119,20 @@ func newSessionReconcilerTracer(cityPath, cityName string, stderr io.Writer) *Se
 		store:     store,
 		armStore:  newSessionReconcilerTraceArmStore(cityPath),
 		lastArms:  make(map[string]TraceArm),
-		flushCh:   make(chan sessionReconcilerTraceFlushRequest, sessionReconcilerTraceFlushQueueSize),
-		flushDone: make(chan struct{}),
-		closeCh:   make(chan struct{}),
 	}
-	go tracer.runFlushLoop()
+	// In production, an async worker goroutine drains the flush queue with a
+	// bounded wait budget so tick liveness wins over trace durability under
+	// slow storage. Under `go test`, the same bound makes assertions on trace
+	// records non-deterministic — back-to-back ticks in a single test can fill
+	// the queue or starve the result wait, and records silently drop. Bypass
+	// the queue in tests so AppendBatch is synchronous and trace assertions
+	// observe what the production gate actually decided. (ga-231oq)
+	if !testing.Testing() {
+		tracer.flushCh = make(chan sessionReconcilerTraceFlushRequest, sessionReconcilerTraceFlushQueueSize)
+		tracer.flushDone = make(chan struct{})
+		tracer.closeCh = make(chan struct{})
+		go tracer.runFlushLoop(tracer.flushCh)
+	}
 	return tracer
 }
 
@@ -161,9 +172,9 @@ func (t *SessionReconcilerTracer) Close() error {
 	return t.store.Close()
 }
 
-func (t *SessionReconcilerTracer) runFlushLoop() {
+func (t *SessionReconcilerTracer) runFlushLoop(flushCh <-chan sessionReconcilerTraceFlushRequest) {
 	defer close(t.flushDone)
-	for req := range t.flushCh {
+	for req := range flushCh {
 		err := t.store.AppendBatch(req.records, req.durability)
 		select {
 		case req.result <- err:
@@ -271,6 +282,13 @@ func (c *SessionReconcilerTraceCycle) addRecord(rec SessionReconcilerTraceRecord
 	if len(c.records) >= sessionReconcilerTraceMaxRecordsPerCycle {
 		c.droppedRecords++
 		c.dropReasons["record_budget_exceeded"]++
+		return
+	}
+	if c.ended {
+		rec.ensureFields()
+		rec.Fields["post_cycle_result"] = true
+		rec.Fields["rollup_excluded"] = true
+		c.records = append(c.records, rec)
 		return
 	}
 	c.accumulateRecordLocked(rec)
@@ -552,16 +570,20 @@ func buildTraceDetailScopes(cfg *config.City, arms []TraceArm) map[string]TraceS
 	return scopes
 }
 
-func (c *SessionReconcilerTraceCycle) RecordConfigReload(previousRev, newRev string, outcome TraceOutcomeCode, added, removed []string, providerChanged bool, err error) {
+func (c *SessionReconcilerTraceCycle) RecordConfigReload(previousRev, newRev string, outcome TraceOutcomeCode, source reloadSource, added, removed []string, providerChanged bool, warnings []string, err error) {
 	if c == nil {
 		return
 	}
 	fields := map[string]any{
 		"previous_config_revision": previousRev,
 		"new_config_revision":      newRev,
+		"source":                   string(source),
 		"added_templates":          added,
 		"removed_templates":        removed,
 		"provider_changed":         providerChanged,
+	}
+	if len(warnings) > 0 {
+		fields["warnings"] = warnings
 	}
 	if err != nil {
 		fields["error"] = err.Error()
@@ -862,6 +884,10 @@ func (c *SessionReconcilerTraceCycle) RecordTraceControl(action string, scopeTyp
 	c.addRecord(rec)
 }
 
+// End flushes the cycle and writes a cycle-result trace record. Caller fields
+// are intentionally open-ended: known rollup keys are merged through
+// coalesceTraceField, so caller values keep priority there; additional non-nil
+// caller fields are preserved for site-specific trace context.
 func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fields map[string]any) error {
 	if c == nil || c.tracer == nil || !c.tracer.Enabled() {
 		return nil
@@ -870,6 +896,8 @@ func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fiel
 	dur := now.Sub(c.start)
 	c.mu.Lock()
 	batch := append([]SessionReconcilerTraceRecord(nil), c.records...)
+	c.records = nil
+	c.ended = true
 	droppedRecords := c.droppedRecords
 	droppedBatches := c.droppedBatches
 	dropReasons := make(map[string]int, len(c.dropReasons))
@@ -913,6 +941,11 @@ func (c *SessionReconcilerTraceCycle) End(completion TraceCompletionStatus, fiel
 		"dropped_record_count":    droppedRecords,
 		"dropped_batch_count":     droppedBatches,
 		"drop_reason_counts":      dropReasons,
+	}
+	for k, v := range fields {
+		if _, ok := rollup[k]; !ok {
+			rollup[k] = v
+		}
 	}
 	rec := newTraceRecord(TraceRecordCycleResult).withCycle(c, now)
 	rec.SiteCode = TraceSiteCycleFinish

@@ -11,13 +11,12 @@
 
 set -euo pipefail
 cd "$GC_CITY"
+ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    # Check for assigned work
-    hooked=$(gc agent claimed "$GC_AGENT" 2>/dev/null || true)
-
-    if echo "$hooked" | grep -q "^ID:"; then
-        work_id=$(echo "$hooked" | grep "^ID:" | awk '{print $2}')
+    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    if echo "$hooked" | grep -q "^gc-"; then
+        work_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
 
         # Step 1: Create feature branch
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then
@@ -36,7 +35,6 @@ while true; do
             cd "$GC_CITY"
         fi
 
-        # Step 4: Close work bead
         bd close "$work_id" 2>/dev/null || true
 
         exit 0

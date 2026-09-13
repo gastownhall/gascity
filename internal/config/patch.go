@@ -6,29 +6,40 @@ import "fmt"
 // resources by identity key and modify specific fields. They are applied
 // after fragment merge, before validation.
 type Patches struct {
-	// Agents targets agents by (dir, name).
+	// Agents targets agents by rig scope + name.
 	Agents []AgentPatch `toml:"agent,omitempty"`
+	// NamedSessions targets configured named sessions by (dir, template).
+	NamedSessions []NamedSessionPatch `toml:"named_session,omitempty"`
 	// Rigs targets rigs by name.
 	Rigs []RigPatch `toml:"rigs,omitempty"`
 	// Providers targets providers by name.
 	Providers []ProviderPatch `toml:"providers,omitempty"`
+	// GitHubPRMonitors targets GitHub PR readiness monitors by name.
+	GitHubPRMonitors []GitHubPRMonitorPatch `toml:"github_pr_monitor,omitempty"`
 }
 
-// AgentPatch modifies an existing agent identified by (Dir, Name).
+// AgentPatch modifies existing agents identified by rig scope and Name.
 // Pointer fields distinguish "not set" from "set to zero value."
 type AgentPatch struct {
-	// Dir is the targeting key (required with Name). Identifies the agent's
-	// working directory scope. Empty for city-scoped agents.
-	Dir string `toml:"dir" jsonschema:"required"`
+	// Dir is the legacy targeting key for rig identity. Empty means
+	// city-scoped. New configs should set Rig instead; Dir remains the
+	// canonical resolved identity that both keys feed into.
+	Dir string `toml:"dir,omitempty"`
+	// Rig is new targeting key for rig identity (replaces Dir).
+	// "*" matches all rigs + city. Empty means city-scoped unless Dir is set.
+	Rig string `toml:"rig,omitempty"`
 	// Name is the targeting key (required). Must match an existing agent's name.
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// TmuxAlias overrides the tmux session name template
+	// (see Agent.TmuxAlias for semantics).
+	TmuxAlias *string `toml:"tmux_alias,omitempty"`
 	// Scope overrides the agent's scope ("city" or "rig").
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
-	// Pool overrides pool configuration fields.
+	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
@@ -37,40 +48,90 @@ type AgentPatch struct {
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate overrides the prompt template path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
-	// Session overrides the session transport ("acp").
+	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
+	// Upstream overrides the model-serving endpoint selection (Phase C).
+	Upstream *string `toml:"upstream,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
+	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
+	Lifecycle *string `toml:"lifecycle,omitempty" jsonschema:"enum=one_shot"`
 	// Nudge overrides the nudge text.
 	Nudge *string `toml:"nudge,omitempty"`
 	// IdleTimeout overrides the idle timeout. Duration string (e.g., "30s", "5m", "1h").
 	IdleTimeout *string `toml:"idle_timeout,omitempty"`
+	// MaxSessionAge overrides the max session age. Duration string (e.g., "5h").
+	MaxSessionAge *string `toml:"max_session_age,omitempty"`
+	// MaxSessionAgeJitter overrides the max session age jitter. Duration string (e.g., "15m").
+	MaxSessionAgeJitter *string `toml:"max_session_age_jitter,omitempty"`
+	// AssignedWorkDeferLimit overrides Agent.AssignedWorkDeferLimit (see that
+	// field for semantics).
+	AssignedWorkDeferLimit *int `toml:"assigned_work_defer_limit,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string or "off".
 	SleepAfterIdle *string `toml:"sleep_after_idle,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
+	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	Skills []string `toml:"skills,omitempty"`
+	// MCP is a tombstone field retained for v0.15.1 backwards compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	MCP []string `toml:"mcp,omitempty"`
+	// SkillsAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	SkillsAppend []string `toml:"skills_append,omitempty"`
+	// MCPAppend is a tombstone field retained for v0.15.1 backwards
+	// compatibility.
+	//
+	// Deprecated: removed in v0.16. Tombstone — accepted but ignored. See
+	// engdocs/proposals/skill-materialization.md
+	MCPAppend []string `toml:"mcp_append,omitempty"`
 	// HooksInstalled overrides automatic hook detection.
 	HooksInstalled *bool `toml:"hooks_installed,omitempty"`
+	// InjectAssignedSkills overrides per-agent appendix injection
+	// (see Agent.InjectAssignedSkills).
+	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
 	// SessionSetup overrides the agent's session_setup commands.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript overrides the agent's session_setup_script path.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	SessionSetupScript *string `toml:"session_setup_script,omitempty"`
 	// SessionLive overrides the agent's session_live commands.
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir overrides the agent's overlay_dir path. Copies contents
 	// additively into the agent's working directory at startup.
-	// Relative paths resolve against the city directory.
+	// Relative paths resolve against the declaring config file's directory
+	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
-	// InjectFragments overrides the agent's inject_fragments list.
-	InjectFragments []string `toml:"inject_fragments,omitempty"`
+	// InjectFragments overrides the agent's inject_fragments list. Leave this
+	// field unset to keep inherited fragments; JSON callers may send null for
+	// the same no-op. Set an empty list to clear fragments; set a populated
+	// list to replace fragments.
+	InjectFragments *[]string `toml:"inject_fragments,omitempty"`
+	// AppendFragments overrides the agent's append_fragments list.
+	AppendFragments []string `toml:"append_fragments,omitempty"`
 	// Attach overrides the agent's attach setting.
 	Attach *bool `toml:"attach,omitempty"`
 	// DependsOn overrides the agent's dependency list.
@@ -79,6 +140,8 @@ type AgentPatch struct {
 	ResumeCommand *string `toml:"resume_command,omitempty"`
 	// WakeMode overrides the agent's wake mode ("resume" or "fresh").
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
+	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
@@ -94,7 +157,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
-	// ScaleCheck overrides the shell command whose output determines desired session count.
+	// ScaleCheck overrides the command template whose output reports new
+	// unassigned session demand for bead-backed reconciliation. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -103,19 +168,36 @@ type AgentPatch struct {
 	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
 }
 
-// PoolOverride modifies pool configuration fields. Nil fields are not changed.
+// NamedSessionPatch modifies an existing named session identified by canonical
+// name or, for compatibility, by an unambiguous template.
+type NamedSessionPatch struct {
+	// Dir is the targeting key. Empty targets a city-scoped named session.
+	Dir string `toml:"dir,omitempty"`
+	// Name is the canonical named-session identity. Use this to disambiguate
+	// sessions that share the same template.
+	Name string `toml:"name,omitempty"`
+	// Template is a compatibility targeting key when Name is omitted.
+	Template string `toml:"template,omitempty"`
+	// Mode overrides the named-session controller mode ("on_demand" or "always").
+	Mode *string `toml:"mode,omitempty" jsonschema:"enum=on_demand,enum=always"`
+}
+
+// PoolOverride modifies legacy [pool] fields that map to session scaling. Nil fields are not changed.
 type PoolOverride struct {
-	// Min overrides pool minimum instances.
+	// Min overrides the minimum number of sessions.
 	Min *int `toml:"min,omitempty" jsonschema:"minimum=0"`
-	// Max overrides pool maximum instances. 0 means the pool is disabled.
+	// Max overrides the maximum number of sessions. 0 means no sessions can claim routed work.
 	Max *int `toml:"max,omitempty" jsonschema:"minimum=0"`
-	// Check overrides the pool check command.
+	// Check overrides the session scale check command template. Supports the
+	// same Go template placeholders as Agent.scale_check.
 	Check *string `toml:"check,omitempty"`
 	// DrainTimeout overrides the drain timeout. Duration string (e.g., "5m", "30m", "1h").
 	DrainTimeout *string `toml:"drain_timeout,omitempty"`
-	// OnDeath overrides the on_death command.
+	// OnDeath overrides the on_death command template. Supports the same Go
+	// template placeholders as Agent.on_death.
 	OnDeath *string `toml:"on_death,omitempty"`
-	// OnBoot overrides the on_boot command.
+	// OnBoot overrides the on_boot command template. Supports the same Go
+	// template placeholders as Agent.on_boot.
 	OnBoot *string `toml:"on_boot,omitempty"`
 }
 
@@ -127,24 +209,56 @@ type RigPatch struct {
 	Path *string `toml:"path,omitempty"`
 	// Prefix overrides the bead ID prefix.
 	Prefix *string `toml:"prefix,omitempty"`
-	// Suspended overrides the rig's suspended state.
+	// DefaultBranch overrides the rig's recorded mainline branch.
+	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// Suspended is the deprecated, pre-runtime-state suspension override.
+	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
+	// warning and recommends the rename to SuspendedOnStart. No behavioral
+	// code path reads it.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart overrides the rig's desired suspension state at
+	// city start. Mirrors Rig.SuspendedOnStart.
+	SuspendedOnStart *bool `toml:"suspended_on_start,omitempty"`
+	// FormulaVars adds or overrides rig-scoped formula var defaults.
+	// Additive merge: patch keys win over existing rig keys, unspecified
+	// keys are preserved.
+	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
 type ProviderPatch struct {
 	// Name is the targeting key (required). Must match an existing provider's name.
 	Name string `toml:"name" jsonschema:"required"`
+	// Base overrides the provider's inheritance parent (presence-aware).
+	// Pointer to a pointer so the patch can distinguish "no change"
+	// (double-nil) from "clear to inherit default" (single-nil value in
+	// outer pointer) from "set to explicit empty opt-out" (value "" in
+	// inner pointer) from "set to <name>". Callers use:
+	//   nil          = patch does not touch Base
+	//   &(*string)(nil) = patch clears Base to absent
+	//   &(&"")       = patch sets Base = "" (explicit opt-out)
+	//   &(&"builtin:codex") = patch sets Base to that value
+	Base **string `toml:"base,omitempty"`
 	// Command overrides the provider command.
 	Command *string `toml:"command,omitempty"`
+	// ACPCommand overrides the provider command for ACP transport sessions.
+	ACPCommand *string `toml:"acp_command,omitempty"`
 	// Args overrides the provider args.
 	Args []string `toml:"args,omitempty"`
+	// ACPArgs overrides the provider args for ACP transport sessions.
+	ACPArgs []string `toml:"acp_args,omitempty"`
+	// ArgsAppend overrides the provider args_append list.
+	ArgsAppend []string `toml:"args_append,omitempty"`
+	// OptionsSchemaMerge overrides the options_schema merge mode.
+	OptionsSchemaMerge *string `toml:"options_schema_merge,omitempty"`
 	// PromptMode overrides prompt delivery mode.
 	PromptMode *string `toml:"prompt_mode,omitempty" jsonschema:"enum=arg,enum=flag,enum=none"`
 	// PromptFlag overrides the prompt flag.
 	PromptFlag *string `toml:"prompt_flag,omitempty"`
 	// ReadyDelayMs overrides the ready delay in milliseconds.
 	ReadyDelayMs *int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
+	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
+	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
 	Env map[string]string `toml:"env,omitempty"`
 	// EnvRemove lists env var keys to remove.
@@ -153,9 +267,70 @@ type ProviderPatch struct {
 	Replace bool `toml:"_replace,omitempty"`
 }
 
+// GitHubPRMonitorPatch modifies an existing GitHub PR readiness monitor by
+// name. Pointer fields distinguish "not set" from "set to zero value."
+type GitHubPRMonitorPatch struct {
+	// Name is the monitor identity to patch.
+	Name string `toml:"name" jsonschema:"required"`
+	// Owner overrides the GitHub repository owner or organization.
+	Owner *string `toml:"owner,omitempty"`
+	// Repo overrides the GitHub repository name.
+	Repo *string `toml:"repo,omitempty"`
+	// BaseBranches replaces the monitored base branch list. An empty list
+	// clears the field and will fail validation unless another patch fills it.
+	BaseBranches *[]string `toml:"base_branches,omitempty"`
+	// Rig overrides the owning rig.
+	Rig *string `toml:"rig,omitempty"`
+	// Notify replaces notification recipients. An empty list clears recipients.
+	Notify *[]string `toml:"notify,omitempty"`
+	// NotifyAppend appends notification recipients after Notify replacement.
+	NotifyAppend []string `toml:"notify_append,omitempty"`
+	// RepairRoute overrides the repair route target.
+	RepairRoute *string `toml:"repair_route,omitempty"`
+	// RepairWorkflow overrides the formula attached to repair beads.
+	RepairWorkflow *string `toml:"repair_workflow,omitempty"`
+	// WebhookSecretEnv overrides the env var containing the webhook secret.
+	WebhookSecretEnv *string `toml:"webhook_secret_env,omitempty"`
+	// WebhookSecretKey overrides the stable webhook secret key.
+	WebhookSecretKey *string `toml:"webhook_secret_key,omitempty"`
+	// PollInterval overrides the optional polling cadence.
+	PollInterval *string `toml:"poll_interval,omitempty"`
+	// MergeQueuePolicy overrides merge-queue signal handling.
+	MergeQueuePolicy *string `toml:"merge_queue,omitempty" jsonschema:"enum=ignore,enum=observe,enum=repair"`
+}
+
 // IsEmpty reports whether p has no patch operations.
 func (p *Patches) IsEmpty() bool {
-	return len(p.Agents) == 0 && len(p.Rigs) == 0 && len(p.Providers) == 0
+	return len(p.Agents) == 0 &&
+		len(p.NamedSessions) == 0 &&
+		len(p.Rigs) == 0 &&
+		len(p.Providers) == 0 &&
+		len(p.GitHubPRMonitors) == 0
+}
+
+// Fragments returns a pointer to the given inject_fragments list for use
+// in AgentPatch and AgentOverride literals. Mirrors the three
+// presence-aware states of InjectFragments:
+//
+//	Fragments()                 // empty list: clear
+//	Fragments("frag-a")         // single item: replace with one fragment
+//	Fragments("frag-a", "...")  // populated list: replace with all fragments
+//	nil                         // leave unchanged; do not call Fragments
+//
+// Calling Fragments() with no arguments is the canonical clear; it
+// makes the intent visible at the call site without ad-hoc
+// `&[]string{}` literals.
+func Fragments(items ...string) *[]string {
+	if items == nil {
+		items = []string{}
+	}
+	out := append([]string(nil), items...)
+	if out == nil {
+		// `append(nil, ...empty...)` returns nil; force a non-nil empty
+		// slice so the pointer dereferences to the clear signal.
+		out = []string{}
+	}
+	return &out
 }
 
 // ApplyPatches applies all patches to the config. Patches target existing
@@ -168,6 +343,11 @@ func ApplyPatches(cfg *City, patches Patches) error {
 			return fmt.Errorf("patches.agent[%d]: %w", i, err)
 		}
 	}
+	for i, p := range patches.NamedSessions {
+		if err := applyNamedSessionPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.named_session[%d]: %w", i, err)
+		}
+	}
 	for i, p := range patches.Rigs {
 		if err := applyRigPatch(cfg, &p); err != nil {
 			return fmt.Errorf("patches.rigs[%d]: %w", i, err)
@@ -178,18 +358,143 @@ func ApplyPatches(cfg *City, patches Patches) error {
 			return fmt.Errorf("patches.providers[%d]: %w", i, err)
 		}
 	}
+	for i, p := range patches.GitHubPRMonitors {
+		if err := applyGitHubPRMonitorPatch(cfg, &p); err != nil {
+			return fmt.Errorf("patches.github_pr_monitor[%d]: %w", i, err)
+		}
+	}
 	return nil
 }
 
-// applyAgentPatch finds an agent by (dir, name) and applies the patch.
+func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
+	target, matches, err := namedSessionPatchMatches(cfg, patch)
+	if err != nil {
+		return err
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("named_session %q not found in merged config", target)
+	}
+	if len(matches) > 1 {
+		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
+	}
+	applyNamedSessionPatchFields(&cfg.NamedSessions[matches[0]], patch)
+	return nil
+}
+
+func namedSessionPatchMatches(cfg *City, patch *NamedSessionPatch) (string, []int, error) {
+	if patch.Name == "" && patch.Template == "" {
+		return "", nil, fmt.Errorf("named_session patch: name or template is required")
+	}
+	if patch.Name != "" {
+		target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+		matches := make([]int, 0, 1)
+		for i := range cfg.NamedSessions {
+			if cfg.NamedSessions[i].QualifiedName() == target {
+				matches = append(matches, i)
+			}
+		}
+		return target, matches, nil
+	}
+
+	target := qualifiedNameFromPatch(patch.Dir, patch.Template)
+	matches := make([]int, 0, 1)
+	for i := range cfg.NamedSessions {
+		s := &cfg.NamedSessions[i]
+		if s.QualifiedName() == target || s.TemplateQualifiedName() == target {
+			matches = append(matches, i)
+		}
+	}
+	return target, matches, nil
+}
+
+func applyNamedSessionPatchFields(s *NamedSession, p *NamedSessionPatch) {
+	if p.Mode != nil {
+		s.Mode = *p.Mode
+	}
+}
+
+func agentPatchTargetDir(patch *AgentPatch) (string, error) {
+	if patch.Dir != "" && patch.Rig != "" && patch.Rig != "*" {
+		return "", fmt.Errorf("use only one of dir or rig")
+	}
+	if patch.Rig != "" && patch.Rig != "*" {
+		return patch.Rig, nil
+	}
+	return patch.Dir, nil
+}
+
+// TargetQualifiedName returns the canonical qualified identity this patch
+// targets, folding the legacy Dir key and the newer Rig key into a single
+// string so a patch authored with either key resolves to the same identity
+// ("rigA/name" whether written as dir="rigA" or rig="rigA"). The "*" wildcard
+// is preserved as its own scope ("*/name") so a wildcard patch has a stable
+// identity distinct from a city-scoped one ("name"). The HTTP patch API and
+// the config editor key on this — rather than on Dir alone — so rig- and
+// wildcard-targeted patches can be created, retrieved, and deleted by identity.
+func (p *AgentPatch) TargetQualifiedName() string {
+	dir := p.Dir
+	if p.Rig != "" {
+		dir = p.Rig
+	}
+	return qualifiedNameFromPatch(dir, p.Name)
+}
+
+// Validate reports whether the patch is a well-formed, resolvable target.
+// It enforces the AgentPatch identity contract every write boundary relies on:
+// Name is required, and the legacy Dir key and the newer Rig key (including the
+// "*" wildcard) are mutually exclusive. The HTTP patch API and the config editor
+// call this before persisting so a patch that would hard-fail the next config
+// load — an unresolvable dir+rig combination — can never be written to city.toml
+// and brick config loading. Apply-time resolution (agentPatchTargetDir and
+// applyAgentPatch) enforces the same rule for patches that arrive from other
+// sources, so this is a fail-fast guard at the edge, not the only guard.
+func (p *AgentPatch) Validate() error {
+	if p.Name == "" {
+		return fmt.Errorf("agent patch: name is required")
+	}
+	if p.Dir != "" && p.Rig != "" {
+		return fmt.Errorf("agent patch %q: use only one of dir or rig", p.Name)
+	}
+	return nil
+}
+
+// applyAgentPatch finds agent target(s) and applies patch.
 func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 	if patch.Name == "" {
 		return fmt.Errorf("agent patch: name is required")
 	}
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	if patch.Rig == "*" {
+		if patch.Dir != "" {
+			return fmt.Errorf("use only one of dir or rig")
+		}
+		matched := false
+		for i := range cfg.Agents {
+			a := &cfg.Agents[i]
+			if a.Name == patch.Name || a.BindingQualifiedName() == patch.Name {
+				applyAgentPatchFields(a, patch)
+				matched = true
+			}
+		}
+		if !matched {
+			return fmt.Errorf("agent %q not found in merged config", qualifiedNameFromPatch("*", patch.Name))
+		}
+		return nil
+	}
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return err
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		// V2: match by qualified name so patches targeting "gastown.mayor"
+		// find agents with BindingName="gastown" and Name="mayor".
+		if AgentMatchesIdentity(a, target) {
+			applyAgentPatchFields(a, patch)
+			return nil
+		}
+		// V1 fallback: direct Dir+Name match.
+		if a.Dir == targetDir && a.Name == patch.Name {
 			applyAgentPatchFields(a, patch)
 			return nil
 		}
@@ -198,8 +503,26 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 }
 
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
+	applyAgentMutation(a, p, SessionSleepSourceAgentPatch)
+}
+
+// applyAgentMutation applies the overridable fields of an AgentPatch to an
+// agent. Agent patches and rig-scoped agent overrides share this single merge
+// body: applyAgentOverride adapts an AgentOverride into an AgentPatch (via
+// toAgentPatch) and delegates here, so the two override paths can never
+// silently diverge field-by-field. sleepSource records which config layer
+// supplied SleepAfterIdle (SessionSleepSourceAgentPatch for patches,
+// SessionSleepSourceRigOverride for rig overrides).
+//
+// TestApplyAgentPatchCoversAllFields and TestApplyAgentOverrideCoversAllFields
+// enforce that every overridable field is wired in here (and, for the override
+// path, copied by toAgentPatch); a missed field fails the build.
+func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
+	}
+	if p.TmuxAlias != nil {
+		a.TmuxAlias = *p.TmuxAlias
 	}
 	if p.Scope != nil {
 		a.Scope = *p.Scope
@@ -222,8 +545,20 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.Provider != nil {
 		a.Provider = *p.Provider
 	}
+	if p.ContextAdvisory != nil {
+		a.ContextAdvisory = cloneContextAdvisory(p.ContextAdvisory)
+	}
+	if p.Upstream != nil {
+		a.Upstream = *p.Upstream
+	}
+	if p.Args != nil {
+		a.Args = append([]string(nil), (*p.Args)...)
+	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
+	}
+	if p.Lifecycle != nil {
+		a.Lifecycle = *p.Lifecycle
 	}
 	if p.Nudge != nil {
 		a.Nudge = *p.Nudge
@@ -231,9 +566,18 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.IdleTimeout != nil {
 		a.IdleTimeout = *p.IdleTimeout
 	}
+	if p.MaxSessionAge != nil {
+		a.MaxSessionAge = *p.MaxSessionAge
+	}
+	if p.MaxSessionAgeJitter != nil {
+		a.MaxSessionAgeJitter = *p.MaxSessionAgeJitter
+	}
+	if p.AssignedWorkDeferLimit != nil {
+		a.AssignedWorkDeferLimit = p.AssignedWorkDeferLimit
+	}
 	if p.SleepAfterIdle != nil {
 		a.SleepAfterIdle = NormalizeSleepAfterIdle(*p.SleepAfterIdle)
-		a.SleepAfterIdleSource = "agent_patch"
+		a.SleepAfterIdleSource = sleepSource
 	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)
@@ -243,6 +587,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.HooksInstalled != nil {
 		a.HooksInstalled = p.HooksInstalled
+	}
+	if p.InjectAssignedSkills != nil {
+		a.InjectAssignedSkills = p.InjectAssignedSkills
 	}
 	if len(p.SessionSetup) > 0 {
 		a.SessionSetup = append([]string(nil), p.SessionSetup...)
@@ -281,8 +628,27 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.WakeMode != nil {
 		a.WakeMode = *p.WakeMode
 	}
-	if len(p.InjectFragments) > 0 {
-		a.InjectFragments = append([]string(nil), p.InjectFragments...)
+	if p.MouseMode != nil {
+		a.MouseMode = *p.MouseMode
+	}
+	// InjectFragments uses presence-aware semantics via *[]string: a nil
+	// pointer means "leave unchanged"; a non-nil pointer (even to an
+	// empty slice) means "replace the agent's list with exactly this
+	// value". The pointer travels through TOML write/read intact —
+	// `inject_fragments = []` in a [[patches.agent]] block survives
+	// round-trip and clears an inherited list. Without this, downstream
+	// editors that want to clear a pack-baseline inject_fragments
+	// silently no-op because TOML's omitempty drops `[]string{}` on
+	// encode. The existing `len > 0` pattern remains for `depends_on`,
+	// `pre_start`, `session_setup`, and other list fields whose UX
+	// hasn't asked for clearing yet (see TODO above) — the same
+	// presence-aware pattern can be adopted field by field as the need
+	// arises.
+	if p.InjectFragments != nil {
+		a.InjectFragments = append([]string(nil), (*p.InjectFragments)...)
+	}
+	if len(p.AppendFragments) > 0 {
+		a.AppendFragments = append([]string(nil), p.AppendFragments...)
 	}
 	if len(p.InjectFragmentsAppend) > 0 {
 		a.InjectFragments = append(a.InjectFragments, p.InjectFragmentsAppend...)
@@ -360,13 +726,79 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.Prefix != nil {
 				r.Prefix = *patch.Prefix
 			}
+			if patch.DefaultBranch != nil {
+				r.DefaultBranch = *patch.DefaultBranch
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if patch.SuspendedOnStart != nil {
+				r.SuspendedOnStart = *patch.SuspendedOnStart
+			}
+			if len(patch.FormulaVars) > 0 {
+				if r.FormulaVars == nil {
+					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
+				}
+				for k, v := range patch.FormulaVars {
+					r.FormulaVars[k] = v
+				}
 			}
 			return nil
 		}
 	}
 	return fmt.Errorf("rig %q not found in merged config", patch.Name)
+}
+
+// applyGitHubPRMonitorPatch finds a GitHub PR monitor by name and applies
+// the patch.
+func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
+	if patch.Name == "" {
+		return fmt.Errorf("github pr monitor patch: name is required")
+	}
+	for i := range cfg.GitHub.PRMonitors {
+		monitor := &cfg.GitHub.PRMonitors[i]
+		if monitor.Name != patch.Name {
+			continue
+		}
+		if patch.Owner != nil {
+			monitor.Owner = *patch.Owner
+		}
+		if patch.Repo != nil {
+			monitor.Repo = *patch.Repo
+		}
+		if patch.BaseBranches != nil {
+			monitor.BaseBranches = append([]string(nil), (*patch.BaseBranches)...)
+		}
+		if patch.Rig != nil {
+			monitor.Rig = *patch.Rig
+		}
+		if patch.Notify != nil {
+			monitor.Notify = append([]string(nil), (*patch.Notify)...)
+		}
+		if len(patch.NotifyAppend) > 0 {
+			monitor.Notify = append(monitor.Notify, patch.NotifyAppend...)
+		}
+		if patch.RepairRoute != nil {
+			monitor.RepairRoute = *patch.RepairRoute
+		}
+		if patch.RepairWorkflow != nil {
+			monitor.RepairWorkflow = *patch.RepairWorkflow
+		}
+		if patch.WebhookSecretEnv != nil {
+			monitor.WebhookSecretEnv = *patch.WebhookSecretEnv
+		}
+		if patch.WebhookSecretKey != nil {
+			monitor.WebhookSecretKey = *patch.WebhookSecretKey
+		}
+		if patch.PollInterval != nil {
+			monitor.PollInterval = *patch.PollInterval
+		}
+		if patch.MergeQueuePolicy != nil {
+			monitor.MergeQueuePolicy = *patch.MergeQueuePolicy
+		}
+		return nil
+	}
+	return fmt.Errorf("github pr monitor %q not found in merged config", patch.Name)
 }
 
 // applyProviderPatch modifies a provider. If Replace is true, replaces the
@@ -385,12 +817,29 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	if patch.Replace {
 		// Full replacement — build a new spec from patch fields only.
 		var newSpec ProviderSpec
+		if patch.Base != nil {
+			newSpec.Base = *patch.Base
+		}
 		if patch.Command != nil {
 			newSpec.Command = *patch.Command
+		}
+		if patch.ACPCommand != nil {
+			newSpec.ACPCommand = *patch.ACPCommand
 		}
 		if len(patch.Args) > 0 {
 			newSpec.Args = make([]string, len(patch.Args))
 			copy(newSpec.Args, patch.Args)
+		}
+		if patch.ACPArgs != nil {
+			newSpec.ACPArgs = make([]string, len(patch.ACPArgs))
+			copy(newSpec.ACPArgs, patch.ACPArgs)
+		}
+		if len(patch.ArgsAppend) > 0 {
+			newSpec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+			copy(newSpec.ArgsAppend, patch.ArgsAppend)
+		}
+		if patch.OptionsSchemaMerge != nil {
+			newSpec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.PromptMode != nil {
 			newSpec.PromptMode = *patch.PromptMode
@@ -400,6 +849,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		}
 		if patch.ReadyDelayMs != nil {
 			newSpec.ReadyDelayMs = *patch.ReadyDelayMs
+		}
+		if patch.AcceptStartupDialogs != nil {
+			newSpec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 		}
 		if len(patch.Env) > 0 {
 			newSpec.Env = make(map[string]string, len(patch.Env))
@@ -411,12 +863,29 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		return nil
 	}
 	// Deep merge: only set fields override.
+	if patch.Base != nil {
+		spec.Base = *patch.Base // outer nil handled above; *patch.Base may be nil (clear) or valid
+	}
 	if patch.Command != nil {
 		spec.Command = *patch.Command
+	}
+	if patch.ACPCommand != nil {
+		spec.ACPCommand = *patch.ACPCommand
 	}
 	if len(patch.Args) > 0 {
 		spec.Args = make([]string, len(patch.Args))
 		copy(spec.Args, patch.Args)
+	}
+	if patch.ACPArgs != nil {
+		spec.ACPArgs = make([]string, len(patch.ACPArgs))
+		copy(spec.ACPArgs, patch.ACPArgs)
+	}
+	if len(patch.ArgsAppend) > 0 {
+		spec.ArgsAppend = make([]string, len(patch.ArgsAppend))
+		copy(spec.ArgsAppend, patch.ArgsAppend)
+	}
+	if patch.OptionsSchemaMerge != nil {
+		spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 	}
 	if patch.PromptMode != nil {
 		spec.PromptMode = *patch.PromptMode
@@ -426,6 +895,9 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 	}
 	if patch.ReadyDelayMs != nil {
 		spec.ReadyDelayMs = *patch.ReadyDelayMs
+	}
+	if patch.AcceptStartupDialogs != nil {
+		spec.AcceptStartupDialogs = cloneBoolPtr(patch.AcceptStartupDialogs)
 	}
 	// Env: additive merge.
 	if len(patch.Env) > 0 {

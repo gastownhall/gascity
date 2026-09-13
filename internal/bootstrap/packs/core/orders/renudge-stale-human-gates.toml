@@ -1,0 +1,37 @@
+# renudge-stale-human-gates re-mails + re-nudges the addressee of a human
+# gate that has stayed OPEN past a configurable threshold, repeating on an
+# interval until the gate is resolved. It is the companion to
+# notify-on-human-gate-creation: that order fires ONCE at creation; this one
+# covers the gate that is created, notified, and then sits unresolved — the
+# human forgets, the creation mail scrolls off, and nothing tells them again.
+# Doctrine compensates by hand ("a human gate open past a threshold gets
+# re-nudged, repeating on the interval"); this ships that reflex.
+#
+# It is a cooldown sweep (mechanical: list gates, compare timestamps, send
+# mail — no LLM judgment), mirroring gate-sweep. Each run enumerates open
+# gates across HQ and every rig via `gc bd gate list` (open-only by default),
+# keeps only `await_type == "human"` gates, and for each one older than the
+# staleness threshold whose last re-nudge is older than the re-nudge interval,
+# re-fetches the gate (`gc bd gate list` omits assignee/metadata), resolves the
+# addressee (assignee -> gc.deferred_assignee -> escalation recipient) and
+# re-notifies via `gc mail send --notify`.
+#
+# `gc mail send --notify` mails the addressee and nudges them when they are a
+# real session — and deliberately skips the tmux-nudge for the "human"
+# recipient (humans have no session; cmd_mail.go to != "human"), the same
+# primitive notify-on-human-gate-creation rides. Undeliverable sends surface
+# loudly and are NOT recorded, so the next sweep retries them (loud-fail,
+# gastownhall/gascity#4543). Per-gate dedup state (last re-nudge time) bounds
+# the re-fire to once per interval. See
+# assets/scripts/renudge-stale-human-gates.sh.
+#
+# Interval is the SWEEP cadence, not the re-nudge cadence: the sweep runs
+# every 5m to detect threshold/interval crossings promptly, but any single
+# gate is re-nudged at most once per GC_STALE_GATE_RENUDGE_INTERVAL (default
+# 1h). The controller runs it via exec — no agent context burned.
+[order]
+description = "Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold"
+trigger = "cooldown"
+interval = "5m"
+timeout = "120s"
+exec = "$PACK_DIR/assets/scripts/renudge-stale-human-gates.sh"

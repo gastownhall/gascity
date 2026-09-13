@@ -1,25 +1,48 @@
 package dispatch
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
+)
+
+const (
+	// Keep this retry window short and bounded while covering common
+	// sub-second Dolt read-after-write visibility lag between a retry
+	// subject's status=closed write and its gc.outcome/gc.failure_class/
+	// gc.failure_reason metadata becoming visible to a subsequent read: the
+	// agent (or fake-agent test harness) sets status and outcome metadata
+	// together in one call, but a reader can still observe them in two
+	// visibility steps under load. When ProcessOptions.Context is set, retry
+	// waits exit promptly on cancellation.
+	retrySubjectOutcomeResolveAttempts   = 5
+	retrySubjectOutcomeResolveRetryDelay = 100 * time.Millisecond
 )
 
 func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
-	attempt, err := strconv.Atoi(bead.Metadata["gc.attempt"])
+	attempt, err := strconv.Atoi(bead.Metadata[beadmeta.AttemptMetadataKey])
 	if err != nil || attempt < 1 {
-		return ControlResult{}, fmt.Errorf("%s: invalid gc.attempt %q", bead.ID, bead.Metadata["gc.attempt"])
+		return ControlResult{}, fmt.Errorf("%s: invalid gc.attempt %q", bead.ID, bead.Metadata[beadmeta.AttemptMetadataKey])
 	}
-	maxAttempts, err := strconv.Atoi(bead.Metadata["gc.max_attempts"])
+	maxAttempts, err := strconv.Atoi(bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	if err != nil || maxAttempts < 1 {
-		return ControlResult{}, fmt.Errorf("%s: invalid gc.max_attempts %q", bead.ID, bead.Metadata["gc.max_attempts"])
+		return ControlResult{}, fmt.Errorf("%s: invalid gc.max_attempts %q", bead.ID, bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	}
-	onExhausted := bead.Metadata["gc.on_exhausted"]
+	onExhausted := bead.Metadata[beadmeta.OnExhaustedMetadataKey]
 	if onExhausted == "" {
-		onExhausted = "hard_fail"
+		onExhausted = beadmeta.DispositionHardFail
 	}
 
 	logicalID := resolveLogicalBeadID(store, bead)
@@ -30,7 +53,7 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: loading logical bead %s: %w", bead.ID, logicalID, err)
 	}
-	if closedBy, _ := strconv.Atoi(logical.Metadata["gc.closed_by_attempt"]); closedBy >= attempt {
+	if closedBy, _ := strconv.Atoi(logical.Metadata[beadmeta.ClosedByAttemptMetadataKey]); closedBy >= attempt {
 		if err := finalizeRetryEval(store, logicalID, bead.ID); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: finalizing stale retry eval: %w", bead.ID, err)
 		}
@@ -44,16 +67,24 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	if subject.Status != "closed" {
 		return ControlResult{}, ErrControlPending
 	}
+	subjectID := subject.ID
+	subject, err = resolveRetrySubjectOutcome(store, subject, bead.ID, opts)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: resolving retry subject outcome for %s: %w", bead.ID, subjectID, err)
+	}
 
-	result := classifyRetryAttempt(subject)
+	result, err := classifyRetryAttemptWithPostconditions(store, subject, opts)
+	if err != nil {
+		return ControlResult{}, fmt.Errorf("%s: evaluating retry postconditions for %s: %w", bead.ID, subject.ID, err)
+	}
 	if err := persistRetryEvalResult(store, bead.ID, result); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: persisting retry eval result: %w", bead.ID, err)
 	}
 
 	switch result.Outcome {
 	case "pass":
-		if outputJSON := subject.Metadata["gc.output_json"]; outputJSON != "" {
-			if err := store.SetMetadata(logicalID, "gc.output_json", outputJSON); err != nil {
+		if outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+			if err := store.SetMetadata(logicalID, beadmeta.OutputJSONMetadataKey, outputJSON); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: propagating gc.output_json to logical bead: %w", logicalID, err)
 			}
 		}
@@ -61,70 +92,84 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 			return ControlResult{}, fmt.Errorf("%s: propagating subject metadata to logical bead: %w", logicalID, err)
 		}
 		if err := store.SetMetadataBatch(logicalID, map[string]string{
-			"gc.closed_by_attempt": strconv.Itoa(attempt),
-			"gc.final_disposition": "pass",
+			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionPass,
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: marking logical pass: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "pass"); err != nil {
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed eval: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, logicalID, "pass"); err != nil {
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "pass"}, nil
 
 	case "hard":
 		if err := store.SetMetadataBatch(logicalID, map[string]string{
-			"gc.closed_by_attempt": strconv.Itoa(attempt),
-			"gc.failed_attempt":    strconv.Itoa(attempt),
-			"gc.failure_class":     "hard",
-			"gc.failure_reason":    result.Reason,
-			"gc.final_disposition": "hard_fail",
+			beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
+			beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    result.Reason,
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: marking logical hard failure: %w", logicalID, err)
 		}
-		if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed eval: %w", bead.ID, err)
 		}
-		if err := setOutcomeAndClose(store, logicalID, "fail"); err != nil {
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing hard-failed logical bead: %w", logicalID, err)
 		}
 		return ControlResult{Processed: true, Action: "hard-fail"}, nil
 
+	case "canceled":
+		// The run was canceled: close the eval and its logical bead as canceled
+		// (an explicit terminal non-failure) rather than scheduling another
+		// attempt. The cancellation gate normally closes retry-eval beads before
+		// they reach here; this is the defensive terminal path when an eval does
+		// classify a canceled subject.
+		if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeCanceled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing canceled eval: %w", bead.ID, err)
+		}
+		if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeCanceled); err != nil {
+			return ControlResult{}, fmt.Errorf("%s: closing canceled logical bead: %w", logicalID, err)
+		}
+		return ControlResult{Processed: true, Action: "canceled"}, nil
+
 	case "transient":
 		if attempt >= maxAttempts {
-			if onExhausted == "soft_fail" {
+			if onExhausted == beadmeta.DispositionSoftFail {
 				if err := store.SetMetadataBatch(logicalID, map[string]string{
-					"gc.closed_by_attempt": strconv.Itoa(attempt),
-					"gc.failed_attempt":    strconv.Itoa(attempt),
-					"gc.failure_class":     "transient",
-					"gc.failure_reason":    result.Reason,
-					"gc.final_disposition": "soft_fail",
+					beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
+					beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+					beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
+					beadmeta.FailureReasonMetadataKey:    result.Reason,
+					beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionSoftFail,
 				}); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: marking logical soft-fail: %w", logicalID, err)
 				}
-				if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+				if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
 				}
-				if err := setOutcomeAndClose(store, logicalID, "pass"); err != nil {
+				if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomePass); err != nil {
 					return ControlResult{}, fmt.Errorf("%s: closing soft-failed logical bead: %w", logicalID, err)
 				}
 				return ControlResult{Processed: true, Action: "soft-fail"}, nil
 			}
 			if err := store.SetMetadataBatch(logicalID, map[string]string{
-				"gc.closed_by_attempt": strconv.Itoa(attempt),
-				"gc.failed_attempt":    strconv.Itoa(attempt),
-				"gc.failure_class":     "transient",
-				"gc.failure_reason":    result.Reason,
-				"gc.final_disposition": "hard_fail",
+				beadmeta.ClosedByAttemptMetadataKey:  strconv.Itoa(attempt),
+				beadmeta.FailedAttemptMetadataKey:    strconv.Itoa(attempt),
+				beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassTransient,
+				beadmeta.FailureReasonMetadataKey:    result.Reason,
+				beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionHardFail,
 			}); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: marking exhausted logical failure: %w", logicalID, err)
 			}
-			if err := setOutcomeAndClose(store, bead.ID, "fail"); err != nil {
+			if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeFail); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: closing exhausted eval: %w", bead.ID, err)
 			}
-			if err := setOutcomeAndClose(store, logicalID, "fail"); err != nil {
+			if err := setOutcomeAndClose(store, logicalID, beadmeta.OutcomeFail); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: closing exhausted logical bead: %w", logicalID, err)
 			}
 			return ControlResult{Processed: true, Action: "fail"}, nil
@@ -134,55 +179,74 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 	}
 
 	nextAttempt := attempt + 1
-	switch bead.Metadata["gc.retry_state"] {
+	switch bead.Metadata[beadmeta.RetryStateMetadataKey] {
 	case "":
 		if err := store.SetMetadataBatch(bead.ID, map[string]string{
-			"gc.retry_state":  "spawning",
-			"gc.next_attempt": strconv.Itoa(nextAttempt),
+			beadmeta.RetryStateMetadataKey:  beadmeta.SpawnStateSpawning,
+			beadmeta.NextAttemptMetadataKey: strconv.Itoa(nextAttempt),
 		}); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn start: %w", bead.ID, err)
 		}
-	case "spawning":
+	case beadmeta.SpawnStateSpawning:
 		// Resume partial append below.
-	case "spawned":
+	case beadmeta.SpawnStateSpawned:
 		// Resume finalization below without cloning again.
 	default:
-		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata["gc.retry_state"])
+		return ControlResult{}, fmt.Errorf("%s: unsupported gc.retry_state %q", bead.ID, bead.Metadata[beadmeta.RetryStateMetadataKey])
 	}
 
-	if beadUsesMetadataPoolRoute(subject, opts.CityPath) {
+	// A routeConfig error is intentionally tolerated here: retry preserves the
+	// prior attempt's already-stamped routes rather than scope-routing, so a nil
+	// cfg degrades to metadata-only instead of mis-routing. Spawn/fanout
+	// (control.go, fanout.go) cannot degrade to metadata-only because they
+	// scope-route fresh through applyAttemptControlStepRoute, so they instead
+	// classify a load/parse failure as a transient controller-boundary error and
+	// retry it as pending.
+	routeCfg, _ := opts.routeConfig()
+	if beadUsesMetadataPoolRouteWithConfig(subject, routeCfg) {
 		if opts.RecycleSession == nil {
 			return ControlResult{}, fmt.Errorf("%s: pooled retry subject %s requires RecycleSession callback", bead.ID, subject.ID)
 		}
-		if bead.Metadata["gc.retry_session_recycled"] != "true" {
+		if bead.Metadata[beadmeta.RetrySessionRecycledMetadataKey] != "true" {
 			if subject.Assignee == "" {
 				return ControlResult{}, fmt.Errorf("%s: pooled retry subject %s missing assignee", bead.ID, subject.ID)
 			}
 			if err := opts.RecycleSession(subject); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: recycling pooled session %s: %w", bead.ID, subject.Assignee, err)
 			}
-			if err := store.SetMetadata(bead.ID, "gc.retry_session_recycled", "true"); err != nil {
+			if err := store.SetMetadata(bead.ID, beadmeta.RetrySessionRecycledMetadataKey, "true"); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: recording pooled session recycle: %w", bead.ID, err)
 			}
 		}
 	}
 
-	if bead.Metadata["gc.retry_state"] != "spawned" {
-		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, opts.CityPath); err != nil {
+	if bead.Metadata[beadmeta.RetryStateMetadataKey] != beadmeta.SpawnStateSpawned {
+		if err := appendRetryAttempt(store, logicalID, subject, bead, nextAttempt, routeCfg); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: appending retry attempt: %w", bead.ID, err)
 		}
-		if err := store.SetMetadataBatch(bead.ID, map[string]string{
-			"gc.retry_state":  "spawned",
-			"gc.next_attempt": strconv.Itoa(nextAttempt),
-		}); err != nil {
+		spawnedMetadata := map[string]string{
+			beadmeta.RetryStateMetadataKey:  beadmeta.SpawnStateSpawned,
+			beadmeta.NextAttemptMetadataKey: strconv.Itoa(nextAttempt),
+		}
+		clearControllerSpawnErrorMetadata(spawnedMetadata)
+		if err := store.SetMetadataBatch(bead.ID, spawnedMetadata); err != nil {
+			if controllerSpawnBoundaryPending(store, bead.ID, err, opts) {
+				return ControlResult{}, ErrControlPending
+			}
 			return ControlResult{}, fmt.Errorf("%s: recording retry spawn complete: %w", bead.ID, err)
 		}
 	}
 
 	if err := store.SetMetadataBatch(logicalID, map[string]string{
-		"gc.retry_count":        strconv.Itoa(attempt),
-		"gc.last_failure_class": "transient",
-		"gc.failure_reason":     result.Reason,
+		beadmeta.RetryCountMetadataKey:       strconv.Itoa(attempt),
+		beadmeta.LastFailureClassMetadataKey: beadmeta.FailureClassTransient,
+		beadmeta.FailureReasonMetadataKey:    result.Reason,
 	}); err != nil {
 		return ControlResult{}, fmt.Errorf("%s: recording retry metadata on logical bead: %w", logicalID, err)
 	}
@@ -193,20 +257,20 @@ func processRetryEval(store beads.Store, bead beads.Bead, opts ProcessOptions) (
 }
 
 func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string, attempt int) (beads.Bead, error) {
-	if rootID := strings.TrimSpace(eval.Metadata["gc.root_bead_id"]); rootID != "" && logicalID != "" && attempt > 0 {
-		all, err := listByWorkflowRoot(store, rootID)
+	if rootID := strings.TrimSpace(eval.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" && logicalID != "" && attempt > 0 {
+		all, err := beads.DirectMembers(store, rootID)
 		if err != nil {
 			return beads.Bead{}, err
 		}
 		attemptStr := strconv.Itoa(attempt)
 		for _, candidate := range all {
-			if candidate.Metadata["gc.kind"] != "retry-run" {
+			if candidate.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindRetryRun {
 				continue
 			}
-			if candidate.Metadata["gc.logical_bead_id"] != logicalID {
+			if candidate.Metadata[beadmeta.LogicalBeadIDMetadataKey] != logicalID {
 				continue
 			}
-			if candidate.Metadata["gc.attempt"] != attemptStr {
+			if candidate.Metadata[beadmeta.AttemptMetadataKey] != attemptStr {
 				continue
 			}
 			return candidate, nil
@@ -220,37 +284,473 @@ func resolveRetryRunSubject(store beads.Store, eval beads.Bead, logicalID string
 	return store.Get(subjectID)
 }
 
+// subjectOutcomeAmbiguous reports whether subject is closed but carries none
+// of the signals classifyRetryAttempt uses to determine an outcome. Such a
+// subject is indistinguishable between "the agent closed this without ever
+// recording an outcome" and "the outcome metadata write has not become
+// visible to this read yet."
+func subjectOutcomeAmbiguous(subject beads.Bead) bool {
+	if strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey]) != "" {
+		return false
+	}
+	return !typedDeliverableCloseFor(subject)
+}
+
+// resolveRetrySubjectOutcome re-reads subject a bounded number of times while
+// its outcome stays ambiguous, so a closed-but-not-yet-visible outcome write
+// isn't misclassified as gc.failure_reason=missing_outcome. Once attempts are
+// exhausted it gives up and returns the last-read subject unchanged (nil
+// error) — a genuinely outcome-less close still classifies as missing_outcome
+// exactly as before; this only closes the visibility-lag race, it does not
+// change what counts as ambiguous.
+func resolveRetrySubjectOutcome(store beads.Store, subject beads.Bead, traceID string, opts ProcessOptions) (beads.Bead, error) {
+	if !subjectOutcomeAmbiguous(subject) {
+		return subject, nil
+	}
+	ctx := opts.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	current := subject
+	for attempt := 1; attempt <= retrySubjectOutcomeResolveAttempts; attempt++ {
+		if attempt > 1 {
+			next, err := store.Get(current.ID)
+			if err != nil {
+				// Best-effort refinement: a failed re-read degrades to the
+				// subject we already hold, which is exactly the pre-retry
+				// behavior. Returning the error instead lets an unclassified
+				// bd read failure (ErrNotFound, a JSON parse error) reach
+				// TierNone in handleControlDispatchError and quarantine the
+				// eval bead — a failure mode this path could not have before
+				// the re-read existed.
+				opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=read-error err=%v", traceID, attempt, subject.ID, err)
+				return current, nil
+			}
+			current = next
+		}
+		if !subjectOutcomeAmbiguous(current) {
+			opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=ok", traceID, attempt, subject.ID)
+			return current, nil
+		}
+		opts.tracef("retry-eval bead=%s resolve-outcome attempt=%d subject=%s result=retry reason=missing_outcome", traceID, attempt, subject.ID)
+		if attempt < retrySubjectOutcomeResolveAttempts {
+			timer := time.NewTimer(retrySubjectOutcomeResolveRetryDelay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return beads.Bead{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	opts.tracef("retry-eval bead=%s resolve-outcome attempts=%d subject=%s result=exhausted", traceID, retrySubjectOutcomeResolveAttempts, subject.ID)
+	return current, nil
+}
+
 type retryEvalResult struct {
 	Outcome string
 	Reason  string
 }
 
+// typedDeliverableCloseFor reports whether subject carries a complete, strict
+// gc-outcome-close deliverable envelope for itself. Producer names are open-world.
+func typedDeliverableCloseFor(subject beads.Bead) bool {
+	raw := strings.TrimSpace(subject.Metadata[beadmeta.CoordinatorOutcomeProducerDispositionMetadataKey])
+	if raw == "" {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var envelope struct {
+		ContractVersion int     `json:"contract_version"`
+		Disposition     string  `json:"disposition"`
+		WorkID          string  `json:"work_id"`
+		RecordedBy      string  `json:"recorded_by"`
+		Reason          string  `json:"reason"`
+		Producer        *string `json:"producer"`
+		PassingVerdict  string  `json:"passing_verdict"`
+	}
+	if err := decoder.Decode(&envelope); err != nil {
+		return false
+	}
+	// Reject trailing data after the envelope: DisallowUnknownFields only guards the
+	// first object, so a valid envelope followed by more JSON or garbage must fail
+	// closed rather than forge a pass.
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return false
+	}
+	if envelope.Disposition != beadmeta.CoordinatorDispositionDeliverable {
+		return false
+	}
+	if envelope.ContractVersion != beadmeta.CoordinatorOutcomeContractVersion {
+		return false
+	}
+	if envelope.WorkID != subject.ID {
+		return false
+	}
+	if strings.TrimSpace(envelope.RecordedBy) == "" || strings.TrimSpace(envelope.Reason) == "" {
+		return false
+	}
+	if envelope.Producer == nil || strings.TrimSpace(*envelope.Producer) == "" {
+		return false
+	}
+	if envelope.PassingVerdict != "" {
+		switch envelope.PassingVerdict {
+		case beadmeta.CoordinatorPassingVerdictReview, beadmeta.CoordinatorPassingVerdictEvidence:
+		default:
+			return false
+		}
+		if subject.Metadata[beadmeta.ReviewGateMetadataKey] != "consumed" ||
+			subject.Metadata[envelope.PassingVerdict] != beadmeta.OutcomePass {
+			return false
+		}
+	}
+	return true
+}
+
 func classifyRetryAttempt(subject beads.Bead) retryEvalResult {
-	outcome := strings.TrimSpace(subject.Metadata["gc.outcome"])
+	outcome := strings.TrimSpace(subject.Metadata[beadmeta.OutcomeMetadataKey])
+	if outcome == "" && typedDeliverableCloseFor(subject) {
+		outcome = beadmeta.OutcomePass
+	}
 	switch outcome {
-	case "pass":
-		if strings.TrimSpace(subject.Metadata["gc.failure_class"]) != "" || strings.TrimSpace(subject.Metadata["gc.failure_reason"]) != "" {
-			return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+	case beadmeta.OutcomePass:
+		if strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) != "" || strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey]) != "" {
+			return retryEvalResult{Outcome: "transient", Reason: "pass_with_failure_metadata"}
+		}
+		if strings.TrimSpace(subject.Metadata[beadmeta.OutputJSONRequiredMetadataKey]) == "true" {
+			rawOutput := strings.TrimSpace(subject.Metadata[beadmeta.OutputJSONMetadataKey])
+			if rawOutput == "" {
+				return retryEvalResult{Outcome: "transient", Reason: "missing_required_output_json"}
+			}
+			if !json.Valid([]byte(rawOutput)) {
+				return retryEvalResult{Outcome: "transient", Reason: "invalid_required_output_json"}
+			}
 		}
 		return retryEvalResult{Outcome: "pass"}
-	case "fail":
-		switch strings.TrimSpace(subject.Metadata["gc.failure_class"]) {
-		case "transient":
+	case beadmeta.OutcomeFail:
+		switch strings.TrimSpace(subject.Metadata[beadmeta.FailureClassMetadataKey]) {
+		case beadmeta.FailureClassTransient:
 			return retryEvalResult{Outcome: "transient", Reason: retryFailureReason(subject)}
-		case "hard", "":
+		case beadmeta.FailureClassHard, "":
 			return retryEvalResult{Outcome: "hard", Reason: retryFailureReason(subject)}
 		default:
-			return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+			return retryEvalResult{Outcome: "transient", Reason: "unknown_failure_class"}
 		}
+	case beadmeta.OutcomeCanceled:
+		// A canceled attempt subject (its run was canceled via the API) is a
+		// terminal non-failure: do not schedule another attempt.
+		return retryEvalResult{Outcome: "canceled"}
 	case "":
-		return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+		return retryEvalResult{Outcome: "transient", Reason: "missing_outcome"}
 	default:
-		return retryEvalResult{Outcome: "hard", Reason: "invalid_worker_result_contract"}
+		return retryEvalResult{Outcome: "transient", Reason: "invalid_outcome_value"}
 	}
 }
 
+func classifyRetryAttemptWithPostconditions(store beads.Store, subject beads.Bead, opts ProcessOptions) (retryEvalResult, error) {
+	result := classifyRetryAttempt(subject)
+	if result.Outcome != "pass" {
+		return result, nil
+	}
+	reason, err := validateRequiredArtifacts(store, subject, opts)
+	if err != nil {
+		return retryEvalResult{}, err
+	}
+	if reason != "" {
+		return retryEvalResult{Outcome: "transient", Reason: reason}, nil
+	}
+	return result, nil
+}
+
+func validateRequiredArtifacts(store beads.Store, subject beads.Bead, opts ProcessOptions) (string, error) {
+	stat := opts.RequiredArtifactStat
+	if stat == nil {
+		stat = os.Stat
+	}
+	for _, rawPath := range requiredArtifactTemplates(subject.Metadata) {
+		path, worktree, reason, err := resolveRequiredArtifactPath(store, subject, rawPath, opts)
+		if err != nil {
+			return "", err
+		}
+		if reason != "" {
+			return reason, nil
+		}
+		info, err := stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "missing_required_artifact", nil
+			}
+			return "unreadable_required_artifact", nil
+		}
+		contained, err := requiredArtifactTargetInWorktree(worktree, path)
+		if err != nil {
+			return "", err
+		}
+		if !contained {
+			return "required_artifact_outside_worktree", nil
+		}
+		if info.IsDir() || info.Size() == 0 {
+			return "empty_required_artifact", nil
+		}
+	}
+	return "", nil
+}
+
+// requiredArtifactTemplates keeps the singular key as one opaque path; only
+// the plural key is parsed as a comma/newline-delimited list.
+func requiredArtifactTemplates(metadata map[string]string) []string {
+	var result []string
+	if raw := strings.TrimSpace(metadata[beadmeta.RequiredArtifactMetadataKey]); raw != "" {
+		result = append(result, raw)
+	}
+	raw := strings.TrimSpace(metadata[beadmeta.RequiredArtifactsMetadataKey])
+	if raw == "" {
+		return result
+	}
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == ','
+	}) {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// requiredArtifactWorkDir reads the worktree recorded on a bead, canonical key
+// first and legacy second. beadmeta documents that contract for this key family
+// and internal/beads/contract implements it for the sibling keys; the artifact
+// gate predates both and read only the legacy spelling, so a bead carrying just
+// gc.work_dir resolved to nothing and its attempts stayed transient forever.
+func requiredArtifactWorkDir(meta map[string]string) string {
+	if v := strings.TrimSpace(meta[beadmeta.WorkDirMetadataKey]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(meta[beadmeta.LegacyWorkDirMetadataKey])
+}
+
+// resolveRequiredArtifactPath expands a gc.required_artifact template against
+// the attempt subject. This is the only place the template vocabulary is
+// defined, so it is also where that vocabulary is documented:
+//
+//	{worktree}          the resolved worktree root (also the implicit base for
+//	                    a relative template)
+//	{root} / {root_id}  the workflow root bead ID
+//	{attempt}           gc.attempt — this step's own retry counter
+//	{iteration}         gc.iteration — the loop iteration the step ran in
+//
+// {attempt} and {iteration} are NOT interchangeable. A directory shared by the
+// steps of one loop iteration is named by {iteration}; only {attempt} advances
+// when a single step retries. Any token left unexpanded fails the template
+// loudly rather than resolving to a partial path.
+func resolveRequiredArtifactPath(store beads.Store, subject beads.Bead, rawPath string, opts ProcessOptions) (string, string, string, error) {
+	rootID := strings.TrimSpace(subject.Metadata[beadmeta.RootBeadIDMetadataKey])
+	attempt := strings.TrimSpace(subject.Metadata[beadmeta.AttemptMetadataKey])
+	iteration := strings.TrimSpace(subject.Metadata[beadmeta.IterationMetadataKey])
+	worktree := requiredArtifactWorkDir(subject.Metadata)
+
+	if worktree == "" {
+		resolvedWorktree, reason, err := resolveRequiredArtifactWorktree(store, rootID, opts)
+		if err != nil {
+			return "", "", "", err
+		}
+		if reason != "" {
+			return "", "", reason, nil
+		}
+		worktree = resolvedWorktree
+	}
+	if worktree == "" {
+		return "", "", "missing_required_artifact_context", nil
+	}
+
+	path := rawPath
+	path = strings.ReplaceAll(path, "{worktree}", worktree)
+	path = strings.ReplaceAll(path, "{root}", rootID)
+	path = strings.ReplaceAll(path, "{root_id}", rootID)
+	path = strings.ReplaceAll(path, "{attempt}", attempt)
+	// {iteration} names the loop iteration a whole sub-DAG ran in, which is the
+	// directory a set of sibling steps share. {attempt} names one step's own
+	// retry counter, which only the step that retried advances — so a template
+	// built from it sends a retried reader to a directory its siblings never
+	// wrote. Substituted only when the bead actually carries the value: an empty
+	// replacement would produce a silently wrong path segment and the gate would
+	// then blame the step for the resolver's gap, where falling through to the
+	// unresolved-template check below names the real fault (ga-la0py).
+	if iteration != "" {
+		path = strings.ReplaceAll(path, "{iteration}", iteration)
+	}
+	if strings.Contains(path, "{") || strings.Contains(path, "}") {
+		return "", "", "unresolved_required_artifact_template", nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(worktree, path)
+	}
+	path = filepath.Clean(path)
+	contained, err := requiredArtifactPathInWorktree(worktree, path)
+	if err != nil {
+		return "", "", "", err
+	}
+	if !contained {
+		return "", "", "required_artifact_outside_worktree", nil
+	}
+	return path, worktree, "", nil
+}
+
+func requiredArtifactPathInWorktree(worktree, path string) (bool, error) {
+	absWorktree, err := filepath.Abs(filepath.Clean(worktree))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact worktree path %q: %w", worktree, err)
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact path %q: %w", path, err)
+	}
+	return pathutil.PathWithin(absWorktree, absPath), nil
+}
+
+// requiredArtifactTargetInWorktree reports whether path's symlink-resolved
+// target is contained within worktree's symlink-resolved root, tolerating a
+// missing path (treated as contained; the caller's earlier os.Stat is what
+// classifies missing artifacts as failures).
+func requiredArtifactTargetInWorktree(worktree, path string) (bool, error) {
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. worktree is always an absolute git-worktree path stamped
+	// by the controller (never a bare "." or other unresolved relative
+	// value); a worktree that no longer resolves must fail this check,
+	// which pathutil.NormalizePathForCompare's never-errors contract would
+	// silently paper over.
+	resolvedWorktree, err := filepath.EvalSymlinks(filepath.Clean(worktree))
+	if err != nil {
+		return false, fmt.Errorf("resolving required artifact worktree symlinks %q: %w", worktree, err)
+	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. A missing artifact target is deliberately treated as
+	// contained (true) here — validateRequiredArtifacts' earlier os.Stat
+	// call is what classifies missing/unreadable artifacts as failures;
+	// this function only needs to gate symlink escapes for targets that
+	// exist.
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("resolving required artifact path symlinks %q: %w", path, err)
+	}
+	return requiredArtifactPathInWorktree(resolvedWorktree, resolvedPath)
+}
+
+func resolveRequiredArtifactWorktree(store beads.Store, rootID string, opts ProcessOptions) (string, string, error) {
+	if rootID == "" {
+		return "", "missing_required_artifact_context", nil
+	}
+	root, err := store.Get(rootID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return "", "missing_required_artifact_context", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("loading required artifact workflow root %s: %w", rootID, markTransientControllerBoundaryError(err))
+	}
+	// The rebase gate stamps work_dir on the root as well as the source, and
+	// the root always lives in the subject's own store. Prefer it: the source
+	// bead of a cross-store root (gc.root_store_ref pointing at another rig)
+	// is not resolvable through this store, and dereferencing it used to fail
+	// passing attempts with missing_required_artifact_context.
+	if worktree := requiredArtifactWorkDir(root.Metadata); worktree != "" {
+		return worktree, "", nil
+	}
+	sourceID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
+	fromSourceBead := sourceID != ""
+	if sourceID == "" {
+		sourceID = strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	}
+	if sourceID == "" {
+		return "", "missing_required_artifact_context", nil
+	}
+	source, found, err := resolveRequiredArtifactSourceBead(store, root, sourceID, fromSourceBead, opts)
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
+		return "", "missing_required_artifact_context", nil
+	}
+	worktree := requiredArtifactWorkDir(source.Metadata)
+	if worktree == "" {
+		return "", "missing_required_artifact_context", nil
+	}
+	return worktree, "", nil
+}
+
+// resolveRequiredArtifactSourceBead reads the worktree-bearing source bead a
+// workflow root points at, across store boundaries. The root lives in the
+// subject's own (graph) store, but on a split city the bead it points at does
+// not: a gc.source_bead_id source lives in the scope named by
+// gc.source_store_ref, and a gc.input_convoy_id convoy is a work bead in the
+// work store. Reading either through the ambient store gets a clean
+// ErrNotFound and misclassifies a genuinely-passing attempt as transient
+// missing_required_artifact_context, burning attempts until exhaustion. Two
+// doors, matching the finalize lane's walkSourceBeadChain:
+//
+//   - A non-empty gc.source_store_ref names another scope's store; resolve it
+//     via opts.ResolveStoreRef and read there. A ref with no resolver wired
+//     fails LOUD rather than silently narrowing to the ambient store.
+//   - With no ref, resolve over the same residency frame the drain uses
+//     (opts.MemberStores as the work leg). With no member stores — every
+//     single-store caller — this is byte-identical to the ambient store.Get
+//     it replaces.
+//
+// found=false is a clean not-found on every probed store; the caller maps it
+// to missing_required_artifact_context exactly as before.
+func resolveRequiredArtifactSourceBead(store beads.Store, root beads.Bead, sourceID string, fromSourceBead bool, opts ProcessOptions) (beads.Bead, bool, error) {
+	if fromSourceBead {
+		if ref := strings.TrimSpace(root.Metadata[beadmeta.SourceStoreRefMetadataKey]); ref != "" {
+			if opts.ResolveStoreRef == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source bead %s (ref %s): no store-ref resolver provided", sourceID, ref)
+			}
+			resolved, err := opts.ResolveStoreRef(ref)
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: %w", ref, markTransientControllerBoundaryError(err))
+			}
+			if resolved == nil {
+				return beads.Bead{}, false, fmt.Errorf("resolving required artifact source store %q: nil store", ref)
+			}
+			source, err := resolved.Get(sourceID)
+			if errors.Is(err, beads.ErrNotFound) {
+				return beads.Bead{}, false, nil
+			}
+			if err != nil {
+				return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s in %s: %w", sourceID, ref, markTransientControllerBoundaryError(err))
+			}
+			return source, true, nil
+		}
+	}
+	if len(opts.MemberStores) == 0 {
+		source, err := store.Get(sourceID)
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+		}
+		return source, true, nil
+	}
+	owner, found, err := resolveDrainMember(store, sourceID, opts)
+	if err != nil {
+		return beads.Bead{}, false, fmt.Errorf("loading required artifact source bead %s: %w", sourceID, markTransientControllerBoundaryError(err))
+	}
+	if !found {
+		return beads.Bead{}, false, nil
+	}
+	return owner.Bead, true, nil
+}
+
 func retryFailureReason(subject beads.Bead) string {
-	reason := strings.TrimSpace(subject.Metadata["gc.failure_reason"])
+	reason := strings.TrimSpace(subject.Metadata[beadmeta.FailureReasonMetadataKey])
 	if reason == "" {
 		return "unspecified"
 	}
@@ -259,18 +759,25 @@ func retryFailureReason(subject beads.Bead) string {
 
 func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalResult) error {
 	batch := map[string]string{
-		"gc.failure_reason": result.Reason,
+		beadmeta.FailureReasonMetadataKey: result.Reason,
 	}
+	// result.Outcome is the internal retryEvalResult domain {pass, transient,
+	// hard} produced by classifyRetryAttempt, not the gc.outcome /
+	// gc.failure_class vocabularies it maps onto below. Match it raw so the two
+	// vocabularies cannot silently drift into a miscompare.
 	switch result.Outcome {
 	case "pass":
-		batch["gc.outcome"] = "pass"
-		batch["gc.failure_class"] = ""
+		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomePass
+		batch[beadmeta.FailureClassMetadataKey] = ""
+	case "canceled":
+		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeCanceled
+		batch[beadmeta.FailureClassMetadataKey] = ""
 	case "transient":
-		batch["gc.outcome"] = "fail"
-		batch["gc.failure_class"] = "transient"
+		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeFail
+		batch[beadmeta.FailureClassMetadataKey] = beadmeta.FailureClassTransient
 	default:
-		batch["gc.outcome"] = "fail"
-		batch["gc.failure_class"] = "hard"
+		batch[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeFail
+		batch[beadmeta.FailureClassMetadataKey] = beadmeta.FailureClassHard
 	}
 	return store.SetMetadataBatch(beadID, batch)
 }
@@ -278,7 +785,7 @@ func persistRetryEvalResult(store beads.Store, beadID string, result retryEvalRe
 func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject beads.Bead) error {
 	batch := map[string]string{}
 	for key, value := range subject.Metadata {
-		if key == "" || strings.HasPrefix(key, "gc.") {
+		if key == "" || strings.HasPrefix(key, beadmeta.Namespace) {
 			continue
 		}
 		batch[key] = value
@@ -289,12 +796,12 @@ func propagateRetrySubjectMetadata(store beads.Store, logicalID string, subject 
 	return store.SetMetadataBatch(logicalID, batch)
 }
 
-func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, cityPath string) error {
-	oldAttempt, err := strconv.Atoi(prevRun.Metadata["gc.attempt"])
+func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval beads.Bead, nextAttempt int, routeCfg *config.City) error {
+	oldAttempt, err := strconv.Atoi(prevRun.Metadata[beadmeta.AttemptMetadataKey])
 	if err != nil || oldAttempt < 1 {
-		return fmt.Errorf("%s: invalid gc.attempt %q", prevRun.ID, prevRun.Metadata["gc.attempt"])
+		return fmt.Errorf("%s: invalid gc.attempt %q", prevRun.ID, prevRun.Metadata[beadmeta.AttemptMetadataKey])
 	}
-	rootID := prevRun.Metadata["gc.root_bead_id"]
+	rootID := prevRun.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
 		return fmt.Errorf("%s: missing gc.root_bead_id", prevRun.ID)
 	}
@@ -305,7 +812,7 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 		return fmt.Errorf("%s: could not derive retry step refs", prevRun.ID)
 	}
 
-	all, err := listByWorkflowRoot(store, rootID)
+	all, err := beads.DirectMembers(store, rootID)
 	if err != nil {
 		return err
 	}
@@ -320,7 +827,7 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 	}
 
 	if nextRun.ID == "" {
-		nextRun, err = store.Create(retryAttemptBead(prevRun, logicalID, runRef, nextAttempt, cityPath))
+		nextRun, err = store.Create(retryAttemptBead(prevRun, logicalID, runRef, nextAttempt, routeCfg))
 		if err != nil {
 			return fmt.Errorf("creating retry run bead: %w", err)
 		}
@@ -341,18 +848,22 @@ func appendRetryAttempt(store beads.Store, logicalID string, prevRun, prevEval b
 	return nil
 }
 
-func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, cityPath string) beads.Bead {
+func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, routeCfg *config.City) beads.Bead {
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
-	meta["gc.attempt"] = strconv.Itoa(attempt)
-	meta["gc.retry_from"] = prev.ID
-	meta["gc.step_ref"] = stepRef
-	meta["gc.logical_bead_id"] = logicalID
+	assignee := retryPreservedAssigneeWithConfig(prev, routeCfg)
+	if assignee == "" {
+		clearSessionAffinityMetadata(meta)
+	}
+	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	meta[beadmeta.RetryFromMetadataKey] = prev.ID
+	meta[beadmeta.StepRefMetadataKey] = stepRef
+	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
 	return beads.Bead{
 		Title:       prev.Title,
 		Description: prev.Description,
 		Type:        prev.Type,
-		Assignee:    retryPreservedAssignee(prev, cityPath),
+		Assignee:    assignee,
 		From:        prev.From,
 		ParentID:    prev.ParentID,
 		Ref:         stepRef,
@@ -364,10 +875,11 @@ func retryAttemptBead(prev beads.Bead, logicalID, stepRef string, attempt int, c
 func retryEvalBead(prev beads.Bead, logicalID, stepRef string, attempt int) beads.Bead {
 	meta := cloneMetadata(prev.Metadata)
 	clearRetryEphemera(meta)
-	meta["gc.attempt"] = strconv.Itoa(attempt)
-	meta["gc.retry_from"] = prev.ID
-	meta["gc.step_ref"] = stepRef
-	meta["gc.logical_bead_id"] = logicalID
+	clearSessionAffinityMetadata(meta)
+	meta[beadmeta.AttemptMetadataKey] = strconv.Itoa(attempt)
+	meta[beadmeta.RetryFromMetadataKey] = prev.ID
+	meta[beadmeta.StepRefMetadataKey] = stepRef
+	meta[beadmeta.LogicalBeadIDMetadataKey] = logicalID
 	return beads.Bead{
 		Title:       prev.Title,
 		Description: prev.Description,
@@ -393,7 +905,7 @@ func finalizeRetryEval(store beads.Store, logicalID, evalID string) error {
 	if eval.Status == "closed" {
 		return nil
 	}
-	return setOutcomeAndClose(store, evalID, "fail")
+	return setOutcomeAndClose(store, evalID, beadmeta.OutcomeFail)
 }
 
 func ensureDep(store beads.Store, issueID, dependsOnID, depType string) error {
@@ -410,7 +922,7 @@ func ensureDep(store beads.Store, issueID, dependsOnID, depType string) error {
 }
 
 func stepRefForRetryBead(bead beads.Bead) string {
-	if ref := strings.TrimSpace(bead.Metadata["gc.step_ref"]); ref != "" {
+	if ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]); ref != "" {
 		return ref
 	}
 	return strings.TrimSpace(bead.Ref)

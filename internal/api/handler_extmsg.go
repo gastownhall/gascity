@@ -3,52 +3,31 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// --- helpers ---
-
-// extmsgServices returns the extmsg services from state, writing an error
-// response and returning nil if unavailable.
-func (s *Server) extmsgServices(w http.ResponseWriter) *extmsg.Services {
-	svc := s.state.ExtMsgServices()
-	if svc == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "external messaging not enabled")
-		return nil
-	}
-	return svc
-}
-
-// extmsgAdapterRegistry returns the adapter registry from state, writing an
-// error response and returning nil if unavailable.
-func (s *Server) extmsgAdapterRegistry(w http.ResponseWriter) *extmsg.AdapterRegistry {
-	reg := s.state.AdapterRegistry()
-	if reg == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "adapter registry not available")
-		return nil
-	}
-	return reg
-}
-
 // extmsgEmitEvent builds an event emitter closure for extmsg handlers.
-func (s *Server) extmsgEmitEvent() func(string, string, map[string]any) {
+// The payload parameter is the events.Payload sealed interface so only
+// types registered in the central event-payload registry are accepted
+// — ad-hoc map[string]any emissions are a compile-time error
+// (Principle 7). The json.Marshal below is the internal bus
+// serialization permitted by the Principle 4 edge case; the SSE
+// projection decodes these bytes back into the typed Go variant via
+// events.DecodePayload before emitting on the wire.
+func (s *Server) extmsgEmitEvent() func(string, string, events.Payload) {
 	ep := s.state.EventProvider()
 	if ep == nil {
-		return func(string, string, map[string]any) {}
+		return func(string, string, events.Payload) {}
 	}
-	return func(eventType, subject string, payload map[string]any) {
+	return func(eventType, subject string, payload events.Payload) {
 		b, err := json.Marshal(payload)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "extmsg: marshal event payload: %v\n", err)
@@ -62,608 +41,291 @@ func (s *Server) extmsgEmitEvent() func(string, string, map[string]any) {
 	}
 }
 
-// extmsgNotifyMembers sends a "check transcript" message to all transcript
-// members via the session message API. This ensures delivery regardless of
-// session state: sleeping sessions are woken, idle sessions get a new prompt
-// turn that triggers the transcript check hook.
-func (s *Server) extmsgNotifyMembers(conv extmsg.ConversationRef, inboundMsg extmsg.ExternalInboundMessage) {
+// extmsgDefaultAgentForConversation builds the InboundDeps default-route
+// resolver from [[extmsg.default_route]] config: it maps an unrouted
+// inbound conversation to the qualified identity of the configured agent.
+// A route naming an agent that does not resolve to a configured named
+// session is logged and skipped — the message stays unrouted rather than
+// failing the inbound on a config error.
+func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef) string {
+	cfg := s.state.Config()
+	if cfg == nil || len(cfg.ExtMsg.DefaultRoutes) == 0 {
+		return nil
+	}
+	store := s.state.SessionsBeadStore().Store
+	return func(ref extmsg.ConversationRef) string {
+		agent := cfg.ExtMsgDefaultRouteAgent(ref.Provider, ref.AccountID)
+		if agent == "" {
+			return ""
+		}
+		spec, ok, err := s.findNamedSessionSpecForTarget(store, agent)
+		if err != nil || !ok {
+			log.Printf("extmsg: default-route agent %q for %s/%s does not resolve to a configured named session (err=%v)", agent, ref.Provider, ref.AccountID, err)
+			return ""
+		}
+		return spec.Identity
+	}
+}
+
+// extmsgResolveSessionSelector builds the OutboundDeps session-selector
+// resolver: it maps a selector — a configured agent identity, session name,
+// alias, or concrete session bead ID — to the concrete ID of a live session,
+// without materializing one. HandleOutbound uses it to authorize publishes on
+// agent-bound conversations.
+func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		return nil
+	}
+	return func(ctx context.Context, selector string) (string, error) {
+		return s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+	}
+}
+
+func extmsgHandleLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	if idx := strings.LastIndex(value, "/"); idx >= 0 && idx+1 < len(value) {
+		return value[idx+1:]
+	}
+	return value
+}
+
+func (s *Server) extmsgSessionHandleForSelector(selector string) string {
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		return extmsgHandleLabel(selector)
+	}
+	resolvedID, err := session.ResolveSessionIDAllowClosed(store, selector)
+	if err != nil {
+		return extmsgHandleLabel(selector)
+	}
+	return s.extmsgSessionHandleForResolvedID(resolvedID, selector)
+}
+
+func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return extmsgHandleLabel(fallback)
+	}
+	source, ok := session.NewStore(store).ExtmsgHandleSource(resolvedID)
+	if !ok || source == "" {
+		return extmsgHandleLabel(fallback)
+	}
+	return extmsgHandleLabel(source)
+}
+
+// extmsgNotifyMembers sends a peer-publication reminder to transcript members
+// via the session message API. This treats membership as the routing truth and
+// lets session resolution materialize or wake named sessions on first receive.
+//
+// explicitTarget, when non-empty, carries the address-by-handle target so
+// peer members can self-silence on off-target messages (see #2484). Outbound
+// reply broadcasts and self-update notifications pass "" because they are
+// not addressed to a specific agent.
+func (s *Server) extmsgNotifyMembers(
+	ctx context.Context,
+	conv extmsg.ConversationRef,
+	actorDisplayName string,
+	actorKind string,
+	text string,
+	excludeSelector string,
+	explicitTarget string,
+) {
 	svc := s.state.ExtMsgServices()
-	store := s.state.CityBeadStore()
+	// Sessions class, and a WRITE path: the member fan-out below materializes a
+	// configured named session that has no live bead yet, so through the work
+	// store on a relocated city every cold-wake mints a stranded session bead.
+	store := s.state.SessionsBeadStore().Store
 	if svc == nil || store == nil {
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
-	members, err := svc.Transcript.ListMemberships(context.Background(), caller, conv)
+	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
+	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
 		return
 	}
 
-	actorKind := "agent"
-	if !inboundMsg.Actor.IsBot {
-		actorKind = "human"
+	excludedResolvedID := ""
+	excludedSelector := apiNormalizeSessionTarget(excludeSelector)
+	if selector := strings.TrimSpace(excludeSelector); selector != "" {
+		resolvedID, err := s.resolveSessionTargetIDWithContext(ctx, store, selector, apiSessionResolveOptions{})
+		if err != nil {
+			log.Printf("extmsg: resolve sender %s failed: %v", selector, err)
+		} else {
+			excludedResolvedID = resolvedID
+		}
 	}
 
-	ctx := context.Background()
+	notifyResolved := func(sessionSelector, resolvedID string) {
+		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
+		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+			Provider:                conv.Provider,
+			ConversationID:          conv.ConversationID,
+			ActorDisplay:            actorDisplayName,
+			ActorKind:               actorKind,
+			Text:                    text,
+			RecipientSelector:       sessionSelector,
+			RecipientSessionID:      resolvedID,
+			Handle:                  handle,
+			ExplicitTarget:          explicitTarget,
+			ExplicitTargetSessionID: explicitTargetSessionID,
+		})
+		if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
+			log.Printf("extmsg: notify %s failed: %v", sessionSelector, err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	for _, m := range members {
 		wg.Add(1)
-		go func(sessionID string) {
+		go func(sessionSelector string) {
 			defer wg.Done()
-			// Resolve the member's handle from their session bead alias.
-			// Membership stores session names (s-et-xxxx); bead IDs drop the "s-" prefix.
-			handle := sessionID
-			beadID := strings.TrimPrefix(sessionID, "s-")
-			if b, err := store.Get(beadID); err == nil {
-				if alias := b.Metadata["alias"]; alias != "" {
-					if idx := strings.LastIndex(alias, "/"); idx >= 0 {
-						handle = alias[idx+1:]
-					} else {
-						handle = alias
-					}
-				}
-			}
-			nudge := fmt.Sprintf("<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
-				"- %s (%s): %s\n\n"+
-				"To reply in Discord, write your response to a file and run:\n"+
-				"  gc discord reply-current --conversation-id %s --body-file <path>\n"+
-				"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
-				"Run 'gc transcript read --ack' after responding to mark as read.\n"+
-				"</system-reminder>",
-				conv.Provider, conv.ConversationID,
-				inboundMsg.Actor.DisplayName, actorKind, inboundMsg.Text,
-				conv.ConversationID,
-				handle,
-			)
-			// Resolve session identifier to bead ID, then send.
-			resolvedID, err := session.ResolveSessionID(store, sessionID)
-			if err != nil {
-				log.Printf("extmsg: resolve session %s failed: %v", sessionID, err)
+			if excludedSelector != "" && apiNormalizeSessionTarget(sessionSelector) == excludedSelector {
 				return
 			}
-			if err := s.sendBackgroundMessageToSession(ctx, store, resolvedID, nudge); err != nil {
-				log.Printf("extmsg: notify %s failed: %v", sessionID, err)
+			preexistingID, preErr := s.resolveSessionTargetIDWithContext(ctx, store, sessionSelector, apiSessionResolveOptions{})
+			if preErr == nil && preexistingID != "" {
+				if excludedResolvedID != "" && preexistingID == excludedResolvedID {
+					return
+				}
+				notifyResolved(sessionSelector, preexistingID)
+				return
 			}
+			resolvedID, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, sessionSelector)
+			if err != nil {
+				log.Printf("extmsg: resolve session %s failed: %v", sessionSelector, err)
+				return
+			}
+			if preErr != nil {
+				log.Printf("extmsg: materialized session %s as %s for conversation %s/%s", sessionSelector, resolvedID, conv.Provider, conv.ConversationID)
+			}
+			if excludedResolvedID != "" && resolvedID == excludedResolvedID {
+				return
+			}
+			notifyResolved(sessionSelector, resolvedID)
 		}(m.SessionID)
 	}
 	wg.Wait()
 }
 
-// --- inbound ---
-
-func (s *Server) handleExtMsgInbound(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
+func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
+	if strings.TrimSpace(explicitTarget) == "" || svc == nil || svc.Groups == nil {
+		return ""
 	}
-	reg := s.extmsgAdapterRegistry(w)
-	if reg == nil {
-		return
-	}
-
-	var body struct {
-		// For pre-normalized messages (out-of-process adapters):
-		Message *extmsg.ExternalInboundMessage `json:"message,omitempty"`
-		// For raw payloads (in-process adapters):
-		Provider  string `json:"provider,omitempty"`
-		AccountID string `json:"account_id,omitempty"`
-		Payload   []byte `json:"payload,omitempty"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	deps := extmsg.InboundDeps{
-		Services:  *svc,
-		Registry:  reg,
-		EmitEvent: s.extmsgEmitEvent(),
-	}
-
-	ctx := r.Context()
-
-	// Pre-normalized path.
-	if body.Message != nil {
-		result, err := extmsg.HandleInboundNormalized(ctx, deps, *body.Message)
-		if err != nil {
-			writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-			return
-		}
-		go s.extmsgNotifyMembers(body.Message.Conversation, *body.Message)
-		writeJSON(w, http.StatusOK, result)
-		return
-	}
-
-	// Raw payload path.
-	if body.Provider == "" || body.AccountID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "provider and account_id are required for raw payloads")
-		return
-	}
-
-	key := extmsg.AdapterKey{Provider: body.Provider, AccountID: body.AccountID}
-	result, err := extmsg.HandleInbound(ctx, deps, key, extmsg.InboundPayload{
-		Body:       body.Payload,
-		ReceivedAt: time.Now(),
+	route, err := svc.Groups.ResolveInbound(ctx, extmsg.ExternalInboundMessage{
+		Conversation:   conv,
+		ExplicitTarget: explicitTarget,
 	})
 	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
+		log.Printf("extmsg: resolve explicit target %q for %s/%s failed: %v", explicitTarget, conv.Provider, conv.ConversationID, err)
+		return ""
 	}
-	writeJSON(w, http.StatusOK, result)
+	if route == nil || route.Match != extmsg.GroupRouteExplicitTarget {
+		return ""
+	}
+	return strings.TrimSpace(route.TargetSessionID)
 }
 
-// --- outbound ---
-
-func (s *Server) handleExtMsgOutbound(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
+func (s *Server) extmsgNotifyInboundMembers(ctx context.Context, msg extmsg.ExternalInboundMessage) {
+	actorKind := "agent"
+	if !msg.Actor.IsBot {
+		actorKind = "human"
 	}
-	reg := s.extmsgAdapterRegistry(w)
-	if reg == nil {
-		return
-	}
-
-	var body struct {
-		SessionID        string                 `json:"session_id"`
-		Conversation     extmsg.ConversationRef `json:"conversation"`
-		Text             string                 `json:"text"`
-		ReplyToMessageID string                 `json:"reply_to_message_id,omitempty"`
-		IdempotencyKey   string                 `json:"idempotency_key,omitempty"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "session_id is required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	deps := extmsg.OutboundDeps{
-		Services:  *svc,
-		Registry:  reg,
-		EmitEvent: s.extmsgEmitEvent(),
-	}
-
-	result, err := extmsg.HandleOutbound(r.Context(), deps, caller, extmsg.OutboundRequest{
-		SessionID:        body.SessionID,
-		Conversation:     body.Conversation,
-		Text:             body.Text,
-		ReplyToMessageID: body.ReplyToMessageID,
-		IdempotencyKey:   body.IdempotencyKey,
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-	go s.extmsgNotifyMembers(body.Conversation, extmsg.ExternalInboundMessage{
-		Conversation: body.Conversation,
-		Actor:        extmsg.ExternalActor{ID: body.SessionID, DisplayName: body.SessionID, IsBot: true},
-		Text:         body.Text,
-	})
-	writeJSON(w, http.StatusOK, result)
+	s.extmsgNotifyMembers(ctx, msg.Conversation, msg.Actor.DisplayName, actorKind, msg.Text, "", msg.ExplicitTarget)
 }
 
-// --- bindings ---
-
-func (s *Server) handleExtMsgBindingList(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
+// titleCaseProvider uppercases the first ASCII byte of a provider name.
+// Used to avoid a golang.org/x/text/cases dependency just for one
+// capitalization in the inbound nudge — provider names are always
+// short lowercase ASCII identifiers (slack, discord, ...).
+func titleCaseProvider(name string) string {
+	if name == "" {
+		return ""
 	}
-
-	sessionID := r.URL.Query().Get("session_id")
-	if sessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "session_id query parameter is required")
-		return
+	first := name[0]
+	if first >= 'a' && first <= 'z' {
+		return string(first-'a'+'A') + name[1:]
 	}
-
-	bindings, err := svc.Bindings.ListBySession(r.Context(), sessionID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if bindings == nil {
-		bindings = []extmsg.SessionBindingRecord{}
-	}
-	writeListJSON(w, s.latestIndex(), bindings, len(bindings))
+	return name
 }
 
-func (s *Server) handleExtMsgBind(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	var body struct {
-		Conversation extmsg.ConversationRef `json:"conversation"`
-		SessionID    string                 `json:"session_id"`
-		Metadata     map[string]string      `json:"metadata,omitempty"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "session_id is required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	binding, err := svc.Bindings.Bind(r.Context(), caller, extmsg.BindInput{
-		Conversation: body.Conversation,
-		SessionID:    body.SessionID,
-		Metadata:     body.Metadata,
-		Now:          time.Now(),
-	})
-	if err != nil {
-		switch {
-		case errors.Is(err, extmsg.ErrBindingConflict):
-			writeError(w, http.StatusConflict, "conflict", err.Error())
-		case errors.Is(err, extmsg.ErrInvalidInput) || errors.Is(err, extmsg.ErrInvalidConversation):
-			writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		}
-		return
-	}
-
-	s.extmsgEmitEvent()(events.ExtMsgBound, body.SessionID, map[string]any{
-		"provider":        body.Conversation.Provider,
-		"conversation_id": body.Conversation.ConversationID,
-		"session_id":      body.SessionID,
-	})
-	writeJSON(w, http.StatusCreated, binding)
+// extmsgNotifyReminder collects the inputs the inbound-message
+// <system-reminder> block is constructed from. Externally-supplied fields
+// (ActorDisplay, Text, ExplicitTarget) are sanitized via
+// extmsg.SanitizeForSystemReminder inside formatExtmsgNotifyReminder before
+// interpolation; callers should not pre-sanitize.
+//
+// ExplicitTarget carries the provider-resolved address-by-handle target (set
+// when an inbound was addressed to a specific agent via @handle: prefix or a
+// subteam mention). When non-empty and not routed to the receiving session,
+// formatExtmsgNotifyReminder emits a "do not reply" discriminator line so
+// peer sessions can self-silence on off-target messages. See
+// gastownhall/gascity#2484.
+type extmsgNotifyReminder struct {
+	Provider                string
+	ConversationID          string
+	ActorDisplay            string
+	ActorKind               string
+	Text                    string
+	RecipientSelector       string
+	RecipientSessionID      string
+	Handle                  string
+	ExplicitTarget          string
+	ExplicitTargetSessionID string
 }
 
-func (s *Server) handleExtMsgUnbind(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
+// formatExtmsgNotifyReminder builds the inbound-message reminder body.
+// Attacker-controllable fields (ActorDisplay, Text, ExplicitTarget) are
+// stripped of literal <system-reminder> open/close sequences before being
+// interpolated into the reminder block. Without this guard, an external
+// sender can inject the sequence and break out of the legitimate reminder,
+// injecting attacker-controlled instructions into the receiving agent's
+// prompt. See gastownhall/gascity#2195.
+//
+// When ExplicitTarget is non-empty and does not target the receiving session,
+// a discriminator line is appended so peer sessions can self-silence on
+// messages addressed to a different agent. See gastownhall/gascity#2484.
+func formatExtmsgNotifyReminder(r extmsgNotifyReminder) string {
+	providerCLI := strings.ToLower(r.Provider)
+	providerDisplay := titleCaseProvider(providerCLI)
+	safeActor := extmsg.SanitizeForSystemReminder(r.ActorDisplay)
+	safeText := extmsg.SanitizeForSystemReminder(r.Text)
 
-	var body struct {
-		Conversation *extmsg.ConversationRef `json:"conversation,omitempty"`
-		SessionID    string                  `json:"session_id"`
+	var b strings.Builder
+	fmt.Fprintf(&b,
+		"<system-reminder>\nNew message in shared conversation %s/%s:\n\n"+
+			"- %s (%s): %s\n\n",
+		r.Provider, r.ConversationID,
+		safeActor, r.ActorKind, safeText,
+	)
+	if target := strings.TrimSpace(r.ExplicitTarget); target != "" && !extmsgNotifyReminderTargetsRecipient(r, target) {
+		safeTarget := extmsg.SanitizeForSystemReminder(target)
+		fmt.Fprintf(&b,
+			"Addressed to: @%s — if that is not you, do not reply.\n\n",
+			safeTarget,
+		)
 	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "session_id is required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	unbound, err := svc.Bindings.Unbind(r.Context(), caller, extmsg.UnbindInput{
-		Conversation: body.Conversation,
-		SessionID:    body.SessionID,
-		Now:          time.Now(),
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-
-	s.extmsgEmitEvent()(events.ExtMsgUnbound, body.SessionID, map[string]any{
-		"session_id": body.SessionID,
-		"count":      len(unbound),
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"unbound": unbound})
+	fmt.Fprintf(&b,
+		"To reply in %s, write your response to a file and run:\n"+
+			"  gc %s reply-current --conversation-id %s --body-file <path>\n"+
+			"Prefix your reply with your agent handle in bold (e.g., **%s:** your message).\n"+
+			"</system-reminder>",
+		providerDisplay,
+		providerCLI, r.ConversationID,
+		r.Handle,
+	)
+	return b.String()
 }
 
-// --- groups ---
-
-func (s *Server) handleExtMsgGroupLookup(w http.ResponseWriter, r *http.Request) {
-	// Read-only lookup of a group by root conversation query params.
-	// Does NOT create a group — use POST /v0/extmsg/groups for that.
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
+func extmsgNotifyReminderTargetsRecipient(r extmsgNotifyReminder, target string) bool {
+	if targetSessionID := strings.TrimSpace(r.ExplicitTargetSessionID); targetSessionID != "" {
+		return strings.TrimSpace(r.RecipientSessionID) == targetSessionID ||
+			apiNormalizeSessionTarget(r.RecipientSelector) == apiNormalizeSessionTarget(targetSessionID)
 	}
-
-	q := r.URL.Query()
-	ref := extmsg.ConversationRef{
-		ScopeID:        q.Get("scope_id"),
-		Provider:       q.Get("provider"),
-		AccountID:      q.Get("account_id"),
-		ConversationID: q.Get("conversation_id"),
-		Kind:           extmsg.ConversationKind(q.Get("kind")),
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	group, err := svc.Groups.FindByConversation(r.Context(), caller, ref)
-	if err != nil {
-		if errors.Is(err, extmsg.ErrGroupNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "group not found for conversation")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, group)
-}
-
-func (s *Server) handleExtMsgGroupEnsure(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	var body struct {
-		RootConversation extmsg.ConversationRef `json:"root_conversation"`
-		Mode             extmsg.GroupMode       `json:"mode"`
-		DefaultHandle    string                 `json:"default_handle,omitempty"`
-		Metadata         map[string]string      `json:"metadata,omitempty"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.Mode == "" {
-		body.Mode = extmsg.GroupModeLauncher
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	group, err := svc.Groups.EnsureGroup(r.Context(), caller, extmsg.EnsureGroupInput{
-		RootConversation: body.RootConversation,
-		Mode:             body.Mode,
-		DefaultHandle:    body.DefaultHandle,
-		Metadata:         body.Metadata,
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-
-	s.extmsgEmitEvent()(events.ExtMsgGroupCreated, group.ID, map[string]any{
-		"provider":        body.RootConversation.Provider,
-		"conversation_id": body.RootConversation.ConversationID,
-		"mode":            string(body.Mode),
-	})
-	writeJSON(w, http.StatusCreated, group)
-}
-
-func (s *Server) handleExtMsgParticipantUpsert(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	var body struct {
-		GroupID   string            `json:"group_id"`
-		Handle    string            `json:"handle"`
-		SessionID string            `json:"session_id"`
-		Public    bool              `json:"public"`
-		Metadata  map[string]string `json:"metadata,omitempty"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.GroupID == "" || body.Handle == "" || body.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "group_id, handle, and session_id are required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	participant, err := svc.Groups.UpsertParticipant(r.Context(), caller, extmsg.UpsertParticipantInput{
-		GroupID:   body.GroupID,
-		Handle:    body.Handle,
-		SessionID: body.SessionID,
-		Public:    body.Public,
-		Metadata:  body.Metadata,
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, participant)
-}
-
-func (s *Server) handleExtMsgParticipantRemove(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	var body struct {
-		GroupID string `json:"group_id"`
-		Handle  string `json:"handle"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.GroupID == "" || body.Handle == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "group_id and handle are required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	err := svc.Groups.RemoveParticipant(r.Context(), caller, extmsg.RemoveParticipantInput{
-		GroupID: body.GroupID,
-		Handle:  body.Handle,
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
-}
-
-// --- transcript ---
-
-func (s *Server) handleExtMsgTranscriptList(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	q := r.URL.Query()
-	ref := extmsg.ConversationRef{
-		ScopeID:              q.Get("scope_id"),
-		Provider:             q.Get("provider"),
-		AccountID:            q.Get("account_id"),
-		ConversationID:       q.Get("conversation_id"),
-		ParentConversationID: q.Get("parent_conversation_id"),
-		Kind:                 extmsg.ConversationKind(q.Get("kind")),
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	entries, err := svc.Transcript.List(r.Context(), extmsg.ListTranscriptInput{
-		Caller:       caller,
-		Conversation: ref,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if entries == nil {
-		entries = []extmsg.ConversationTranscriptRecord{}
-	}
-	writeListJSON(w, s.latestIndex(), entries, len(entries))
-}
-
-func (s *Server) handleExtMsgTranscriptAck(w http.ResponseWriter, r *http.Request) {
-	svc := s.extmsgServices(w)
-	if svc == nil {
-		return
-	}
-
-	var body struct {
-		Conversation extmsg.ConversationRef `json:"conversation"`
-		SessionID    string                 `json:"session_id"`
-		Sequence     int64                  `json:"sequence"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.SessionID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "session_id is required")
-		return
-	}
-
-	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "api"}
-	err := svc.Transcript.Ack(r.Context(), extmsg.AckMembershipInput{
-		Caller:       caller,
-		Conversation: body.Conversation,
-		SessionID:    body.SessionID,
-		Sequence:     body.Sequence,
-	})
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "processing_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "acked"})
-}
-
-// --- adapters ---
-
-func (s *Server) handleExtMsgAdapterList(w http.ResponseWriter, _ *http.Request) {
-	reg := s.extmsgAdapterRegistry(w)
-	if reg == nil {
-		return
-	}
-
-	keys := reg.List()
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Provider != keys[j].Provider {
-			return keys[i].Provider < keys[j].Provider
-		}
-		return keys[i].AccountID < keys[j].AccountID
-	})
-	type adapterInfo struct {
-		Provider  string `json:"provider"`
-		AccountID string `json:"account_id"`
-		Name      string `json:"name"`
-	}
-	items := make([]adapterInfo, 0, len(keys))
-	for _, k := range keys {
-		a := reg.Lookup(k)
-		name := ""
-		if a != nil {
-			name = a.Name()
-		}
-		items = append(items, adapterInfo{
-			Provider:  k.Provider,
-			AccountID: k.AccountID,
-			Name:      name,
-		})
-	}
-	writeListJSON(w, s.latestIndex(), items, len(items))
-}
-
-func (s *Server) handleExtMsgAdapterRegister(w http.ResponseWriter, r *http.Request) {
-	reg := s.extmsgAdapterRegistry(w)
-	if reg == nil {
-		return
-	}
-
-	var body struct {
-		Provider     string                     `json:"provider"`
-		AccountID    string                     `json:"account_id"`
-		Name         string                     `json:"name"`
-		CallbackURL  string                     `json:"callback_url"`
-		Capabilities extmsg.AdapterCapabilities `json:"capabilities"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.Provider == "" || body.AccountID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "provider and account_id are required")
-		return
-	}
-	if body.Name == "" {
-		body.Name = body.Provider + "/" + body.AccountID
-	}
-
-	adapter := extmsg.NewHTTPAdapter(body.Name, body.CallbackURL, body.Capabilities)
-	key := extmsg.AdapterKey{Provider: body.Provider, AccountID: body.AccountID}
-	reg.Register(key, adapter)
-
-	s.extmsgEmitEvent()(events.ExtMsgAdapterAdded, body.Name, map[string]any{
-		"provider":   body.Provider,
-		"account_id": body.AccountID,
-	})
-	writeJSON(w, http.StatusCreated, map[string]string{
-		"status":     "registered",
-		"provider":   body.Provider,
-		"account_id": body.AccountID,
-		"name":       body.Name,
-	})
-}
-
-func (s *Server) handleExtMsgAdapterUnregister(w http.ResponseWriter, r *http.Request) {
-	reg := s.extmsgAdapterRegistry(w)
-	if reg == nil {
-		return
-	}
-
-	var body struct {
-		Provider  string `json:"provider"`
-		AccountID string `json:"account_id"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-	if body.Provider == "" || body.AccountID == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "provider and account_id are required")
-		return
-	}
-
-	key := extmsg.AdapterKey{Provider: body.Provider, AccountID: body.AccountID}
-	reg.Unregister(key)
-
-	s.extmsgEmitEvent()(events.ExtMsgAdapterRemoved, body.Provider+"/"+body.AccountID, map[string]any{
-		"provider":   body.Provider,
-		"account_id": body.AccountID,
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "unregistered"})
+	return strings.EqualFold(target, strings.TrimSpace(r.Handle))
 }

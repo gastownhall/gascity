@@ -22,6 +22,7 @@ type sessionConn struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	done     chan struct{}      // closed when process exits
+	readDone chan struct{}      // closed after buffered stdout is dispatched
 	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
 	listener net.Listener       // control socket for cross-process ops
 
@@ -31,6 +32,12 @@ type sessionConn struct {
 	outputBuf      []string
 	outputBufMax   int
 	lastActivity   time.Time
+
+	// activityPublisher moves sidecar I/O off the JSON-RPC read loop. It is
+	// installed after the handshake seed is durably committed and detached
+	// before session metadata is removed.
+	activityPublisher       *activityPublisher
+	activityPublisherClosed bool
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -43,26 +50,36 @@ type sessionConn struct {
 
 	// pending tracks response waiters by request ID.
 	pending map[int64]chan JSONRPCMessage
+	idleCh  chan struct{}
 }
 
 // newSessionConn creates a sessionConn with the given buffer size.
-func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSize int) *sessionConn {
+func newSessionConn(cmd *exec.Cmd, stdin io.WriteCloser, lis net.Listener, bufSize int, done chan struct{}) *sessionConn {
 	if bufSize <= 0 {
 		bufSize = defaultOutputBufferLines
 	}
-	return &sessionConn{
+	if done == nil {
+		done = make(chan struct{})
+	}
+	sc := &sessionConn{
 		cmd:          cmd,
 		stdin:        stdin,
-		done:         make(chan struct{}),
+		done:         done,
+		readDone:     make(chan struct{}),
 		listener:     lis,
 		outputBufMax: bufSize,
 		pending:      make(map[int64]chan JSONRPCMessage),
+		idleCh:       make(chan struct{}),
 	}
+	close(sc.idleCh)
+	return sc
 }
 
 // readLoop reads JSON-RPC messages from the agent's stdout and dispatches them.
 // It runs until the reader returns EOF or an error.
 func (sc *sessionConn) readLoop(r io.Reader) {
+	defer close(sc.readDone)
+
 	scanner := bufio.NewScanner(r)
 	// ACP messages can be large (e.g., file contents in updates).
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -107,7 +124,7 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 		}
 		// Clear busy state if this is the active prompt response.
 		if sc.activePromptID != 0 && *msg.ID == sc.activePromptID {
-			sc.activePromptID = 0
+			sc.markIdleLocked()
 		}
 		sc.mu.Unlock()
 		if ok {
@@ -121,22 +138,72 @@ func (sc *sessionConn) dispatch(msg JSONRPCMessage) {
 func (sc *sessionConn) handleUpdate(msg JSONRPCMessage) {
 	var params SessionUpdateParams
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		fmt.Fprintf(os.Stderr, "acp: session/update unmarshal: %v\n", err)
 		return
 	}
+
+	sc.markActivity(time.Now())
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	sc.lastActivity = time.Now()
-	for _, block := range params.Content {
-		if block.Type != "text" || block.Text == "" {
+	switch params.Update.Type {
+	case "agent_message_chunk", "user_message_chunk", "agent_thought_chunk":
+		var block ContentBlock
+		if err := json.Unmarshal(params.Update.Content, &block); err != nil {
+			fmt.Fprintf(os.Stderr, "acp: session/update content unmarshal (variant=%s): %v\n", params.Update.Type, err)
+			return
+		}
+		sc.appendContentBlock(block)
+	case "tool_call", "tool_call_update":
+		if params.Update.Title != "" {
+			sc.appendLine("[tool: " + params.Update.Title + "]")
+		}
+		if len(params.Update.Content) > 0 {
+			sc.appendToolCallContent(params.Update.Type, params.Update.Content)
+		}
+	default:
+		if params.Update.Type == "" {
+			if len(params.Content) > 0 {
+				sc.appendContentBlocks(params.Content)
+				return
+			}
+			fmt.Fprintln(os.Stderr, "acp: session/update missing update discriminator")
+		}
+	}
+}
+
+func (sc *sessionConn) appendToolCallContent(variant string, raw json.RawMessage) {
+	var parts []toolCallContent
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		fmt.Fprintf(os.Stderr, "acp: session/update content unmarshal (variant=%s): %v\n", variant, err)
+		return
+	}
+	for _, part := range parts {
+		if part.Type != "content" {
 			continue
 		}
-		// Split multi-line text into individual lines for the buffer.
-		lines := strings.Split(block.Text, "\n")
-		for _, line := range lines {
-			sc.appendLine(line)
+		var block ContentBlock
+		if err := json.Unmarshal(part.Content, &block); err != nil {
+			fmt.Fprintf(os.Stderr, "acp: session/update tool content unmarshal (variant=%s): %v\n", variant, err)
+			continue
 		}
+		sc.appendContentBlock(block)
+	}
+}
+
+func (sc *sessionConn) appendContentBlocks(blocks []ContentBlock) {
+	for _, block := range blocks {
+		sc.appendContentBlock(block)
+	}
+}
+
+func (sc *sessionConn) appendContentBlock(block ContentBlock) {
+	if block.Type != "text" || block.Text == "" {
+		return
+	}
+	for _, line := range strings.Split(block.Text, "\n") {
+		sc.appendLine(line)
 	}
 }
 
@@ -199,7 +266,7 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 // setActivePrompt marks the given request ID as the active prompt.
 func (sc *sessionConn) setActivePrompt(id int64) {
 	sc.mu.Lock()
-	sc.activePromptID = id
+	sc.markBusyLocked(id)
 	sc.mu.Unlock()
 }
 
@@ -207,10 +274,18 @@ func (sc *sessionConn) setActivePrompt(id int64) {
 // Safe to call multiple times — closed channels are deleted from the map.
 func (sc *sessionConn) drainPending() {
 	sc.mu.Lock()
-	sc.activePromptID = 0
+	sc.markIdleLocked()
 	for id, ch := range sc.pending {
 		close(ch)
 		delete(sc.pending, id)
+	}
+	sc.mu.Unlock()
+}
+
+func (sc *sessionConn) clearActivePrompt(id int64) {
+	sc.mu.Lock()
+	if id == 0 || sc.activePromptID == id {
+		sc.markIdleLocked()
 	}
 	sc.mu.Unlock()
 }
@@ -222,19 +297,53 @@ func (sc *sessionConn) isBusy() bool {
 	return sc.activePromptID != 0
 }
 
-// waitIdle polls until the agent is not busy or the timeout expires.
+func (sc *sessionConn) ensureIdleChannelLocked() {
+	if sc.idleCh == nil {
+		sc.idleCh = make(chan struct{})
+		if sc.activePromptID == 0 {
+			close(sc.idleCh)
+		}
+	}
+}
+
+func (sc *sessionConn) markBusyLocked(id int64) {
+	sc.ensureIdleChannelLocked()
+	if sc.activePromptID == 0 {
+		sc.idleCh = make(chan struct{})
+	}
+	sc.activePromptID = id
+}
+
+func (sc *sessionConn) markIdleLocked() {
+	sc.ensureIdleChannelLocked()
+	sc.activePromptID = 0
+	select {
+	case <-sc.idleCh:
+	default:
+		close(sc.idleCh)
+	}
+}
+
+// waitIdle blocks until the agent is not busy or the timeout expires.
 // Returns true if the agent became idle, false on timeout.
 func (sc *sessionConn) waitIdle(timeout time.Duration) bool {
-	deadline := time.After(timeout)
-	for {
-		if !sc.isBusy() {
-			return true
-		}
-		select {
-		case <-deadline:
-			return false
-		case <-time.After(100 * time.Millisecond):
-		}
+	sc.mu.Lock()
+	sc.ensureIdleChannelLocked()
+	if sc.activePromptID == 0 {
+		sc.mu.Unlock()
+		return true
+	}
+	idleCh := sc.idleCh
+	sc.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-idleCh:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -263,6 +372,56 @@ func (sc *sessionConn) getLastActivity() time.Time {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	return sc.lastActivity
+}
+
+// markActivity records that the agent produced output at t and offers the
+// newest stamp to the asynchronous publisher. It performs no filesystem I/O.
+func (sc *sessionConn) markActivity(t time.Time) {
+	sc.mu.Lock()
+	if t.After(sc.lastActivity) {
+		sc.lastActivity = t
+	}
+	stamp := sc.lastActivity
+	publisher := sc.activityPublisher
+	sc.mu.Unlock()
+
+	if publisher != nil {
+		publisher.offer(stamp)
+	}
+}
+
+// installActivityPublisher attaches a worker after seed has been written.
+// Updates observed during the handshake are coalesced behind the seed.
+func (sc *sessionConn) installActivityPublisher(publisher *activityPublisher, seed time.Time) error {
+	sc.mu.Lock()
+	if sc.activityPublisherClosed {
+		sc.mu.Unlock()
+		publisher.close()
+		return fmt.Errorf("ACP connection closed before activity publication started")
+	}
+	if seed.After(sc.lastActivity) {
+		sc.lastActivity = seed
+	}
+	latest := sc.lastActivity
+	sc.activityPublisher = publisher
+	sc.mu.Unlock()
+
+	if latest.After(seed) {
+		publisher.offer(latest)
+	}
+	return nil
+}
+
+// closeActivityPublisher waits for any in-flight atomic write to finish.
+func (sc *sessionConn) closeActivityPublisher() {
+	sc.mu.Lock()
+	sc.activityPublisherClosed = true
+	publisher := sc.activityPublisher
+	sc.activityPublisher = nil
+	sc.mu.Unlock()
+	if publisher != nil {
+		publisher.close()
+	}
 }
 
 // alive reports whether the process is still running.

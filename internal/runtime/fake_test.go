@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 )
 
 // Compile-time check: Fake implements Provider.
@@ -119,6 +121,7 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 	cfg := Config{
 		WorkDir:                "/proj",
 		Command:                "claude --dangerously-skip-permissions",
+		Lifecycle:              LifecycleOneShot,
 		Env:                    map[string]string{"GC_AGENT": "mayor", "HOME": "/home/user"},
 		ReadyPromptPrefix:      "❯ ",
 		ReadyDelayMs:           10000,
@@ -135,6 +138,9 @@ func TestFake_CapturesAllConfigFields(t *testing.T) {
 	}
 	if got.Command != "claude --dangerously-skip-permissions" {
 		t.Errorf("Command = %q, want %q", got.Command, "claude --dangerously-skip-permissions")
+	}
+	if got.Lifecycle != LifecycleOneShot {
+		t.Errorf("Lifecycle = %q, want %q", got.Lifecycle, LifecycleOneShot)
 	}
 	if got.Env["GC_AGENT"] != "mayor" {
 		t.Errorf("Env[GC_AGENT] = %q, want %q", got.Env["GC_AGENT"], "mayor")
@@ -281,6 +287,24 @@ func TestFakeRemoveMeta(t *testing.T) {
 	}
 }
 
+func TestFakeRemoveMetaErrorForSessionKey(t *testing.T) {
+	f := NewFake()
+	_ = f.SetMeta("session-a", "GC_DRAIN", "123")
+	f.RemoveMetaErrors["session-a"] = map[string]error{"GC_DRAIN": errors.New("remove denied")}
+
+	if err := f.RemoveMeta("session-a", "GC_DRAIN"); err == nil {
+		t.Fatal("RemoveMeta error = nil, want configured error")
+	}
+	val, _ := f.GetMeta("session-a", "GC_DRAIN")
+	if val != "123" {
+		t.Errorf("GetMeta after failed remove = %q, want original value", val)
+	}
+
+	if err := f.RemoveMeta("session-a", "OTHER"); err != nil {
+		t.Fatalf("RemoveMeta unrelated key: %v", err)
+	}
+}
+
 func TestFakeListRunning(t *testing.T) {
 	f := NewFake()
 	_ = f.Start(context.Background(), "gc-city-mayor", Config{})
@@ -402,5 +426,297 @@ func TestFlattenText_Empty(t *testing.T) {
 	}
 	if got := FlattenText([]ContentBlock{{Type: "text"}}); got != "" {
 		t.Errorf("FlattenText(empty text) = %q, want empty", got)
+	}
+}
+
+func TestFakeWaitForIdleGate_BlocksUntilClosed(t *testing.T) {
+	f := NewFake()
+	f.WaitForIdleErrors["s1"] = nil
+	gate := make(chan struct{})
+	f.WaitForIdleGates["s1"] = gate
+
+	done := make(chan error, 1)
+	go func() {
+		done <- f.WaitForIdle(context.Background(), "s1", time.Second)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForIdle returned before gate closed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(gate)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WaitForIdle returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForIdle did not return after gate closed")
+	}
+}
+
+func TestFakeWaitForIdleGate_RespectsContextCancel(t *testing.T) {
+	f := NewFake()
+	f.WaitForIdleErrors["s1"] = nil
+	f.WaitForIdleGates["s1"] = make(chan struct{}) // never closed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- f.WaitForIdle(ctx, "s1", time.Second)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForIdle returned before cancel")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WaitForIdle error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WaitForIdle did not return after context cancel")
+	}
+}
+
+func TestFakeWaitForIdleGate_MuReleasedWhileBlocked(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "s1", Config{WorkDir: "/tmp"})
+	f.WaitForIdleErrors["s1"] = nil
+	gate := make(chan struct{})
+	f.WaitForIdleGates["s1"] = gate
+
+	// Start a gated WaitForIdle in the background.
+	go func() {
+		_ = f.WaitForIdle(context.Background(), "s1", time.Second)
+	}()
+
+	// Give the goroutine time to acquire and release the lock.
+	time.Sleep(20 * time.Millisecond)
+
+	// Other Fake operations must not deadlock while the gate is held.
+	if !f.IsRunning("s1") {
+		t.Fatal("IsRunning returned false while gate is held")
+	}
+
+	close(gate)
+}
+
+func TestFakeFindRuntimesBySessionID_BrokenError(t *testing.T) {
+	f := NewFailFake()
+
+	_, err := f.FindRuntimesBySessionID("sess1")
+	if err == nil {
+		t.Fatal("expected error from broken fake")
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "FindRuntimesBySessionID" {
+			found = true
+			if c.Name != "sess1" {
+				t.Errorf("Call.Name = %q, want %q", c.Name, "sess1")
+			}
+		}
+	}
+	if !found {
+		t.Error("FindRuntimesBySessionID call not recorded on broken fake")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_EmptyIDReturnsAll(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-a"] = LiveRuntime{SessionID: "sid-a", PID: 1}
+	f.OrphanedRuntimes["sid-b"] = LiveRuntime{PID: 2} // empty SessionID; map key is used
+	f.OrphanedRuntimes[""] = LiveRuntime{PID: 99}     // both key and SessionID empty; skipped
+	_ = f.Start(context.Background(), "provider-c", Config{Env: map[string]string{"GC_SESSION_ID": "sid-c"}})
+	_ = f.Start(context.Background(), "provider-d", Config{}) // no GC_SESSION_ID; skipped
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 3 {
+		t.Fatalf("got %d runtimes, want 3: %+v", len(runtimes), runtimes)
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_FiltersByID(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-match"] = LiveRuntime{SessionID: "sid-match"}
+	f.OrphanedRuntimes["sid-other"] = LiveRuntime{SessionID: "sid-other"}
+	_ = f.Start(context.Background(), "provider-match", Config{Env: map[string]string{"GC_SESSION_ID": "sid-match"}})
+	_ = f.Start(context.Background(), "provider-other", Config{Env: map[string]string{"GC_SESSION_ID": "sid-other"}})
+
+	runtimes, err := f.FindRuntimesBySessionID("sid-match")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 2 {
+		t.Fatalf("got %d runtimes, want 2: %+v", len(runtimes), runtimes)
+	}
+	for _, r := range runtimes {
+		if r.SessionID != "sid-match" {
+			t.Errorf("returned runtime SessionID = %q, want %q", r.SessionID, "sid-match")
+		}
+	}
+	if f.CountCalls("FindRuntimesBySessionID", "sid-match") != 1 {
+		t.Error("FindRuntimesBySessionID call not recorded")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_EmptySessionIDsSkipped(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes[""] = LiveRuntime{PID: 1}                   // both key and SessionID empty; skipped
+	_ = f.Start(context.Background(), "provider-no-sid", Config{}) // no GC_SESSION_ID; skipped
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 0 {
+		t.Fatalf("got %d runtimes, want 0: %+v", len(runtimes), runtimes)
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_OrphanForcesIsTrackedFalse(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["sid-orphan"] = LiveRuntime{SessionID: "sid-orphan", IsTracked: true}
+
+	runtimes, err := f.FindRuntimesBySessionID("sid-orphan")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Fatalf("got %d runtimes, want 1", len(runtimes))
+	}
+	if runtimes[0].IsTracked {
+		t.Error("orphan runtime IsTracked = true, want false")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_TrackedUsesProviderNameAndSessionID(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "my-provider", Config{Env: map[string]string{"GC_SESSION_ID": "sess-abc"}})
+
+	runtimes, err := f.FindRuntimesBySessionID("sess-abc")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	if len(runtimes) != 1 {
+		t.Fatalf("got %d runtimes, want 1", len(runtimes))
+	}
+	r := runtimes[0]
+	if r.SessionID != "sess-abc" {
+		t.Errorf("SessionID = %q, want %q", r.SessionID, "sess-abc")
+	}
+	if r.ProviderName != "my-provider" {
+		t.Errorf("ProviderName = %q, want %q", r.ProviderName, "my-provider")
+	}
+	if !r.IsTracked {
+		t.Error("tracked runtime IsTracked = false, want true")
+	}
+}
+
+func TestFakeFindRuntimesBySessionID_TrackedUsesCityFromEnv(t *testing.T) {
+	f := NewFake()
+	_ = f.Start(context.Background(), "path-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-path",
+		"GC_CITY_PATH":  "/tmp/path-city",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+	_ = f.Start(context.Background(), "fallback-city", Config{Env: map[string]string{
+		"GC_SESSION_ID": "sess-fallback",
+		"GC_CITY":       "/tmp/fallback-city",
+	}})
+
+	runtimes, err := f.FindRuntimesBySessionID("")
+	if err != nil {
+		t.Fatalf("FindRuntimesBySessionID: %v", err)
+	}
+	cities := map[string]string{}
+	for _, r := range runtimes {
+		cities[r.SessionID] = r.City
+	}
+	if cities["sess-path"] != "/tmp/path-city" {
+		t.Errorf("City for sess-path = %q, want GC_CITY_PATH value", cities["sess-path"])
+	}
+	if cities["sess-fallback"] != "/tmp/fallback-city" {
+		t.Errorf("City for sess-fallback = %q, want GC_CITY fallback value", cities["sess-fallback"])
+	}
+}
+
+func TestFakeTerminateRuntime_RecordsCallWithSessionID(t *testing.T) {
+	f := NewFake()
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "my-session", ProviderName: "some-provider"}); err != nil {
+		t.Fatalf("TerminateRuntime: %v", err)
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "TerminateRuntime" {
+			found = true
+			if c.Name != "my-session" {
+				t.Errorf("Call.Name = %q, want %q (SessionID, not ProviderName)", c.Name, "my-session")
+			}
+		}
+	}
+	if !found {
+		t.Error("TerminateRuntime call not recorded")
+	}
+}
+
+func TestFakeTerminateRuntime_RemovesOrphan(t *testing.T) {
+	f := NewFake()
+	f.OrphanedRuntimes["my-session"] = LiveRuntime{SessionID: "my-session", PID: 42}
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "my-session"}); err != nil {
+		t.Fatalf("TerminateRuntime: %v", err)
+	}
+	if _, ok := f.OrphanedRuntimes["my-session"]; ok {
+		t.Error("OrphanedRuntimes still contains entry after TerminateRuntime")
+	}
+}
+
+func TestFakeTerminateRuntime_MissingEntryIsNil(t *testing.T) {
+	f := NewFake()
+
+	if err := f.TerminateRuntime(LiveRuntime{SessionID: "nonexistent"}); err != nil {
+		t.Fatalf("TerminateRuntime on missing entry returned error: %v", err)
+	}
+}
+
+func TestFakeTerminateRuntime_BrokenError(t *testing.T) {
+	f := NewFailFake()
+	f.OrphanedRuntimes["sid"] = LiveRuntime{SessionID: "sid"}
+
+	err := f.TerminateRuntime(LiveRuntime{SessionID: "sid"})
+	if err == nil {
+		t.Fatal("expected error from broken fake")
+	}
+
+	var found bool
+	for _, c := range f.Calls {
+		if c.Method == "TerminateRuntime" {
+			found = true
+			if c.Name != "sid" {
+				t.Errorf("Call.Name = %q, want %q", c.Name, "sid")
+			}
+		}
+	}
+	if !found {
+		t.Error("TerminateRuntime call not recorded on broken fake")
+	}
+	if _, ok := f.OrphanedRuntimes["sid"]; !ok {
+		t.Error("OrphanedRuntimes entry removed despite error from broken fake")
 	}
 }

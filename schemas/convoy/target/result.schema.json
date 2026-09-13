@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "convoy_id", "target"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "convoy.target" },
+    "action": { "const": "target" },
+    "convoy_id": { "type": "string", "minLength": 1 },
+    "target": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": true
+}

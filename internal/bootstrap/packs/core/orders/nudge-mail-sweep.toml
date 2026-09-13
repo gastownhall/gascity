@@ -1,0 +1,10 @@
+# Closes stale delivered nudge beads and read mail beads to prevent accumulation
+# of consumed signal infrastructure. Nudge beads past the default 10m TTL that
+# are not in the live nudge queue are closed; read mail beads past 60m are closed.
+# A budget cap of 50 closes per run prevents competing with the reconciler under load.
+# The controller watchdog runs this same sweep every 5 minutes automatically.
+[order]
+description = "Close stale delivered nudge beads and read mail beads"
+trigger = "cooldown"
+interval = "5m"
+exec = "gc order sweep-nudge-mail --quiet"

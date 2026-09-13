@@ -10,3 +10,13 @@ func explicitAgents(agents []Agent) []Agent {
 	}
 	return out
 }
+
+func userNamedSessions(sessions []NamedSession) []NamedSession {
+	var out []NamedSession
+	for _, s := range sessions {
+		if s.Template != ControlDispatcherAgentName {
+			out = append(out, s)
+		}
+	}
+	return out
+}

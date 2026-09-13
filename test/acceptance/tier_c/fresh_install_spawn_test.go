@@ -61,7 +61,9 @@ func TestFreshInit_ClaudeUnrestricted(t *testing.T) {
 	}
 
 	result := runFreshInitSlingClaudeWork(t, "Write the current time to permission-check.txt", "permission-check.txt")
-	command := metaString(result.SpawnedSessionBead.Metadata, "command")
+	spawnedSessionBead, err := showBeadJSON(result.CityDir, result.SpawnedSessionBead.ID)
+	require.NoError(t, err, "refresh spawned session bead %s", result.SpawnedSessionBead.ID)
+	command := metaString(spawnedSessionBead.Metadata, "command")
 	require.NotEmpty(t, command, "spawned worker should persist the resolved launch command")
 	require.Contains(t, command, "--dangerously-skip-permissions", "fresh claude worker should launch unrestricted")
 	require.NotContains(t, command, "--permission-mode auto-edit", "fresh claude worker should not launch in auto-edit mode")
@@ -72,6 +74,11 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 
 	c := helpers.NewCity(t, testEnvC)
 	c.Init("claude")
+	applyTierCAcceptanceConfig(t, c)
+	// The built-in maintenance dog pool is auto-included; this fixture needs
+	// a generic claude pool target for mol-do-work.
+	configureFreshInitClaudePool(t, c)
+	installFreshInitGitBaseline(t, c.Dir)
 
 	initialSessionBeadsOut, err := bdCmd(testEnvC, c.Dir, "list", "--include-infra", "--label", "gc:session", "--json", "--limit=20")
 	require.NoError(t, err, "bd list session beads before sling: %s", initialSessionBeadsOut)
@@ -115,6 +122,7 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			return false
 		}
 		sessionBeads := parseBeadListJSON(t, sessionsOut)
+		sessionListOut, sessionListErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "list")
 		for _, sessionBead := range sessionBeads {
 			if metaString(sessionBead.Metadata, "template") != "claude" {
 				continue
@@ -123,12 +131,18 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 			if state != "creating" && state != "active" && state != "awake" {
 				continue
 			}
-			if metaString(sessionBead.Metadata, "session_name") == "" {
+			sessionName := metaString(sessionBead.Metadata, "session_name")
+			if sessionName == "" {
 				continue
 			}
 			spawnedSessionBead = sessionBead
-			running, total, ok := parseRunningAgents(statusOut)
-			return ok && total > 0 && running > 0
+			if state == "active" || state == "awake" {
+				return true
+			}
+			if sessionListErr != nil {
+				return false
+			}
+			return sessionListShowsActive(sessionListOut, sessionBead.ID, sessionName)
 		}
 		return false
 	})
@@ -138,13 +152,25 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		if sessionErr != nil {
 			sessionOut = strings.TrimSpace(sessionOut + "\nERR: " + sessionErr.Error())
 		}
+		sessionLogsOut := ""
+		sessionPeekOut := ""
+		if sessionName := metaString(spawnedSessionBead.Metadata, "session_name"); sessionName != "" {
+			sessionLogsOut, sessionErr = runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "logs", sessionName, "--tail", "0")
+			if sessionErr != nil {
+				sessionLogsOut = strings.TrimSpace(sessionLogsOut + "\nERR: " + sessionErr.Error())
+			}
+			sessionPeekOut, sessionErr = runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "peek", sessionName, "--lines", "200")
+			if sessionErr != nil {
+				sessionPeekOut = strings.TrimSpace(sessionPeekOut + "\nERR: " + sessionErr.Error())
+			}
+		}
 		supervisorOut, supervisorErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "supervisor", "logs")
 		if supervisorErr != nil {
 			supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
 		}
 
-		t.Fatalf("fresh gc init city never spawned a running claude pool worker after gc sling within 90s\nlast status:\n%s\nlast session json:\n%s\nsessions:\n%s\nsupervisor logs:\n%s",
-			lastStatus, lastSessionsOut, sessionOut, supervisorOut)
+		t.Fatalf("fresh gc init city never spawned a running claude pool worker after gc sling within 90s\nlast status:\n%s\nlast session json:\n%s\nsessions:\n%s\nsession logs:\n%s\nsession peek:\n%s\nsupervisor logs:\n%s",
+			lastStatus, lastSessionsOut, sessionOut, sessionLogsOut, sessionPeekOut, supervisorOut)
 	}
 
 	if poolManaged := metaString(spawnedSessionBead.Metadata, "pool_managed"); poolManaged != "" {
@@ -178,6 +204,14 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	if sessionErr != nil {
 		sessionOut = strings.TrimSpace(sessionOut + "\nERR: " + sessionErr.Error())
 	}
+	sessionLogsOut, sessionLogsErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "logs", sessionName, "--tail", "0")
+	if sessionLogsErr != nil {
+		sessionLogsOut = strings.TrimSpace(sessionLogsOut + "\nERR: " + sessionLogsErr.Error())
+	}
+	sessionPeekOut, sessionPeekErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "session", "peek", sessionName, "--lines", "200")
+	if sessionPeekErr != nil {
+		sessionPeekOut = strings.TrimSpace(sessionPeekOut + "\nERR: " + sessionPeekErr.Error())
+	}
 	supervisorOut, supervisorErr := runGCWithTimeout(10*time.Second, testEnvC, c.Dir, "supervisor", "logs")
 	if supervisorErr != nil {
 		supervisorOut = strings.TrimSpace(supervisorOut + "\nERR: " + supervisorErr.Error())
@@ -189,9 +223,19 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 	}
 
 	if !completed {
-		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsupervisor logs:\n%s",
-			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, supervisorOut)
+		t.Fatalf("fresh gc init city spawned a claude worker but did not complete routed work within 4m\nwork bead:\n%+v\nsession bead:\n%+v\noutput file (%s):\n%s\nstatus:\n%s\nsessions:\n%s\nsession logs:\n%s\nsession peek:\n%s\nsupervisor logs:\n%s",
+			lastWorkBead, spawnedSessionBead, outputRel, outputDiag, lastStatus, sessionOut, sessionLogsOut, sessionPeekOut, supervisorOut)
 	}
+	workOutcome := metaString(lastWorkBead.Metadata, "gc.work_outcome")
+	workCommit := metaString(lastWorkBead.Metadata, "gc.work_commit")
+	workBranch := metaString(lastWorkBead.Metadata, "gc.work_branch")
+	require.Equal(t, "shipped", workOutcome, "completed fresh-init work should have a shipped work record")
+	require.NotEmpty(t, workCommit, "shipped fresh-init work should record its integrating commit")
+	require.NotEmpty(t, workBranch, "shipped fresh-init work should record its integrating branch")
+	resolvedWorkCommit := requireResolvedGitCommit(t, c.Dir, workCommit)
+	resolvedWorkBranch := requireResolvedGitCommit(t, c.Dir, workBranch)
+	require.Equal(t, resolvedWorkCommit, resolvedWorkBranch, "recorded branch should resolve to the integrating commit")
+	require.Equal(t, outputRel, gitCmd(t, c.Dir, "show", "--format=", "--name-only", resolvedWorkCommit, "--", outputRel), "integrating commit should contain the requested city-root artifact")
 
 	return freshInstallSlingResult{
 		CityDir:            c.Dir,
@@ -201,6 +245,46 @@ func runFreshInitSlingClaudeWork(t *testing.T, prompt, outputRel string) freshIn
 		OutputPath:         outputPath,
 		OutputContents:     strings.TrimSpace(string(outputContents)),
 	}
+}
+
+func requireResolvedGitCommit(t *testing.T, dir, revision string) string {
+	t.Helper()
+	require.False(t, strings.HasPrefix(revision, "-"), "Git commit revision must not be option-like: %q", revision)
+	resolved := gitCmd(t, dir, "rev-parse", "--verify", revision+"^{commit}")
+	require.Regexp(t, `^[0-9a-f]{40}$`, resolved, "resolved Git commit %q", revision)
+	return resolved
+}
+
+func configureFreshInitClaudePool(t *testing.T, c *helpers.City) {
+	t.Helper()
+	c.WriteV2AgentDir("claude",
+		`provider = "claude"`,
+		`default_sling_formula = "mol-do-work"`,
+		`min_active_sessions = 0`,
+		`max_active_sessions = 1`,
+	)
+	promptPath := filepath.Join(helpers.FindModuleRoot(), "internal", "bootstrap", "packs", "core", "assets", "prompts", "pool-worker.template.md")
+	prompt, err := os.ReadFile(promptPath)
+	require.NoError(t, err, "read canonical pool-worker prompt")
+	prompt = append(prompt, []byte("\n## Acceptance Fixture\n\n"+
+		"For file-writing tasks in this acceptance test:\n\n"+
+		"1. Do not change directories; the current working directory is the integration root under test.\n"+
+		"2. Create or update the requested file using its relative path in that current directory.\n"+
+		"3. Verify the file and commit it on the current branch.\n"+
+		"4. Close the work bead as shipped only with the resulting commit and branch metadata.\n")...)
+	err = os.WriteFile(filepath.Join(c.Dir, "agents", "claude", "prompt.template.md"), []byte(prompt), 0o644)
+	require.NoError(t, err, "write claude test prompt")
+}
+
+func installFreshInitGitBaseline(t *testing.T, cityDir string) {
+	t.Helper()
+	gitCmd(t, cityDir, "init", "--initial-branch=main")
+	gitCmd(t, cityDir, "config", "user.name", "Gas City Test")
+	gitCmd(t, cityDir, "config", "user.email", "gc-test@test.local")
+	gitCmd(t, cityDir, "add", ".gitignore", "city.toml", "agents/claude")
+	gitCmd(t, cityDir, "commit", "-m", "test: baseline fresh-init city")
+	head := gitCmd(t, cityDir, "rev-parse", "HEAD")
+	require.Regexp(t, `^[0-9a-f]{40}$`, head, "fresh-init fixture should have a committed Git baseline")
 }
 
 func runGCWithTimeout(timeout time.Duration, env *helpers.Env, dir string, args ...string) (string, error) {
@@ -244,6 +328,54 @@ func parseCreatedBeadID(output string) string {
 		return ""
 	}
 	return strings.TrimSpace(match[1])
+}
+
+func TestSessionListShowsActiveAcceptsLiveStateDuringMetadataLag(t *testing.T) {
+	output := `2026/06/13 22:51:49 WARN native_store_unavailable
+ID           TEMPLATE  STATE   REASON          TARGET              TITLE   AGE  LAST ACTIVE  LAST NUDGE
+a9-wisp-0my  claude    active  session,config  claude-a9-wisp-0my  claude  19s  0s ago       -
+a9-wisp-q0w  claude    creating create,config  s-a9-wisp-q0w       claude  27s  -            -
+`
+
+	if !sessionListShowsActive(output, "a9-wisp-0my", "claude-a9-wisp-0my") {
+		t.Fatal("expected active live session row to satisfy spawned-worker check")
+	}
+	if sessionListShowsActive(output, "a9-wisp-q0w", "s-a9-wisp-q0w") {
+		t.Fatal("creating live session row must not satisfy spawned-worker check")
+	}
+	if sessionListShowsActive(output, "missing", "missing") {
+		t.Fatal("unrelated session must not satisfy spawned-worker check")
+	}
+}
+
+func sessionListShowsActive(output, beadID, sessionName string) bool {
+	beadID = strings.TrimSpace(beadID)
+	sessionName = strings.TrimSpace(sessionName)
+	if beadID == "" && sessionName == "" {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		state := fields[2]
+		if state != "active" && state != "awake" {
+			continue
+		}
+		if beadID != "" && fields[0] == beadID {
+			return true
+		}
+		if sessionName == "" {
+			continue
+		}
+		for _, field := range fields[3:] {
+			if field == sessionName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseBeadListJSON(t *testing.T, out string) []beadJSON {

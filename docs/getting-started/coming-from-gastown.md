@@ -1,507 +1,177 @@
 ---
 title: Coming from Gas Town
-description: The fastest way to translate Gas Town concepts into Gas City primitives.
+description: Map Gas Town's roles, mechanisms, layout, commands, and workflows onto Gas City's primitives.
 ---
 
-Gas City is the SDK extracted from Gas Town. The fastest way to get
-productive is to stop looking for a one-to-one port of Town's role tree and
-instead map Town concepts onto Gas City's primitives:
+If you have run Gas Town, you already know its roles, its `~/gt/...` layout, and its `gt` commands. This page carries that knowledge across to Gas City.
 
-- agents
-- beads
-- events
-- config
-- prompt templates
-- derived mechanisms like orders, formulas, waits, mail, and sling
+Gas City is the platform that machinery was extracted into. Two things changed. First, the orchestrator hardcodes **zero roles** — every role you knew is now configuration, and you express Gas Town (or any orchestration) on top of a few primitives. Second, and bigger: the orchestrator can now run a formula as a **graph across many agents, out of your session** — decomposing a job into beads, fanning the ready ones out in parallel, gating each step on its dependencies, and retrying failures to completion. Your single-agent, in-session formulas still run (v1); this fleet orchestration (v2) is what's new. Because it is a platform, a feature added to Gas City lifts *every* orchestrator built on it — Gas Town included.
 
-If you built systems in Gas Town, you already know the operational problems Gas
-City is trying to solve. The main change is where the logic lives.
+For the system-level mental model first, read [How Gas City Works](/getting-started/how-gas-city-works).
 
-## The Core Shift
+## Mapping tables
 
-Gas Town is shaped around a role taxonomy and a filesystem layout. Gas City is
-shaped around a small primitive set plus configuration.
+The five tables map Gas Town onto Gas City one domain at a time. Every entry on the right is **configuration** — a user-configured agent plus a prompt template — not a built-in platform type.
 
-In Gas Town, it is normal to think in terms of:
+### Roles
 
-- mayor, deacon, witness, refinery, polecat, crew, dog
-- `~/gt/...` directory layout
-- plugins and convoys as named orchestration features
-- role-specific managers and cwd-derived identity
-
-In Gas City, the default mental model should be:
-
-- everything is configured in `city.toml` plus packs
-- every durable work item is a bead
-- agents are generic; roles come from prompts, formulas, orders, and config
-- the controller owns SDK infrastructure behavior
-- directories are an implementation detail, not the architecture
-
-That is the biggest onboarding difference. Gas City is not "Gas Town with
-renamed commands". It is the lower-level orchestration toolkit that Gas Town
-can be expressed in.
-
-## Concept Map
-
-| Gas Town concept | Gas City concept | What changes for you |
+| Gas Town role | What it did | Gas City equivalent |
 |---|---|---|
-| Town config + rig config + role homes | `city.toml` plus packs and overrides | Most behavior is configured declaratively in one place instead of being spread across role-specific directories and managers. |
-| Mayor, deacon, witness, refinery, polecat, crew, dog | Configured agents | Gas City has no baked-in role names in Go. These are pack conventions, not SDK primitives. |
-| Plugin | Order | An exec order runs shell directly with no agent session. A formula order instantiates agent work. If you were thinking "plugin that runs a command", start with an exec order. |
-| Convoy | Convoy bead plus sling/formulas | Convoys are still bead-backed work grouping, but there is no special convoy runtime layer you have to use to get orchestration. |
-| Dog | Usually an order first, sometimes a pool agent | In Gas Town, dogs are named infrastructure helpers. In Gas City, a lot of that work is cleaner as exec orders because no LLM session is needed. |
-| Deacon watchdog logic | Controller and supervisor | Health patrol, order dispatch, wisp GC, and reconciliation are controller concerns, not role-agent responsibilities. |
-| Witness lifecycle logic | Pack behavior built on waits, formulas, pool config, and controller wake/sleep | The SDK gives you the mechanisms. A pack decides whether to model a witness role at all. |
-| Crew and polecats as hard types | Persistent agents and pool agents | "Crew" and "polecat" are operating styles. Gas City only knows agent config and pool behavior. |
-| Directory tree under `~/gt` | `dir` for identity scope and `work_dir` for session cwd | Do not encode architecture into paths. Keep identity in config and metadata. Use `work_dir` only when a role really needs filesystem isolation. |
-| Role-specific startup files and local settings dirs | Prompt templates, overlays, provider hooks, `pre_start`, `session_setup`, `gc prime` | Startup shaping is explicit and provider-aware instead of being mostly inferred from where a role lives on disk. |
-| Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Avoid porting code or prompts that assume cwd implies who the agent is. |
-| Formula runner inside Town workflows | Formula resolution in Gas City plus backend-owned execution | Gas City resolves formulas and dispatches them, but real multi-step execution is still backend-dependent today. `bd` is the production path. |
-
-## What Usually Maps Cleanly
-
-### Roles Become Pack Agents
-
-If you would have added a new role in Gas Town, the Gas City move is usually:
-
-1. start in your local `city.toml`
-2. include a pack if one already solves most of the problem
-3. override the stamped agent if you just need local behavior changes
-4. edit the pack only when you are changing the shared default for everyone
-5. add formulas or orders around the agent if it needs workflow automation
-
-That keeps role behavior in configuration instead of hardcoding more role
-semantics into the SDK, while still making the common day-one workflow feel
-local and incremental.
-
-### Start In `city.toml`
-
-This is the main day-one habit to adopt.
-
-Most Gas Town users should begin in their local `city.toml`, not by editing a
-pack. Packs are for reusable defaults. Your local city config is for:
-
-- registering rigs
-- including the Gastown pack
-- adding named crew agents
-- changing providers
-- overriding pool sizes
-- tweaking prompts, hooks, overlays, and timeouts for your own city
-
-Reach for a pack edit when the change should become the new reusable default
-for every consumer of that pack.
-
-### Plugins Become Orders
-
-This is the most important practical translation.
-
-If the Gas Town idea is "something should run automatically on a schedule, on
-an event, or when a condition is true", you probably want an order.
-
-- Use an **exec order** when the work is just shell or controller-side logic.
-- Use a **formula order** when the work should instantiate agent-driven
-  workflow.
-
-That is the clean replacement for many Town "plugin" instincts. Exec orders are
-especially important because they can run non-agent commands with no prompt, no
-session, and no extra role agent.
-
-### Convoys Stay Bead-Shaped
-
-Gas Town taught people to think in convoys. That mental model still transfers
-well, but the implementation boundary is different.
-
-In Gas City:
-
-- convoys are still bead-backed grouping and lineage
-- `gc sling` can create convoy structure as part of routing
-- formulas, orders, and waits compose around that bead graph
-
-So keep the convoy mental model for tracking work, but do not assume it needs a
-special orchestration subsystem beyond beads plus dispatch.
-
-### Crew and Polecats Are Operating Modes
-
-In Gas Town, these feel like first-class worker types. In Gas City, they are
-best thought of as conventions:
-
-- **crew**: persistent named agents you expect humans to reason about
-- **polecats**: pooled or transient agents, often with dedicated worktrees
-
-That distinction is real and useful, but the SDK does not force it. A pack can
-adopt the convention, relax it, or replace it.
-
-## Where Gas City Deliberately Differs
-
-### The Controller Owns Infrastructure Behavior
-
-In Gas Town, some orchestration behavior is mediated through specific roles. In
-Gas City, the controller is the canonical owner of infrastructure operations
-like:
-
-- reconcile desired sessions to running sessions
-- pool scaling
-- order evaluation
-- health patrol
-- wisp garbage collection
-
-If something is fundamentally SDK infrastructure, prefer putting it in the
-controller path instead of inventing another deacon-like role behavior.
-
-### Filesystem Layout Is Not The Architecture
-
-Gas Town uses directories as part of the system contract. Gas City tries not to.
-
-The current rule of thumb is:
-
-- use `dir` to carry the agent's scope and identity context
-- use `work_dir` when the session must run somewhere else
-- use bead metadata for durable handoff state
-
-Good reasons to use a separate `work_dir`:
-
-- the role mutates a repo and needs an isolated worktree
-- provider scratch files would collide with another role
-- the role needs a durable sandbox independent from the canonical rig root
-
-Bad reason:
-
-- "Gas Town had a separate folder for this role"
-
-### Roles Are Examples, Not SDK Law
-
-The Gastown pack still ships familiar roles, but that is an example operating
-model, not a type system inside Gas City.
-
-This matters when you change the system:
-
-- adding a new behavior usually means editing a pack, formula, order, or prompt
-- it usually does not mean adding a new hardcoded role to the SDK
-
-That is a feature, not a missing abstraction.
-
-It is also worth separating two kinds of changes:
-
-- **local city change**: edit `city.toml`, add rig overrides, add patches, or
-  add a city-specific agent
-- **shared product change**: edit the pack because you want a better default
-  for everyone
-
-Most onboarding work should live in the first category.
-
-## Common Translation Patterns
-
-### "I need a new dog"
-
-Ask this first:
-
-- Can this be an exec order?
-
-If yes, prefer the order. That gives you trigger logic, history, and controller
-ownership without burning an agent slot.
-
-Reach for a dog-like pool agent only if the task truly needs a long-lived
-session, rich interactive context, or repeated agent judgment.
-
-### "I need a witness-like lifecycle manager"
-
-Ask which parts are:
-
-- controller infrastructure
-- bead state transitions
-- formula logic
-- prompt guidance
-
-Only the first category belongs in Go SDK infrastructure. The rest usually live
-better in the pack.
-
-### "I need another special directory tree"
-
-Usually you do not.
-
-Start with:
-
-- canonical repo root from the rig
-- isolated `work_dir` only for roles that mutate repos or need provider-file
-  isolation
-- explicit env and metadata, not cwd inference
-
-### "I need to run something without an agent"
-
-Use an exec order before inventing a plugin, helper role, or hidden session.
-
-That is the direct Gas City answer to many old Town automation tasks.
-
-## Common Gastown Overrides In `city.toml`
-
-If you are using the Gastown pack, these are the most common local changes.
-
-### Register a rig
-
-This activates the rig-scoped Gastown agents for one repo:
-
-```toml
-[[rigs]]
-name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
+| **Mayor** | Planner/coordinator; the human's point of contact | Configured agent + coordinating prompt (e.g. the Gastown pack's `mayor`). Reach it with `gc session attach mayor`. |
+| **Deacon** | Watchdog: stall detection, restart, SLA enforcement | Orchestrator health patrol + config thresholds; optionally a configured agent. You tune thresholds, not run a role. |
+| **Witness** | Lifecycle observer; publishes health/transition events | Events + waits, formulas, session scale config. Modeling a "witness" on top is optional pack behavior. |
+| **Refinery** | Post-processor; reshapes raw agent output | Configured agent + a formula or order post-processing step. A workflow step, not a standing role. |
+| **Polecat** | Ephemeral on-demand worker, often in a worktree | Scalable/transient agent config (a pool — `min`/`max_active_sessions`). An operating *style*. |
+| **Crew** | Persistent worker pool claiming from a queue | Persistent named agent config. An operating *style*. |
+| **Dog** | Integration / external-messaging relay | Core-pack exec orders (most relay work needs no LLM); the Gastown pack's `dog` pool covers work that does need an agent. |
+
+### Mechanisms and behaviors
+
+*What those roles and features actually **do**, and where that logic now lives.*
+
+| Gas Town behavior | Gas City equivalent | Notes |
+|---|---|---|
+| Deacon watchdog logic | Orchestrator health patrol + reconciliation | Stall detection, restart-with-backoff, reconcile-to-desired-state are orchestrator concerns, not a role agent. |
+| Witness lifecycle tracking | Waits, formulas, session scale config, orchestrator wake/sleep, events | Mechanisms are first-class; modeling a "witness" on them is optional. |
+| Plugin (scheduled/event/conditional automation) | Order — exec order or formula order | **Exec order** for shell or orchestrator-side logic; **formula order** to instantiate agent-driven work. |
+| Convoy as orchestration runtime | Convoy beads + `gc sling` + formulas | Convoys stay bead-backed grouping and lineage; no special convoy runtime to use. |
+| Formula runner inside Town workflows | In-process formula compiler + orchestrator execution | Gas City compiles and runs formulas over the convoy's beads itself. For v2 formulas (host-enabled by default), the orchestrator executes control beads; agents execute work beads. See [Choosing a Compiler Contract](/guides/understanding-formulas#choosing-a-compiler-contract). |
+| Path-derived identity | Explicit agent identity, rig scope, env, bead metadata | Do not port code or prompts that assume directory path implies who the agent is. |
+
+### Filesystem and state
+
+*Gas Town encodes architecture into directories; Gas City treats directories as an implementation detail.*
+
+| Gas Town location | Gas City equivalent | Notes |
+|---|---|---|
+| `~/gt/...` directory tree | City directory + `.gc/` runtime state | A city is a directory holding `city.toml` and `.gc/`. Rigs are registered in `city.toml`; each `[[rigs]]` has a `path` defaulting under `rigs/` but allowed anywhere (absolute or city-relative). Live state is queried, not read from a fixed home tree. |
+| Town config | `pack.toml` (reusable behavior) + `city.toml` (this city's deployment) | One town config splits along a definition/deployment seam. |
+| Rig config | `city.toml` `[[rigs]]` entries + `.gc/` (machine-local path bindings) | *Which* rigs and their scale is deployment; *where* a rig lives on this machine is a local binding. |
+| Role homes | `agents/<name>/` (`agent.toml` + `prompt.template.md`) in the root city pack or an imported pack | Only the agent *definition* lives here. No on-disk role "home"; identity is not path-derived. |
+| Role home dirs (e.g. `~/gt/mayor/`) | `dir` (identity scope) + `work_dir` (session working dir, only when needed) | Set both in `agent.toml` (or patch per-rig in `city.toml`): `dir` carries scope/identity; `work_dir` only when a role truly needs filesystem isolation. |
+| Role-specific startup files | Prompt templates, overlays, provider hooks, `pre_start`, `session_setup`, `gc prime` | Startup shaping is explicit and provider-aware, not inferred from disk location. |
+
+### Workflows
+
+*The operator verbs — the things you actually type. (Formulas are a mechanism, above; these are day-to-day moves.)* The transcripts below show them end to end.
+
+| Gas Town workflow | Gas City command | Deeper |
+|---|---|---|
+| Spin up a worker | `gc start` + a persistent agent config (`agents/<name>/`) | [Tutorial 02 — Agents](/tutorials/02-agents), [Shareable Packs](/guides/shareable-packs) |
+| Send a task to the mayor | `gc sling mayor "<description>"` (or `bd create` + a bead hook) | [`gc sling`](/reference/cli#gc-sling), [Tutorial 06 — Beads](/tutorials/06-beads) |
+| Inspect what's stuck | `gc session list`, then `gc session peek <name>` | [`gc session list`](/reference/cli#gc-session-list) |
+| Restart a stalled agent | `gc session reset <name>` (or let health patrol auto-restart) | [`gc session reset`](/reference/cli#gc-session-reset) |
+| Share config across teams | A shareable pack (`pack.toml` + `agents/<name>/`), imported by each city | [Shareable Packs](/guides/shareable-packs) |
+| Run a one-shot job | A formula or exec order, dispatched on demand | [Tutorial 07 — Orders](/tutorials/07-orders), [Tutorial 05 — Formulas](/tutorials/05-formulas) |
+| Watch live agent output | `gc session attach <name>` (interactive) or `gc session peek <name>` (snapshot) | [`gc session attach`](/reference/cli#gc-session-attach) |
+
+A first work cycle — start the city, hand the mayor a task, watch it land:
+
+```bash
+gc start                                  # boots the city under the supervisor, reconciles
+gc sling mayor "add a /health endpoint"   # creates a task bead from text, routes it to mayor
+gc session list                           # see what's running (mayor, pools, …)
+gc session attach mayor                    # interactive live view of the mayor working
 ```
 
-### Increase or shrink the polecat pool
+Triage a stuck agent without attaching:
 
-This is the cleanest answer to "I want more or fewer polecats for this rig."
-
-```toml
-[[rigs]]
-name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
-
-[[rigs.overrides]]
-agent = "polecat"
-
-[rigs.overrides.pool]
-max = 10
+```bash
+gc session list                  # find the suspect by name/state
+gc session peek mayor --lines 80 # snapshot of recent output (default 50 lines)
+gc session reset mayor           # fresh restart; bead, alias, mail, and queued work survive
+gc events --follow               # system-wide live feed (or let health patrol act on its own)
 ```
 
-### Change the provider for one rig's polecats
+<Note>
+`gc session peek` takes `--lines` for a point-in-time snapshot — there is no `--follow`. For a continuously updating view, `gc session attach`. For the system-wide live feed, `gc events --follow`.
+</Note>
 
-```toml
-[[rigs]]
-name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
+### Commands
 
-[[rigs.overrides]]
-agent = "polecat"
-provider = "codex"
+The full `gt` → `gc`/`bd` mapping lives in the **[Gas Town → Gas City Command Map](/reference/gastown-command-map)**.
+
+## What usually maps cleanly
+
+**Roles become pack agents.** Adding a role follows an escalation ladder — stop at the first rung that solves your problem:
+
+```text
+edit local city.toml  →  include a pack that already solves most of it
+  →  override the stamped agent (local-only change)
+  →  edit the pack (change the shared default for everyone)
+  →  add formulas/orders for workflow automation
 ```
 
-You can combine that with pool overrides, env, prompt changes, or hook changes
-on the same override block.
-
-### Change a city-scoped Gastown agent
-
-City-scoped agents such as `mayor`, `deacon`, and `boot` are easiest to tweak
-with patches:
+**Start with the root city pack plus `city.toml`, not an imported pack.** Edit a pack only when the change should become the reusable default for every consumer.
 
 ```toml
-[[patches.agent]]
-dir = ""
-name = "mayor"
-provider = "codex"
-idle_timeout = "2h"
+# pack.toml      — imports reusable packs, defines city-specific behavior
+# agents/<name>/ — city-owned named agents
+# city.toml      — deployment: rigs, substrates, scale
+# .gc/           — site bindings such as local rig paths
 ```
 
-Use patches when the target is already a concrete city-scoped agent. Use
-`[[rigs.overrides]]` when the target is a pack agent stamped per rig.
+**Plugins become orders** — the most important practical translation. "Run something automatically on a schedule, on an event, or when a condition holds" is an order: **exec order** for shell/orchestrator-side logic, **formula order** for agent-driven work. Exec orders matter most — they run non-agent commands with no prompt, no session, no extra role agent.
 
-### Add a named crew agent
+**Convoys stay bead-shaped.** Keep the convoy mental model for tracking work; the implementation boundary moved. Convoys are bead-backed grouping and lineage, `gc sling` creates convoy structure while routing, and formulas/orders/waits compose around that bead graph. The orchestration that runs over it is the orchestrator's control dispatcher — it executes the control beads (check, retry, fan-out, tally, drain) that drive a convoy's work to completion across many agents.
 
-Crew is usually city-specific, so it often belongs directly in `city.toml`
-rather than in the shared Gastown pack:
+**Crew and polecats are operating modes, not types.** *Crew* = persistent named agents; *polecats* = scalable or transient agents, often with worktrees. The platform does not force the distinction — a pack can adopt, relax, or replace it.
 
-```toml
-[[agent]]
-name = "wolf"
-dir = "myproject"
-prompt_template = "packs/gastown/prompts/crew.md.tmpl"
-nudge = "Check your hook and mail, then act accordingly."
-work_dir = ".gc/worktrees/myproject/crew/wolf"
-idle_timeout = "4h"
+## Where Gas City deliberately differs
+
+**The orchestrator owns infrastructure behavior.** It is the canonical owner of reconciling desired→running sessions, session scaling, order evaluation, health patrol, and garbage-collecting ephemeral run beads (the v1 *wisp* container). If something is fundamentally platform infrastructure, put it on the orchestrator path rather than inventing another deacon-like role.
+
+**Filesystem layout is not the architecture.** Use `dir` (in `agent.toml`, or patched per-rig in `city.toml`) for scope and identity; `work_dir` only when the session must run elsewhere; bead metadata for durable handoff state.
+
+| Use a separate `work_dir` when… | Not when… |
+|---|---|
+| the role mutates a repo and needs an isolated worktree | "Gas Town has a separate folder for this role" |
+| provider scratch files would collide with another role | |
+| the role needs a durable sandbox independent from the rig root | |
+
+**Roles are examples, not platform law.** The Gastown pack ships familiar roles as an example operating model, not a type system. Adding a behavior means editing a pack, formula, order, or prompt — not adding a hardcoded role. A **local city change** edits `city.toml` (rig overrides, patches, a city-specific agent); a **shared product change** edits the pack for a better default everywhere. Most onboarding work is local.
+
+## Common translation patterns
+
+| Old Town instinct | Ask first | Default answer |
+|---|---|---|
+| "I need a new dog" | Can this be an exec order? | Prefer the order — trigger logic, history, orchestrator ownership, no agent slot. Reach for a scalable agent only if it needs a long-lived session, rich interactive context, or repeated agent judgment. |
+| "I need a witness-like lifecycle manager" | Which parts are orchestrator infra vs. bead transitions vs. formula logic vs. prompt guidance? | Only orchestrator infrastructure belongs in platform code; the rest lives in the pack. |
+| "I need another special directory tree" | Do I really? | Canonical repo root from the rig; isolated `work_dir` only for roles that mutate repos or need provider-file isolation; explicit env and metadata, never path inference. |
+| "I need to run something without an agent" | Could an exec order do it? | Use an exec order before inventing a plugin, helper role, or hidden session. |
+
+### "How do I get to my mayor?"
+
+```bash
+gc session attach mayor
 ```
 
-That keeps the shared pack generic while still letting your city have named
-long-lived workers.
+The Mayor session is the familiar Gas Town entry point — an interactive session with full city context that you coordinate from. It is one window onto the city; the orchestrator is still running the fleet and driving formula graphs to completion behind it. The CLI is plumbing for reaching that session. City-scoped Gastown agents (`mayor`, `deacon`, `boot`) attach the same way; `gc session list` shows what is running. This replaces `gt session at mayor/` or `tmux attach -t gt-mayor`.
 
-### Change a prompt, overlay, or timeout without forking the pack
+## What not to port literally
 
-This is what rig overrides are for:
-
-```toml
-[[rigs]]
-name = "myproject"
-path = "/path/to/myproject"
-includes = ["packs/gastown"]
-
-[[rigs.overrides]]
-agent = "refinery"
-prompt_template = "local/prompts/refinery.md.tmpl"
-overlay_dir = "local/overlays/refinery"
-idle_timeout = "4h"
-```
-
-If that change turns out to be broadly useful across cities, that is when it
-should move into the pack.
-
-## `gt` -> `gc` Command Map
-
-This is a closest-match map, not a claim that the two CLIs have identical
-architecture.
-
-Two rules help a lot:
-
-- if the old `gt` command was about orchestration, sessions, routing, hooks, or
-  runtime behavior, the closest home is usually `gc`
-- if the old `gt` command was really about bead CRUD or bead content, the
-  closest home is often still `bd`, not `gc`
-
-### Workspace And Runtime
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt install` | `gc init` | Gas City uses `gc init` to create a city. |
-| `gt init` | `gc rig add` or `gc init` | Town `init` and `install` split across city creation and rig registration in Gas City. |
-| `gt rig` | `gc rig` | Near-direct mapping. |
-| `gt start` | `gc start` | Starts the city under the machine-wide supervisor. |
-| `gt up` | `gc start` | Same high-level intent. |
-| `gt down` | `gc stop` | Stop sessions for the current city. |
-| `gt shutdown` | `gc stop` | Same intent, different implementation model. |
-| `gt daemon` | `gc supervisor` | Supervisor is the canonical long-running runtime in Gas City. |
-| `gt status` | `gc status` | City-wide overview. |
-| `gt dashboard` | `gc dashboard` | Same general purpose; `gc dashboard serve` still exists as the explicit form. |
-| `gt doctor` | `gc doctor` | Near-direct mapping. |
-| `gt config` | `gc config` plus editing `city.toml` | Gas City config is file-first; `gc config` is mostly inspect/explain. |
-| `gt disable` | `gc suspend` | Closest operational match is per-city suspension, not a system-wide Town toggle. |
-| `gt enable` | `gc resume` | Resumes a suspended city. |
-| `gt uninstall` | no direct equivalent | Gas City has supervisor install/uninstall, but not a Town-style global uninstall command. |
-| `gt version` | `gc version` | Direct mapping. |
-| `gt completion` | no direct equivalent | Gas City does not currently expose a matching completion command. |
-| `gt help` | `gc help` | Direct mapping. |
-| `gt info` | `gc version`, `gc status`, docs | No single `gc info` command. |
-| `gt stale` | no direct equivalent | Closest checks are `gc version` and `gc doctor`. |
-| `gt town` | split across `gc start`, `gc status`, `gc stop`, `gc supervisor` | Gas City does not keep a separate Town namespace. |
-
-### Configuration And Extension
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt git-init` | `git init` plus `gc rig add` | Git repo setup and city registration are separate concerns in Gas City. |
-| `gt hooks` | config-driven hook install plus `gc doctor` | Gas City does not have Town's hook-management namespace; hook install is primarily config and lifecycle driven. |
-| `gt plugin` | `gc order` | Plugin-like controller automation usually becomes an exec order or formula order. |
-| `gt issue` | no direct equivalent | Usually replaced by bead metadata or session context, depending intent. |
-| `gt account` | no direct equivalent | Provider account management is outside Gas City's core CLI. |
-| `gt shell` | no direct equivalent | Gas City does not ship a Town-style shell integration namespace. |
-| `gt theme` | no direct equivalent | Pack scripts or tmux config are the normal path. |
-
-### Work Routing And Workflow
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt sling` | `gc sling` | Direct mapping in spirit and name. |
-| `gt handoff` | `gc handoff` | Near-direct mapping. |
-| `gt convoy` | `gc convoy` | Near-direct mapping for convoy creation and tracking. |
-| `gt hook` | `gc hook` | Same name, narrower surface: `gc hook` is work-query and hook injection behavior, not the full Town hook manager. |
-| `gt ready` | `bd ready` | This stays bead-centric more than city-centric. |
-| `gt done` | no single direct equivalent | In Gas City this is usually a bead close, metadata transition, convoy action, or formula step. |
-| `gt unsling` | no direct equivalent | Usually replaced by bead edits plus re-routing with `bd` and `gc sling`. |
-| `gt formula` | partial: `gc sling --formula/--on`, `gc order`, `bd mol ...` | Gas City resolves formulas, but there is no top-level generic `gc formula run` parity today. |
-| `gt mol` | mostly `bd mol ...` | Molecule execution is backend-owned; `gc` orchestrates around it. |
-| `gt mq` | no direct generic `gc` command | Gastown-style merge queue behavior lives in the pack and formulas, not a generic SDK namespace. |
-| `gt gate` | `gc wait` | Durable waits are the closest SDK concept. |
-| `gt park` | `gc wait` | Same underlying idea: stop and resume around a dependency or gate. |
-| `gt resume` | `gc wait ready`, `gc session wake`, `gc mail check` | Depends on whether the old action was a parked wait, sleeping session, or handoff/mail resume. |
-| `gt synthesis` | partial: `gc converge`, formulas, convoys | No one-command parity. |
-| `gt orphans` | no direct generic command | In Gas City this is usually pack logic plus witness/refinery formulas and bead inspection. |
-| `gt release` | mostly `bd` state edits | No single `gc release` command. |
-
-### Sessions, Roles, And Agents
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt agents` | `gc session` plus `gc status` | Session management is generic in Gas City; not a Town-specific agent switcher. |
-| `gt session` | `gc session` | Same broad idea, but not polecat-specific. |
-| `gt crew` | `city.toml` agents plus `gc session` | Crew is a pack convention, not a first-class SDK command family. |
-| `gt polecat` | Gastown pack `polecat` agent plus `gc status` / `gc session` / `gc sling` | No dedicated top-level SDK namespace. |
-| `gt witness` | Gastown pack `witness` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
-| `gt refinery` | Gastown pack `refinery` agent plus `gc session` / `gc status` | No dedicated top-level SDK namespace. |
-| `gt mayor` | Gastown pack `mayor` agent plus `gc session attach mayor` / `gc status` | Managed as a configured agent, not a baked-in command family. |
-| `gt deacon` | Gastown pack `deacon` agent plus `gc session`, `gc status`, controller behavior | In Gas City, much of what deacon did lives in the controller/supervisor. |
-| `gt boot` | Gastown pack `boot` agent | Same pattern as other role agents. |
-| `gt dog` | usually `gc order`, sometimes a pooled agent in `city.toml` | Dog-like helpers are often better modeled as exec orders. |
-| `gt role` | `gc config explain`, `gc session list`, prompt/config inspection | Role is not a first-class SDK concept. |
-| `gt callbacks` | no direct equivalent | Callback behavior is folded into runtime, hooks, waits, and orders. |
-| `gt cycle` | no direct generic command | Closest equivalents are tmux bindings or pack-specific session UX. |
-| `gt namepool` | config-only today | Gas City supports namepool files in config, but does not expose a top-level `gc namepool` command. |
-| `gt worktree` | `work_dir`, `pre_start`, `git worktree`, pack scripts | Worktree behavior is explicit config and script wiring, not a generic `gc worktree` namespace. |
-
-### Communication And Nudges
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt mail` | `gc mail` | Near-direct mapping. |
-| `gt nudge` | `gc session nudge` or `gc nudge` | Use `gc session nudge` for a specific live session, `gc nudge` for deferred delivery controls. |
-| `gt peek` | `gc session peek` | Near-direct mapping. |
-| `gt broadcast` | no single direct equivalent | Usually modeled as `gc mail send` to a group or multiple explicit targets. |
-| `gt notify` | no direct equivalent | Notification policy is not a top-level SDK command family. |
-| `gt dnd` | no direct equivalent | Closest behavior usually lives in mail or local workflow policy. |
-| `gt escalate` | no direct equivalent | Model escalations with beads, mail, orders, or pack-specific workflow. |
-| `gt whoami` | no direct equivalent | Identity is explicit in config, session metadata, and `GC_*` env rather than a dedicated CLI. |
-
-### Beads, Events, And Diagnostics
-
-| `gt` | Closest in Gas City | Notes |
-|---|---|---|
-| `gt bead` | mostly `bd` | Bead CRUD is still primarily the bead tool's job. |
-| `gt cat` | mostly `bd` | Same rule: bead content inspection is bead-centric. |
-| `gt show` | mostly `bd` | Use the bead tool for detailed bead state/content. |
-| `gt close` | mostly `bd close` | Still bead-centric. |
-| `gt commit` | `git commit` | Gas City does not wrap commit the way Town did. |
-| `gt activity` | `gc event emit` and `gc events` | Same basic event/logging space. |
-| `gt trail` | `gc events`, `gc session peek`, `gc session logs` | No one-command parity. |
-| `gt feed` | `gc events` | Closest live system feed. |
-| `gt log` | `gc events` or `gc supervisor logs` | Depends on whether you want event history or runtime logs. |
-| `gt audit` | partial: `gc events`, `gc graph`, `bd` queries | No single audit namespace equivalent. |
-| `gt checkpoint` | no direct equivalent | Session durability lives in the runtime and bead/session model rather than a user-facing checkpoint CLI. |
-| `gt patrol` | no direct equivalent | Patrol behavior is generally modeled with orders plus formulas. |
-| `gt migrate-agents` | `gc migration` | Same general migration/upgrade bucket. |
-| `gt prime` | `gc prime` | Direct mapping. |
-| `gt account` | no direct equivalent | Provider account management is outside Gas City's core CLI. |
-| `gt shell` | no direct equivalent | Gas City does not ship a Town-style shell integration namespace. |
-| `gt theme` | no direct equivalent | Pack scripts or tmux config are the normal path. |
-| `gt costs` | no direct equivalent | No matching top-level cost accounting command today. |
-| `gt seance` | no direct equivalent | Gas City has resume and session metadata, but not a seance command. |
-| `gt thanks` | no direct equivalent | No matching command. |
-
-### Practical Translation Rule
-
-If you are unsure where a `gt` command went, ask this in order:
-
-1. Is it now just `gc` with nearly the same name?
-2. Is it really a bead operation that should stay in `bd`?
-3. Is it no longer a special command because Gas City moved that behavior into
-   config, orders, waits, formulas, or controller logic?
-
-## What Not To Port Literally
-
-These Gas Town habits usually create unnecessary complexity in Gas City:
+These Town habits create unnecessary complexity in Gas City:
 
 - exact `~/gt/...` directory trees
-- cwd-derived identity
-- new hardcoded role names in SDK code
+- path-derived identity
+- new hardcoded role names in platform code
 - plugin systems when an order is enough
 - special helper agents for work that is really a shell command
-- duplicating durable state outside beads when labels or metadata are enough
+- duplicating durable state outside beads when labels or metadata suffice
 
-The most common architectural mistake is importing Town's surface area instead
-of re-expressing the intent in Gas City's primitives.
+The most common mistake is importing Town's surface area instead of re-expressing the intent in Gas City's primitives.
 
-## Fast Ramp Checklist
+## Editing Gastown config
 
-If you already know Gas Town, this is the shortest path to becoming effective
-in Gas City:
+The common edits — registering rigs, scaling pools, swapping providers, patching agents, tweaking prompts — live in [Gastown on Gas City: Config Recipes](/guides/gastown-config-recipes).
 
-1. Read the Nine Concepts Overview (`engdocs/architecture/nine-concepts`).
-2. Read the Config System docs (`engdocs/architecture/config`).
-3. Read Orders (`engdocs/architecture/orders`) and mentally remap "plugins" to
-   "orders".
-4. Read Formulas & Molecules (`engdocs/architecture/formulas`) and remember that
-   formulas are resolved by Gas City but executed by the configured beads
-   backend.
-5. Look at [examples/gastown/city.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/city.toml)
-   first, then [examples/gastown/packs/gastown/pack.toml](https://github.com/gastownhall/gascity/blob/main/examples/gastown/packs/gastown/pack.toml).
-   The city file is the normal starting point; the pack defines the reusable
-   defaults behind it.
+## Fast ramp checklist
 
-If you keep those five points straight, most of the Gas Town to Gas City ramp
-goes quickly.
+The shortest path to effective:
+
+1. Read [How Gas City Works](/getting-started/how-gas-city-works) for the six primitives in user terms.
+2. Skim the [CLI reference](/reference/cli) alongside the [Command Map](/reference/gastown-command-map) so `gt` → `gc` muscle memory transfers.
+3. Read [Tutorial 07 — Orders](/tutorials/07-orders) and remap "plugins" → "orders".
+4. Read [Tutorial 05 — Formulas](/tutorials/05-formulas): Gas City compiles and instantiates formulas itself; for v2 formulas the orchestrator drives control beads while agents execute work beads.
+5. Work through [Tutorial 02 — Agents](/tutorials/02-agents) and [Shareable Packs](/guides/shareable-packs) for the `agents/<name>/` layout end to end.
+6. Read [A Complete Gastown Example](/guides/gastown-config-recipes#a-complete-gastown-example) — city, root pack, and nested pack assembled into one runnable topology.

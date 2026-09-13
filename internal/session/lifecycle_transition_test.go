@@ -1,0 +1,932 @@
+package session
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	later := now.Add(5 * time.Minute)
+	resetNow := time.Date(2026, 4, 15, 6, 0, 0, 0, time.FixedZone("test", -7*60*60))
+
+	tests := []struct {
+		name  string
+		patch MetadataPatch
+		want  MetadataPatch
+	}{
+		{
+			name:  "request explicit wake",
+			patch: RequestExplicitWakePatch("explicit", now),
+			want: MetadataPatch{
+				"wake_request":      "explicit",
+				"wake_requested_at": now.UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			name:  "request wake",
+			patch: RequestWakePatch("explicit", now),
+			want: MetadataPatch{
+				"state":                     string(StateStartPending),
+				"state_reason":              "explicit",
+				"pending_create_claim":      "true",
+				"pending_create_started_at": now.UTC().Format(time.RFC3339),
+				"held_until":                "",
+				"quarantined_until":         "",
+				"sleep_reason":              "",
+				"wait_hold":                 "",
+				"sleep_intent":              "",
+				"wake_attempts":             "0",
+				"churn_count":               "0",
+			},
+		},
+		{
+			name: "pre wake resume mode",
+			patch: PreWakePatch(PreWakePatchInput{
+				Generation:        3,
+				InstanceToken:     "token-3",
+				ContinuationEpoch: 2,
+				Now:               now,
+				SleepReason:       "idle-timeout",
+				FreshWake:         false,
+			}),
+			want: MetadataPatch{
+				"instance_token":             "token-3",
+				"continuation_epoch":         "2",
+				"continuation_reset_pending": "",
+				"detached_at":                "",
+				"state":                      string(StateCreating),
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
+				"last_woke_at":               now.UTC().Format(time.RFC3339),
+				"sleep_reason":               "idle-timeout",
+				"sleep_intent":               "",
+				"generation":                 "3",
+				"wake_request":               "",
+				"wake_requested_at":          "",
+			},
+		},
+		{
+			name: "pre wake fresh mode",
+			patch: PreWakePatch(PreWakePatchInput{
+				Generation:        4,
+				InstanceToken:     "token-4",
+				ContinuationEpoch: 5,
+				Now:               now,
+				FreshWake:         true,
+			}),
+			want: MetadataPatch{
+				"instance_token":             "token-4",
+				"continuation_epoch":         "5",
+				"continuation_reset_pending": "",
+				"detached_at":                "",
+				"state":                      string(StateCreating),
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
+				"last_woke_at":               now.UTC().Format(time.RFC3339),
+				"sleep_reason":               "",
+				"sleep_intent":               "",
+				"generation":                 "4",
+				"wake_request":               "",
+				"wake_requested_at":          "",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+			},
+		},
+		{
+			name:  "continuation reset wake",
+			patch: ContinuationResetWakePatch(now),
+			want: MetadataPatch{
+				"state":                      string(StateStartPending),
+				"state_reason":               "continuation-reset",
+				"pending_create_claim":       "true",
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
+				"held_until":                 "",
+				"quarantined_until":          "",
+				"sleep_reason":               "",
+				"wait_hold":                  "",
+				"sleep_intent":               "",
+				"wake_attempts":              "0",
+				"churn_count":                "0",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			name:  "confirm started",
+			patch: ConfirmStartedPatch(now),
+			want: MetadataPatch{
+				"state":                     string(StateActive),
+				"state_reason":              "creation_complete",
+				"creation_complete_at":      now.UTC().Format(time.RFC3339),
+				"awake_started_at":          now.UTC().Format(time.RFC3339),
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"sleep_reason":              "",
+			},
+		},
+		{
+			name:  "begin drain",
+			patch: BeginDrainPatch(now, "config-drift"),
+			want: MetadataPatch{
+				"state":        string(StateDraining),
+				"state_reason": "config-drift",
+				"drain_at":     now.Format(time.RFC3339),
+			},
+		},
+		{
+			name:  "sleep",
+			patch: SleepPatch(now, "idle-timeout"),
+			want: MetadataPatch{
+				"state":                     string(StateAsleep),
+				"state_reason":              "",
+				"sleep_reason":              "idle-timeout",
+				"last_woke_at":              "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"sleep_intent":              "",
+				"slept_at":                  now.Format(time.RFC3339),
+				"suspended_at":              "",
+			},
+		},
+		{
+			name:  "acknowledge drain resume mode",
+			patch: AcknowledgeDrainPatch(now, false),
+			want: MetadataPatch{
+				"state":                     "drained",
+				"state_reason":              "",
+				"last_woke_at":              "",
+				"slept_at":                  now.UTC().Format(time.RFC3339),
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+			},
+		},
+		{
+			name:  "acknowledge drain fresh mode",
+			patch: AcknowledgeDrainPatch(now, true),
+			want: MetadataPatch{
+				"state":                      "drained",
+				"state_reason":               "",
+				"last_woke_at":               "",
+				"slept_at":                   now.UTC().Format(time.RFC3339),
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			name:  "complete drain fresh mode",
+			patch: CompleteDrainPatch(now, "idle", true),
+			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"state_reason":               "",
+				"sleep_reason":               "idle",
+				"last_woke_at":               "",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+				"sleep_intent":               "",
+				"slept_at":                   now.Format(time.RFC3339),
+				"suspended_at":               "",
+				"session_key":                "",
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"continuation_reset_pending": "true",
+			},
+		},
+		{
+			name:  "restart request",
+			patch: RestartRequestPatch("new-session-key", resetNow),
+			want: MetadataPatch{
+				"restart_requested":          "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
+				"last_woke_at":               "",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+				"session_key":                "new-session-key",
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2 C-7): a restart handoff forces a fresh re-prime.
+				"primed_at":            "",
+				"priming_attempted_at": "",
+				"prompt_hash":          "",
+			},
+		},
+		{
+			name:  "restart request without rotated key",
+			patch: RestartRequestPatch("", resetNow),
+			want: MetadataPatch{
+				"restart_requested":          "",
+				"started_config_hash":        "",
+				"continuation_reset_pending": "true",
+				ResetCommittedAtKey:          resetNow.UTC().Format(time.RFC3339),
+				"last_woke_at":               "",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+				// Priming markers share started_config_hash's lifetime (S19
+				// Stage 2 C-7): a restart handoff forces a fresh re-prime.
+				"primed_at":            "",
+				"priming_attempted_at": "",
+				"prompt_hash":          "",
+			},
+		},
+		{
+			name:  "config drift reset to creating",
+			patch: ConfigDriftResetPatch(StateCreating, "new-session-key", now),
+			want: MetadataPatch{
+				"state":                      string(StateCreating),
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"last_woke_at":               "",
+				"restart_requested":          "",
+				"continuation_reset_pending": "true",
+				"pending_create_claim":       "true",
+				"pending_create_started_at":  now.UTC().Format(time.RFC3339),
+				"session_key":                "new-session-key",
+			},
+		},
+		{
+			name:  "config drift reset to asleep",
+			patch: ConfigDriftResetPatch(StateAsleep, "new-session-key", now),
+			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"last_woke_at":               "",
+				"restart_requested":          "",
+				"continuation_reset_pending": "true",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+				"session_key":                "new-session-key",
+			},
+		},
+		{
+			name:  "config drift reset to asleep without rotated key",
+			patch: ConfigDriftResetPatch(StateAsleep, "", now),
+			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"started_config_hash":        "",
+				"started_live_hash":          "",
+				"live_hash":                  "",
+				"startup_dialog_verified":    "",
+				"primed_at":                  "",
+				"priming_attempted_at":       "",
+				"prompt_hash":                "",
+				"last_woke_at":               "",
+				"restart_requested":          "",
+				"continuation_reset_pending": "true",
+				"pending_create_claim":       "",
+				"pending_create_started_at":  "",
+			},
+		},
+		{
+			name:  "archive continuity eligible",
+			patch: ArchivePatch(now, "drain_complete", true),
+			want: MetadataPatch{
+				"state":                     string(StateArchived),
+				"state_reason":              "drain_complete",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "true",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+			},
+		},
+		{
+			name:  "archive historical only",
+			patch: ArchivePatch(now, "duplicate-repair", false),
+			want: MetadataPatch{
+				"state":                     string(StateArchived),
+				"state_reason":              "duplicate-repair",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "false",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+			},
+		},
+		{
+			name:  "close",
+			patch: ClosePatch(now, "orphaned"),
+			want: MetadataPatch{
+				"state":        "orphaned",
+				"close_reason": "session orphaned: configured agent removed",
+				"closed_at":    now.Format(time.RFC3339),
+				"synced_at":    now.Format(time.RFC3339),
+			},
+		},
+		{
+			name:  "retire named session",
+			patch: RetireNamedSessionPatch(now, "duplicate-repair", "worker"),
+			want: MetadataPatch{
+				"state":                     string(StateArchived),
+				"state_reason":              "duplicate-repair",
+				"archived_at":               now.Format(time.RFC3339),
+				"continuity_eligible":       "false",
+				"alias":                     "",
+				"session_name":              "",
+				"session_name_explicit":     "",
+				"canonical_instance_name":   "",
+				"canonical_pool_slot":       "",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"retired_named_identity":    "worker",
+				"synced_at":                 now.Format(time.RFC3339),
+				"held_until":                "",
+				"quarantined_until":         "",
+				"wait_hold":                 "",
+				"sleep_intent":              "",
+				"sleep_reason":              "",
+			},
+		},
+		{
+			name:  "quarantine",
+			patch: QuarantinePatch(later, 3),
+			want: MetadataPatch{
+				"state":             string(StateQuarantined),
+				"state_reason":      "crash-loop",
+				"quarantined_until": later.Format(time.RFC3339),
+				"quarantine_cycle":  "3",
+				"last_woke_at":      "",
+			},
+		},
+		{
+			name:  "reactivate continuity eligible",
+			patch: ReactivatePatch(true),
+			want: MetadataPatch{
+				"state":                     string(StateAsleep),
+				"state_reason":              "reactivated",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"continuity_eligible":       "true",
+				"quarantined_until":         "",
+				"crash_count":               "0",
+				"archived_at":               "",
+			},
+		},
+		{
+			name:  "reactivate historical only",
+			patch: ReactivatePatch(false),
+			want: MetadataPatch{
+				"state":                     string(StateAsleep),
+				"state_reason":              "reactivated",
+				"pending_create_claim":      "",
+				"pending_create_started_at": "",
+				"continuity_eligible":       "false",
+				"quarantined_until":         "",
+				"crash_count":               "0",
+				"archived_at":               "",
+			},
+		},
+		{
+			name:  "clear expired user hold",
+			patch: ClearExpiredHoldPatch("user-hold"),
+			want: MetadataPatch{
+				"held_until":   "",
+				"sleep_reason": "",
+			},
+		},
+		{
+			name:  "clear expired non-hold timer",
+			patch: ClearExpiredHoldPatch("idle"),
+			want: MetadataPatch{
+				"held_until": "",
+			},
+		},
+		{
+			name:  "clear expired quarantine",
+			patch: ClearExpiredQuarantinePatch("quarantine"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:  "clear expired context churn",
+			patch: ClearExpiredQuarantinePatch("context-churn"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:  "clear expired rate limit",
+			patch: ClearExpiredQuarantinePatch("rate_limit"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+				"sleep_reason":      "",
+			},
+		},
+		{
+			name:  "clear expired non-quarantine timer",
+			patch: ClearExpiredQuarantinePatch("idle"),
+			want: MetadataPatch{
+				"quarantined_until": "",
+				"wake_attempts":     "0",
+				"churn_count":       "0",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !reflect.DeepEqual(tt.patch, tt.want) {
+				t.Fatalf("patch = %#v, want %#v", tt.patch, tt.want)
+			}
+		})
+	}
+}
+
+func TestPreWakePatchPreservesResetCommittedAt(t *testing.T) {
+	committedAt := "2026-04-15T13:00:00Z"
+	meta := map[string]string{
+		ResetCommittedAtKey: committedAt,
+	}
+
+	got := PreWakePatch(PreWakePatchInput{
+		Generation:        1,
+		InstanceToken:     "token-1",
+		ContinuationEpoch: 1,
+		Now:               time.Date(2026, 4, 15, 13, 1, 0, 0, time.UTC),
+		FreshWake:         true,
+	}).Apply(meta)
+
+	if got[ResetCommittedAtKey] != committedAt {
+		t.Fatalf("PreWakePatch should preserve %s, got %q", ResetCommittedAtKey, got[ResetCommittedAtKey])
+	}
+}
+
+func TestMetadataPatchApplyReturnsMergedCopy(t *testing.T) {
+	original := map[string]string{
+		"state":        string(StateAsleep),
+		"session_name": "s-worker",
+	}
+	patch := RequestWakePatch("pin", time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC))
+
+	merged := patch.Apply(original)
+	if merged["state"] != string(StateStartPending) {
+		t.Fatalf("merged state = %q, want start-pending", merged["state"])
+	}
+	if merged["session_name"] != "s-worker" {
+		t.Fatalf("merged session_name = %q, want preserved", merged["session_name"])
+	}
+	if original["state"] != string(StateAsleep) {
+		t.Fatalf("original state = %q, want original map unchanged", original["state"])
+	}
+}
+
+func TestCommitStartedPatchStampsFreshAwakeEpochOnlyForNewInterval(t *testing.T) {
+	t0 := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+
+	// A genuine start/wake opens a new awake interval and stamps a fresh epoch.
+	startA := CommitStartedPatch(CommitStartedPatchInput{ConfirmState: true, StartsAwakeInterval: true, Now: t0})
+	epochA := startA["awake_started_at"]
+	if epochA == "" {
+		t.Fatal("StartsAwakeInterval must stamp awake_started_at")
+	}
+
+	// A second start a few hundred ms later (e.g. a rapid drain/rewake on a
+	// reused session bead) must get a distinct epoch, or the second awake
+	// interval would be suppressed by the first interval's emit marker.
+	startB := CommitStartedPatch(CommitStartedPatchInput{ConfirmState: true, StartsAwakeInterval: true, Now: t0.Add(250 * time.Millisecond)})
+	if startB["awake_started_at"] == epochA {
+		t.Fatalf("sub-second re-start reused epoch %q; intervals would collide", epochA)
+	}
+
+	// A recovery re-confirmation of an already-running runtime must not reset
+	// the in-flight interval's epoch.
+	recovered := CommitStartedPatch(CommitStartedPatchInput{ConfirmState: true, StartsAwakeInterval: false, Now: t0.Add(time.Hour)})
+	if v, ok := recovered["awake_started_at"]; ok {
+		t.Fatalf("recovery re-confirm must not stamp awake_started_at, got %q", v)
+	}
+}
+
+func TestCommitStartedPatchBuildsAtomicStartMetadata(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:                "core-hash",
+		LiveHash:                "live-hash",
+		ProvisionHash:           "provision-hash",
+		LaunchHash:              "launch-hash",
+		CoreBreakdown:           `{"command":"core-hash"}`,
+		ConfirmState:            true,
+		ClearSleepReason:        true,
+		ClearPendingCreateClaim: true,
+		Now:                     now,
+	})
+
+	want := MetadataPatch{
+		"started_config_hash":        "core-hash",
+		"live_hash":                  "live-hash",
+		"started_live_hash":          "live-hash",
+		"started_provision_hash":     "provision-hash",
+		"started_launch_hash":        "launch-hash",
+		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
+		"core_hash_breakdown":        `{"command":"core-hash"}`,
+		"state":                      string(StateActive),
+		"state_reason":               "creation_complete",
+		"creation_complete_at":       now.Format(time.RFC3339),
+		"sleep_reason":               "",
+		"pending_create_claim":       "",
+		"pending_create_started_at":  "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestCommitStartedPatchClearsResetCommittedAt(t *testing.T) {
+	committedAt := "2026-07-08T20:09:10Z"
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:     "core-hash",
+		ConfirmState: true,
+		Now:          time.Date(2026, 7, 8, 20, 10, 30, 0, time.UTC),
+	})
+
+	if got, ok := patch[ResetCommittedAtKey]; !ok || got != "" {
+		t.Fatalf("successful start must clear %s after prior reset %s; got present=%v value=%q", ResetCommittedAtKey, committedAt, ok, got)
+	}
+
+	merged := patch.Apply(MetadataPatch{ResetCommittedAtKey: committedAt, "continuation_reset_pending": "true"})
+	if merged[ResetCommittedAtKey] != "" {
+		t.Fatalf("merged metadata kept stale %s = %q", ResetCommittedAtKey, merged[ResetCommittedAtKey])
+	}
+	if merged["continuation_reset_pending"] != "" {
+		t.Fatalf("merged metadata kept continuation_reset_pending = %q", merged["continuation_reset_pending"])
+	}
+}
+
+// Callers that set ClearPendingCreateClaim must see the claim cleared in the
+// same batch as state/state_reason/creation_complete_at so the sweep never
+// observes a transient state where the claim is gone but the post-create
+// marker isn't set yet.
+func TestCommitStartedPatchClearsPendingCreateClaimAtomicallyWithStateTransition(t *testing.T) {
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:                "c",
+		LiveHash:                "l",
+		ConfirmState:            true,
+		ClearPendingCreateClaim: true,
+		Now:                     now,
+	})
+	required := []string{"state", "state_reason", "creation_complete_at", "pending_create_claim", "pending_create_started_at"}
+	for _, key := range required {
+		if _, ok := patch[key]; !ok {
+			t.Fatalf("patch missing %q — sweep-visibility atomicity broken: %#v", key, patch)
+		}
+	}
+	if patch["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", patch["pending_create_claim"])
+	}
+	if patch["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", patch["pending_create_started_at"])
+	}
+}
+
+func TestCommitStartedPatchClearsCreateStartedAtWhenConfirmingNoClaimStart(t *testing.T) {
+	now := time.Date(2026, 5, 19, 15, 0, 0, 0, time.UTC)
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:     "c",
+		LiveHash:     "l",
+		ConfirmState: true,
+		Now:          now,
+	})
+	if got := patch["pending_create_started_at"]; got != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", got)
+	}
+	if _, ok := patch["pending_create_claim"]; ok {
+		t.Fatalf("pending_create_claim should not be touched for a no-claim start: %#v", patch)
+	}
+}
+
+func TestCommitStartedPatchCanPersistHashesWithoutRestampingState(t *testing.T) {
+	patch := CommitStartedPatch(CommitStartedPatchInput{
+		CoreHash:         "core-hash",
+		LiveHash:         "live-hash",
+		ProvisionHash:    "provision-hash",
+		LaunchHash:       "launch-hash",
+		ClearSleepReason: true,
+	})
+
+	want := MetadataPatch{
+		"started_config_hash":        "core-hash",
+		"live_hash":                  "live-hash",
+		"started_live_hash":          "live-hash",
+		"started_provision_hash":     "provision-hash",
+		"started_launch_hash":        "launch-hash",
+		"continuation_reset_pending": "",
+		ResetCommittedAtKey:          "",
+		"sleep_reason":               "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestDrainAckStopPendingPatchOwnsDurableStopPendingMetadata(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	patch := DrainAckStopPendingPatch(now)
+
+	want := MetadataPatch{
+		"state":                     string(StateDraining),
+		"state_reason":              DrainAckStopPendingReason,
+		"drain_at":                  now.Format(time.RFC3339),
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}
+	if !reflect.DeepEqual(patch, want) {
+		t.Fatalf("patch = %#v, want %#v", patch, want)
+	}
+}
+
+func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		patch MetadataPatch
+	}{
+		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
+		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := tt.patch["state_reason"]; !ok || got != "" {
+				t.Fatalf("state_reason = %q, present=%v; want explicit clear", got, ok)
+			}
+		})
+	}
+}
+
+func TestClearWakeBlockersPatchClearsOnlyWakeBlockerMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       State
+		sleepReason string
+		want        MetadataPatch
+	}{
+		{
+			name:        "wait hold asleep",
+			state:       StateAsleep,
+			sleepReason: "wait-hold",
+			want: MetadataPatch{
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
+			},
+		},
+		{
+			name:        "drained compatibility becomes asleep",
+			state:       StateDrained,
+			sleepReason: "drained",
+			want: MetadataPatch{
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			name:        "suspended compatibility becomes asleep",
+			state:       StateSuspended,
+			sleepReason: "user-hold",
+			want: MetadataPatch{
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"state":                 string(StateAsleep),
+				"sleep_reason":          "",
+				"suspended_at":          "",
+				"slept_at":              waitStoreNow.UTC().Format(time.RFC3339),
+			},
+		},
+		{
+			name:        "idle reason is preserved",
+			state:       StateAsleep,
+			sleepReason: "idle",
+			want: MetadataPatch{
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+			},
+		},
+		{
+			name:        "rate limit reason is cleared",
+			state:       StateAsleep,
+			sleepReason: "rate_limit",
+			want: MetadataPatch{
+				"held_until":            "",
+				"quarantined_until":     "",
+				"wait_hold":             "",
+				"sleep_intent":          "",
+				"wake_attempts":         "0",
+				"wake_refused_event_at": "",
+				"churn_count":           "0",
+				"sleep_reason":          "",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClearWakeBlockersPatch(tt.state, tt.sleepReason, waitStoreNow)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("patch = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequestWakePatchClearsStaleWakeBlockers(t *testing.T) {
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	merged := RequestWakePatch("manual", now).Apply(map[string]string{
+		"state":             string(StateAsleep),
+		"held_until":        "9999-12-31T23:59:59Z",
+		"quarantined_until": "9999-12-31T23:59:59Z",
+		"sleep_reason":      "wait-hold",
+		"wait_hold":         "true",
+		"sleep_intent":      "idle-stop-pending",
+		"wake_attempts":     "4",
+		"churn_count":       "2",
+	})
+
+	for _, key := range []string{"held_until", "quarantined_until", "sleep_reason", "wait_hold", "sleep_intent"} {
+		if merged[key] != "" {
+			t.Fatalf("%s = %q, want cleared", key, merged[key])
+		}
+	}
+	for _, key := range []string{"wake_attempts", "churn_count"} {
+		if merged[key] != "0" {
+			t.Fatalf("%s = %q, want reset to 0", key, merged[key])
+		}
+	}
+	if got, want := merged["pending_create_started_at"], now.UTC().Format(time.RFC3339); got != want {
+		t.Fatalf("pending_create_started_at = %q, want %q", got, want)
+	}
+}
+
+func TestArchivePatchClearsStaleCreateClaim(t *testing.T) {
+	now := time.Date(2026, 4, 15, 13, 0, 0, 0, time.UTC)
+	merged := ArchivePatch(now, "failed-create", false).Apply(map[string]string{
+		"state":                string(StateCreating),
+		"pending_create_claim": "true",
+	})
+
+	if merged["state"] != string(StateArchived) {
+		t.Fatalf("state = %q, want archived", merged["state"])
+	}
+	if merged["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", merged["pending_create_claim"])
+	}
+	if merged["pending_create_started_at"] != "" {
+		t.Fatalf("pending_create_started_at = %q, want cleared", merged["pending_create_started_at"])
+	}
+}
+
+func TestReactivatePatchDoesNotForceHistoricalBeadEligible(t *testing.T) {
+	merged := ReactivatePatch(false).Apply(map[string]string{
+		"state":               string(StateArchived),
+		"continuity_eligible": "false",
+	})
+
+	if merged["state"] != string(StateAsleep) {
+		t.Fatalf("state = %q, want asleep", merged["state"])
+	}
+	if merged["continuity_eligible"] != "false" {
+		t.Fatalf("continuity_eligible = %q, want false", merged["continuity_eligible"])
+	}
+}
+
+func TestSleepPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	merged := SleepPatch(time.Date(2026, 5, 14, 16, 0, 0, 0, time.UTC), "idle-timeout").Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
+	}
+}
+
+func TestAcknowledgeDrainPatchClearsStaleStateReasonOnApply(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	merged := AcknowledgeDrainPatch(now, false).Apply(map[string]string{
+		"state":        string(StateDraining),
+		"state_reason": "creation_complete",
+	})
+	if got := merged["state_reason"]; got != "" {
+		t.Fatalf("state_reason = %q, want cleared", got)
+	}
+}
+
+func TestCanonicalCloseReasonMeetsValidatorThreshold(t *testing.T) {
+	// bd's validation.on-close=error rejects close reasons under 20 chars.
+	// Every short stateCode that ClosePatch may stamp must round-trip to a
+	// reason >=20 chars; this guards against future additions falling back
+	// to a too-short literal and reintroducing the reconciler-flap bug.
+	stateCodes := []string{
+		"gc_swept",
+		"orphaned",
+		"drained",
+		"failed-create",
+		"stale-session",
+		"duplicate",
+		"duplicate-repair",
+		"reconfigured",
+		"suspended",
+	}
+	for _, code := range stateCodes {
+		got := CanonicalCloseReason(code)
+		trimmed := strings.TrimSpace(got)
+		if len(trimmed) < 20 {
+			t.Errorf("CanonicalCloseReason(%q) = %q (%d trimmed chars); want >=20", code, got, len(trimmed))
+		}
+	}
+}
+
+func TestCanonicalCloseReasonUnknownCodeFallback(t *testing.T) {
+	got := CanonicalCloseReason("xyz")
+	if trimmed := strings.TrimSpace(got); len(trimmed) < 20 {
+		t.Errorf("fallback for unknown short code = %q (%d trimmed chars); want >=20", got, len(trimmed))
+	}
+	empty := CanonicalCloseReason("")
+	if trimmed := strings.TrimSpace(empty); len(trimmed) < 20 {
+		t.Errorf("fallback for empty code = %q (%d trimmed chars); want >=20", empty, len(trimmed))
+	}
+	long := "an-already-long-state-code-of-thirty-plus-characters"
+	if got := CanonicalCloseReason(long); got != long {
+		t.Errorf("CanonicalCloseReason(%q) = %q; want passthrough", long, got)
+	}
+}
+
+func TestClosePatchKeepsShortStateCode(t *testing.T) {
+	// state must remain the short canonical code so reconciler logic and
+	// closedNamedSessionReopenEligible (which switches on state) keep working.
+	patch := ClosePatch(time.Now().UTC(), "orphaned")
+	if patch["state"] != "orphaned" {
+		t.Errorf("state = %q, want %q (short stateCode preserved)", patch["state"], "orphaned")
+	}
+	if trimmed := strings.TrimSpace(patch["close_reason"]); len(trimmed) < 20 {
+		t.Errorf("close_reason = %q (%d trimmed chars); want >=20 to satisfy validator",
+			patch["close_reason"], len(trimmed))
+	}
+}

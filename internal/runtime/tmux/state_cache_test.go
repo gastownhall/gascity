@@ -1,12 +1,19 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gcruntime "github.com/gastownhall/gascity/internal/runtime"
 )
 
 // mockFetcher implements StateFetcher for testing.
@@ -14,13 +21,15 @@ type mockFetcher struct {
 	mu       sync.Mutex
 	calls    int
 	sessions map[string]bool
+	state    runtimeStateSnapshot
 	err      error
 	delay    time.Duration
 }
 
-func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error) {
+func (m *mockFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
 	m.mu.Lock()
 	m.calls++
+	state := m.state
 	sessions := m.sessions
 	err := m.err
 	delay := m.delay
@@ -30,10 +39,16 @@ func (m *mockFetcher) FetchRunning(ctx context.Context) (map[string]bool, error)
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return runtimeStateSnapshot{}, ctx.Err()
 		}
 	}
-	return sessions, err
+	if state.Sessions == nil && sessions != nil {
+		state.Sessions = make(map[string]sessionRuntimeState, len(sessions))
+		for name, running := range sessions {
+			state.Sessions[name] = sessionRuntimeState{Running: running}
+		}
+	}
+	return state, err
 }
 
 func (m *mockFetcher) getCalls() int {
@@ -46,7 +61,41 @@ func (m *mockFetcher) setResult(sessions map[string]bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions = sessions
+	m.state = runtimeStateSnapshot{}
 	m.err = err
+}
+
+type controlledRefreshFetcher struct {
+	mu        sync.Mutex
+	calls     int
+	state     runtimeStateSnapshot
+	blockCall int
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func (f *controlledRefreshFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	state := f.state
+	f.mu.Unlock()
+
+	if call == f.blockCall {
+		close(f.entered)
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return runtimeStateSnapshot{}, ctx.Err()
+		}
+	}
+	return state, nil
+}
+
+func (f *controlledRefreshFetcher) getCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func TestStateCache_FreshCacheReturnsCorrectState(t *testing.T) {
@@ -131,6 +180,228 @@ func TestStateCache_ConcurrentCallersCoalesceIntoOneFetch(t *testing.T) {
 	}
 }
 
+func TestStateCache_ProcessAliveUsesFreshSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "claude",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{{
+				PID:     "101",
+				PPID:    "1",
+				Command: "claude",
+				Args:    "claude --dangerously-skip-permissions",
+			}}),
+			ProcessesAvailable: true,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"claude"}) {
+		t.Fatal("ProcessAlive(agent-1, claude) = false, want true")
+	}
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false, want true from same snapshot")
+	}
+	if cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = true, want false")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across ProcessAlive and IsRunning", got)
+	}
+}
+
+// TestStateCache_DegradedProcessSnapshotRetainsLiveness asserts the control
+// plane stays correct when the OS process-table snapshot is unavailable (the
+// ps scan lost the CPU race to a busy fleet). tmux already proved the session
+// is alive, so IsRunning must stay true and ProcessAlive must degrade
+// optimistically (NOT report the process dead, which would wrongly reap it).
+func TestStateCache_DegradedProcessSnapshotRetainsLiveness(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes:   []paneRuntimeState{{Command: "bash", PID: "101"}},
+				},
+			},
+			// Processes empty + ProcessesAvailable=false models a failed ps scan.
+			ProcessesAvailable: false,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("IsRunning(agent-1) = false under degraded snapshot, want true (tmux liveness retained)")
+	}
+	if !cache.ProcessAlive("agent-1", []string{"claude"}) {
+		t.Fatal("ProcessAlive(agent-1, claude) = false under degraded snapshot, want true (optimistic degrade, never report dead)")
+	}
+	if cache.IsRunning("agent-2") {
+		t.Fatal("IsRunning(agent-2) = true, want false for an absent session even when degraded")
+	}
+}
+
+func TestStateCache_ProcessAliveMatchesShellDescendantFromSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+			ProcessesAvailable: true,
+		},
+	}
+	cache := NewStateCache(f, 2*time.Second)
+
+	if !cache.ProcessAlive("agent-1", []string{"codex"}) {
+		t.Fatal("ProcessAlive(agent-1, codex) = false, want true from cached descendant snapshot")
+	}
+	if got := f.getCalls(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
+	}
+}
+
+func TestProviderObserveLivenessUsesCacheProcessSnapshot(t *testing.T) {
+	f := &mockFetcher{
+		state: runtimeStateSnapshot{
+			Sessions: map[string]sessionRuntimeState{
+				"agent-1": {
+					Running: true,
+					Panes: []paneRuntimeState{{
+						Command: "bash",
+						PID:     "101",
+					}},
+				},
+			},
+			Processes: newProcessSnapshot([]processRuntimeState{
+				{PID: "101", PPID: "1", Command: "bash", Args: "bash -lc codex"},
+				{PID: "102", PPID: "101", Command: "node", Args: "node /usr/local/bin/codex"},
+			}),
+			ProcessesAvailable: true,
+		},
+	}
+	provider := &Provider{cache: NewStateCache(f, time.Hour)}
+
+	got := provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	got = provider.ObserveLiveness("agent-1", []string{"codex"})
+	if !got.Running || !got.Alive {
+		t.Fatalf("second ObserveLiveness = %+v, want running and alive from cache", got)
+	}
+	if calls := f.getCalls(); calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1 across repeated ObserveLiveness calls", calls)
+	}
+}
+
+// FetchState must report an unreachable tmux server as an observation FAILURE
+// (runtime.ErrRuntimeUnavailable), not as an empty success. The empty-success
+// form let refresh() overwrite last-known-good and instantly report every
+// session not-running, draining healthy pool slots on a brief tmux blip. The
+// wrapped error must still satisfy isNoServerError so downstream absorbers keep
+// working.
+func TestTmuxFetcher_NoServerMapsToRuntimeUnavailable(t *testing.T) {
+	f := &tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: &fakeExecutor{err: ErrNoServer}}}
+
+	snap, err := f.FetchState(context.Background())
+	if err == nil {
+		t.Fatalf("FetchState() err = nil (snapshot %+v), want an error for an unreachable server", snap)
+	}
+	if !errors.Is(err, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("FetchState() err = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", err)
+	}
+	if !isNoServerError(err) {
+		t.Fatalf("FetchState() err = %v must still satisfy isNoServerError so downstream ErrNoServer absorbers work", err)
+	}
+}
+
+// End to end at the cache: after a good prime, an ErrNoServer refresh must
+// preserve last-known-good (within staleTTL) instead of collapsing to empty.
+func TestStateCache_NoServerRefreshPreservesLastKnownGood(t *testing.T) {
+	fe := &fakeExecutor{
+		// FetchState issues exactly one executor call (list-panes); the
+		// process-table half reads /proc directly, not through exec. First
+		// call primes one live pane, every later call reports no server.
+		outs: []string{"agent-1\t0\tclaude\t123"},
+		errs: []error{nil, ErrNoServer, ErrNoServer, ErrNoServer},
+	}
+	// TTL 0 forces every read to refresh unconditionally (time.Since(fetchedAt)
+	// is never < 0). A nanosecond TTL is non-deterministic here: on a coarse
+	// monotonic clock time.Since can read 0 on the very next call, so the second
+	// IsRunning may skip the refresh and leave lastError nil (flaky).
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}, 0)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	// TTL 0, so the next read forces a refresh that hits ErrNoServer.
+	// Last-known-good must survive it (staleTTL default 30s).
+	if !cache.IsRunning("agent-1") {
+		t.Error("expected agent-1 still running after an ErrNoServer refresh (last-known-good); a brief tmux outage must not report sessions as gone")
+	}
+	cache.mu.RLock()
+	lastErr := cache.lastError
+	cache.mu.RUnlock()
+	if !errors.Is(lastErr, gcruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("cache.lastError = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", lastErr)
+	}
+}
+
+// An UNPRIMED cache (never held a good state, fetchedAt zero) that hits a
+// genuine "no server" must prime itself to an empty snapshot rather than
+// re-spawning list-panes and re-logging the failure on every IsRunning. A
+// fresh city with no tmux server yet would otherwise storm the (absent) server
+// with one list-panes per liveness probe.
+func TestStateCache_UnprimedNoServerPrimesEmptyWithoutRefetch(t *testing.T) {
+	fe := &fakeExecutor{
+		// Every list-panes reports no server; the cache is never primed good.
+		errs: []error{ErrNoServer, ErrNoServer, ErrNoServer, ErrNoServer},
+	}
+	// A real TTL (not 0) so a successfully primed empty snapshot is a cache hit
+	// on the next read — proving priming stops the refetch storm.
+	cache := NewStateCache(&tmuxFetcher{tm: &Tmux{cfg: DefaultConfig(), exec: fe}}, time.Second)
+
+	if cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 not running against a server-less city")
+	}
+	// The first read primed an empty snapshot with a single list-panes spawn.
+	// Every subsequent read within the TTL must be a cache hit — no refetch.
+	_ = cache.IsRunning("agent-1")
+	_ = cache.IsRunning("agent-2")
+	if calls := len(fe.calls); calls != 1 {
+		t.Fatalf("list-panes calls = %d, want 1: an unprimed no-server must prime empty once, not refetch on every IsRunning", calls)
+	}
+
+	// The cache is primed: fetchedAt set, and the failure recorded in lastError.
+	cache.mu.RLock()
+	fetchedAt := cache.fetchedAt
+	lastErr := cache.lastError
+	cache.mu.RUnlock()
+	if fetchedAt.IsZero() {
+		t.Error("expected fetchedAt to be set (cache primed) after an unprimed no-server refresh")
+	}
+	if !errors.Is(lastErr, gcruntime.ErrRuntimeUnavailable) {
+		t.Errorf("cache.lastError = %v, want errors.Is(runtime.ErrRuntimeUnavailable)", lastErr)
+	}
+}
+
 func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	f := &mockFetcher{
 		sessions: map[string]bool{"agent-1": true},
@@ -158,6 +429,51 @@ func TestStateCache_RefreshFailurePreservesLastKnownGood(t *testing.T) {
 	cache.mu.RUnlock()
 	if lastErr == nil {
 		t.Error("expected lastError to be set after refresh failure")
+	}
+}
+
+func TestStateCache_DiscardRefreshAfterEvictSession(t *testing.T) {
+	state := runtimeStateSnapshot{
+		Sessions: map[string]sessionRuntimeState{
+			"agent-1": {Running: true},
+		},
+	}
+	f := &controlledRefreshFetcher{
+		state:     state,
+		blockCall: 2,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	cache := NewStateCache(f, time.Nanosecond)
+
+	if !cache.IsRunning("agent-1") {
+		t.Fatal("expected agent-1 running after prime")
+	}
+	time.Sleep(time.Millisecond)
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- cache.IsRunning("agent-1")
+	}()
+
+	select {
+	case <-f.entered:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh to start")
+	}
+	cache.EvictSession("agent-1")
+	close(f.release)
+
+	select {
+	case got := <-result:
+		if got {
+			t.Fatal("IsRunning(agent-1) = true after concurrent eviction, want false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for IsRunning result")
+	}
+	if calls := f.getCalls(); calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", calls)
 	}
 }
 
@@ -227,6 +543,237 @@ func TestStateCache_EmptySessionsMap(t *testing.T) {
 	}
 }
 
+func TestFetchProcessSnapshotCanceledContextReturnsError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := fetchProcessSnapshot(ctx)
+	if err == nil {
+		t.Fatal("fetchProcessSnapshot canceled context returned nil error")
+	}
+}
+
+func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "typical line",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print"),
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "claude code",
+			wantArgs: "claude code --print",
+		},
+		{
+			// Linux comm can also contain internal whitespace —
+			// applications can set thread names via prctl(PR_SET_NAME)
+			// to strings like "Renderer Main" or "I/O Worker". The
+			// fixed-column slice preserves them; a whitespace
+			// tokenizer would not.
+			name:     "comm with internal spaces (PR_SET_NAME style)",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "456", "1", "Renderer Main", "/opt/app/bin/renderer --headless"),
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "Renderer Main",
+			wantArgs: "/opt/app/bin/renderer --headless",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineFixedColumns(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwin(t *testing.T) {
+	// macOS omits fixed-width modifiers because its ps rejects Linux's
+	// `:N=` syntax. The Darwin snapshot asks for pid, ppid, and args only;
+	// the command name is derived from argv[0] instead of guessing where an
+	// unbounded comm column ends.
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "short argv0 with dynamic numeric columns",
+			line:     "  123     1 /sbin/launchd --boot",
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "launchd",
+			wantArgs: "/sbin/launchd --boot",
+		},
+		{
+			name:     "dynamic columns with no comm width dependency",
+			line:     "  489     1 /usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
+			wantPID:  "489",
+			wantPPID: "1",
+			wantCmd:  "coreaudiod",
+			wantArgs: "/usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
+		},
+		{
+			name:     "wide pid and ppid columns",
+			line:     "123456 98765 /opt/app/bin/renderer --headless",
+			wantPID:  "123456",
+			wantPPID: "98765",
+			wantCmd:  "renderer",
+			wantArgs: "/opt/app/bin/renderer --headless",
+		},
+		{
+			name:     "args preserves internal multi-space",
+			line:     "  456     1 /usr/local/bin/claude a  b   c",
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "claude",
+			wantArgs: "/usr/local/bin/claude a  b   c",
+		},
+		{
+			name:     "outer args whitespace is normalized",
+			line:     "  789     1    /bin/zsh -l   ",
+			wantPID:  "789",
+			wantPPID: "1",
+			wantCmd:  "zsh",
+			wantArgs: "/bin/zsh -l",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineDarwin(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwinRejectsMalformed(t *testing.T) {
+	// Inputs the parser must NOT accept — empty, too few columns to
+	// extract pid/ppid/comm. Returning ok=false lets the caller skip
+	// the row instead of recording garbage.
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"empty line", ""},
+		{"whitespace only", "       "},
+		{"pid only", "  123"},
+		{"pid and ppid only", "  123     1"},
+		{"pid, ppid, separator, no args", "  123     1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseProcessSnapshotLineDarwin(tc.line); ok {
+				t.Errorf("expected ok=false for %q", tc.line)
+			}
+		})
+	}
+}
+
+func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/zsh -l",
+		"  102   101 2.1.30 --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 zsh",
+		"  102   101 /usr/local/bin/claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "/usr/local/bin/claude" {
+		t.Fatalf("Command = %q, want comm path", process.Command)
+	}
+	if process.Args != "2.1.30 --print" {
+		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
+	}
+	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
+	}
+}
+
+func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/bash -l",
+		"  102   101 ",
+		"  103   102 /usr/local/bin/claude --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 bash",
+		"  102   101 launchd helper",
+		"  103   102 claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "launchd helper" {
+		t.Fatalf("Command = %q, want comm for empty-args process", process.Command)
+	}
+	if process.Args != "" {
+		t.Fatalf("Args = %q, want empty args", process.Args)
+	}
+	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
+	}
+}
+
+func TestProcessSnapshotPSArgsRejectsLinuxSyntaxOnDarwin(t *testing.T) {
+	// Regression: macOS ps rejects the BSD `:N=` column-width form. Confirm
+	// we don't emit it on Darwin. Skip elsewhere — Linux ps accepts both
+	// forms so verifying the wide form there is just a tautology.
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific syntax guard")
+	}
+	args := processSnapshotPSArgs()
+	for _, a := range args {
+		if strings.Contains(a, ":") {
+			t.Fatalf("processSnapshotPSArgs returned %v on darwin; contains Linux-only `:N=` width specifier", args)
+		}
+	}
+}
+
 func TestStateCache_NilSessionsMap(t *testing.T) {
 	// FetchRunning returns nil map (e.g., no tmux server) — same as empty.
 	f := &mockFetcher{
@@ -267,4 +814,85 @@ func TestStateCache_ConcurrentInvalidateAndRead(_ *testing.T) {
 	wg.Wait()
 
 	// No panics, no data races — that's the assertion (run with -race).
+}
+
+// TestStateCache_RefreshLogIsOptInViaEnvVar verifies that the successful
+// refresh log line is silent by default and only emitted when
+// GC_LOG_TMUX_CACHE=true. Regression test for #644.
+func TestStateCache_RefreshLogIsOptInViaEnvVar(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	t.Run("silent by default", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "")
+
+		f := &mockFetcher{sessions: map[string]bool{"a": true}}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		if got := buf.String(); got != "" {
+			t.Errorf("expected no log output by default, got %q", got)
+		}
+	})
+
+	t.Run("logs when opted in", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "true")
+
+		f := &mockFetcher{sessions: map[string]bool{"a": true}}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refreshed") {
+			t.Errorf("expected refresh log with GC_LOG_TMUX_CACHE=true, got %q", got)
+		}
+		if strings.Contains(got, "refresh failed") {
+			t.Errorf("unexpected failure log in success path, got %q", got)
+		}
+	})
+
+	t.Run("failure log still emitted when opt-out", func(t *testing.T) {
+		buf.Reset()
+		t.Setenv("GC_LOG_TMUX_CACHE", "")
+
+		f := &mockFetcher{err: errors.New("boom")}
+		cache := NewStateCache(f, 50*time.Millisecond)
+		cache.IsRunning("a")
+
+		got := buf.String()
+		if !strings.Contains(got, "tmux state cache: refresh failed") {
+			t.Errorf("expected refresh-failed log regardless of GC_LOG_TMUX_CACHE, got %q", got)
+		}
+	})
+}
+
+func TestIsNoServerErrorRecognizesSentinel(t *testing.T) {
+	if !isNoServerError(ErrNoServer) {
+		t.Fatal("isNoServerError(ErrNoServer) = false, want true")
+	}
+}
+
+// TestProcessAliveWrappedPane pins the wrapped-pane liveness contract
+// (GC_AGENT_SLICE): a pane whose root command is systemd-run — not an agent
+// name, a shell, or a known interpreter — still counts as alive when the
+// agent runs as its descendant, via processAlive's unconditional descendant
+// fallback.
+func TestProcessAliveWrappedPane(t *testing.T) {
+	snapshot := newProcessSnapshot([]processRuntimeState{
+		{PID: "100", PPID: "1", Command: "systemd-run", Args: "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c claude"},
+		{PID: "101", PPID: "100", Command: "claude", Args: "claude"},
+	})
+	pane := paneRuntimeState{Command: "systemd-run", PID: "100"}
+	if !pane.processAlive(processNameSet([]string{"claude"}), snapshot) {
+		t.Fatal("processAlive = false for systemd-run pane with claude child, want true (descendant fallback)")
+	}
 }

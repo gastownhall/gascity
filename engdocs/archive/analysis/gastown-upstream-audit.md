@@ -1250,7 +1250,7 @@ the Delta 4 landing work; already-landed Delta 4 parity items are not repeated.
 ## 40. Gastown Example Gaps (Delta 5)
 
 - [x] **aecdc21c + e6516e5c** — Keep worktree ignores local and cover modern runtime files.
-  Landed in Gas City via `f9e7205f` (`examples/gastown/packs/gastown/scripts/worktree-setup.sh`): polecat worktree bootstrap now writes runtime ignore patterns to the git exclude file resolved by `git rev-parse --git-path info/exclude` instead of mutating tracked `.gitignore`, and the local ignore block now covers modern runtime paths including `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.runtime/`, `.logs/`, and `state.json`.
+  Landed in Gas City via `f9e7205f` (`examples/gastown/packs/gastown/scripts/worktree-setup.sh`): polecat worktree bootstrap now writes runtime ignore patterns to the git exclude file resolved by `git rev-parse --git-path info/exclude` instead of mutating tracked `.gitignore`, and the local ignore block now covers modern runtime paths including `.claude/`, `.codex/`, `.gemini/`, `.opencode/`, `.logs/`, and `state.json`.
 
 - [~] **1916b730** — Polecats should consult repo `CLAUDE.md` / `AGENTS.md` when gate vars are unset.
   Upstream stopped treating empty `setup_command` / `typecheck_command` / `lint_command` / `build_command` / `test_command` vars as a silent skip and explicitly told polecats to read project `CLAUDE.md` / `AGENTS.md` for the real Definition of Done. Gas City's `cmd/gc/formulas/mol-polecat-base.formula.toml` still tells polecats to skip empty commands silently, which can bypass project-specific gates in Gastown rigs that rely on repo instructions instead of pack config.

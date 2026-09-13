@@ -2,26 +2,29 @@ package api
 
 import (
 	"context"
-	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type rigResponse struct {
-	Name         string     `json:"name"`
-	Path         string     `json:"path"`
-	Suspended    bool       `json:"suspended"`
-	Prefix       string     `json:"prefix,omitempty"`
-	AgentCount   int        `json:"agent_count"`
-	RunningCount int        `json:"running_count"`
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	Git          *gitStatus `json:"git,omitempty"`
+	Name          string     `json:"name"`
+	Path          string     `json:"path"`
+	Suspended     bool       `json:"suspended"`
+	Prefix        string     `json:"prefix,omitempty"`
+	DefaultBranch string     `json:"default_branch,omitempty"`
+	AgentCount    int        `json:"agent_count"`
+	RunningCount  int        `json:"running_count"`
+	LastActivity  *time.Time `json:"last_activity,omitempty"`
+	Git           *gitStatus `json:"git,omitempty"`
 }
 
 type gitStatus struct {
@@ -32,146 +35,8 @@ type gitStatus struct {
 	Behind       int    `json:"behind"`
 }
 
-func (s *Server) handleRigList(w http.ResponseWriter, r *http.Request) {
-	bp := parseBlockingParams(r)
-	if bp.isBlocking() {
-		waitForChange(r.Context(), s.state.EventProvider(), bp)
-	}
-
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-	wantGit := r.URL.Query().Get("git") == "true"
-
-	rigs := make([]rigResponse, 0, len(cfg.Rigs))
-	for _, rig := range cfg.Rigs {
-		resp := buildRigResponse(cfg, rig, sp, cityName, s.state.CityPath())
-		if wantGit {
-			resp.Git = fetchGitStatus(rig.Path)
-		}
-		rigs = append(rigs, resp)
-	}
-	writeListJSON(w, s.latestIndex(), rigs, len(rigs))
-}
-
-func (s *Server) handleRig(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	wantGit := r.URL.Query().Get("git") == "true"
-
-	for _, rig := range cfg.Rigs {
-		if rig.Name == name {
-			resp := buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
-			if wantGit {
-				resp.Git = fetchGitStatus(rig.Path)
-			}
-			writeIndexJSON(w, s.latestIndex(), resp)
-			return
-		}
-	}
-	writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
-}
-
-func (s *Server) handleRigAction(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	action := r.PathValue("action")
-
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "internal", "mutations not supported")
-		return
-	}
-
-	var err error
-	switch action {
-	case "suspend":
-		err = sm.SuspendRig(name)
-	case "resume":
-		err = sm.ResumeRig(name)
-	case "restart":
-		s.handleRigRestart(w, name)
-		return
-	default:
-		writeError(w, http.StatusNotFound, "not_found", "unknown rig action: "+action)
-		return
-	}
-
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "action": action, "rig": name})
-}
-
-// handleRigRestart kills all agents in a rig so the reconciler restarts them.
-// Uses sp.Stop() directly — no StateMutator dependency for runtime kills.
-func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-
-	// Verify rig exists.
-	rigFound := false
-	for _, rig := range cfg.Rigs {
-		if rig.Name == name {
-			rigFound = true
-			break
-		}
-	}
-	if !rigFound {
-		writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
-		return
-	}
-
-	// Best-effort kill: the agent set may change between config read and each
-	// Stop call (pool scaling, config reload). The reconciler is the
-	// convergence mechanism — survivors will be caught on its next tick.
-	killed := make([]string, 0)
-	failed := make([]string, 0)
-	for _, a := range cfg.Agents {
-		if workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs) != name {
-			continue
-		}
-		expanded := expandAgent(a, cityName, cfg.Workspace.SessionTemplate, sp)
-		for _, ea := range expanded {
-			sessionName := agentSessionName(cityName, ea.qualifiedName, cfg.Workspace.SessionTemplate)
-			if err := sp.Stop(sessionName); err != nil {
-				// "not found" / "not running" are benign — agent wasn't running.
-				if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "not running") {
-					failed = append(failed, ea.qualifiedName)
-				}
-			} else {
-				killed = append(killed, ea.qualifiedName)
-			}
-		}
-	}
-	resp := map[string]any{
-		"status": "ok",
-		"action": "restart",
-		"rig":    name,
-		"killed": killed,
-	}
-	httpStatus := http.StatusOK
-	if len(failed) > 0 {
-		resp["failed"] = failed
-		if len(killed) == 0 {
-			// Total failure — no agents were killed.
-			resp["status"] = "failed"
-			httpStatus = http.StatusInternalServerError
-		} else {
-			resp["status"] = "partial"
-		}
-	}
-	writeJSON(w, httpStatus, resp)
-}
-
 // buildRigResponse creates a rigResponse with agent counts and last activity.
-func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
+func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
 	var maxActivity time.Time
@@ -180,26 +45,29 @@ func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cit
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			if sp.IsRunning(sessionName) {
+			obs := observeProviderSession(sp, sessionName, processNames)
+			if obs.Running {
 				runningCount++
 			}
-			if t, err := sp.GetLastActivity(sessionName); err == nil && t.After(maxActivity) {
-				maxActivity = t
+			if obs.LastActivity != nil && obs.LastActivity.After(maxActivity) {
+				maxActivity = *obs.LastActivity
 			}
 		}
 	}
 
 	resp := rigResponse{
-		Name:         rig.Name,
-		Path:         rig.Path,
-		Suspended:    rigSuspended(cfg, rig, sp, cityName, cityPath),
-		Prefix:       rig.Prefix,
-		AgentCount:   agentCount,
-		RunningCount: runningCount,
+		Name:          rig.Name,
+		Path:          rig.Path,
+		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
+		Prefix:        rig.Prefix,
+		DefaultBranch: rig.DefaultBranch,
+		AgentCount:    agentCount,
+		RunningCount:  runningCount,
 	}
 	if !maxActivity.IsZero() {
 		resp.LastActivity = &maxActivity
@@ -207,11 +75,16 @@ func buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, cit
 	return resp
 }
 
-// rigSuspended computes effective suspended state for a rig by merging config
-// and runtime session metadata. A rig is suspended if the config says so, or
-// if all its agents are runtime-suspended via session metadata.
-func rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
-	if rig.Suspended {
+// rigSuspended computes the effective suspended state for a rig. A rig
+// is suspended if the runtime state file records an explicit "suspended"
+// preference, if the rig's SuspendedOnStart applies with no overriding
+// runtime entry, or if all its agents are runtime-suspended via session
+// metadata. The deprecated `[[rig]] suspended` field in city.toml is
+// intentionally NOT consulted — `gc doctor` surfaces it as a migration
+// target.
+func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityName, cityPath string) bool {
+	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
+		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate
@@ -220,11 +93,13 @@ func rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, cityNam
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
+		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
 		expanded := expandAgent(a, cityName, tmpl, sp)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
+			obs := observeProviderSession(sp, sessionName, processNames)
+			if obs.Suspended {
 				suspendedCount++
 			}
 		}

@@ -96,12 +96,25 @@ const (
 	BindingEnded BindingStatus = "ended"
 )
 
-// SessionBindingRecord links a conversation to a session.
+// SessionBindingRecord links a conversation to a session or to a configured
+// agent identity. A binding is either a session binding (SessionID + SessionName)
+// or an agent binding (AgentName); exactly one target form is set.
+//
+// SessionID is the session bead ID a session binding currently resolves to. It
+// is volatile: a session that crashes and respawns under the same name gets a
+// fresh bead ID. SessionName is the stable identity the binding was created
+// under; it survives respawn and lets ResolveByConversation and the binding
+// reaper re-point the binding at the session's current live bead.
+//
+// AgentName defers session resolution to delivery time so the conversation
+// survives session retirement (delivery-time cold-wake).
 type SessionBindingRecord struct {
 	ID                string
 	SchemaVersion     int
 	Conversation      ConversationRef
 	SessionID         string
+	SessionName       string
+	AgentName         string
 	Status            BindingStatus
 	BoundAt           time.Time
 	ExpiresAt         *time.Time
@@ -131,6 +144,14 @@ type ExternalOriginEnvelope struct {
 }
 
 // AdapterCapabilities describes what a transport adapter supports.
+//
+// Intentionally untagged: this struct does not cross the gc↔adapter HTTP
+// callback wire. It is passed by value at adapter construction (see
+// NewHTTPAdapter) and exposed via the Huma API at POST /extmsg/adapters,
+// which serializes it with PascalCase keys today. Adding json tags here
+// would silently change that public API contract; if a snake_case
+// migration is wanted, do it as a coordinated API change with
+// regenerated clients, not as a side-effect of this fix.
 type AdapterCapabilities struct {
 	SupportsChildConversations bool
 	SupportsAttachments        bool
@@ -138,12 +159,27 @@ type AdapterCapabilities struct {
 }
 
 // PublishRequest is a request to publish a message to an external conversation.
+//
+// JSON tags are required: this struct is serialized over the HTTP wire to
+// out-of-process adapters (gc → adapter `/publish`), and the adapter side
+// parses snake_case keys. Without tags, Go marshals fields as PascalCase,
+// and case-insensitive matching on the receiver does not bridge the
+// underscore difference (so `ReplyToMessageID` would not match the
+// adapter's `reply_to_message_id` tag and the field would silently zero).
+//
+// SessionID is the originating gc session id. Adapters that need it for
+// per-session behavior (e.g. Slack `chat:write.customize` identity
+// overrides) read this field directly. Until gc-kvt landed, gc forwarded
+// the session id under `Metadata["source_session_id"]` instead;
+// adapters may still honor that key as a legacy fallback for old gc
+// binaries, but new code should rely on SessionID.
 type PublishRequest struct {
-	Conversation     ConversationRef
-	Text             string
-	ReplyToMessageID string
-	IdempotencyKey   string
-	Metadata         map[string]string
+	SessionID        string            `json:"session_id,omitempty"`
+	Conversation     ConversationRef   `json:"conversation"`
+	Text             string            `json:"text"`
+	ReplyToMessageID string            `json:"reply_to_message_id,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // PublishFailureKind classifies the reason a publish attempt failed.
@@ -165,6 +201,13 @@ const (
 )
 
 // PublishReceipt is the result of a publish attempt.
+//
+// Intentionally untagged: this struct is exposed via the Huma API as
+// OutboundResult.Receipt at POST /extmsg/outbound, where the public
+// contract is PascalCase. The gc↔adapter HTTP callback wire (which
+// uses snake_case) is bridged in HTTPAdapter.Publish via an explicit
+// wire-shaped intermediate type, so domain-type tagging is not needed
+// to fix the silent-drop bug.
 type PublishReceipt struct {
 	MessageID    string
 	Conversation ConversationRef
@@ -309,13 +352,19 @@ type ConversationGroupRecord struct {
 }
 
 // ConversationGroupParticipant represents a participant in a conversation group.
+//
+// SessionID is the volatile session bead ID this participant currently resolves
+// to. SessionName is the stable identity the participant was registered under;
+// it survives session respawn and lets ResolveInbound/ResolveOutbound re-point
+// at the current live bead via resolveLiveSession.
 type ConversationGroupParticipant struct {
-	ID        string
-	GroupID   string
-	Handle    string
-	SessionID string
-	Public    bool
-	Metadata  map[string]string
+	ID          string
+	GroupID     string
+	Handle      string
+	SessionID   string
+	SessionName string
+	Public      bool
+	Metadata    map[string]string
 }
 
 // GroupRouteMatch classifies how a message was routed within a group.
@@ -328,8 +377,19 @@ const (
 	GroupRouteLastAddressed GroupRouteMatch = "last_addressed"
 	// GroupRouteDefault means the message was routed to the default participant.
 	GroupRouteDefault GroupRouteMatch = "default"
-	// GroupRouteNoMatch means no routing match was found.
+	// GroupRouteNoMatch means a group exists for the conversation but the
+	// message matched no routable participant (an explicit target that is not a
+	// participant, or no default/last-addressed handle). The conversation is
+	// still grouped, so callers must not fall back to a non-group route.
 	GroupRouteNoMatch GroupRouteMatch = "no_match"
+	// GroupRouteNoGroup means no group exists for the conversation, so group
+	// routing did not apply. Unlike GroupRouteNoMatch, the conversation is
+	// ungrouped and is eligible for a configured default route.
+	GroupRouteNoGroup GroupRouteMatch = "no_group"
+	// GroupRouteParticipantMatch means an outbound publish was authorized
+	// because the publishing session is a participant of the group bound
+	// to the conversation.
+	GroupRouteParticipantMatch GroupRouteMatch = "participant_match"
 )
 
 // GroupRouteDecision is the result of routing an inbound message within a group.
@@ -339,19 +399,41 @@ type GroupRouteDecision struct {
 	UpdateCursor    bool
 }
 
-// BindInput is the input for creating a session binding.
+// GroupOutboundDecision is the result of authorizing an outbound publish
+// against a conversation's group when no single-session binding exists.
+//
+// A non-nil decision with Match == GroupRouteParticipantMatch authorizes
+// the caller's session to publish on behalf of the group; any other Match
+// value (including GroupRouteNoMatch) means no authorization was found.
+type GroupOutboundDecision struct {
+	Match       GroupRouteMatch
+	GroupID     string
+	Participant ConversationGroupParticipant
+}
+
+// BindInput is the input for creating a session binding. Exactly one of
+// SessionID (bind to a concrete session) or AgentName (bind to a configured
+// agent identity whose live session is resolved at delivery time) must be
+// set. Replace rebinds a conversation whose active binding targets someone
+// else (a handoff): the active binding is ended and the new one created
+// under the same conversation lock. Without Replace such a bind conflicts.
 type BindInput struct {
 	Conversation ConversationRef
 	SessionID    string
+	AgentName    string
+	Replace      bool
 	ExpiresAt    *time.Time
 	Metadata     map[string]string
 	Now          time.Time
 }
 
-// UnbindInput is the input for removing a session binding.
+// UnbindInput is the input for removing a session binding. SessionID and
+// AgentName filter which active bindings are removed; with a nil
+// Conversation, at least one of them selects the bindings to close.
 type UnbindInput struct {
 	Conversation *ConversationRef
 	SessionID    string
+	AgentName    string
 	Now          time.Time
 }
 
@@ -432,12 +514,27 @@ type RemoveMembershipInput struct {
 	Now          time.Time
 }
 
+// TranscriptOrder controls the sort order of listed transcript entries by sequence.
+type TranscriptOrder string
+
+const (
+	// TranscriptOrderAsc returns entries oldest-first (ascending sequence). Default.
+	TranscriptOrderAsc TranscriptOrder = "asc"
+	// TranscriptOrderDesc returns entries newest-first (descending sequence),
+	// letting callers fetch the most recent entries without walking the whole
+	// stream on busy conversations.
+	TranscriptOrderDesc TranscriptOrder = "desc"
+)
+
 // ListTranscriptInput is the input for listing transcript entries.
 type ListTranscriptInput struct {
 	Caller        Caller
 	Conversation  ConversationRef
 	AfterSequence int64
 	Limit         int
+	// Order controls newest-first vs oldest-first traversal. Empty defaults to
+	// TranscriptOrderAsc for backwards compatibility.
+	Order TranscriptOrder
 }
 
 // ListBackfillInput is the input for listing backfill entries for a member.
@@ -479,6 +576,7 @@ type GroupService interface {
 	UpsertParticipant(ctx context.Context, caller Caller, input UpsertParticipantInput) (ConversationGroupParticipant, error)
 	RemoveParticipant(ctx context.Context, caller Caller, input RemoveParticipantInput) error
 	ResolveInbound(ctx context.Context, event ExternalInboundMessage) (*GroupRouteDecision, error)
+	ResolveOutbound(ctx context.Context, ref ConversationRef, sessionID string) (*GroupOutboundDecision, error)
 	UpdateCursor(ctx context.Context, caller Caller, input UpdateCursorInput) error
 }
 

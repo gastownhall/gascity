@@ -1,0 +1,12 @@
+# Detect beads stuck in a recovery loop (crash loop indicator).
+#
+# When the same bead gets reset to pool multiple times, a polecat is
+# likely crash-looping on that specific work. The script counts
+# bead.updated events where status transitions to open with assignee
+# cleared (the recovery signature) and escalates when the count for
+# any single bead exceeds the threshold.
+[order]
+description = "Detect beads repeatedly bouncing back to pool (spawn storm)"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/spawn-storm-detect.sh"

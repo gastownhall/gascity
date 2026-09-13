@@ -1,4 +1,4 @@
-//go:build acceptance_a
+//go:build acceptance_bd_contract
 
 // Beads CLI contract acceptance test.
 //
@@ -671,7 +671,18 @@ func TestBdBasicCRUD(t *testing.T) {
 	// --- Config ---
 
 	t.Run("ConfigSet", func(t *testing.T) {
-		requireBD(t, dir, "config", "set", "issue_prefix", "ct")
+		requireBD(t, dir, "config", "set", "export.auto", "false")
+		out := requireBD(t, dir, "config", "get", "export.auto")
+		if strings.TrimSpace(out) != "false" {
+			t.Fatalf("bd config get export.auto = %q, want false", strings.TrimSpace(out))
+		}
+	})
+
+	t.Run("ConfigGetIssuePrefix", func(t *testing.T) {
+		out := requireBD(t, dir, "config", "get", "issue_prefix")
+		if strings.TrimSpace(out) != "ct" {
+			t.Fatalf("bd config get issue_prefix = %q, want ct", strings.TrimSpace(out))
+		}
 	})
 }
 
@@ -827,9 +838,13 @@ func TestBdWorkflow(t *testing.T) {
 		t.Fatalf("dep list does not contain root id %s:\n%s", rootID, depOut)
 	}
 
-	// 6. Close the root, then the step.
+	// 6. Close the root (unassigned), then the step. The step was assigned to
+	// polecat-1 above, and this test process drives bd as a different actor (it
+	// never sets BEADS_ACTOR), so closing it exercises bd's cross-actor
+	// close-authority guard (gastownhall/beads#3734) and must pass --force — the
+	// same override the SDK BdStore always applies.
 	requireBD(t, dir, "close", "--json", rootID)
-	requireBD(t, dir, "close", "--json", stepID)
+	requireBD(t, dir, "close", "--force", "--json", stepID)
 
 	// 7. Verify both are closed.
 	for _, id := range []string{rootID, stepID} {

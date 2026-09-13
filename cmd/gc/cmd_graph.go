@@ -3,19 +3,17 @@ package main
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/spf13/cobra"
 )
 
 func newGraphCmd(stdout, stderr io.Writer) *cobra.Command {
-	var mermaid, tree bool
+	var mermaid, tree, jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "graph <bead-ids|convoy-id...>",
 		Short: "Show dependency graph for beads",
@@ -33,7 +31,7 @@ By default prints a table. Use --tree for a Unicode tree view or
   gc graph gc-42 --mermaid     # Mermaid.js diagram`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			opts := graphOpts{Mermaid: mermaid, Tree: tree}
+			opts := graphOpts{Mermaid: mermaid, Tree: tree, JSON: jsonOutput}
 			if cmdGraph(args, opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -42,7 +40,8 @@ By default prints a table. Use --tree for a Unicode tree view or
 	}
 	cmd.Flags().BoolVar(&mermaid, "mermaid", false, "output Mermaid.js flowchart")
 	cmd.Flags().BoolVar(&tree, "tree", false, "output Unicode dependency tree")
-	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
+	cmd.MarkFlagsMutuallyExclusive("mermaid", "tree", "json")
 	return cmd
 }
 
@@ -50,34 +49,113 @@ By default prints a table. Use --tree for a Unicode tree view or
 type graphOpts struct {
 	Mermaid bool
 	Tree    bool
+	JSON    bool
+}
+
+type graphJSONResult struct {
+	SchemaVersion string           `json:"schema_version"`
+	OK            bool             `json:"ok"`
+	Input         []string         `json:"input"`
+	Nodes         []graphJSONNode  `json:"nodes"`
+	Summary       graphJSONSummary `json:"summary"`
+}
+
+type graphJSONNode struct {
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`
+	Type         string   `json:"type,omitempty"`
+	ParentID     string   `json:"parent_id,omitempty"`
+	BlockedBy    []string `json:"blocked_by"`
+	OpenBlockers []string `json:"open_blockers"`
+	Ready        bool     `json:"ready"`
+}
+
+type graphJSONSummary struct {
+	Total   int `json:"total"`
+	Closed  int `json:"closed"`
+	Ready   int `json:"ready"`
+	Blocked int `json:"blocked"`
 }
 
 // cmdGraph is the CLI entry point.
 func cmdGraph(args []string, opts graphOpts, stdout, stderr io.Writer) int {
-	store, code := openRigAwareStore(args, stderr, "gc graph")
+	store, code := openRigAwareStore(args, stderr)
 	if store == nil {
 		return code
 	}
-	return doGraph(store, args, opts, stdout, stderr)
+	// resolveCity already succeeded inside openRigAwareStore; a failure here
+	// only costs class routing, leaving the work ledger as the answer.
+	cityPath, _ := resolveCity()
+	return doGraph(graphStoresFor(store, cityPath), args, opts, stdout, stderr)
+}
+
+// graphStores answers "which store owns this bead?" per id: `gc graph` takes
+// arbitrary ids, so a one-store read misses everything the binding holds.
+type graphStores struct {
+	work beads.Store
+	// graph is the relocated binding, nil on a city that relocates nothing.
+	graph beads.Store
+	cache map[string]beads.Store
+}
+
+// graphStoresFor builds the per-id resolver for the city at cityPath. A city
+// that relocates nothing yields a resolver that answers from the work store.
+func graphStoresFor(work beads.Store, cityPath string) *graphStores {
+	return graphStoresOver(work, cityGraphClassBinding(cityPath))
+}
+
+// graphStoresOver builds the resolver from an already-resolved binding.
+func graphStoresOver(work, graph beads.Store) *graphStores {
+	return &graphStores{work: work, graph: graph, cache: map[string]beads.Store{}}
+}
+
+// storeFor returns the store that owns id, falling back to the work store.
+// Memoized: doGraph asks twice per id, and each miss costs a probe.
+func (g *graphStores) storeFor(id string) (beads.Store, error) {
+	if g.graph == nil {
+		return g.work, nil
+	}
+	if store, ok := g.cache[id]; ok {
+		return store, nil
+	}
+	store, err := classRoutedStoreForIDIn(g.graph, id, g.work)
+	if err != nil {
+		return nil, err
+	}
+	g.cache[id] = store
+	return store, nil
+}
+
+// memberClasses names the classes a convoy expansion spans. Naming a class is
+// what makes it participate; an unnamed Graph leaves members as placeholders.
+func (g *graphStores) memberClasses(convoyStore beads.Store) convoycore.MemberClasses {
+	// A constructor INPUT, not a residency answer: it names the legs convoycore
+	// resolves against, and storeFor above is this type's actual answer.
+	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph} // residency:allow — constructor input to convoycore.MemberClasses
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory
 // if the first bead arg has a rig prefix. Uses rig-level Dolt config when
 // the rig has its own Dolt server.
-func openRigAwareStore(args []string, stderr io.Writer, cmdName string) (beads.Store, int) {
+func openRigAwareStore(args []string, stderr io.Writer) (beads.Store, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
-	readDoltPort(cityPath)
 
 	// Try to resolve rig from the first bead arg's prefix.
 	if len(args) > 0 {
-		cfg, cfgErr := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		cfg, cfgErr := loadCityConfig(cityPath, stderr)
 		if cfgErr == nil {
 			if storeDir := slingDirForBead(cfg, cityPath, args[0]); storeDir != cityPath {
-				store := bdStoreForRig(storeDir, cityPath, cfg)
+				store, err := openStoreAtForCity(storeDir, cityPath)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
+					fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+					return nil, 1
+				}
 				return store, 0
 			}
 		}
@@ -85,7 +163,7 @@ func openRigAwareStore(args []string, stderr io.Writer, cmdName string) (beads.S
 
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc graph: %v\n", err)                      //nolint:errcheck // best-effort stderr
 		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
 		return nil, 1
 	}
@@ -112,19 +190,28 @@ func isBlockingDep(depType string) bool {
 }
 
 // doGraph resolves beads and their dependencies, then prints the graph.
-func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io.Writer) int {
+func doGraph(stores *graphStores, args []string, opts graphOpts, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc graph: missing bead IDs") //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	// Resolve input — expand containers, returning beads directly.
-	resolved, err := resolveGraphInput(store, args, stderr)
+	resolved, err := resolveGraphInput(stores, args, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc graph: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if len(resolved) == 0 {
+		if opts.JSON {
+			return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", graphJSONResult{
+				SchemaVersion: "1",
+				OK:            true,
+				Input:         append([]string(nil), args...),
+				Nodes:         []graphJSONNode{},
+				Summary:       graphJSONSummary{},
+			})
+		}
 		fmt.Fprintln(stdout, "No beads to graph") //nolint:errcheck // best-effort stdout
 		return 0
 	}
@@ -138,7 +225,14 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	// Fetch dependencies for each bead.
 	nodes := make([]graphNode, 0, len(resolved))
 	for _, b := range resolved {
-		deps, err := store.DepList(b.ID, "down")
+		// Edges come from the store that owns the bead; convoy members span
+		// classes, and a store that lacks one returns an empty dep list.
+		depStore, err := stores.storeFor(b.ID)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc graph: resolving the store for %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		deps, err := depStore.DepList(b.ID, "down")
 		if err != nil {
 			fmt.Fprintf(stderr, "gc graph: listing deps for %s: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -169,6 +263,8 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	}
 
 	switch {
+	case opts.JSON:
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc graph", buildGraphJSONResult(args, nodes))
 	case opts.Mermaid:
 		printMermaid(nodes, stdout)
 	case opts.Tree:
@@ -179,10 +275,49 @@ func doGraph(store beads.Store, args []string, opts graphOpts, stdout, stderr io
 	return 0
 }
 
+func buildGraphJSONResult(args []string, nodes []graphNode) graphJSONResult {
+	result := graphJSONResult{
+		SchemaVersion: "1",
+		OK:            true,
+		Input:         append([]string(nil), args...),
+		Nodes:         make([]graphJSONNode, 0, len(nodes)),
+	}
+	for _, n := range nodes {
+		ready := isBeadReady(n)
+		switch {
+		case n.bead.Status == "closed":
+			result.Summary.Closed++
+		case ready:
+			result.Summary.Ready++
+		default:
+			result.Summary.Blocked++
+		}
+		result.Nodes = append(result.Nodes, graphJSONNode{
+			ID:           n.bead.ID,
+			Title:        n.bead.Title,
+			Status:       n.bead.Status,
+			Type:         n.bead.Type,
+			ParentID:     n.bead.ParentID,
+			BlockedBy:    append([]string(nil), n.blockedBy...),
+			OpenBlockers: append([]string(nil), n.openBlocker...),
+			Ready:        ready,
+		})
+	}
+	result.Summary.Total = len(nodes)
+	return result
+}
+
 // resolveGraphInput expands convoy inputs to their children.
 // Non-containers are passed through. Multiple args are resolved individually.
 // Duplicate IDs are removed. Returns the full Bead objects to avoid re-fetching.
-func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]beads.Bead, error) {
+//
+// This is NOT a molecule membership rule and deliberately implements none of
+// beads.Membership: `gc graph` renders the dependency edges among the ids the
+// operator named, and only "convoy" is a container type. A molecule root
+// therefore expands to itself — unlike `gc bd graph <root>`, which returns the
+// whole molecule. Do not "fix" that by folding a membership rule in here
+// without deciding what `gc graph <root> <unrelated-id>` should then mean.
+func resolveGraphInput(stores *graphStores, args []string, stderr io.Writer) ([]beads.Bead, error) {
 	seen := make(map[string]bool)
 	var result []beads.Bead
 	add := func(b beads.Bead) {
@@ -192,6 +327,10 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 		}
 	}
 	for _, arg := range args {
+		store, err := stores.storeFor(arg)
+		if err != nil {
+			return nil, fmt.Errorf("resolving the store for %s: %w", arg, err)
+		}
 		b, err := store.Get(arg)
 		if err != nil {
 			return nil, err
@@ -200,10 +339,9 @@ func resolveGraphInput(store beads.Store, args []string, stderr io.Writer) ([]be
 			fmt.Fprintf(stderr, "gc graph: epic %s is treated as an ordinary bead; convoy expansion is first-class\n", b.ID) //nolint:errcheck // best-effort stderr
 		}
 		if beads.IsContainerType(b.Type) {
-			children, err := store.List(beads.ListQuery{
-				ParentID: b.ID,
-				Sort:     beads.SortCreatedAsc,
-			})
+			// Membership edges come from the convoy's own store; members
+			// resolve across both legs.
+			children, err := convoycore.MembersIn(stores.memberClasses(store), b.ID, false)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

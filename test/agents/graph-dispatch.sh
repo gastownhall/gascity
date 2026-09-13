@@ -14,6 +14,7 @@ REPORT_FILE="$GC_CITY/graph-workflow-steps.log"
 TRACE_FILE="$GC_CITY/graph-workflow-trace.log"
 ASSIGNEE="${GC_SESSION_NAME:-${GC_AGENT:-}}"
 HARNESS_STATE_DIR="$GC_CITY/.gc/test-harness"
+HOOK_TIMEOUT="${GC_GRAPH_HOOK_TIMEOUT:-35}"
 
 # Keep each worker/pool slot distinct at the beads actor layer.
 # `bd update --claim` claims "to you", so sharing one actor across sessions
@@ -26,6 +27,19 @@ echo "graph-worker startup: GC_CITY=${GC_CITY:-} GC_CITY_PATH=${GC_CITY_PATH:-} 
 trace() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$TRACE_FILE"
 }
+
+if ! command -v timeout >/dev/null 2>&1; then
+    if command -v gtimeout >/dev/null 2>&1; then
+        timeout() {
+            gtimeout "$@"
+        }
+    else
+        timeout() {
+            shift
+            "$@"
+        }
+    fi
+fi
 
 current_port_file() {
     if [ -f "$GC_CITY/.beads/dolt-server.port" ]; then
@@ -69,7 +83,7 @@ ref_matches_suffix_list() {
     for suffix in "${suffixes[@]}"; do
         suffix=$(trim_spaces "$suffix")
         [ -n "$suffix" ] || continue
-        if [[ "$ref" == *"$suffix"* ]]; then
+        if [[ "$ref" == *"$suffix" ]]; then
             return 0
         fi
     done
@@ -91,16 +105,27 @@ close_with_result() {
     local failure_class="${3:-}"
     local failure_reason="${4:-}"
 
+    # Swallow any bd failure — the worker runs under `set -e`, so an
+    # error from a transient bd issue here (flaky socket, concurrent
+    # modification, etc.) would kill the whole worker mid-loop and take
+    # down the test session. Callers already tolerate unknown final
+    # outcomes (they read it back via show_outcome), so failing silently
+    # is safer than failing loudly.
     if [ "$outcome" = "pass" ]; then
-        bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed
+        if ! bd update "$bead_id" --set-metadata "gc.outcome=pass" --status closed 2>/dev/null; then
+            trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
+        fi
         return 0
     fi
 
-    bd update "$bead_id" \
+    if ! bd update "$bead_id" \
         --set-metadata "gc.outcome=fail" \
         --set-metadata "gc.failure_class=$failure_class" \
         --set-metadata "gc.failure_reason=$failure_reason" \
-        --status closed
+        --status closed 2>/dev/null; then
+        trace "close-rejected bead=$bead_id outcome=$outcome (likely already closed by controller)"
+    fi
+    return 0
 }
 
 should_fail_transient_once() {
@@ -168,6 +193,52 @@ show_assignee() {
     timeout 10 bd show --json "$1" | json_payload | jq_bead '.assignee'
 }
 
+refresh_bead_json() {
+    timeout 10 bd show --json "$1" 2>/dev/null
+}
+
+owned_status_ok() {
+    local status="$1"
+    local assignee="$2"
+
+    [ "$assignee" = "$BEADS_ACTOR" ] || return 1
+    [ "$status" = "open" ] || [ "$status" = "in_progress" ]
+}
+
+ack_drain_if_idle() {
+    if [ -z "$ASSIGNEE" ]; then
+        return 1
+    fi
+    if ! gc runtime drain-check 2>/dev/null; then
+        return 1
+    fi
+    trace "drain-requested assignee=$ASSIGNEE"
+    gc runtime drain-ack 2>/dev/null || true
+    trace "drain-acked assignee=$ASSIGNEE"
+    exit 0
+}
+
+should_use_hook_fallback() {
+    if [ "${GC_GRAPH_HOOK_FALLBACK:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${GC_SESSION_ORIGIN:-}" = "ephemeral" ]; then
+        return 0
+    fi
+    # Always-on named sessions also receive work that the deterministic control
+    # dispatcher assigned by SESSION BEAD ID -- e.g. ralph re-iterated
+    # run_target=<worker> steps land as assignee=<session bead id> with
+    # gc.routed_to cleared (internal/dispatch/control.go directSessionID route).
+    # The name-only `bd ready --assignee=$ASSIGNEE` fast path cannot match a
+    # bead-ID assignee, so a named session must fall back to `gc hook`, whose
+    # work query resolves by GC_SESSION_ID too. Omitting this stalls the worker
+    # (it name-polls into the void) and hangs the review workflow.
+    if [ "${GC_SESSION_ORIGIN:-}" = "named" ]; then
+        return 0
+    fi
+    [ -n "${GC_TEMPLATE:-}" ] && [ "${GC_TEMPLATE:-}" != "${GC_AGENT:-}" ]
+}
+
 trace "startup pid=$$ assignee=${ASSIGNEE:-}"
 trace_store
 cleanup() {
@@ -181,6 +252,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 misses=0
+DISPATCH_WAKE_FILE="$GC_CITY/.gc/dispatch-wake"
+DISPATCH_WAKE_LAST_MTIME=""
 
 jq_bead() {
     local filter="$1"
@@ -211,14 +284,21 @@ fetch_ready_queue() {
     if [ -z "$ASSIGNEE" ]; then
         return 1
     fi
-    case "$ASSIGNEE" in
-        polecat-*)
-            timeout 10 gc hook "$ASSIGNEE" 2>/dev/null
-            ;;
-        *)
-            timeout 10 bd ready --assignee "$ASSIGNEE" --json --limit=20 2>/dev/null
-            ;;
-    esac
+    # Graph workflow attempts are preassigned by the deterministic control
+    # dispatcher. Read that assigned queue directly so empty polls do not spend
+    # their budget in gc hook/native-store preflight. Keep the full hook path
+    # available for tests that explicitly need generic routed work.
+    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+        if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
+            printf '%s\n' "$ready"
+            return 0
+        fi
+    fi
+    if should_use_hook_fallback; then
+        timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null
+        return $?
+    fi
+    return 1
 }
 
 fetch_in_progress_queue() {
@@ -288,6 +368,19 @@ select_candidate_from_queue() {
 }
 
 while true; do
+    # --- dispatch-wake check ---
+    # The control dispatcher touches .gc/dispatch-wake after each successful batch.
+    # Detect mtime change and skip idle sleep so gc hook runs immediately.
+    dispatch_woke="false"
+    if [ -f "$DISPATCH_WAKE_FILE" ]; then
+        current_mtime=$(stat -c %Y "$DISPATCH_WAKE_FILE" 2>/dev/null || stat -f %m "$DISPATCH_WAKE_FILE" 2>/dev/null || echo "")
+        if [ -n "$current_mtime" ] && [ "$current_mtime" != "$DISPATCH_WAKE_LAST_MTIME" ]; then
+            DISPATCH_WAKE_LAST_MTIME="$current_mtime"
+            dispatch_woke="true"
+            trace "dispatch-wake mtime=$current_mtime"
+        fi
+    fi
+
     owned=""
     bead_json=""
     owns_bead="false"
@@ -302,11 +395,17 @@ while true; do
         trace "resume bead=$bead_id assignee=$ASSIGNEE"
     fi
 
+    if [ "$owns_bead" != "true" ]; then
+        ack_drain_if_idle || true
+    fi
+
     ready=""
     ready_rc=0
     if [ -z "$bead_id" ]; then
         if [ -n "$ASSIGNEE" ]; then
-            if ! ready=$(fetch_ready_queue); then
+            if ready=$(fetch_ready_queue); then
+                :
+            else
                 ready_rc=$?
             fi
         fi
@@ -320,14 +419,17 @@ while true; do
         elif [ $((misses % 25)) -eq 0 ]; then
             trace "idle misses=$misses assignee=$ASSIGNEE"
         fi
-        sleep 0.2
+        if [ "$dispatch_woke" != "true" ]; then
+            sleep 0.2
+        fi
         continue
     fi
     misses=0
 
-    is_pool_work=$(printf '%s\n' "$bead_json" | jq -r '((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))' 2>/dev/null || echo "false")
+    is_claimable_work=$(printf '%s\n' "$bead_json" | jq -r '(.assignee // "" | length == 0) and ((((.metadata // {})["gc.routed_to"] // "" | length > 0) or ((.labels // []) | any(startswith("pool:")))))' 2>/dev/null || echo "false")
     claimed_here="false"
-    if [ "$is_pool_work" = "true" ] && [ "$owns_bead" != "true" ]; then
+    if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
+        ack_drain_if_idle || true
         if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
@@ -343,7 +445,7 @@ while true; do
     ref=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.ref // .metadata["gc.step_ref"] // ""')
     kind=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.kind"] // ""')
     root_id=$(printf '%s\n' "$bead_json" | json_payload | jq_bead '.metadata["gc.root_bead_id"] // ""')
-    source_id=""
+    target_id=""
     work_dir=""
     if [ -n "$root_id" ]; then
         if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
@@ -351,20 +453,20 @@ while true; do
             sleep 1
             continue
         fi
-        source_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.source_bead_id"]')
+        target_id=$(printf '%s\n' "$root_json" | json_payload | jq_bead '.metadata["gc.input_convoy_id"]')
     fi
-    if [ -n "$source_id" ]; then
-        if ! source_json=$(timeout 10 bd show --json "$source_id" 2>/dev/null); then
-            trace "source-show-failed bead=$bead_id source=$source_id"
+    if [ -n "$target_id" ]; then
+        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+            trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
         fi
-        work_dir=$(printf '%s\n' "$source_json" | json_payload | jq_bead '.metadata.work_dir')
+        work_dir=$(printf '%s\n' "$target_json" | json_payload | jq_bead '.metadata.work_dir')
     fi
 
     if is_currently_blocked "$bead_id" "$root_id"; then
         trace "skip-blocked bead=$bead_id ref=$ref assignee=$ASSIGNEE"
-        if [ "$is_pool_work" = "true" ]; then
+        if [ "$is_claimable_work" = "true" ]; then
             if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
@@ -388,36 +490,27 @@ while true; do
             ;;
     esac
 
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
-    if [ "$outcome_before" = "skipped" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    if ! bead_json=$(refresh_bead_json "$bead_id"); then
+        trace "state-refresh-failed bead=$bead_id ref=$ref"
         sleep 0.2
         continue
     fi
-    if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
-            trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
-            sleep 0.2
-            continue
-        fi
-    elif [ "$status_before" != "open" ]; then
-        trace "skip-terminal bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
+    bead_payload=$(printf '%s\n' "$bead_json" | json_payload)
+    if [ -z "$bead_payload" ] || ! printf '%s\n' "$bead_payload" | jq -e . >/dev/null 2>&1; then
+        trace "state-refresh-failed bead=$bead_id ref=$ref reason=invalid-json"
         sleep 0.2
         continue
     fi
-
-    status_before=$(show_status "$bead_id" 2>/dev/null || true)
-    outcome_before=$(show_outcome "$bead_id" 2>/dev/null || true)
-    assignee_before=$(show_assignee "$bead_id" 2>/dev/null || true)
+    status_before=$(printf '%s\n' "$bead_payload" | jq_bead '.status')
+    outcome_before=$(printf '%s\n' "$bead_payload" | jq_bead '.metadata["gc.outcome"]')
+    assignee_before=$(printf '%s\n' "$bead_payload" | jq_bead '.assignee')
     if [ "$outcome_before" = "skipped" ]; then
         trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before"
         sleep 0.2
         continue
     fi
     if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
+        if ! owned_status_ok "$status_before" "$assignee_before"; then
             trace "skip-before-action bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
             sleep 0.2
             continue
@@ -428,26 +521,72 @@ while true; do
         continue
     fi
 
-    printf '%s\n' "$ref" >> "$REPORT_FILE"
-    trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
-    trace_store
-
     if should_exit_after_claim_once "$ref"; then
         trace "exit-after-claim bead=$bead_id ref=$ref assignee=$ASSIGNEE"
         exit 1
     fi
 
+    # Report emission is deferred until just before close_with_result so a
+    # step that gets skipped by the controller mid-processing (after we
+    # fetched it from the ready queue but before we committed to closing)
+    # does not appear in the report. Writing here would violate
+    # TestGraphWorkflowFailureRunsCleanup's "report should not include
+    # .implement after abort" invariant.
+    trace "run bead=$bead_id ref=$ref kind=$kind target=$target_id work_dir=$work_dir"
+    trace_store
+
+    # Abort-propagation defense for TestGraphWorkflowFailureRunsCleanup.
+    # Without this, a worker that picked up .implement or .submit after
+    # preflight closed with fail, but before the controller's
+    # skipOpenScopeMembers pass ran, could race the controller:
+    #   1. Outcome race: worker closes a skipped step with pass before the
+    #      controller's skip lands. bd allows overwrites on closed beads,
+    #      so whoever writes last wins.
+    #   2. Side-effect race: .submit mutates the source issue before this
+    #      worker notices the abort.
+    #   3. Report race: worker writes the ref to REPORT_FILE between its
+    #      own outcome check and close.
+    # Defense: detect any sibling hard failure in the same workflow before
+    # step side effects and close this bead as skipped.
+    # Scoped to gc.failure_class="hard" so retry-flavor transient failures
+    # (which the controller DOESN'T use to skip siblings) don't trigger
+    # false positives. Teardown beads must still run after body failure.
+    sibling_hard_fail="false"
+    if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
+        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+            if printf '%s\n' "$sibling_json" | json_payload | jq -e \
+                --arg root "$root_id" --arg self "$bead_id" '
+                    if type == "array" then
+                        any(.[]?; (.metadata // {})["gc.root_bead_id"] == $root
+                                    and .id != $self
+                                    and .status == "closed"
+                                    and (.metadata // {})["gc.outcome"] == "fail"
+                                    and (.metadata // {})["gc.failure_class"] == "hard")
+                    else false
+                    end' >/dev/null 2>&1; then
+                sibling_hard_fail="true"
+            fi
+        fi
+    fi
+    if [ "$sibling_hard_fail" = "true" ] && [[ "$ref" != *.cleanup-worktree* ]]; then
+        trace "skip-sibling-hard-fail bead=$bead_id ref=$ref root=$root_id (sibling has outcome=fail class=hard; closing self as skipped)"
+        bd update "$bead_id" --set-metadata "gc.outcome=skipped" --status closed 2>/dev/null || \
+            trace "skip-close-failed bead=$bead_id ref=$ref"
+        continue
+    fi
+
     case "$ref" in
         *.workspace-setup*)
             if [ -z "$work_dir" ]; then
-                work_dir="$GC_CITY/worktrees/$source_id"
+                work_dir="$GC_CITY/worktrees/$target_id"
                 mkdir -p "$work_dir"
-                bd update "$source_id" --set-metadata "work_dir=$work_dir"
-                trace "workspace-setup source=$source_id work_dir=$work_dir"
+                bd update "$target_id" --set-metadata "work_dir=$work_dir"
+                trace "workspace-setup target=$target_id work_dir=$work_dir"
             fi
             ;;
         *.preflight-tests*)
             if [ "$MODE" = "fail-preflight" ]; then
+                printf '%s\n' "$ref" >> "$REPORT_FILE"
                 trace "close-fail bead=$bead_id ref=$ref class=hard reason=preflight_failed"
                 close_with_result "$bead_id" "fail" "hard" "preflight_failed"
                 trace "close-returned bead=$bead_id"
@@ -466,16 +605,16 @@ while true; do
             printf 'implemented\n' > "$work_dir/implemented.txt"
             ;;
         *.submit*)
-            bd update "$source_id" --set-metadata "submitted=true"
-            trace "submitted source=$source_id"
+            bd update "$target_id" --set-metadata "submitted=true"
+            trace "submitted target=$target_id"
             ;;
         *.cleanup-worktree*)
             if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
                 rm -rf "$work_dir"
                 trace "cleanup removed work_dir=$work_dir"
             fi
-            bd update "$source_id" --unset-metadata work_dir
-            trace "cleanup unset work_dir source=$source_id"
+            bd update "$target_id" --unset-metadata work_dir
+            trace "cleanup unset work_dir target=$target_id"
             ;;
     esac
 
@@ -483,6 +622,7 @@ while true; do
 
     if should_fail_transient_once "$ref"; then
         reason=$(transient_reason_for_ref "$ref")
+        printf '%s\n' "$ref" >> "$REPORT_FILE"
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=once"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
@@ -493,6 +633,7 @@ while true; do
     fi
     if should_fail_transient_always "$ref"; then
         reason=$(transient_reason_for_ref "$ref")
+        printf '%s\n' "$ref" >> "$REPORT_FILE"
         trace "close-fail bead=$bead_id ref=$ref class=transient reason=$reason mode=always"
         close_with_result "$bead_id" "fail" "transient" "$reason"
         trace "close-returned bead=$bead_id"
@@ -511,7 +652,7 @@ while true; do
         continue
     fi
     if [ "$owns_bead" = "true" ]; then
-        if [ "$status_before" != "in_progress" ] || [ "$assignee_before" != "$BEADS_ACTOR" ]; then
+        if ! owned_status_ok "$status_before" "$assignee_before"; then
             trace "skip-before-close bead=$bead_id ref=$ref status=$status_before outcome=$outcome_before assignee=$assignee_before"
             sleep 0.2
             continue
@@ -522,6 +663,7 @@ while true; do
         continue
     fi
 
+    printf '%s\n' "$ref" >> "$REPORT_FILE"
     trace "close bead=$bead_id ref=$ref"
     trace_store
     close_with_result "$bead_id" "pass"

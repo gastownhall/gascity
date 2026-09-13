@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 
 func preferRealBDOnPath(t *testing.T) {
 	t.Helper()
+	skipSlowCmdGCTest(t, "requires a live bd-managed session probe; run make test-cmd-gc-process for full coverage")
 
 	currentPath := os.Getenv("PATH")
 	pathEntries := filepath.SplitList(currentPath)
@@ -59,7 +61,7 @@ func resolveLiveProbeSessionID(cityPath string, cfg *config.City, store beads.St
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	return ensureSessionIDForTemplate(cityPath, cfg, store, target, nil)
+	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, target, nil, ensureSessionForTemplateOptions{})
 }
 
 func TestLiveClaudeInterruptNow(t *testing.T) {
@@ -79,14 +81,13 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
 	}
-	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
+	sp, err := newSessionProviderForCityByName(cfg, cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
 	}
 	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
 	id, err := resolveLiveProbeSessionID(cityPath, cfg, store, target, sessionID)
@@ -97,7 +98,7 @@ func TestLiveClaudeInterruptNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name
@@ -156,14 +157,13 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadCityConfig(%q): %v", cityPath, err)
 	}
-	readDoltPort(cityPath)
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
 	}
-	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
+	sp, err := newSessionProviderForCityByName(cfg, cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
 	if err != nil {
-		t.Fatalf("newSessionProviderByName: %v", err)
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
 	}
 	mgr := newSessionManagerWithConfig(cityPath, store, sp, cfg)
 	id, err := resolveLiveProbeSessionID(cityPath, cfg, store, target, sessionID)
@@ -174,7 +174,7 @@ func TestLiveGeminiSubmitIntents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mgr.Get(%q): %v", id, err)
 	}
-	resumeCmd, hints := buildResumeCommand(cfg, info, "")
+	resumeCmd, hints := buildResumeCommand(t.TempDir(), cfg, info, "", nil, io.Discard)
 	socket := cfg.Session.Socket
 	if socket == "" {
 		socket = cfg.Workspace.Name

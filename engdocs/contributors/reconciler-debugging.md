@@ -14,6 +14,13 @@ Use this workflow when the session reconciler does something unexpected:
 
 The trace stream is persisted locally under `.gc/runtime/session-reconciler-trace/`.
 
+If you see `gc convoy control --serve` warning about a legacy control-dispatcher
+trace path at `${GC_CITY}/control-dispatcher-trace.log`, treat it as a rollout
+action item, not just a symptom: any long-lived control-dispatcher session that
+still carries that baked-in `GC_WORKFLOW_TRACE` must be restarted or recycled
+after the upgrade so it picks up the watcher-safe default under
+`.gc/runtime/control-dispatcher-trace.log`.
+
 ## Fast Incident Workflow
 
 From the city root, start detail tracing on the exact normalized template:
@@ -21,6 +28,11 @@ From the city root, start detail tracing on the exact normalized template:
 ```bash
 gc trace start --template repo/polecat --for 20m
 ```
+
+Arm the template even when you only suspect a pool is sitting correctly idle:
+the `pool_desired.compute` / `no_demand` / `skipped` decision — the positive
+evidence that the reconciler reached that template and found nothing to do — is
+detail-tier, so it reaches the persisted trace only once the template is armed.
 
 If you want live visibility while reproducing:
 
@@ -66,6 +78,26 @@ Point the next agent at these artifacts:
 - anything under `.gc/runtime/session-reconciler-trace/quarantine/` if it exists
 
 If a real session existed and the bug crossed into runtime behavior, also include the relevant session or provider logs.
+
+Drain-ack stop completion is event-first: newer controllers record
+`SessionStopped` with message `drain acknowledged by agent` instead of relying
+on the old `Stopped drain-acked session` stdout line. Use `.gc/events.jsonl`
+and the trace `operation` records as the durable signal, with stdout/stderr as
+supporting diagnostics only.
+
+## Rig-Scoped Convergence Rollback
+
+Before rolling back a release that has created rig-scoped convergence loops,
+stop active loops in each affected rig:
+
+```bash
+gc --rig <rig-name> converge list
+gc --rig <rig-name> converge stop <bead-id>
+```
+
+Older controllers only watch the city/HQ convergence store. If rollback happens
+with active rig-scoped convergence beads still present, those loops become
+crash-orphans until a controller with rig-scoped convergence support runs again.
 
 ## How To Read The Trace
 

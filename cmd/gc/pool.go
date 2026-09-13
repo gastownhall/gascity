@@ -5,19 +5,22 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 type poolSessionRef struct {
@@ -27,7 +30,9 @@ type poolSessionRef struct {
 
 // ScaleCheckRunner runs a scale_check command and returns stdout.
 // dir specifies the working directory for the command (e.g., rig path
-// for rig-scoped pools so bd queries the correct database).
+// for rig-scoped pools so bd queries the correct database). env, when
+// non-nil, is merged into the subprocess environment after sanitizing
+// inherited GC_DOLT_* and BEADS_* keys.
 //
 // Implementations MUST be safe to invoke concurrently from multiple
 // goroutines. Both evaluatePendingPools and computeWorkSet dispatch
@@ -36,7 +41,7 @@ type poolSessionRef struct {
 // because it only reads its arguments and spawns an independent
 // subprocess; test doubles should avoid shared mutable state or
 // protect it explicitly.
-type ScaleCheckRunner func(command, dir string) (string, error)
+type ScaleCheckRunner func(command, dir string, env map[string]string) (string, error)
 
 // Default bd probe concurrency is config.DefaultProbeConcurrency (8).
 // Override via [daemon] probe_concurrency in city.toml. Both
@@ -46,10 +51,13 @@ type ScaleCheckRunner func(command, dir string) (string, error)
 // completes before beadReconcileTick), the effective concurrency never
 // exceeds this limit at any given moment.
 
-// bdProbeTimeout is the timeout for bd subprocess probes (scale_check,
-// work_query). Generous to accommodate bd calls that serialize through
-// a shared dolt sql-server when many pool probes run in parallel.
-const bdProbeTimeout = 180 * time.Second
+// bdProbeTimeoutDefault is the default timeout for bd subprocess probes
+// (scale_check, work_query). Generous to accommodate bd calls that serialize
+// through a shared dolt sql-server when many pool probes run in parallel.
+const bdProbeTimeoutDefault = 180 * time.Second
+
+// bdProbeTimeoutFloor is the minimum accepted GC_BD_PROBE_TIMEOUT value.
+const bdProbeTimeoutFloor = 5 * time.Second
 
 // hookTimeout is the timeout for lifecycle hook commands (on_death,
 // on_boot). Kept shorter than probe timeout because hooks run
@@ -57,14 +65,27 @@ const bdProbeTimeout = 180 * time.Second
 const hookTimeout = 30 * time.Second
 
 // shellCommand runs a command via sh -c with the given timeout and
-// returns stdout. dir sets the command's working directory.
-func shellCommand(command, dir string, timeout time.Duration) (string, error) {
+// returns stdout. dir sets the command's working directory. When env is
+// non-nil, it is merged into the subprocess environment after sanitizing
+// inherited GC_DOLT_* and BEADS_* keys.
+func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
+	return runShellCommand(command, dir, timeout, env, nil)
+}
+
+// runShellCommand is the shared `sh -c` body. prepare, when non-nil, adjusts
+// the command before it starts — it is how a caller opts into a cancellation
+// policy stronger than CommandContext's default.
+func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.WaitDelay = 2 * time.Second
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	if prepare != nil {
+		prepare(cmd)
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -73,18 +94,67 @@ func shellCommand(command, dir string, timeout time.Duration) (string, error) {
 	return string(out), nil
 }
 
+// hookSignalGrace is how long a canceled hook's process group gets to exit on
+// SIGTERM before it is SIGKILLed. Matches the order-exec path's grace.
+const hookSignalGrace = 2 * time.Second
+
+// hookProcessGroupCleanup makes a hook its own process-group leader and
+// terminates that GROUP when the command is canceled.
+//
+// Without it, a timed-out hook leaks its descendants. CommandContext kills the
+// `sh` it started, and WaitDelay then stops waiting on the pipe — but WaitDelay
+// closes I/O, it does not signal a process tree, so the pipeline the hook
+// spawned (bd, and whatever it is piped into) keeps running and keeps holding a
+// store connection. That is worse here than it looks: the hook's semaphore slot
+// is released the moment the shell dies, so the pool admits the next hook while
+// the previous one's bd is still connected, and the bound that exists to stop a
+// boot-time read storm quietly stops bounding anything.
+func hookProcessGroupCleanup(cmd *exec.Cmd) {
+	processgroup.StartCommandInNewGroup(cmd)
+	cmd.Cancel = func() error {
+		return processgroup.TerminateCommand(cmd, 0, hookSignalGrace, processgroup.Options{})
+	}
+}
+
+// parseBDProbeTimeout reads GC_BD_PROBE_TIMEOUT and returns the parsed duration.
+// Unset or empty: returns bdProbeTimeoutDefault (180s). Invalid: logs warning,
+// returns default. Below floor (5s): logs warning, returns floor.
+func parseBDProbeTimeout(stderr io.Writer) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_BD_PROBE_TIMEOUT"))
+	if raw == "" {
+		return bdProbeTimeoutDefault
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc: GC_BD_PROBE_TIMEOUT=%s invalid duration, using %s\n", raw, bdProbeTimeoutDefault) //nolint:errcheck
+		return bdProbeTimeoutDefault
+	}
+	if d < bdProbeTimeoutFloor {
+		fmt.Fprintf(stderr, "gc: GC_BD_PROBE_TIMEOUT=%s below minimum (%s), using %s\n", raw, bdProbeTimeoutFloor, bdProbeTimeoutFloor) //nolint:errcheck
+		return bdProbeTimeoutFloor
+	}
+	return d
+}
+
 // shellScaleCheck runs a scale_check command via sh -c and returns stdout.
-// dir sets the command's working directory. Uses bdProbeTimeout (180s).
-func shellScaleCheck(command, dir string) (string, error) {
-	return shellCommand(command, dir, bdProbeTimeout)
+// dir sets the command's working directory. Uses bdProbeTimeoutDefault (180s)
+// unless GC_BD_PROBE_TIMEOUT overrides it.
+func shellScaleCheck(command, dir string, env map[string]string) (string, error) {
+	return shellCommand(command, dir, parseBDProbeTimeout(os.Stderr), env)
 }
 
 // shellRunHook runs a lifecycle hook command (on_death, on_boot) via
 // sh -c with the shorter hookTimeout (30s). Separated from
 // shellScaleCheck so that hung hooks don't stall the reconciler for
 // the full bd probe timeout.
-func shellRunHook(command, dir string) (string, error) {
-	return shellCommand(command, dir, hookTimeout)
+//
+// Hooks run in their own process group so a timeout reaps the whole pipeline
+// rather than just the shell; see hookProcessGroupCleanup for why the on_boot
+// bound depends on it. shellScaleCheck deliberately keeps the default
+// cancellation policy: those probes run on the reconciler tick under their own
+// bound and timeout, and their signal semantics are not this path's to change.
+func shellRunHook(command, dir string, env map[string]string) (string, error) {
+	return runShellCommand(command, dir, hookTimeout, env, hookProcessGroupCleanup)
 }
 
 // scaleParams holds the resolved scaling parameters for an agent.
@@ -95,10 +165,20 @@ type scaleParams struct {
 }
 
 // scaleParamsFor extracts scaling parameters from an Agent's fields.
+//
+// Check is the count-form pool-demand query (EffectivePoolDemandQuery).
+// It shares the canonical and temporary migration bd ready predicates with
+// EffectiveWorkQuery's Tier 3 via config helpers, keeping reconciler spawn
+// decisions and worker claim decisions structurally symmetric. See
+// engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
+	return scaleParamsForTopology(a, config.QueryTopology{})
+}
+
+func scaleParamsForTopology(a *config.Agent, topo config.QueryTopology) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectiveScaleCheck(),
+		Check: a.EffectivePoolDemandQueryFor(topo),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -110,25 +190,18 @@ func scaleParamsFor(a *config.Agent) scaleParams {
 
 // evaluatePool runs check, parses the output as an integer, and clamps
 // the result to [min, max]. Returns min on error (honors configured minimum).
-func evaluatePool(agentName string, sp scaleParams, dir string, runner ScaleCheckRunner) (int, error) {
+func evaluatePool(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
 	start := time.Now()
-	out, err := runner(sp.Check, dir)
+	out, err := runner(sp.Check, dir, env)
 	durationMs := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
 		return sp.Min, fmt.Errorf("agent %q: %w", agentName, err)
 	}
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" {
-		checkErr := fmt.Errorf("agent %q: check %q produced empty output", agentName, sp.Check)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, checkErr)
-		return sp.Min, checkErr
-	}
-	n, err := strconv.Atoi(trimmed)
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
 	if err != nil {
-		parseErr := fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
-		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, parseErr)
-		return sp.Min, parseErr
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, sp.Min, err)
+		return sp.Min, err
 	}
 	desired := n
 	if desired < sp.Min {
@@ -139,6 +212,38 @@ func evaluatePool(agentName string, sp scaleParams, dir string, runner ScaleChec
 	}
 	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, desired, nil)
 	return desired, nil
+}
+
+func evaluatePoolNewDemand(agentName string, sp scaleParams, dir string, env map[string]string, runner ScaleCheckRunner) (int, error) {
+	start := time.Now()
+	out, err := runner(sp.Check, dir, env)
+	durationMs := float64(time.Since(start).Milliseconds())
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, fmt.Errorf("agent %q: %w", agentName, err)
+	}
+	n, err := parseScaleCheckCount(agentName, sp.Check, out)
+	if err != nil {
+		telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, 0, err)
+		return 0, err
+	}
+	telemetry.RecordPoolCheck(context.Background(), agentName, durationMs, n, nil)
+	return n, nil
+}
+
+func parseScaleCheckCount(agentName, check, out string) (int, error) {
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return 0, fmt.Errorf("agent %q: check %q produced empty output", agentName, check)
+	}
+	n, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("agent %q: check output %q is not an integer", agentName, trimmed)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("agent %q: check output %q is negative", agentName, trimmed)
+	}
+	return n, nil
 }
 
 // SessionSetupContext holds template variables for session_setup command expansion.
@@ -152,6 +257,13 @@ type SessionSetupContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // source directory where agent config was defined
+	// DefaultBranch mirrors workdir.PathContext.DefaultBranch: the rig's
+	// configured mainline branch, empty for city-scoped agents and for rigs
+	// with no default_branch. Configured value only — prompts'
+	// {{.DefaultBranch}} additionally falls back to a live origin/HEAD probe,
+	// but setup-command expansion runs on reconciler hot paths and must not
+	// spawn git. Setup scripts should keep their own probe fallback.
+	DefaultBranch string
 }
 
 // expandSessionSetup expands Go text/template strings in session_setup commands.
@@ -177,15 +289,6 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 	return result
 }
 
-// resolveSetupScript resolves a session_setup_script path relative to cityPath.
-// Returns the path unchanged if already absolute.
-func resolveSetupScript(script, cityPath string) string {
-	if script == "" || filepath.IsAbs(script) {
-		return script
-	}
-	return filepath.Join(cityPath, script)
-}
-
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
 // Slice and map fields are independently allocated so mutations to the copy
 // don't affect the original.
@@ -195,31 +298,41 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Description:       src.Description,
 		Dir:               dir,
 		WorkDir:           src.WorkDir,
+		TmuxAlias:         src.TmuxAlias,
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		ContextAdvisory:   config.CloneContextAdvisory(src.ContextAdvisory),
+		Upstream:          src.Upstream,
+		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
 		Nudge:             src.Nudge,
 		StartCommand:      src.StartCommand,
+		Lifecycle:         src.Lifecycle,
 		PromptMode:        src.PromptMode,
 		PromptFlag:        src.PromptFlag,
 		ReadyPromptPrefix: src.ReadyPromptPrefix,
 		// DefaultSlingFormula: deep-copied below with other pointer fields.
-		WorkQuery:            src.WorkQuery,
-		SlingQuery:           src.SlingQuery,
-		SessionSetupScript:   src.SessionSetupScript,
-		OverlayDir:           src.OverlayDir,
-		SourceDir:            src.SourceDir,
-		Fallback:             src.Fallback,
+		WorkQuery:          src.WorkQuery,
+		SlingQuery:         src.SlingQuery,
+		SessionSetupScript: src.SessionSetupScript,
+		OverlayDir:         src.OverlayDir,
+		SourceDir:          src.SourceDir,
+		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		IdleTimeout:          src.IdleTimeout,
+		MaxSessionAge:        src.MaxSessionAge,
+		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,
 		SleepAfterIdle:       src.SleepAfterIdle,
 		SleepAfterIdleSource: src.SleepAfterIdleSource,
 		Suspended:            src.Suspended,
 		ResumeCommand:        src.ResumeCommand,
 		WakeMode:             src.WakeMode,
+		MouseMode:            src.MouseMode,
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
 		ScaleCheck:           src.ScaleCheck,
+		BindingName:          src.BindingName,
+		PackName:             src.PackName,
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))
@@ -255,10 +368,20 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.InjectFragments = make([]string, len(src.InjectFragments))
 		copy(dst.InjectFragments, src.InjectFragments)
 	}
+	if len(src.AppendFragments) > 0 {
+		dst.AppendFragments = make([]string, len(src.AppendFragments))
+		copy(dst.AppendFragments, src.AppendFragments)
+	}
+	if len(src.InheritedAppendFragments) > 0 {
+		dst.InheritedAppendFragments = make([]string, len(src.InheritedAppendFragments))
+		copy(dst.InheritedAppendFragments, src.InheritedAppendFragments)
+	}
 	if len(src.InstallAgentHooks) > 0 {
 		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
 	}
+	dst.SkillsDir = src.SkillsDir
+	dst.MCPDir = src.MCPDir
 	if src.MaxActiveSessions != nil {
 		v := *src.MaxActiveSessions
 		dst.MaxActiveSessions = &v
@@ -285,9 +408,17 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.HooksInstalled
 		dst.HooksInstalled = &v
 	}
+	if src.InjectAssignedSkills != nil {
+		v := *src.InjectAssignedSkills
+		dst.InjectAssignedSkills = &v
+	}
 	if src.DefaultSlingFormula != nil {
 		v := *src.DefaultSlingFormula
 		dst.DefaultSlingFormula = &v
+	}
+	if src.InheritedDefaultSlingFormula != nil {
+		v := *src.InheritedDefaultSlingFormula
+		dst.InheritedDefaultSlingFormula = &v
 	}
 	if src.Attach != nil {
 		v := *src.Attach
@@ -307,31 +438,140 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 			dst.OptionDefaults[k] = v
 		}
 	}
+	if src.AssignedWorkDeferLimit != nil {
+		v := *src.AssignedWorkDeferLimit
+		dst.AssignedWorkDeferLimit = &v
+	}
 	return dst
+}
+
+// poolOnBootConcurrency bounds how many on_boot hooks run at once.
+//
+// Six, because the hooks are light bd probes with their own hookTimeout and the
+// cost being removed here is the SUM of those timeouts: a city with a dozen pool
+// agents paid a dozen sequential probe budgets before it could serve, 3m12s of
+// one maintainer-city boot (ga-1e78j). A bound keeps a city with many pools from
+// turning its own recovery sweep into a store-wide read storm.
+const poolOnBootConcurrency = 6
+
+// poolOnBootHook is one agent's resolved on_boot invocation.
+type poolOnBootHook struct {
+	agent   string
+	command string
+	dir     string
+	env     map[string]string
 }
 
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
+//
+// Planning is serial and execution is parallel, and the split is load-bearing
+// rather than stylistic. Resolving a hook's environment goes through
+// controllerQueryRuntimeEnv, whose recovery-enabled path can restart a managed
+// Dolt server; running that from every agent at once is precisely the read storm
+// the no-recovery variants exist to bound (ga-cdmx6x). Template expansion also
+// reports malformed commands to the shared stderr. So the impure half stays on
+// one goroutine, and only the subprocesses fan out.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
+	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr)
+}
+
+// planPoolOnBootHooks resolves every eligible pool agent's on_boot command,
+// working directory and environment, in config order. An agent whose
+// environment cannot be resolved is reported and dropped, exactly as the serial
+// loop did.
+func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []poolOnBootHook {
+	cityName := workdirutil.CityName(cityPath, cfg)
+	var hooks []poolOnBootHook
 	for _, a := range cfg.Agents {
-		maxSess := a.EffectiveMaxActiveSessions()
-		isMultiSession := maxSess == nil || *maxSess != 1
-		if !isMultiSession || a.Implicit {
+		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
 		}
-		cmd := a.EffectiveOnBoot()
+		cmd := a.EffectiveOnBootFor(config.QueryTopology{Beads: cfg.Beads})
 		if cmd == "" {
 			continue
 		}
-		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
-		if _, err := runner(cmd, dir); err != nil {
-			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
+		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
+		if err != nil {
+			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
+			continue
 		}
+		hooks = append(hooks, poolOnBootHook{
+			agent:   a.QualifiedName(),
+			command: cmd,
+			dir:     agentCommandDir(cityPath, &a, cfg.Rigs),
+			env:     env,
+		})
 	}
+	return hooks
 }
 
-// discoverPoolInstances returns qualified instance names for a multi-instance pool.
-// For bounded pools (max > 1), generates static names {name}-1..{name}-{max}.
+// runPoolOnBootHooks runs the planned hooks concurrently, bounded by
+// poolOnBootConcurrency, and returns only once every one of them has finished.
+//
+// Each hook's log lines are buffered and written in a single call, so an
+// agent's failure and its recovery diagnostic stay together instead of
+// interleaving with another agent's.
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer) {
+	if len(hooks) == 0 {
+		return
+	}
+	var logMu sync.Mutex
+	emit := func(block []byte) {
+		if len(block) == 0 {
+			return
+		}
+		logMu.Lock()
+		defer logMu.Unlock()
+		stderr.Write(block) //nolint:errcheck // best-effort stderr
+	}
+
+	sem := make(chan struct{}, poolOnBootConcurrency)
+	var wg sync.WaitGroup
+	for _, hook := range hooks {
+		wg.Add(1)
+		go func(hook poolOnBootHook) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Registered last so it runs FIRST on the way out: the panic is
+			// recovered and folded into this hook's block before the slot is
+			// released and before wg.Done. A panic escaping here would take the
+			// whole supervisor down — every city, not just this one — because a
+			// goroutine has nothing above it to recover. Serially these hooks ran
+			// under the per-city recover in startCityWorkers, so containing them
+			// is preserving that, not adding to it. on_boot is best-effort
+			// recovery work, so a panicking hook is logged and skipped exactly
+			// like a failing one.
+			var block bytes.Buffer
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(&block, "on_boot %s: hook panicked: %v\n", hook.agent, r) //nolint:errcheck // bytes.Buffer
+				}
+				emit(block.Bytes())
+			}()
+
+			out, err := runner(hook.command, hook.dir, hook.env)
+			if err != nil {
+				fmt.Fprintf(&block, "on_boot %s: %v\n", hook.agent, err) //nolint:errcheck // bytes.Buffer
+			}
+			// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
+			// the loop could not complete, which exits 0 (so err is nil and the
+			// diagnostic rides stdout). A user on_boot override is passed through
+			// verbatim and carries no marker, so its arbitrary stdout is left alone.
+			if strings.Contains(out, config.RecoveryHookMarker) {
+				fmt.Fprintf(&block, "on_boot %s: %s\n", hook.agent, strings.TrimSpace(out)) //nolint:errcheck // bytes.Buffer
+			}
+		}(hook)
+	}
+	wg.Wait()
+}
+
+// discoverPoolInstances returns qualified runtime identities for a pool-shaped
+// agent. Canonical singleton pools use the configured qualified name. Bounded
+// multi-instance pools generate static names {name}-1..{name}-{max}.
 // For unlimited pools (max < 0), discovers running instances via session provider
 // prefix matching.
 func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent,
@@ -339,12 +579,17 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 ) []string {
 	isUnlimited := sp0.Max < 0
 	if !isUnlimited {
+		if a.UsesCanonicalSingletonPoolIdentity() {
+			return discoverCanonicalSingletonPoolInstances(a, cityName, st, sp)
+		}
 		// Bounded pool: static enumeration.
 		var names []string
 		for i := 1; i <= sp0.Max; i++ {
 			instanceName := poolInstanceName(agentName, i, a)
 			qn := instanceName
-			if agentDir != "" {
+			if a != nil {
+				qn = a.QualifiedInstanceName(instanceName)
+			} else if agentDir != "" {
 				qn = agentDir + "/" + instanceName
 			}
 			names = append(names, qn)
@@ -357,7 +602,9 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	// When bead-derived session names ("s-{beadID}") are active, this prefix
 	// match will fail. Migrate to bead store query by template metadata.
 	qnPrefix := agentName + "-"
-	if agentDir != "" {
+	if a != nil {
+		qnPrefix = a.QualifiedName() + "-"
+	} else if agentDir != "" {
 		qnPrefix = agentDir + "/" + agentName + "-"
 	}
 	// Build the session name prefix to match against running sessions.
@@ -379,16 +626,52 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 			if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
 				qnSanitized = qnSanitized[len(templatePrefix):]
 			}
-			// Unsanitize: "--" → "/"
-			qn := strings.ReplaceAll(qnSanitized, "--", "/")
+			qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
 			names = append(names, qn)
 		}
 	}
 	return names
 }
 
+func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st string, sp runtime.Provider) []string {
+	if a == nil {
+		return nil
+	}
+	canonical := a.QualifiedName()
+	names := []string{canonical}
+	if sp == nil {
+		return names
+	}
+	prefix := agent.SessionNameFor(cityName, canonical+"-", st)
+	running, err := sp.ListRunning("")
+	if err != nil {
+		return names
+	}
+	templatePrefix := agent.SessionNameFor(cityName, "", st)
+	stale := make([]string, 0, len(running))
+	seen := map[string]bool{canonical: true}
+	for _, sn := range running {
+		if !strings.HasPrefix(sn, prefix) {
+			continue
+		}
+		qnSanitized := sn
+		if templatePrefix != "" && strings.HasPrefix(qnSanitized, templatePrefix) {
+			qnSanitized = qnSanitized[len(templatePrefix):]
+		}
+		qn := agent.UnsanitizeQualifiedNameFromSession(qnSanitized)
+		if seen[qn] || nonExpandingPoolIdentitySlot(a, qn) <= 0 {
+			continue
+		}
+		seen[qn] = true
+		stale = append(stale, qn)
+	}
+	sort.Strings(stale)
+	return append(names, stale...)
+}
+
 func resolvePoolSessionRefs(
 	store beads.Store,
+	cfg *config.City,
 	agentName, agentDir string,
 	sp0 scaleParams, a *config.Agent,
 	cityName, sessionTemplate string,
@@ -396,12 +679,14 @@ func resolvePoolSessionRefs(
 	stderr io.Writer,
 ) []poolSessionRef {
 	template := agentName
-	if agentDir != "" {
+	if a != nil {
+		template = a.QualifiedName()
+	} else if agentDir != "" {
 		template = agentDir + "/" + agentName
 	}
 	seenSessions := make(map[string]bool)
 	var refs []poolSessionRef
-	poolSessions, err := lookupPoolSessionNames(store, template)
+	poolSessions, err := lookupPoolSessionNameCandidates(store, template, cfg, a)
 	if err != nil && stderr != nil {
 		fmt.Fprintf(stderr, "gc lifecycle: pool bead lookup for %s returned error (legacy discovery also runs): %v\n", template, err) //nolint:errcheck
 	}
@@ -411,15 +696,17 @@ func resolvePoolSessionRefs(
 	}
 	sort.Strings(poolInstances)
 	for _, qualifiedInstance := range poolInstances {
-		sessionName := poolSessions[qualifiedInstance]
-		if sessionName == "" || seenSessions[sessionName] {
-			continue
+		for _, candidate := range poolSessions[qualifiedInstance] {
+			sessionName := candidate.sessionName
+			if sessionName == "" || seenSessions[sessionName] {
+				continue
+			}
+			seenSessions[sessionName] = true
+			refs = append(refs, poolSessionRef{
+				qualifiedInstance: qualifiedInstance,
+				sessionName:       sessionName,
+			})
 		}
-		seenSessions[sessionName] = true
-		refs = append(refs, poolSessionRef{
-			qualifiedInstance: qualifiedInstance,
-			sessionName:       sessionName,
-		})
 	}
 	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
 		sessionName := lookupSessionNameOrLegacy(store, cityName, qualifiedInstance, sessionTemplate)
@@ -433,4 +720,29 @@ func resolvePoolSessionRefs(
 		})
 	}
 	return refs
+}
+
+func selectRunningPoolSessionRefs(store beads.Store, sp runtime.Provider, cfg *config.City, refs []poolSessionRef) ([]poolSessionRef, error) {
+	grouped := make(map[string][]poolSessionRef)
+	order := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if _, ok := grouped[ref.qualifiedInstance]; !ok {
+			order = append(order, ref.qualifiedInstance)
+		}
+		grouped[ref.qualifiedInstance] = append(grouped[ref.qualifiedInstance], ref)
+	}
+
+	live := make([]poolSessionRef, 0, len(order))
+	for _, qualifiedInstance := range order {
+		for _, ref := range grouped[qualifiedInstance] {
+			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, ref.sessionName)
+			if err != nil {
+				return nil, fmt.Errorf("observing %s: %w", ref.sessionName, err)
+			}
+			if running {
+				live = append(live, ref)
+			}
+		}
+	}
+	return live, nil
 }

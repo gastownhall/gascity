@@ -3,32 +3,66 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
+type partialAgentSessionLister struct {
+	running []string
+	err     error
+}
+
+func (p partialAgentSessionLister) ListRunning(prefix string) ([]string, error) {
+	var filtered []string
+	for _, name := range p.running {
+		if len(prefix) == 0 || strings.HasPrefix(name, prefix) {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered, p.err
+}
+
+type activeBeadQueryStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Assignee != "" && query.Status == "in_progress" {
+		s.queries = append(s.queries, query)
+	}
+	return s.Store.List(query)
+}
+
 func TestAgentList(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var resp listResponse
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -47,10 +81,11 @@ func TestAgentListPoolExpansion(t *testing.T) {
 		},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -93,10 +128,11 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--polecat-1", runtime.Config{}) //nolint:errcheck
 	state.sp.Start(context.Background(), "myrig--polecat-2", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -118,6 +154,72 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 	for i, item := range resp.Items {
 		if item.Pool != "myrig/polecat" {
 			t.Errorf("Items[%d].Pool = %q, want %q", i, item.Pool, "myrig/polecat")
+		}
+		if !item.Running {
+			t.Errorf("Items[%d].Running = false, want true", i)
+		}
+	}
+}
+
+func TestDiscoverUnlimitedPoolFailsClosedOnPartialListResults(t *testing.T) {
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(0),
+		MaxActiveSessions: intPtr(-1),
+	}
+	sp := partialAgentSessionLister{
+		running: []string{"myrig--polecat-1", "myrig--polecat-2"},
+		err:     &runtime.PartialListError{Err: errors.New("remote backend down")},
+	}
+
+	got := discoverUnlimitedPool(a, "myrig/polecat", "test-city", "", sp)
+	if len(got) != 0 {
+		t.Fatalf("len = %d, want fail-closed empty result on partial list", len(got))
+	}
+}
+
+func TestAgentListUnlimitedImportedPoolDiscovery(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "polecat",
+			Dir:               "myrig",
+			BindingName:       "gs",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
+		},
+	}
+	state.sp.Start(context.Background(), "myrig--gs__polecat-1", runtime.Config{}) //nolint:errcheck
+	state.sp.Start(context.Background(), "myrig--gs__polecat-2", runtime.Config{}) //nolint:errcheck
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if resp.Total != 2 {
+		t.Fatalf("Total = %d, want 2", resp.Total)
+	}
+
+	for i, item := range resp.Items {
+		if item.Name != "myrig/gs.polecat-1" && item.Name != "myrig/gs.polecat-2" {
+			t.Errorf("Items[%d].Name = %q, want imported pool member name", i, item.Name)
+		}
+		if item.Pool != "myrig/gs.polecat" {
+			t.Errorf("Items[%d].Pool = %q, want %q", i, item.Pool, "myrig/gs.polecat")
 		}
 		if !item.Running {
 			t.Errorf("Items[%d].Running = false, want true", i)
@@ -151,6 +253,157 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 	}
 }
 
+func TestFindAgentCanonicalSingletonPoolRejectsSuffix(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
+		},
+	}
+	if a, ok := findAgent(cfg, "myrig/worker"); !ok || a.QualifiedName() != "myrig/worker" {
+		t.Fatalf("findAgent(myrig/worker) = (%q, %v), want canonical template", a.QualifiedName(), ok)
+	}
+	if _, ok := findAgent(cfg, "myrig/worker-1"); ok {
+		t.Fatal("findAgent(myrig/worker-1) = true, want false for canonical singleton pool")
+	}
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	if len(expanded) != 1 {
+		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
+	}
+	if expanded[0].qualifiedName != "myrig/worker" {
+		t.Fatalf("expandAgent()[0].qualifiedName = %q, want myrig/worker", expanded[0].qualifiedName)
+	}
+}
+
+func TestExpandAgentDisabledAgentUsesConfiguredIdentity(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0)},
+		},
+	}
+	if isMultiSessionAgent(cfg.Agents[0]) {
+		t.Fatal("isMultiSessionAgent(max=0) = true, want false")
+	}
+	expanded := expandAgent(cfg.Agents[0], "city", "", nil)
+	if len(expanded) != 1 {
+		t.Fatalf("expandAgent() returned %d entries, want 1", len(expanded))
+	}
+	if expanded[0].qualifiedName != "myrig/worker" {
+		t.Fatalf("expandAgent()[0].qualifiedName = %q, want myrig/worker", expanded[0].qualifiedName)
+	}
+	if expanded[0].pool != "" {
+		t.Fatalf("expandAgent()[0].pool = %q, want empty", expanded[0].pool)
+	}
+}
+
+// TestFindAgentBoundedPoolMember covers bounded multi-session pools — both
+// V1 (no BindingName) and V2 (with BindingName), with and without
+// NamepoolNames. The V2 cases regressed silently because the bounded
+// path enumerated raw member names without applying the binding prefix
+// the listing endpoint adds via Agent.QualifiedInstanceName, so detail
+// lookups for those instances 404'd while the listing happily emitted
+// them. The unlimited path already handled this correctly.
+func TestFindAgentBoundedPoolMember(t *testing.T) {
+	tests := []struct {
+		name     string
+		agent    config.Agent
+		query    string
+		wantOK   bool
+		wantName string
+	}{
+		{
+			name: "v1 numeric in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "myrig/polecat-1", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v1 namepool in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+				NamepoolNames: []string{"alpha", "bravo", "charlie"},
+			},
+			query: "myrig/bravo", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 numeric city-scoped",
+			agent: config.Agent{
+				Name:              "dog",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "gastown.dog-1", wantOK: true, wantName: "dog",
+		},
+		{
+			name: "v2 numeric in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "myrig",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "myrig/gastown.polecat-2", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 namepool in rig",
+			agent: config.Agent{
+				Name:              "polecat",
+				Dir:               "nextlex-legal-rag",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+				NamepoolNames: []string{"furiosa", "nux", "slit", "rictus", "capable"},
+			},
+			query: "nextlex-legal-rag/gastown.furiosa", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 namepool city-scoped",
+			agent: config.Agent{
+				Name:              "polecat",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+			query: "gastown.nux", wantOK: true, wantName: "polecat",
+		},
+		{
+			name: "v2 unknown instance does not match",
+			agent: config.Agent{
+				Name:              "dog",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+			},
+			query: "gastown.dog-99", wantOK: false,
+		},
+		{
+			name: "v2 namepool unknown member does not match",
+			agent: config.Agent{
+				Name:              "polecat",
+				BindingName:       "gastown",
+				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+				NamepoolNames: []string{"furiosa", "nux"},
+			},
+			query: "gastown.unknown", wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{tt.agent}}
+			a, ok := findAgent(cfg, tt.query)
+			if ok != tt.wantOK {
+				t.Fatalf("findAgent(%q) ok = %v, want %v", tt.query, ok, tt.wantOK)
+			}
+			if tt.wantOK && a.Name != tt.wantName {
+				t.Errorf("findAgent(%q).Name = %q, want %q", tt.query, a.Name, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestAgentListFilterByRig(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents = []config.Agent{
@@ -162,10 +415,11 @@ func TestAgentListFilterByRig(t *testing.T) {
 		{Name: "rig2", Path: filepath.Join(state.cityPath, "repos", "rig2")},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents?rig=rig1", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents?rig=rig1"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -188,10 +442,11 @@ func TestAgentListFilterByRunning(t *testing.T) {
 	}
 	state.sp.Start(context.Background(), "running-agent", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents?running=true", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents?running=true"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -206,13 +461,168 @@ func TestAgentListFilterByRunning(t *testing.T) {
 	}
 }
 
+// TestAgentListSuspendedCheckGatedByRunning guards against a regression
+// where the suspended-flag GetMeta lookup ran unconditionally, even for
+// agents with no session at all. A non-running agent has no session to
+// query, so the handler must not issue any GetMeta call for it.
+func TestAgentListSuspendedCheckGatedByRunning(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	if n := state.sp.CountCalls("GetMeta", "myrig--worker"); n != 0 {
+		t.Errorf("GetMeta calls for non-running agent = %d, want 0 (suspended check must be gated behind running)", n)
+	}
+}
+
+// rosterFake augments runtime.Fake with the optional batch-read interfaces
+// ([runtime.SessionRosterProvider], [runtime.EnvironmentBatchProvider]) so
+// tests can assert the handler prefers them over per-session-name calls.
+type rosterFake struct {
+	*runtime.Fake
+	roster map[string]runtime.SessionRosterEntry
+	env    map[string]map[string]string
+}
+
+func (r *rosterFake) SessionRoster() (map[string]runtime.SessionRosterEntry, error) {
+	return r.roster, nil
+}
+
+func (r *rosterFake) GetAllEnvironment(name string) (map[string]string, error) {
+	return r.env[name], nil
+}
+
+// TestAgentListPrefersBatchSessionRosterAndEnvironment verifies that when
+// the session provider implements the optional batch-read interfaces, the
+// handler sources running/attached/last-activity/suspended/session-id from
+// the single batched calls instead of falling back to the per-session-name
+// IsRunning/IsAttached/GetLastActivity/GetMeta path.
+func TestAgentListPrefersBatchSessionRosterAndEnvironment(t *testing.T) {
+	state := newFakeState(t)
+	lastActivity := time.Unix(1700000000, 0)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			"myrig--worker": {Attached: true, LastActivity: lastActivity},
+		},
+		env: map[string]map[string]string{
+			"myrig--worker": {"suspended": "true", "GC_SESSION_ID": "sess-xyz"},
+		},
+	}
+	// Liveness still comes from IsRunning, so the session must actually be
+	// started; the roster only supplies attributes for it.
+	fake.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if !item.Running {
+		t.Error("Running = false, want true")
+	}
+	if !item.Suspended {
+		t.Error("Suspended = false, want true (from batched GetAllEnvironment)")
+	}
+	if item.Session == nil || !item.Session.Attached {
+		t.Errorf("Session.Attached = %+v, want Attached=true (from roster)", item.Session)
+	}
+	if item.Session == nil || item.Session.LastActivity == nil || !item.Session.LastActivity.Equal(lastActivity) {
+		t.Errorf("Session.LastActivity = %+v, want %v (from roster)", item.Session, lastActivity)
+	}
+
+	// IsRunning is deliberately absent: it is the liveness source and is
+	// already a single cached fleet-wide read, so batching does not replace
+	// it. The reads below are the ones the batch path subsumes.
+	for _, method := range []string{"IsAttached", "GetLastActivity", "GetMeta"} {
+		if n := fake.CountCalls(method, "myrig--worker"); n != 0 {
+			t.Errorf("%s calls = %d, want 0 (batch path should bypass per-session-name methods)", method, n)
+		}
+	}
+}
+
+// TestAgentListRosterPresenceIsNotLiveness guards the invariant that the
+// batched session roster is an attributes source, not a liveness source.
+// The runtime's session listing still reports a session whose pane has
+// exited (tmux keeps such a corpse listed under remain-on-exit), while
+// IsRunning excludes it. A name present in the roster but not running must
+// therefore report running=false, or a crashed agent surfaces as idle.
+func TestAgentListRosterPresenceIsNotLiveness(t *testing.T) {
+	state := newFakeState(t)
+	fake := &rosterFake{
+		Fake: runtime.NewFake(),
+		roster: map[string]runtime.SessionRosterEntry{
+			// Present in the roster, but never started: the corpse case.
+			"myrig--worker": {Attached: true, LastActivity: time.Unix(1700000000, 0)},
+		},
+		env: map[string]map[string]string{},
+	}
+	state.sessionProvider = fake
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+
+	item := resp.Items[0]
+	if item.Running {
+		t.Error("Running = true, want false (roster presence must not imply liveness)")
+	}
+	if item.Session != nil {
+		t.Errorf("Session = %+v, want nil for a non-running agent", item.Session)
+	}
+}
+
 func TestAgentGet(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -225,13 +635,157 @@ func TestAgentGet(t *testing.T) {
 	}
 }
 
+func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	work, err := state.stores["myrig"].Create(beads.Bead{
+		Title: "active work",
+	})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := state.stores["myrig"].Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp.ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+}
+
+func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	store := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	work, err := store.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items len = %d, want 1", len(resp.Items))
+	}
+	if got := resp.Items[0].ActiveBead; got != work.ID {
+		t.Fatalf("active_bead = %q, want %q", got, work.ID)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("active-bead queries = %d, want 1", len(store.queries))
+	}
+	if store.queries[0].Live {
+		t.Fatal("agent list active-bead lookup should stay cached")
+	}
+}
+
+func TestAgentGetActiveBeadUsesLiveLookup(t *testing.T) {
+	state := newFakeState(t)
+	sessionName := "myrig--worker"
+	sessionID := "mc-session"
+	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
+		t.Fatalf("Start(%s): %v", sessionName, err)
+	}
+	if err := state.sp.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	backing := beads.NewMemStore()
+	work, err := backing.Create(beads.Bead{Title: "active work"})
+	if err != nil {
+		t.Fatalf("Create(work): %v", err)
+	}
+	status := "in_progress"
+	assignee := sessionID
+	if err := backing.Update(work.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("Update(work): %v", err)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	state.stores["myrig"] = cache
+
+	reassigned := "other-session"
+	if err := backing.Update(work.ID, beads.UpdateOpts{Assignee: &reassigned}); err != nil {
+		t.Fatalf("reassign backing work: %v", err)
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := resp.ActiveBead; got != "" {
+		t.Fatalf("active_bead = %q, want empty after external reassignment", got)
+	}
+}
+
 func TestAgentGetNotFound(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/nonexistent"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -243,10 +797,11 @@ func TestAgentOutputPeekFallback(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "Hello from agent")
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -292,13 +847,34 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 	}
 }
 
+func TestFindAgent_QualifiedGenericRigScopedTemplate(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "reviewer", Scope: "rig"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha"},
+			{Name: "beta"},
+		},
+	}
+
+	a, ok := findAgent(cfg, "alpha/reviewer")
+	if !ok {
+		t.Fatal("findAgent(alpha/reviewer) = false, want true")
+	}
+	if got := a.QualifiedName(); got != "alpha/reviewer" {
+		t.Fatalf("QualifiedName() = %q, want alpha/reviewer", got)
+	}
+}
+
 func TestAgentOutputNotRunning(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker/output"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -308,11 +884,12 @@ func TestAgentOutputNotRunning(t *testing.T) {
 func TestAgentSuspendResume(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Suspend.
-	req := newPostRequest("/v0/agent/myrig/worker/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("suspend: status = %d, want %d", rec.Code, http.StatusOK)
@@ -322,9 +899,9 @@ func TestAgentSuspendResume(t *testing.T) {
 	}
 
 	// Resume.
-	req = newPostRequest("/v0/agent/myrig/worker/resume", nil)
+	req = newPostRequest(cityURL(state, "/agent/myrig/worker/resume"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume: status = %d, want %d", rec.Code, http.StatusOK)
@@ -337,14 +914,19 @@ func TestAgentSuspendResume(t *testing.T) {
 func TestAgentRuntimeActionsRemoved(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
+	// Unknown actions (kill/drain/undrain/nudge/restart) are rejected
+	// by the spec's action enum at the Huma validation layer, before
+	// the handler runs. A 422 with a Problem Details body is the
+	// contract for "your request violated the input schema."
 	for _, action := range []string{"kill", "drain", "undrain", "nudge", "restart"} {
-		req := newPostRequest("/v0/agent/myrig/worker/"+action, nil)
+		req := newPostRequest(cityURL(state, "/agent/myrig/worker/")+action, nil)
 		rec := httptest.NewRecorder()
-		srv.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusNotFound)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, want %d", action, rec.Code, http.StatusUnprocessableEntity)
 		}
 	}
 }
@@ -352,10 +934,11 @@ func TestAgentRuntimeActionsRemoved(t *testing.T) {
 func TestAgentActionNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := newPostRequest("/v0/agent/nonexistent/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/nonexistent/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
@@ -366,10 +949,11 @@ func TestAgentActionNotMutator(t *testing.T) {
 	// fakeState (not fakeMutatorState) doesn't implement StateMutator.
 	state := newFakeState(t)
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := newPostRequest("/v0/agent/myrig/worker/suspend", nil)
+	req := newPostRequest(cityURL(state, "/agent/myrig/worker/suspend"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotImplemented)
@@ -384,10 +968,11 @@ func TestAgentProviderAndDisplayName(t *testing.T) {
 		{Name: "coder", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 	}
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -446,10 +1031,11 @@ func TestAgentStateEnum(t *testing.T) {
 			state := newFakeState(t)
 			tt.setup(state)
 			srv := New(state)
+			h := newTestCityHandlerWith(t, state, srv)
 
-			req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+			req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 			rec := httptest.NewRecorder()
-			srv.ServeHTTP(rec, req)
+			h.ServeHTTP(rec, req)
 
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -469,11 +1055,12 @@ func TestAgentPeekViaQueryParam(t *testing.T) {
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	state.sp.SetPeekOutput("myrig--worker", "line1\nline2\nline3")
 	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
 
 	// Without ?peek=true — no last_output.
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	var resp struct {
 		Items []agentResponse `json:"items"`
@@ -484,9 +1071,9 @@ func TestAgentPeekViaQueryParam(t *testing.T) {
 	}
 
 	// With ?peek=true — includes last_output.
-	req = httptest.NewRequest("GET", "/v0/agents?peek=true", nil)
+	req = httptest.NewRequest("GET", cityURL(state, "/agents?peek=true"), nil)
 	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
 	if resp.Items[0].LastOutput == "" {
@@ -520,10 +1107,11 @@ func TestAgentModelAndContext(t *testing.T) {
 
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{searchDir}
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -571,10 +1159,11 @@ func TestAgentActivityFromSessionLog(t *testing.T) {
 
 	srv := New(state)
 	srv.sessionLogSearchPaths = []string{searchDir}
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -648,5 +1237,413 @@ func TestComputeAgentState(t *testing.T) {
 				t.Errorf("computeAgentState() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAgentList_BaseOnlyDescendantUsesResolvedCache covers the
+// base-only descendant contract: a [providers.codex-max] declared
+// with `base = "builtin:codex"` and no explicit command must still
+// report `display_name` + `available=true` in /v0/agents, because
+// the resolved-provider cache carries the inherited Command and the
+// display name comes from the builtin ancestor.
+func TestAgentList_BaseOnlyDescendantUsesResolvedCache(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		// MaxActiveSessions=1 keeps this a non-pool agent so expansion
+		// yields a single entry — SupportsInstanceExpansion returns
+		// true when the field is unset (unlimited pool by default).
+		{Name: "mayor", Dir: "myrig", Provider: "codex-max", MaxActiveSessions: intPtr(1)},
+	}
+	baseCodex := "builtin:codex"
+	state.cfg.Providers = map[string]config.ProviderSpec{
+		// Base-only descendant: no Command, no DisplayName.
+		"codex-max": {Base: &baseCodex},
+	}
+	state.cfg.ResolvedProviders = map[string]config.ResolvedProvider{
+		"codex-max": {
+			Name:            "codex-max",
+			BuiltinAncestor: "codex",
+			Command:         "codex", // inherited from builtin:codex
+			Chain: []config.HopIdentity{
+				{Kind: "custom", Name: "codex-max"},
+				{Kind: "builtin", Name: "codex"},
+			},
+		},
+	}
+	srv := New(state)
+	// Simulate the binary being installed by overriding LookPath.
+	srv.LookPathFunc = func(bin string) (string, error) {
+		if bin == "codex" {
+			return "/usr/local/bin/codex", nil
+		}
+		return "", os.ErrNotExist
+	}
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items length = %d, want 1", len(resp.Items))
+	}
+	agent := resp.Items[0]
+	if agent.Provider != "codex-max" {
+		t.Errorf("provider = %q, want codex-max", agent.Provider)
+	}
+	// DisplayName must come from the builtin ancestor (Codex CLI),
+	// since the leaf provider did not declare one.
+	if agent.DisplayName != "Codex CLI" {
+		t.Errorf("display_name = %q, want %q (inherited from builtin:codex)", agent.DisplayName, "Codex CLI")
+	}
+	// The binary "codex" is stubbed as available, so the agent must
+	// be reported available.
+	if !agent.Available {
+		t.Errorf("available = false (reason: %q); want true — resolved cache should surface inherited command", agent.UnavailableReason)
+	}
+}
+
+// TestProviderPathCheck_BaseOnlyDescendant ensures the PATH probe uses
+// the inherited command from the resolved cache rather than the empty
+// Command on the raw spec.
+func TestProviderPathCheck_BaseOnlyDescendant(t *testing.T) {
+	baseCodex := "builtin:codex"
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"codex-max": {Base: &baseCodex},
+		},
+		ResolvedProviders: map[string]config.ResolvedProvider{
+			"codex-max": {
+				Name:            "codex-max",
+				BuiltinAncestor: "codex",
+				Command:         "codex",
+			},
+		},
+	}
+	got := providerPathCheck("codex-max", cfg)
+	if got != "codex" {
+		t.Errorf("providerPathCheck = %q, want %q", got, "codex")
+	}
+}
+
+// TestProviderPathCheck_FallsBackToRawWhenNoCache keeps Phase A configs
+// working: when the resolved cache is empty, we still read raw
+// Command/PathCheck for the provider.
+func TestProviderPathCheck_FallsBackToRawWhenNoCache(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "custom-cli"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "custom-cli" {
+		t.Errorf("providerPathCheck = %q, want custom-cli", got)
+	}
+}
+
+// TestProviderPathCheck_StripsCommandArgs mirrors the config-side
+// pathCheckBinary behavior: an unset PathCheck with an args-bearing
+// Command must resolve to the bare executable token, so PATH detection
+// checks "my-agent" rather than the whole "my-agent --agent coder" string.
+func TestProviderPathCheck_StripsCommandArgs(t *testing.T) {
+	cfg := &config.City{
+		Providers: map[string]config.ProviderSpec{
+			"custom": {Command: "my-agent --agent coder"},
+		},
+	}
+	if got := providerPathCheck("custom", cfg); got != "my-agent" {
+		t.Errorf("providerPathCheck = %q, want my-agent", got)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit covers the happy
+// path: the freshly created agent is already visible in the snapshot
+// and the wait returns without sleeping.
+func TestWaitForAgentVisibilityIn_ReturnsImmediatelyOnHit(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		return cfg
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := WaitForAgentVisibilityIn(ctx, snapshot, "alpha/worker"); err != nil {
+		t.Fatalf("WaitForAgentVisibilityIn: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("snapshot calls = %d, want 1 (no polling on hit)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_PollsUntilVisible covers the race recovery
+// path: a stale runtime tick clobbers the snapshot after CreateAgent, the
+// next runtime tick restores it, and the wait succeeds once the agent
+// reappears.
+func TestWaitForAgentVisibilityIn_PollsUntilVisible(t *testing.T) {
+	stale := &config.City{}
+	fresh := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "alpha"}},
+	}
+	calls := 0
+	snapshot := func() *config.City {
+		calls++
+		if calls < 3 {
+			return stale
+		}
+		return fresh
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond); err != nil {
+		t.Fatalf("waitForAgentVisibilityIn: %v", err)
+	}
+	if calls < 3 {
+		t.Errorf("snapshot calls = %d, want >= 3 (polled past stale snapshots)", calls)
+	}
+}
+
+// TestWaitForAgentVisibilityIn_RespectsContext covers the bounded-failure
+// case: the agent never appears and the wait surfaces ctx.Err() instead of
+// blocking indefinitely.
+func TestWaitForAgentVisibilityIn_RespectsContext(t *testing.T) {
+	snapshot := func() *config.City { return &config.City{} }
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := waitForAgentVisibilityIn(ctx, snapshot, "alpha/worker", time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want wrapped DeadlineExceeded", err)
+	}
+}
+
+// TestAgentListProvenanceCityNative verifies that an agent declared inline in
+// city.toml (present in both raw and expanded config) reports pack_derived=false
+// with an empty pack binding. A UI uses this to route an edit to the direct
+// PATCH /agent/{name} route rather than the patch overlay.
+func TestAgentListProvenanceCityNative(t *testing.T) {
+	state := newFakeState(t)
+	// Default fake: "worker" in "myrig" is inline (raw == expanded), so it
+	// is city-native, not pack-derived.
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if resp.Items[0].PackDerived {
+		t.Errorf("PackDerived = true, want false for city-native agent")
+	}
+	if resp.Items[0].Pack != "" {
+		t.Errorf("Pack = %q, want empty for city-native agent", resp.Items[0].Pack)
+	}
+}
+
+// TestAgentListProvenancePackDerived verifies that an agent originating from an
+// imported pack (present in expanded config but absent from raw) reports
+// pack_derived=true and pack = its import binding name. A UI uses this to route
+// an edit through the patch overlay (PUT /patches/agents) instead of attempting
+// a direct mutation that would return ErrPackDerived / 409.
+func TestAgentListProvenancePackDerived(t *testing.T) {
+	state := newFakeState(t)
+	// Expanded agent carries the import binding name that brought it into
+	// scope. Mirrors config-explain's TestHandleConfigExplain_PackDerivedAgent:
+	// pack-derived means present in expanded (cfg) but absent from raw.
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "worker",
+			Dir:               "myrig",
+			Provider:          "test-agent",
+			BindingName:       "gastown",
+			MaxActiveSessions: intPtr(1),
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		// No agents in raw — worker comes from pack expansion.
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("Total = %d, want 1", resp.Total)
+	}
+	if !resp.Items[0].PackDerived {
+		t.Errorf("PackDerived = false, want true for pack-derived agent")
+	}
+	if resp.Items[0].Pack != "gastown" {
+		t.Errorf("Pack = %q, want %q (the import binding name)", resp.Items[0].Pack, "gastown")
+	}
+}
+
+// TestAgentGetProvenanceCityNative verifies the single-agent GET carries the
+// same provenance as the list: a city-native agent reports pack_derived=false
+// with an empty pack. (The non-omitempty pack_derived bool would otherwise
+// read as a confident false on this surface.)
+func TestAgentGetProvenanceCityNative(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PackDerived {
+		t.Errorf("PackDerived = true, want false for city-native agent")
+	}
+	if resp.Pack != "" {
+		t.Errorf("Pack = %q, want empty for city-native agent", resp.Pack)
+	}
+}
+
+// TestAgentGetProvenancePackDerived verifies the single-agent GET reports
+// pack_derived=true and the import binding name for a pack-derived agent,
+// matching the list surface so a UI gets the same routing signal either way.
+func TestAgentGetProvenancePackDerived(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "worker",
+			Dir:               "myrig",
+			Provider:          "test-agent",
+			BindingName:       "gastown",
+			MaxActiveSessions: intPtr(1),
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// Binding-stamped agents are addressed by their qualified name
+	// (dir/binding.base), matching AgentMatchesIdentity.
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/gastown.worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp agentResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.PackDerived {
+		t.Errorf("PackDerived = false, want true for pack-derived agent")
+	}
+	if resp.Pack != "gastown" {
+		t.Errorf("Pack = %q, want %q (the import binding name)", resp.Pack, "gastown")
+	}
+}
+
+// TestAgentListProvenancePoolInheritance verifies that every instance of a
+// bounded multi-session (pool) agent inherits the declared agent's provenance.
+// Provenance is a property of the declared agent, so all expanded members of a
+// pack-derived pool must report pack_derived=true with the same binding name.
+func TestAgentListProvenancePoolInheritance(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name:              "polecat",
+			Dir:               "myrig",
+			BindingName:       "gastown",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(3),
+			ScaleCheck:        "echo 3",
+		},
+	}
+	state.cfg.NamedSessions = nil
+	state.rawCfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/tmp/myrig"},
+		},
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("Total = %d, want 3 (bounded pool members)", resp.Total)
+	}
+	for i, item := range resp.Items {
+		if !item.PackDerived {
+			t.Errorf("Items[%d] (%s) PackDerived = false, want true", i, item.Name)
+		}
+		if item.Pack != "gastown" {
+			t.Errorf("Items[%d] (%s) Pack = %q, want %q", i, item.Name, item.Pack, "gastown")
+		}
 	}
 }

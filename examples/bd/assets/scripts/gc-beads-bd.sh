@@ -1,0 +1,3446 @@
+#!/bin/sh
+# gc-beads-bd — exec: beads provider for Dolt-backed beads (bd).
+#
+# Implements the exec beads lifecycle protocol:
+#   gc-beads-bd <operation> [args...]
+#
+# Operations: start, ensure-ready, stop, shutdown, init, health, recover, probe
+# Exit codes: 0 = success, 1 = error, 2 = not needed / not running
+#
+# Environment:
+#   GC_CITY_PATH  — city root directory (required for all operations)
+#   GC_CITY_RUNTIME_DIR — canonical hidden runtime root (optional)
+#   GC_PACK_STATE_DIR — canonical pack runtime root for dolt (optional)
+#   GC_DOLT       — set to "skip" to no-op all operations (exit 2)
+#   GC_BEADS_BACKEND — "dolt" (default) or "doltlite"
+#   GC_DOLT_HOST  — dolt server host (empty = managed local server bound to
+#                   127.0.0.1; 0.0.0.0 = managed local server exposed on all
+#                   interfaces; anything else = remote server GC won't manage)
+#   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
+#   GC_DOLT_USER  — dolt user (default: root)
+#   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
+#       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
+#       defaults, covering the start-flock winner's worst-case stop — 30s
+#       SIGTERM grace + SIGKILL lock gate + post-exit lock wait — plus the
+#       legacy 45s ready allowance)
+#   GC_DOLT_LOCK_RELEASE_TIMEOUT_MS — wait budget for dolt's on-disk exclusive
+#       store locks (<data_dir>/.dolt/noms/LOCK and
+#       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
+#       fail closed, in milliseconds (default: 60000). gc projects
+#       [dolt].dolt_lock_release_timeout from city.toml into this variable.
+
+set -e
+
+# --- Configuration ---
+
+# DOLT_PORT is set after derived paths are resolved (see allocate_port below).
+DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
+DOLT_USER="${GC_DOLT_USER:-root}"
+DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
+DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
+LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
+CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
+LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
+BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
+
+# Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
+# subshells, so a lazily-set memo there would never persist. Without flock
+# the dolt store lock guard (gastownhall/gascity#3174) cannot probe and
+# falls back to the legacy fail-open behavior; warn once so the disabled
+# guard is visible — but only for operations that reach the guard.
+# Status-style ops (health, probe, init, store bridge) never probe the
+# lock and would emit the warning on every invocation.
+FLOCK_AVAILABLE=true
+if ! command -v flock >/dev/null 2>&1; then
+    FLOCK_AVAILABLE=false
+    case "${1:-}" in
+        start|ensure-ready|stop|shutdown|recover)
+            echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+            ;;
+    esac
+fi
+
+# Derived paths (set after GC_CITY_PATH validation).
+GC_DIR=""
+PACK_STATE_DIR=""
+DATA_DIR=""
+LOG_FILE=""
+STATE_FILE=""
+PID_FILE=""
+LOCK_FILE=""
+CONFIG_FILE=""
+
+# --- Helpers ---
+
+die() {
+    echo "$@" >&2
+    exit 1
+}
+
+resolve_gc_helper_bin() {
+    if [ -n "${GC_BIN:-}" ]; then
+        printf '%s\n' "$GC_BIN"
+    fi
+    return 0
+}
+
+is_doltlite_backend() {
+    [ "$BEADS_BACKEND" = "doltlite" ]
+}
+
+resolve_gc_bin() {
+    if [ -n "${GC_BIN:-}" ]; then
+        printf '%s\n' "$GC_BIN"
+        return 0
+    fi
+    command -v gc 2>/dev/null || true
+}
+
+# is_remote returns 0 (true) when GC_DOLT_HOST explicitly names a remote
+# target. Empty, 127.0.0.1 (the default bind), and 0.0.0.0 (the explicit
+# wildcard opt-out for multi-host deployments) all mean GC owns a local
+# managed server.
+is_remote() {
+    case "${GC_DOLT_HOST:-}" in
+        ''|127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") return 1 ;;
+    esac
+    return 0
+}
+
+# connect_host returns the host to connect to (loopback IPv4 for local servers).
+# Using 127.0.0.1 avoids localhost -> ::1 resolution mismatches when the
+# managed Dolt server is only listening on IPv4.
+connect_host() {
+    if is_remote; then
+        echo "$GC_DOLT_HOST"
+    else
+        echo "127.0.0.1"
+    fi
+}
+
+trim_space() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+lower_dolt_database_name() {
+    trim_space "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_system_dolt_database_name() {
+    case "$(lower_dolt_database_name "$1")" in
+        information_schema|mysql|dolt|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_legacy_managed_probe_database_name() {
+    [ "$(lower_dolt_database_name "$1")" = "__gc_probe" ]
+}
+
+csv_unquote_single_field() {
+    local value
+    value="$1"
+    case "$value" in
+        \"*\")
+            case "$value" in
+                *\") ;;
+                *) return 1 ;;
+            esac
+            value=${value#\"}
+            value=${value%\"}
+            printf '%s\n' "$value" | sed 's/""/"/g'
+            ;;
+        *)
+            printf '%s\n' "$value"
+            ;;
+    esac
+}
+
+first_user_database_from_show_databases_csv() {
+    local line name
+    while IFS= read -r line || [ -n "$line" ]; do
+        name=$(csv_unquote_single_field "$line") || return 1
+        name=$(trim_space "$name")
+        [ -n "$name" ] || continue
+        [ "$(lower_dolt_database_name "$name")" = "database" ] && continue
+        if is_system_dolt_database_name "$name"; then
+            continue
+        fi
+        printf '%s\n' "$name"
+        return 0
+    done <<GC_SHOW_DATABASES_CSV
+$1
+GC_SHOW_DATABASES_CSV
+    return 0
+}
+
+quote_dolt_identifier() {
+    local escaped
+    escaped=$(printf '%s' "$1" | sed 's/`/``/g')
+    printf '`%s`' "$escaped"
+}
+
+# tcp_check_port returns 0 if the given port is reachable.
+tcp_check_port() {
+    local port="$1"
+    local host
+    host=$(connect_host)
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w 2 "$host" "$port" 2>/dev/null
+    elif command -v bash >/dev/null 2>&1; then
+        bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# tcp_check returns 0 if the dolt port is reachable.
+tcp_check() {
+    tcp_check_port "$DOLT_PORT"
+}
+
+run_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    "$@" &
+    local cmd_pid=$!
+    (
+        sleep "$timeout_seconds" 2>/dev/null || sleep 1
+        kill "$cmd_pid" 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 &
+    local watchdog_pid=$!
+    local status=0
+    wait "$cmd_pid" || status=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
+}
+
+run_lsof() {
+    command -v lsof >/dev/null 2>&1 || return 127
+    run_with_timeout "$LSOF_TIMEOUT_SECONDS" lsof "$@"
+}
+
+lsof_reports_open() {
+    local status
+    run_lsof "$@" >/dev/null 2>&1
+    status=$?
+    case "$status" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+canonical_dir() {
+    local dir="$1"
+    (cd "$dir" 2>/dev/null && pwd -P) || printf '%s\n' "$dir"
+}
+
+same_dir_path() {
+    local left="$1" right="$2" abs_left abs_right
+    [ "$left" = "$right" ] && return 0
+    abs_left=$(canonical_dir "$left")
+    abs_right=$(canonical_dir "$right")
+    [ "$abs_left" = "$abs_right" ]
+}
+
+path_under_data_dir() {
+    local path="$1" abs_data
+    abs_data=$(canonical_dir "$DATA_DIR")
+    case "$path" in
+        "$DATA_DIR"|"$DATA_DIR"/*|"$abs_data"|"$abs_data"/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# do_query_probe runs a read-only information_schema query against the dolt server.
+do_query_probe() {
+    local host gc_bin
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        "$gc_bin" dolt-state query-probe --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>&1
+        return $?
+    fi
+    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls         sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.SCHEMATA" >/dev/null 2>&1
+}
+
+# server_sql runs a SQL query against the running dolt server.
+# Returns 0 on success, 1 on failure. Stdout contains query output,
+# stderr contains error messages (callers must redirect as needed).
+server_sql() {
+    local host
+    host=$(connect_host)
+    dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -q "$1"
+}
+
+# is_retryable_error checks if an error message is a transient Dolt failure worth retrying.
+# Matches the 7 patterns from upstream isDoltRetryableError().
+is_retryable_error() {
+    case "$1" in
+        *"database is read only"*) return 0 ;;
+        *"cannot update manifest"*) return 0 ;;
+        *"optimistic lock"*) return 0 ;;
+        *"serialization failure"*) return 0 ;;
+        *"lock wait timeout"*) return 0 ;;
+        *"try restarting transaction"*) return 0 ;;
+        *"Unknown database"*) return 0 ;;
+    esac
+    return 1
+}
+
+sleep_ms() {
+    local ms="$1"
+    local seconds remainder
+    seconds=$((ms / 1000))
+    remainder=$((ms % 1000))
+    if [ "$remainder" -eq 0 ]; then
+        sleep "$seconds"
+    else
+        sleep "$seconds.$(printf '%03d' "$remainder")"
+    fi
+}
+
+# server_sql_retry wraps server_sql with exponential backoff on transient errors.
+# 5 attempts, backoff 500ms→1s→2s→4s→8s (capped at 15s).
+server_sql_retry() {
+    local query="$1"
+    local attempt=1
+    local max_attempts=5
+    local backoff_ms=500
+    local max_backoff_ms=15000
+    local output
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        output=$(server_sql "$query" 2>&1) && return 0
+
+        if ! is_retryable_error "$output"; then
+            echo "$output" >&2
+            return 1
+        fi
+
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+            backoff_ms=$((backoff_ms * 2))
+            if [ "$backoff_ms" -gt "$max_backoff_ms" ]; then
+                backoff_ms=$max_backoff_ms
+            fi
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "after $max_attempts retries: $output" >&2
+    return 1
+}
+
+# managed_backing_store_exists reports whether a Dolt database directory
+# backing SQL name $1 already exists under DATA_DIR. Catalog invisibility is
+# NOT proof of freshness: CREATE DATABASE IF NOT EXISTS adopts an existing
+# on-disk directory (see ensure_database_registered's header), so only the
+# disk answers "did this invocation create it". Dolt normalizes '-' to '_'
+# when exposing a directory as a SQL database, so compare normalized names.
+# Fails closed (reports "exists") when the server's disk is not ours to
+# inspect — a missing witness only re-arms bd's migration guard, while a
+# wrongly-written one bypasses it.
+managed_backing_store_exists() {
+    local want="$1" d base
+    is_remote && return 0
+    [ -n "$DATA_DIR" ] || return 0
+    [ -d "$DATA_DIR" ] || return 1
+    want=$(printf '%s' "$want" | tr '-' '_')
+    for d in "$DATA_DIR"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        if [ "$(printf '%s' "$base" | tr '-' '_')" = "$want" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ensure_database_registered creates the database on the running server if
+# it doesn't already exist. Dolt's CREATE DATABASE both creates the on-disk
+# directory and registers it in the server's in-memory catalog. If the
+# directory already exists (from bd init), CREATE DATABASE IF NOT EXISTS
+# adopts it. Without this, databases created by bd init on disk are
+# invisible to the running server.
+#
+# After CREATE DATABASE, polls with USE <db> to wait for catalog propagation
+# (CREATE DATABASE returns before the catalog is fully updated).
+ensure_database_registered() {
+    local db="$1"
+    GC_DATABASE_CREATED_BY_ENSURE=false
+
+    # Validate database name before SQL interpolation (upstream 38f7b380).
+    if ! valid_sql_name "$db"; then
+        echo "error: invalid database name: $db" >&2
+        return 1
+    fi
+
+    # Check if already visible.
+    if server_sql "USE \`$db\`" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Capture disk state BEFORE CREATE: adoption and creation are
+    # indistinguishable from the catalog's point of view.
+    local backing_absent=false
+    if ! managed_backing_store_exists "$db"; then
+        backing_absent=true
+    fi
+
+    # Register with the server (use retry for lock contention).
+    local reg_err
+    if ! reg_err=$(server_sql_retry "CREATE DATABASE IF NOT EXISTS \`$db\`" 2>&1 >/dev/null); then
+        echo "warning: CREATE DATABASE $db failed: $reg_err" >&2
+        return 1
+    fi
+
+    # Wait for catalog propagation (exponential backoff: 100ms → 200ms → 400ms → 800ms → 1.6s).
+    local attempt backoff_ms
+    backoff_ms=100
+    for attempt in 1 2 3 4 5; do
+        if server_sql "USE \`$db\`" >/dev/null 2>&1; then
+            if [ "$backing_absent" = true ]; then
+                GC_DATABASE_CREATED_BY_ENSURE=true
+            fi
+            return 0
+        fi
+        sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+        backoff_ms=$((backoff_ms * 2))
+    done
+
+    echo "warning: database $db not visible after 5 catalog probes" >&2
+    return 1
+}
+
+# seed_fresh_managed_bd_version_witness records the bd version that is about
+# to initialize a database created by this invocation. It probes the same
+# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
+# actually initializes the workspace rather than whichever bd happens to be on
+# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
+# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
+# pre-existing database: doing so would bypass bd's explicit cross-era
+# migration guard.
+seed_fresh_managed_bd_version_witness() {
+    local dir="$1"
+    local marker="$dir/.beads/.local_version"
+    local raw version major tmp
+
+    [ ! -e "$marker" ] || return 0
+
+    if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
+        die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
+    fi
+    version=$(printf '%s\n' "$raw" | sed -nE 's/^[Bb][Dd] [Vv]ersion v?([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1)
+    if [ -z "$version" ]; then
+        die "unrecognized bd version output while initializing fresh managed Dolt workspace at $dir: $raw"
+    fi
+    major=${version%%.*}
+    if [ "$major" -lt 1 ] 2>/dev/null; then
+        die "bd $version cannot initialize the current managed Dolt workspace at $dir (bd 1.0.0 or newer required)"
+    fi
+
+    tmp="$marker.tmp.$$"
+    (umask 077 && printf '%s\n' "$version" > "$tmp") || die "failed to write bd version witness at $marker"
+    mv "$tmp" "$marker" || die "failed to install bd version witness at $marker"
+}
+
+database_exists() {
+    local db="$1"
+    [ -n "$db" ] || return 1
+
+    if ! valid_sql_name "$db"; then
+        return 1
+    fi
+
+    server_sql "USE \`$db\`" >/dev/null 2>&1
+}
+
+database_has_beads_schema() {
+    local db="$1"
+    [ -n "$db" ] || return 1
+
+    if ! valid_sql_name "$db"; then
+        return 1
+    fi
+
+    server_sql "SELECT 1 FROM \`$db\`.issues LIMIT 1" >/dev/null 2>&1
+}
+
+read_existing_dolt_database() {
+    local meta_file="$1"
+    [ -f "$meta_file" ] || return 0
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.dolt_database // empty' "$meta_file" 2>/dev/null || true
+        return 0
+    fi
+
+    grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta_file" 2>/dev/null |         sed 's/.*"dolt_database"[[:space:]]*:[[:space:]]*"//;s/"//' || true
+}
+
+read_metadata_string_field() {
+    local meta_file="$1" key="$2"
+    [ -f "$meta_file" ] || return 0
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg key "$key" '.[$key] // empty' "$meta_file" 2>/dev/null || true
+        return 0
+    fi
+
+    grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$meta_file" 2>/dev/null |
+        sed "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"//;s/\"//" || true
+}
+
+metadata_is_doltlite() {
+    local meta_file="$1"
+    [ "$(read_metadata_string_field "$meta_file" backend)" = "doltlite" ] || [ "$(read_metadata_string_field "$meta_file" database)" = "doltlite" ]
+}
+
+write_doltlite_metadata() {
+    local dir="$1" database="$2" metadata_path tmp project_id
+    metadata_path="$dir/.beads/metadata.json"
+    mkdir -p "$dir/.beads"
+    project_id=$(read_metadata_string_field "$metadata_path" project_id)
+    if [ -z "$project_id" ]; then
+        project_id="$(basename "$dir")"
+    fi
+    tmp="$metadata_path.tmp.$$"
+    cat > "$tmp" <<EOF
+{
+  "backend": "doltlite",
+  "database": "doltlite",
+  "dolt_database": "$database",
+  "project_id": "$project_id"
+}
+EOF
+    chmod 600 "$tmp"
+    mv "$tmp" "$metadata_path"
+}
+
+ensure_doltlite_schema() {
+    local db_path="$1" db_dir
+    db_dir="${db_path%/*}"
+    mkdir -p "$db_dir"
+    command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is required to initialize doltlite beads"
+
+    sqlite3 "$db_path" <<'SQL' || die "failed to initialize doltlite database schema"
+CREATE TABLE IF NOT EXISTS config (
+  "key" TEXT PRIMARY KEY,
+  value TEXT
+);
+CREATE TABLE IF NOT EXISTS issues (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  status TEXT,
+  issue_type TEXT,
+  priority INTEGER,
+  created_at TEXT,
+  updated_at TEXT,
+  assignee TEXT,
+  description TEXT,
+  design TEXT,
+  acceptance_criteria TEXT,
+  notes TEXT,
+  metadata TEXT
+);
+CREATE TABLE IF NOT EXISTS wisps (
+  id TEXT PRIMARY KEY,
+  title TEXT,
+  status TEXT,
+  issue_type TEXT,
+  priority INTEGER,
+  created_at TEXT,
+  updated_at TEXT,
+  assignee TEXT,
+  description TEXT,
+  design TEXT,
+  acceptance_criteria TEXT,
+  notes TEXT,
+  metadata TEXT
+);
+CREATE TABLE IF NOT EXISTS labels (
+  issue_id TEXT,
+  label TEXT
+);
+CREATE TABLE IF NOT EXISTS wisp_labels (
+  issue_id TEXT,
+  label TEXT
+);
+CREATE TABLE IF NOT EXISTS dependencies (
+  issue_id TEXT,
+  depends_on_id TEXT,
+  depends_on_issue_id TEXT,
+  depends_on_wisp_id TEXT,
+  depends_on_external TEXT,
+  type TEXT
+);
+CREATE TABLE IF NOT EXISTS wisp_dependencies (
+  issue_id TEXT,
+  depends_on_id TEXT,
+  depends_on_issue_id TEXT,
+  depends_on_wisp_id TEXT,
+  depends_on_external TEXT,
+  type TEXT
+);
+SQL
+    chmod 600 "$db_path" 2>/dev/null || true
+}
+
+identity_toml_present() {
+    local dir="$1"
+    [ -f "$dir/.beads/identity.toml" ]
+}
+
+ensure_project_identity() {
+    local dir="$1" meta_file gc_bin dolt_database host
+    meta_file="$dir/.beads/metadata.json"
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 0
+    fi
+    dolt_database=$(read_existing_dolt_database "$meta_file")
+    if [ -z "$dolt_database" ]; then
+        return 0
+    fi
+    host=$(connect_host)
+    "$gc_bin" dolt-state ensure-project-id \
+        --city "$GC_CITY_PATH" \
+        --metadata "$meta_file" \
+        --host "$host" \
+        --port "$DOLT_PORT" \
+        --user "$DOLT_USER" \
+        --database "$dolt_database" >/dev/null \
+        || die "failed to ensure project identity for $dir"
+}
+
+ensure_bd_runtime_issue_prefix() {
+    local db="$1"
+    local prefix="$2"
+    ensure_bd_runtime_config_value "$db" "issue_prefix" "$prefix"
+}
+
+valid_custom_types_value() {
+    local types="$1" old_ifs typ
+    [ -n "$types" ] || return 1
+    old_ifs=$IFS
+    IFS=','
+    for typ in $types; do
+        [ -n "$typ" ] || { IFS=$old_ifs; return 1; }
+        valid_sql_name "$typ" || { IFS=$old_ifs; return 1; }
+    done
+    IFS=$old_ifs
+    return 0
+}
+
+ensure_bd_runtime_custom_types() {
+    local db="$1"
+    local types="$2"
+    ensure_bd_runtime_config_value "$db" "types.custom" "$types"
+}
+
+validate_bd_runtime_config_value() {
+    local key="$1"
+    local value="$2"
+    [ -n "$value" ] || return 0
+    case "$key" in
+        issue_prefix)
+            valid_sql_name "$value" || die "invalid beads prefix: $value"
+            ;;
+        types.custom)
+            valid_custom_types_value "$value" || die "invalid custom bead types: $value"
+            ;;
+        *)
+            die "unsupported bd runtime config key: $key"
+            ;;
+    esac
+}
+
+ensure_bd_runtime_config_value() {
+    local db="$1"
+    local key="$2"
+    local value="$3"
+    [ -n "$db" ] || return 0
+    [ -n "$value" ] || return 0
+    valid_sql_name "$db" || die "invalid dolt database name: $db"
+    validate_bd_runtime_config_value "$key" "$value"
+
+    # bd v1.0.3 rejects `bd config set issue_prefix`; GC still needs raw
+    # bd commands to see GC's config in the DB-backed config table.
+    server_sql_retry "USE \`$db\`; INSERT INTO config (\`key\`, value) VALUES ('$key', '$value') ON DUPLICATE KEY UPDATE value = VALUES(value)" >/dev/null || die "failed to set bd runtime $key for $db"
+    commit_bd_runtime_config "$db" "$key"
+}
+
+# commit_bd_runtime_config commits the config row written above. Without it the
+# row lives in the Dolt working set forever: `config` is not registered in
+# dolt_ignore, so the database stays permanently dirty. That is not cosmetic.
+#
+#   - beads refuses to run a schema migration that alters a table holding
+#     pre-existing uncommitted changes. Migration 0030 already issues
+#     `DELETE FROM config`, so the next migration touching `config` blocks
+#     every database GC provisioned. Its documented recovery, `bd dolt commit`,
+#     cannot run against an external Dolt server -- gastownhall/beads#4566
+#     fixed that deadlock for embedded mode only -- so there is no in-band way
+#     out short of hand-committing over a raw SQL connection.
+#   - A table that lives only in the working set is later swept into an
+#     unrelated `DOLT_COMMIT -Am`, drifting the database hash and quarantining
+#     GC for that database (the same hazard the read-only probe table is
+#     registered in dolt_ignore to avoid).
+#
+# Staging is scoped to `config` alone: a blanket DOLT_ADD('.') would sweep
+# whatever else happens to be dirty into GC's commit, which is the hash-drift
+# failure above rather than a fix for it.
+#
+# Fail-open: the value itself is already written, so a commit failure leaves
+# the pre-existing (dirty but functional) state rather than breaking
+# provisioning -- notably on a read-only replica. It is always reported, never
+# swallowed, so the operator knows the working set needs attention.
+commit_bd_runtime_config() {
+    local db="$1"
+    local key="$2"
+    local output
+    [ -n "$db" ] || return 0
+    output=$(server_sql "USE \`$db\`; CALL DOLT_ADD('config'); CALL DOLT_COMMIT('-m', 'gc: record beads runtime config', '--author', 'gascity-builder <builder@gascity.local>')" 2>&1) && return 0
+    # An idempotent re-run has nothing to commit; that is success, not failure.
+    case "$output" in
+        *"nothing to commit"*|*"no changes added to commit"*|*"No changes"*) return 0 ;;
+    esac
+    echo "warning: failed to commit bd runtime $key for $db; the Dolt working set is left dirty and a future beads schema migration touching config will refuse to run: $output" >&2
+    return 0
+}
+
+ensure_doltlite_runtime_config_value() {
+    local db_path="$1"
+    local key="$2"
+    local value="$3"
+    local key_sql value_sql
+    [ -n "$db_path" ] || return 0
+    [ -n "$value" ] || return 0
+    [ -f "$db_path" ] || die "missing doltlite database: $db_path"
+    command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is required to configure doltlite runtime state"
+    validate_bd_runtime_config_value "$key" "$value"
+
+    key_sql=$(printf '%s' "$key" | sed "s/'/''/g")
+    value_sql=$(printf '%s' "$value" | sed "s/'/''/g")
+    sqlite3 "$db_path" <<SQL ||
+.parameter init
+.parameter set @gc_config_key '$key_sql'
+.parameter set @gc_config_value '$value_sql'
+REPLACE INTO config ("key", value) VALUES (@gc_config_key, @gc_config_value);
+SQL
+        die "failed to set doltlite runtime $key for $db_path"
+}
+
+ensure_doltlite_runtime_issue_prefix() {
+    local db_path="$1"
+    local prefix="$2"
+    ensure_doltlite_runtime_config_value "$db_path" "issue_prefix" "$prefix"
+}
+
+ensure_doltlite_runtime_custom_types() {
+    local db_path="$1"
+    local types="$2"
+    ensure_doltlite_runtime_config_value "$db_path" "types.custom" "$types"
+}
+
+bd_runtime_schema_ready() {
+    local db="$1"
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    server_sql "USE \`$db\`; SELECT 1 FROM config LIMIT 1" >/dev/null 2>&1
+}
+
+# server_reachable reports whether the managed Dolt server answers a
+# trivial query. Used to distinguish a transient connection failure
+# (port drift, an exclusive lock held by a stale dolt, a slow server
+# start) from a genuinely missing schema/registration before deciding to
+# force a destructive reinit. server_sql carries the connect target, so
+# this stays in lockstep with bd_runtime_schema_ready / ensure_database_registered.
+server_reachable() {
+    server_sql "SELECT 1" >/dev/null 2>&1
+}
+
+wait_for_bd_runtime_schema() {
+    local db="$1"
+    local attempt backoff_ms
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+
+    backoff_ms=100
+    for attempt in 1 2 3 4 5 6 7 8; do
+        if bd_runtime_schema_ready "$db"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 8 ]; then
+            sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+            if [ "$backoff_ms" -lt 1000 ]; then
+                backoff_ms=$((backoff_ms * 2))
+                if [ "$backoff_ms" -gt 1000 ]; then
+                    backoff_ms=1000
+                fi
+            fi
+        fi
+    done
+
+    return 1
+}
+
+# bd_runtime_bd_table_count prints how many of bd's own tables exist in the
+# database. It returns 1 without printing when the query itself fails, so a
+# caller can tell "this database is empty" from "the server did not answer" —
+# the distinction bd_runtime_schema_ready collapses by design, because a bare
+# readiness probe has no reason to care why it came back negative.
+#
+# The table names below are bd's, listed literally. That is a known ceiling on
+# how much the guard protects: if bd renames these or adds others, a populated
+# store whose tables all fall outside the list counts 0 and reads as empty, so
+# the force-reinit gets authorized again. The failure lands on the behaviour
+# that shipped before this guard existed rather than on something worse, and
+# widening the list belongs with whatever change renames the tables.
+bd_runtime_bd_table_count() {
+    local db="$1"
+    local host output
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
+    # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
+    echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
+# tables, which is what decides whether `bd init --force` would create schema or
+# migrate over live rows. It has three answers and the call site needs all three:
+#
+#   0  yes, tables are present. A forced reinit re-runs bd's migrations over the
+#      existing working set, and beads refuses to migrate any table holding
+#      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
+#      init instead of repairing anything.
+#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
+#      metadata.json for, and reinitializing it is exactly right.
+#   2  could not tell, because the query did not answer.
+#
+# Collapsing 2 into either of the others is the mistake this exists to prevent.
+# Folding it into 0 turns an unreadable count into a refusal to initialize a
+# fresh city; folding it into 1 re-creates the destructive guess this whole
+# guard was added to stop.
+bd_runtime_store_holds_bd_tables() {
+    local count
+    count=$(bd_runtime_bd_table_count "$1") || return 2
+    case "$count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$count" -gt 0 ]
+}
+
+# --- Robustness Helpers ---
+
+# save_state writes the private provider runtime state atomically (no jq dependency).
+save_state() {
+    local pid="$1" running="$2" gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        "$gc_bin" dolt-state write-provider \
+            --file "$STATE_FILE" \
+            --pid "$pid" \
+            --running "$running" \
+            --port "$DOLT_PORT" \
+            --data-dir "$DATA_DIR" || die "failed to write provider state via gc helper $gc_bin"
+        return 0
+    fi
+    mkdir -p "$(dirname "$STATE_FILE")"
+    local tmp
+    tmp=$(mktemp "$STATE_FILE.tmp.XXXXXX")
+    printf '{"running":%s,"pid":%s,"port":%s,"data_dir":"%s","started_at":"%s"}\n' \
+        "$running" "$pid" "$DOLT_PORT" "$DATA_DIR" \
+        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$tmp"
+    mv "$tmp" "$STATE_FILE"
+}
+
+# load_state_field extracts a field from the private provider runtime state (no jq dependency).
+load_state_field() {
+    [ -f "$STATE_FILE" ] || return 0
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        "$gc_bin" dolt-state read-provider --file "$STATE_FILE" --field "$1" 2>/dev/null || true
+        return 0
+    fi
+    sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' "$STATE_FILE" | head -1
+}
+load_runtime_layout_from_gc() {
+    local gc_bin output key value
+    gc_bin=$(resolve_gc_helper_bin)
+    [ -n "$gc_bin" ] || return 1
+    output=$("$gc_bin" dolt-state runtime-layout --city "$GC_CITY_PATH" </dev/null 2>/dev/null) || return 1
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            GC_PACK_STATE_DIR) PACK_STATE_DIR="$value" ;;
+            GC_DOLT_DATA_DIR) DATA_DIR="$value" ;;
+            GC_DOLT_LOG_FILE) LOG_FILE="$value" ;;
+            GC_DOLT_STATE_FILE) STATE_FILE="$value" ;;
+            GC_DOLT_PID_FILE) PID_FILE="$value" ;;
+            GC_DOLT_LOCK_FILE) LOCK_FILE="$value" ;;
+            GC_DOLT_CONFIG_FILE) CONFIG_FILE="$value" ;;
+        esac
+    done <<EOF
+$output
+EOF
+    [ -n "$PACK_STATE_DIR" ] && [ -n "$DATA_DIR" ] && [ -n "$LOG_FILE" ] && [ -n "$STATE_FILE" ] && [ -n "$PID_FILE" ] && [ -n "$LOCK_FILE" ] && [ -n "$CONFIG_FILE" ]
+}
+
+load_managed_process_inspection_from_gc() {
+    local gc_bin output key value
+    gc_bin=$(resolve_gc_helper_bin)
+    [ -n "$gc_bin" ] || return 1
+    output=$("$gc_bin" dolt-state inspect-managed --city "$GC_CITY_PATH" --port "$DOLT_PORT" </dev/null 2>/dev/null) || return 1
+    GC_MANAGED_PID=""
+    GC_MANAGED_OWNED="false"
+    GC_MANAGED_DELETED="false"
+    GC_PORT_HOLDER_PID=""
+    GC_PORT_HOLDER_OWNED="false"
+    GC_PORT_HOLDER_DELETED="false"
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            managed_pid)
+                [ "$value" != "0" ] && GC_MANAGED_PID="$value"
+                ;;
+            managed_owned)
+                GC_MANAGED_OWNED="$value"
+                ;;
+            managed_deleted_inodes)
+                GC_MANAGED_DELETED="$value"
+                ;;
+            port_holder_pid)
+                [ "$value" != "0" ] && GC_PORT_HOLDER_PID="$value"
+                ;;
+            port_holder_owned)
+                GC_PORT_HOLDER_OWNED="$value"
+                ;;
+            port_holder_deleted_inodes)
+                GC_PORT_HOLDER_DELETED="$value"
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    return 0
+}
+
+load_probe_managed_from_gc() {
+    local gc_bin host output key value status parsed=false
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_PROBE_USED="false"
+    GC_PROBE_RUNNING="false"
+    GC_PROBE_PORT_HOLDER_PID=""
+    GC_PROBE_PORT_HOLDER_OWNED="false"
+    GC_PROBE_PORT_HOLDER_DELETED="false"
+    GC_PROBE_TCP_REACHABLE="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_PROBE_USED="true"
+    output=$("$gc_bin" dolt-state probe-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" </dev/null 2>/dev/null)
+    status=$?
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            running)
+                GC_PROBE_RUNNING="$value"
+                parsed=true
+                ;;
+            port_holder_pid)
+                [ "$value" != "0" ] && GC_PROBE_PORT_HOLDER_PID="$value"
+                parsed=true
+                ;;
+            port_holder_owned)
+                GC_PROBE_PORT_HOLDER_OWNED="$value"
+                parsed=true
+                ;;
+            port_holder_deleted_inodes)
+                GC_PROBE_PORT_HOLDER_DELETED="$value"
+                parsed=true
+                ;;
+            tcp_reachable)
+                GC_PROBE_TCP_REACHABLE="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_PROBE_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+load_existing_managed_from_gc() {
+    local gc_bin host output key value status parsed=false timeout_ms="${1:-30000}"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            timeout_ms=30000
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 1 ]; then
+        timeout_ms=1
+    fi
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_EXISTING_USED="false"
+    GC_EXISTING_MANAGED_PID=""
+    GC_EXISTING_MANAGED_OWNED="false"
+    GC_EXISTING_DELETED_INODES="false"
+    GC_EXISTING_STATE_PORT=""
+    GC_EXISTING_READY="false"
+    GC_EXISTING_REUSABLE="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_EXISTING_USED="true"
+    output=$("$gc_bin" dolt-state existing-managed --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --timeout-ms "$timeout_ms" </dev/null 2>/dev/null)
+    status=$?
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            managed_pid)
+                [ "$value" != "0" ] && GC_EXISTING_MANAGED_PID="$value"
+                parsed=true
+                ;;
+            managed_owned)
+                GC_EXISTING_MANAGED_OWNED="$value"
+                parsed=true
+                ;;
+            deleted_inodes)
+                GC_EXISTING_DELETED_INODES="$value"
+                parsed=true
+                ;;
+            state_port)
+                [ "$value" != "0" ] && GC_EXISTING_STATE_PORT="$value"
+                parsed=true
+                ;;
+            ready)
+                GC_EXISTING_READY="$value"
+                parsed=true
+                ;;
+            reusable)
+                GC_EXISTING_REUSABLE="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_EXISTING_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+current_time_ms() {
+    local gc_bin now
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        now=$("$gc_bin" dolt-state now-ms </dev/null 2>/dev/null) || now=""
+        case "$now" in
+            ''|*[!0-9]*)
+                now=""
+                ;;
+        esac
+        if [ -n "$now" ]; then
+            printf '%s\n' "$now"
+            return 0
+        fi
+    fi
+    now=$(date +%s 2>/dev/null) || return 1
+    case "$now" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    printf '%s000\n' "$now"
+}
+
+run_preflight_cleanup() {
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        if "$gc_bin" dolt-state preflight-clean --city "$GC_CITY_PATH" </dev/null 2>/dev/null; then
+            return 0
+        fi
+    fi
+    clean_stale_sockets
+}
+
+# find_port_holder returns the PID of the process listening on DOLT_PORT.
+
+find_port_holder() {
+    run_lsof -nP -t -iTCP:"$DOLT_PORT" -sTCP:LISTEN 2>/dev/null | head -1
+}
+
+# verify_our_server checks if a PID belongs to our server (matching data-dir).
+# Returns 0 if ours, 1 if imposter or unknown.
+verify_our_server() {
+    local pid="$1"
+    [ -n "$pid" ] || return 1
+
+    # Layer 1: State file data-dir comparison.
+    local state_dir
+    state_dir=$(load_state_field data_dir)
+    if [ -n "$state_dir" ] && ! same_dir_path "$state_dir" "$DATA_DIR"; then
+        return 1
+    fi
+
+    # Layer 2: Process args from ps — check --config or --data-dir.
+    local proc_args
+    proc_args=$(ps -p "$pid" -o args= 2>/dev/null) || return 1
+    case "$proc_args" in
+        *"--config $CONFIG_FILE"*|*"--config=$CONFIG_FILE"*)
+            return 0
+            ;;
+        *"--config"*)
+            # --config present but doesn't match our CONFIG_FILE — imposter.
+            return 1
+            ;;
+        *"--data-dir"*)
+            local proc_dir
+            proc_dir=$(echo "$proc_args" | sed -n 's/.*--data-dir[= ]*\([^ ]*\).*/\1/p')
+            if [ -n "$proc_dir" ]; then
+                if same_dir_path "$proc_dir" "$DATA_DIR"; then
+                    return 0
+                fi
+                return 1
+            fi
+            ;;
+    esac
+
+    # Layer 3: /proc/PID/cwd fallback (Linux only).
+    if [ -d "/proc/$pid" ]; then
+        local cwd
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || true
+        if [ -n "$cwd" ] && same_dir_path "$cwd" "$DATA_DIR"; then
+            return 0
+        fi
+    fi
+
+    # State file said it's ours (or no state file) and we couldn't disprove it.
+    if [ -n "$state_dir" ] && same_dir_path "$state_dir" "$DATA_DIR"; then
+        return 0
+    fi
+
+    # Cannot verify — treat as unknown (not ours).
+    return 1
+}
+
+has_deleted_data_inodes() {
+    local pid="$1"
+    [ -n "$pid" ] || return 1
+
+    local checked_proc=false
+    if [ -d "/proc/$pid" ]; then
+        checked_proc=true
+        local cwd
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || true
+        case "$cwd" in
+            *" (deleted)")
+                return 0
+                ;;
+        esac
+    fi
+
+    if [ -d "/proc/$pid/fd" ]; then
+        checked_proc=true
+        local fd target
+        for fd in /proc/"$pid"/fd/*; do
+            [ -e "$fd" ] || [ -L "$fd" ] || continue
+            target=$(readlink "$fd" 2>/dev/null) || continue
+            case "$target" in
+                *" (deleted)")
+                    target=${target% (deleted)}
+                    if path_under_data_dir "$target"; then
+                        return 0
+                    fi
+                    ;;
+            esac
+        done
+    fi
+
+    if [ "$checked_proc" = "true" ]; then
+        return 1
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+        local abs_data
+        abs_data=$(canonical_dir "$DATA_DIR")
+        if run_lsof -a -p "$pid" +L1 -Fnk 2>/dev/null | awk -v data_dir="$DATA_DIR" -v abs_data="$abs_data" '
+            function normalize(path) {
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", path)
+                if (path == "/private/tmp") {
+                    return "/tmp"
+                }
+                if (substr(path, 1, 13) == "/private/tmp/") {
+                    return "/tmp/" substr(path, 14)
+                }
+                if (path == "/private/var") {
+                    return "/var"
+                }
+                if (substr(path, 1, 13) == "/private/var/") {
+                    return "/var/" substr(path, 14)
+                }
+                return path
+            }
+            function within(path, root) {
+                path = normalize(path)
+                root = normalize(root)
+                return path == root || substr(path, 1, length(root) + 1) == root "/"
+            }
+            function within_data(path) {
+                return within(path, data_dir) || within(path, abs_data)
+            }
+            function flush() {
+                if (name != "" && deleted && within_data(name)) {
+                    found = 1
+                }
+                name = ""
+                deleted = 0
+            }
+            substr($0, 1, 1) == "f" {
+                flush()
+                next
+            }
+            substr($0, 1, 1) == "k" {
+                if (substr($0, 2) == "0") {
+                    deleted = 1
+                }
+                next
+            }
+            substr($0, 1, 1) == "n" {
+                if (name != "") {
+                    flush()
+                }
+                name = substr($0, 2)
+                if (name ~ / \(deleted\)$/) {
+                    deleted = 1
+                    sub(/ \(deleted\)$/, "", name)
+                }
+                next
+            }
+            END {
+                flush()
+                exit(found ? 0 : 1)
+            }
+        '; then
+            return 0
+        fi
+        if run_lsof -p "$pid" 2>/dev/null | grep ' (deleted)' | grep -F -e "$DATA_DIR" -e "$abs_data" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+wait_deleted_data_inodes() {
+    local pid="$1" attempt=0
+    while [ "$attempt" -lt 6 ]; do
+        if has_deleted_data_inodes "$pid"; then
+            return 0
+        fi
+        sleep 0.05 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+# kill_imposter kills a process that isn't our dolt server.
+kill_imposter() {
+    local pid="$1"
+    [ -n "$pid" ] || return 0
+
+    echo "killing imposter dolt server (PID $pid) on port $DOLT_PORT" >&2
+    kill "$pid" 2>/dev/null || return 0
+
+    # Wait up to 5s for graceful shutdown.
+    local waited=0
+    while [ "$waited" -lt 5 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Force kill.
+    kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+}
+
+# dolt_data_lock_holder prints the path of the first dolt exclusive store
+# lock (root-level <data_dir>/.dolt/noms/LOCK or per-database
+# <data_dir>/<db>/.dolt/noms/LOCK) held by a live process and returns 0, or
+# returns 1 when every lock is free. Dolt holds this flock until its chunk
+# journal is flushed and the store is closed — it is the authoritative
+# "safe to bind / safe to force-kill" signal (gastownhall/gascity#3174).
+# A lock flock cannot probe (exit code other than 0 or 1, e.g. an unreadable
+# file) is skipped with a warning — fail open, matching the gc helper's
+# probe convention. Without the flock binary no lock state can be probed;
+# report free so callers keep the legacy behavior. Unlike the gc helper's
+# probe, the per-database glob does not match dot-prefixed database
+# directories; managed layouts never create them.
+dolt_data_lock_holder() {
+    local lock_file probe_err probe_status
+    [ "$FLOCK_AVAILABLE" = "true" ] || return 1
+    for lock_file in "$DATA_DIR"/.dolt/noms/LOCK "$DATA_DIR"/*/.dolt/noms/LOCK; do
+        [ -f "$lock_file" ] || continue
+        probe_status=0
+        probe_err=$(flock -n "$lock_file" true 2>&1) || probe_status=$?
+        case "$probe_status" in
+            0) ;;
+            1)
+                printf '%s\n' "$lock_file"
+                return 0
+                ;;
+            *)
+                echo "warning: cannot probe dolt store lock $lock_file: ${probe_err:-flock exit status $probe_status}; treating as free (gastownhall/gascity#3174)" >&2
+                ;;
+        esac
+    done
+    return 1
+}
+
+# lock_release_timeout_ms prints LOCK_RELEASE_TIMEOUT_MS sanitized to a
+# non-negative integer, defaulting to 60000 — matching the gc helper's
+# config.DefaultDoltLockReleaseTimeout (1m).
+lock_release_timeout_ms() {
+    case "$LOCK_RELEASE_TIMEOUT_MS" in
+        ''|*[!0-9]*) printf '60000\n' ;;
+        *) printf '%s\n' "$LOCK_RELEASE_TIMEOUT_MS" ;;
+    esac
+}
+
+# wait_dolt_data_lock_free blocks until no live process holds a dolt
+# exclusive store lock under DATA_DIR, or LOCK_RELEASE_TIMEOUT_MS elapses.
+# Lock release on a clean dolt shutdown happens only after the chunk journal
+# is flushed, so success also means the prior instance finished writing.
+# Returns 1 (fail closed) when a lock is still held at the deadline.
+wait_dolt_data_lock_free() {
+    local timeout_ms deadline_ms now_ms holder
+    timeout_ms=$(lock_release_timeout_ms)
+    holder=$(dolt_data_lock_holder) || return 0
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
+    while :; do
+        now_ms=$(current_time_ms) || return 1
+        if [ "$now_ms" -ge "$deadline_ms" ]; then
+            echo "dolt exclusive store lock $holder is still held by a live process after ${timeout_ms}ms; a prior dolt sql-server has not released the data dir" >&2
+            return 1
+        fi
+        sleep_ms 250 2>/dev/null || sleep 1
+        holder=$(dolt_data_lock_holder) || return 0
+    done
+}
+
+# graceful_stop_owned_pid stops one of OUR dolt server processes without ever
+# SIGKILLing it mid-journal-write: SIGTERM, wait for exit (60 × 500ms = 30s,
+# matching the gc helper's default dolt_stop_timeout), then force-kill only if
+# the dolt exclusive store lock is free. After exit, blocks until the lock is
+# released so a follow-up start cannot bind the data_dir mid-flush. Returns 1
+# (fail closed) when the process survives while still holding the lock.
+graceful_stop_owned_pid() {
+    local pid="$1" waited=0 holder lock_window_ms lock_deadline_ms now_ms
+    [ -n "$pid" ] || return 0
+    kill "$pid" 2>/dev/null || true
+    while [ "$waited" -lt 60 ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        # The process outlived the SIGTERM grace. Extend the wait by the
+        # lock-release window while the store lock is held — the holder is
+        # mid-flush — then force-kill only once the lock is free.
+        lock_window_ms=$(lock_release_timeout_ms)
+        now_ms=$(current_time_ms) || now_ms=0
+        lock_deadline_ms=$((now_ms + lock_window_ms))
+        while kill -0 "$pid" 2>/dev/null && dolt_data_lock_holder >/dev/null; do
+            now_ms=$(current_time_ms) || break
+            [ "$now_ms" -lt "$lock_deadline_ms" ] || break
+            sleep_ms 250 2>/dev/null || sleep 1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            if holder=$(dolt_data_lock_holder); then
+                echo "PID $pid did not exit within the SIGTERM grace and a live process still holds dolt exclusive store lock $holder; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)" >&2
+                return 1
+            fi
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    wait_dolt_data_lock_free
+}
+
+# write_config_yaml generates a managed dolt-config.yaml with timeouts and GC settings.
+# Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
+# accumulate and the server enters unrecoverable read-only mode.
+write_config_yaml() {
+    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    # Surface the resolved managed-server bind. Since the default flipped from
+    # 0.0.0.0 to loopback, an operator who relied on the old wildcard bind would
+    # otherwise see a bare connection-refused; this line names the bind host and
+    # the override knob.
+    printf 'gc-beads-bd: managed dolt server binding %s:%s (override bind with GC_DOLT_HOST=0.0.0.0)\n' "$DOLT_HOST" "$DOLT_PORT" >&2
+    archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
+    case "$archive_level" in
+        ''|*[!0-9]*)
+            archive_level=0
+            ;;
+    esac
+    # Incremental auto-GC defaults to ON; only explicit false-y overrides
+    # disable it. Mirrors parseEnvAutoGCEnabled in cmd/gc/dolt_start_managed.go,
+    # including its whitespace trim.
+    auto_gc_enabled=true
+    auto_gc_sysvar=ON
+    case "$(printf '%s' "${GC_DOLT_AUTO_GC_ENABLED:-}" | tr -d '[:space:]')" in
+        0|[Ff]|[Ff][Aa][Ll][Ss][Ee]|[Oo][Ff][Ff])
+            auto_gc_enabled=false
+            auto_gc_sysvar=OFF
+            ;;
+    esac
+    max_connections=${GC_DOLT_MAX_CONNECTIONS:-256}
+    case "$max_connections" in
+        ''|*[!0-9]*|0)
+            max_connections=256
+            ;;
+    esac
+    # Must track config.DefaultDoltReadTimeoutMillis (internal/config/config.go).
+    # Raised from 15000 to 120000 after #5383 (the Reaper's own maintenance
+    # query was killed mid-production by the old 15s bound) -- see that
+    # constant's comment for the full rationale.
+    read_timeout_millis=${GC_DOLT_READ_TIMEOUT_MILLIS:-120000}
+    case "$read_timeout_millis" in
+        ''|*[!0-9]*|0)
+            read_timeout_millis=120000
+            ;;
+    esac
+    write_timeout_millis=${GC_DOLT_WRITE_TIMEOUT_MILLIS:-300000}
+    case "$write_timeout_millis" in
+        ''|*[!0-9]*|0)
+            write_timeout_millis=300000
+            ;;
+    esac
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        "$gc_bin" dolt-config write-managed \
+            --file "$CONFIG_FILE" \
+            --host "$DOLT_HOST" \
+            --port "$DOLT_PORT" \
+            --data-dir "$DATA_DIR" \
+            --log-level "$DOLT_LOGLEVEL" \
+            --archive-level "$archive_level" \
+            --auto-gc-enabled="$auto_gc_enabled" \
+            --max-connections "$max_connections" \
+            --read-timeout-millis "$read_timeout_millis" \
+            --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
+        return 0
+    fi
+    wait_timeout_line='  wait_timeout: "30"'
+    raw_wait_timeout=${GC_DOLT_WAIT_TIMEOUT:-}
+    case "$raw_wait_timeout" in
+        '' ) ;;
+        -*)
+            case "${raw_wait_timeout#-}" in
+                ''|*[!0-9]* ) ;;
+                * ) wait_timeout_line="" ;;
+            esac
+            ;;
+        *[!0-9]* ) ;;
+        * )
+            if [ "$raw_wait_timeout" -gt 0 ] 2>/dev/null; then
+                wait_timeout_line="  wait_timeout: \"$raw_wait_timeout\""
+            else
+                wait_timeout_line=""
+            fi
+            ;;
+    esac
+    local tmp
+    tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")
+    cat > "$tmp" <<YAML
+# Dolt SQL server configuration — managed by gc-beads-bd
+# Do not edit manually; changes are overwritten on each server start.
+# To customize, set environment variables:
+#   GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER, GC_DOLT_PASSWORD, GC_DOLT_LOGLEVEL
+
+log_level: $DOLT_LOGLEVEL
+
+listener:
+  port: $DOLT_PORT
+  host: $DOLT_HOST
+  max_connections: $max_connections
+  back_log: 50
+  max_connections_timeout_millis: 5000
+  read_timeout_millis: $read_timeout_millis
+  write_timeout_millis: $write_timeout_millis
+
+data_dir: "$DATA_DIR"
+
+# Incremental auto-GC bounds the noms journal so it never reaches GB scale,
+# shrinking both the unclean-stop corruption window and the recovery blast
+# radius (#3176). Historically OFF to work around dolt#10944 (load-avg gating
+# that never fired); fixed upstream in dolt 2.0.3 and the managed floor is
+# 2.1.0+. Scheduled compaction (gc dolt compact) still handles history
+# flattening — see #1918, #1200 for that lineage. Override via city.toml
+# [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
+behavior:
+  auto_gc_behavior:
+    enable: $auto_gc_enabled
+    archive_level: $archive_level
+
+# Managed Gas City workloads generate short-lived probe and metadata queries.
+# Dolt's persistent stats worker can make those tiny databases grow large
+# stats stores and burn CPU, especially on macOS endpoint-managed machines.
+# Keep stats disabled for managed servers; use explicit gc dolt maintenance
+# commands for storage cleanup instead of background workers.
+system_variables:
+  dolt_auto_gc_enabled: "$auto_gc_sysvar"
+  dolt_stats_enabled: "OFF"
+  dolt_stats_gc_enabled: "OFF"
+  dolt_stats_memory_only: "ON"
+  dolt_stats_paused: "ON"
+$wait_timeout_line
+YAML
+    mv "$tmp" "$CONFIG_FILE"
+}
+
+# get_connection_count queries the active connection count from the dolt server.
+# Prints the count to stdout. Returns 1 on failure.
+get_connection_count() {
+    local host output
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST" 2>/dev/null) || return 1
+    # Parse CSV: "cnt\n5\n" — take last non-empty line.
+    echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# drain_connections_before_stop waits briefly for in-flight SQL work to leave
+# before SIGTERM. It is best-effort: an unreachable or wedged server should not
+# block explicit stop/recover forever.
+drain_connections_before_stop() {
+    local count waited
+    waited=0
+    while [ "$waited" -lt 100 ]; do
+        count=$(get_connection_count 2>/dev/null) || return 0
+        case "$count" in
+            ''|*[!0-9]*) return 0 ;;
+        esac
+        [ "$count" -le 1 ] && return 0
+        sleep 0.1 2>/dev/null || sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+# check_read_only tests if the dolt server is in read-only mode.
+# Returns 0 if read-only, 1 if writable, 2 if the write probe is inconclusive.
+check_read_only() {
+    local host gc_bin db quoted_db probe_table ignore_table sql output err_file err_text status
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-read-only-check.XXXXXX") || return 2
+        if "$gc_bin" dolt-state read-only-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" >/dev/null 2>"$err_file"; then
+            rm -f "$err_file"
+            return 0
+        fi
+        err_text=$(cat "$err_file" 2>/dev/null || true)
+        rm -f "$err_file"
+        if [ -n "$err_text" ]; then
+            echo "$err_text" >&2
+            return 2
+        fi
+        return 1
+    fi
+    err_file=$(mktemp "${TMPDIR:-/tmp}/gc-dolt-show-databases.XXXXXX") || return 2
+    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SHOW DATABASES" 2>"$err_file"); then
+        status=0
+    else
+        status=$?
+    fi
+    err_text=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+    if [ "$status" -ne 0 ]; then
+        case "$err_text" in
+            *"read only"*|*"READ ONLY"*|*"Read-only"*)
+                return 0
+                ;;
+        esac
+        [ -n "$err_text" ] && echo "dolt SHOW DATABASES failed: $err_text" >&2
+        return 2
+    fi
+    db=$(first_user_database_from_show_databases_csv "$output") || return 2
+    if [ -z "$db" ]; then
+        echo "dolt read-only probe inconclusive: no user database available" >&2
+        return 2
+    fi
+    quoted_db=$(quote_dolt_identifier "$db")
+    probe_table='`__gc_read_only_probe`'
+    ignore_table='`dolt_ignore`'
+    # The probe table is registered in dolt_ignore so history flattening can
+    # never first-commit it: a non-ignored table that lives only in the working
+    # set is committed by the compaction flatten's DOLT_COMMIT -Am, which drifts
+    # the database hash and quarantines GC for that database (hq June 2026, daa
+    # 2026-08-04). INSERT IGNORE keeps an operator's explicit ignored = 0
+    # override. The probe opens with USE because dolt_ignore is a session-root
+    # backed system table: this remote connection has no default schema, and a
+    # qualified write to dolt_ignore without a current database fails with "no
+    # root value found in session". USE is read-only, so the registration stays
+    # last and a read-only server still fails on the CREATE or REPLACE, which
+    # the classification below keys on. Mirrors cmd/gc/dolt_sql_health.go
+    # managedDoltReadOnlyProbeStatementsFor.
+    sql="USE ${quoted_db}; CREATE TABLE IF NOT EXISTS ${quoted_db}.${probe_table} (k INT PRIMARY KEY); REPLACE INTO ${quoted_db}.${probe_table} VALUES (1); INSERT IGNORE INTO ${quoted_db}.${ignore_table} (pattern, ignored) VALUES ('__gc_read_only_probe', 1);"
+    if output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -q "$sql" 2>&1); then
+        return 1
+    fi
+    case "$output" in
+        *"read only"*|*"READ ONLY"*|*"Read-only"*)
+            return 0  # Is read-only.
+            ;;
+    esac
+    [ -n "$output" ] && echo "dolt write probe failed: $output" >&2
+    return 2
+}
+
+load_health_check_from_gc() {
+    local gc_bin host output key value
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    [ -n "$gc_bin" ] || return 1
+    output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1
+    GC_HEALTH_QUERY_READY="false"
+    GC_HEALTH_READ_ONLY=""
+    GC_HEALTH_CONNECTION_COUNT=""
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            query_ready)
+                GC_HEALTH_QUERY_READY="$value"
+                ;;
+            read_only)
+                GC_HEALTH_READ_ONLY="$value"
+                ;;
+            connection_count)
+                GC_HEALTH_CONNECTION_COUNT="$value"
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    return 0
+}
+
+load_wait_ready_from_gc() {
+    local pid="$1" timeout_ms="$2" check_deleted="${3:-false}"
+    local gc_bin host output key value status parsed=false
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_WAIT_READY_USED="false"
+    GC_WAIT_READY="false"
+    GC_WAIT_PID_ALIVE="false"
+    GC_WAIT_DELETED_INODES="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_WAIT_READY_USED="true"
+    if [ "$check_deleted" = "true" ]; then
+        output=$("$gc_bin" dolt-state wait-ready --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --pid "$pid" --timeout-ms "$timeout_ms" --check-deleted </dev/null 2>/dev/null)
+        status=$?
+    else
+        output=$("$gc_bin" dolt-state wait-ready --city "$GC_CITY_PATH" --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --pid "$pid" --timeout-ms "$timeout_ms" </dev/null 2>/dev/null)
+        status=$?
+    fi
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            ready)
+                GC_WAIT_READY="$value"
+                parsed=true
+                ;;
+            pid_alive)
+                GC_WAIT_PID_ALIVE="$value"
+                parsed=true
+                ;;
+            deleted_inodes)
+                GC_WAIT_DELETED_INODES="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_WAIT_READY_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+wait_for_managed_pid_ready() {
+    local pid="$1" port="$2" timeout_ms="${3:-30000}" check_deleted="${4:-false}"
+    local attempt=0 max_attempts=1
+    [ -n "$pid" ] || return 1
+    [ -n "$port" ] || port="$DOLT_PORT"
+    DOLT_PORT="$port"
+
+    if load_wait_ready_from_gc "$pid" "$timeout_ms" "$check_deleted"; then
+        [ "$GC_WAIT_READY" = "true" ] || return 1
+        if [ "$check_deleted" = "true" ] && [ "$GC_WAIT_DELETED_INODES" = "true" ]; then
+            return 1
+        fi
+        return 0
+    elif [ "$GC_WAIT_READY_USED" = "true" ]; then
+        [ "$GC_WAIT_READY" = "true" ] || return 1
+        if [ "$check_deleted" = "true" ] && [ "$GC_WAIT_DELETED_INODES" = "true" ]; then
+            return 1
+        fi
+        return 0
+    fi
+
+    if [ "$timeout_ms" -gt 0 ] 2>/dev/null; then
+        max_attempts=$((timeout_ms / 500))
+        if [ "$max_attempts" -lt 1 ]; then
+            max_attempts=1
+        fi
+    fi
+
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        if [ "$check_deleted" = "true" ] && has_deleted_data_inodes "$pid"; then
+            return 1
+        fi
+        if tcp_check_port "$port" && do_query_probe; then
+            if [ "$check_deleted" = "true" ] && has_deleted_data_inodes "$pid"; then
+                return 1
+            fi
+            return 0
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+load_start_managed_from_gc() {
+    local gc_bin host output key value status parsed=false
+    host=$(connect_host)
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_START_MANAGED_USED="false"
+    GC_START_READY="false"
+    GC_START_PID=""
+    GC_START_PORT="$DOLT_PORT"
+    GC_START_ADDRESS_IN_USE="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_START_MANAGED_USED="true"
+    output=$("$gc_bin" dolt-state start-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 9>&- </dev/null 2>/dev/null)
+    status=$?
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            ready)
+                GC_START_READY="$value"
+                parsed=true
+                ;;
+            pid)
+                [ "$value" != "0" ] && GC_START_PID="$value"
+                parsed=true
+                ;;
+            port)
+                [ -n "$value" ] && GC_START_PORT="$value"
+                parsed=true
+                ;;
+            address_in_use)
+                GC_START_ADDRESS_IN_USE="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_START_MANAGED_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+wait_for_concurrent_start_ready() {
+    local existing_pid="" existing_port="" holder="" timeout_ms deadline_ms now_ms remaining_ms wait_ms
+    timeout_ms="$CONCURRENT_START_READY_TIMEOUT_MS"
+    case "$timeout_ms" in
+        ''|*[!0-9]*)
+            # The start-flock winner's stop path can spend a 30s SIGTERM
+            # grace plus one lock-release window before SIGKILL and one more
+            # after exit before it launches. Cover that worst case plus the
+            # legacy 45s ready allowance, or a slow-but-recoverable winner
+            # stop hard-fails every concurrent starter
+            # (gastownhall/gascity#3174).
+            timeout_ms=$((75000 + 2 * $(lock_release_timeout_ms)))
+            ;;
+    esac
+    if [ "$timeout_ms" -lt 500 ]; then
+        timeout_ms=500
+    fi
+    now_ms=$(current_time_ms) || return 1
+    deadline_ms=$((now_ms + timeout_ms))
+    while :; do
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        if load_existing_managed_from_gc "$remaining_ms"; then
+            existing_pid="$GC_EXISTING_MANAGED_PID"
+            if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ] && [ -n "$existing_pid" ]; then
+                DOLT_PORT="$GC_EXISTING_STATE_PORT"
+                echo "$existing_pid" > "$PID_FILE"
+                save_state "$existing_pid" true
+                return 0
+            fi
+        fi
+        if load_probe_managed_from_gc; then
+            holder="$GC_PROBE_PORT_HOLDER_PID"
+            if [ "$GC_PROBE_RUNNING" = "true" ] && [ -n "$holder" ]; then
+                if do_query_probe; then
+                    echo "$holder" > "$PID_FILE"
+                    save_state "$holder" true
+                    return 0
+                fi
+            fi
+        fi
+        if [ "$GC_EXISTING_USED" != "true" ] && [ "$GC_PROBE_USED" != "true" ]; then
+            existing_port=$(load_state_field port)
+            if [ -n "$existing_port" ]; then
+                existing_pid=$(find_dolt_pid)
+                if [ -n "$existing_pid" ] && verify_our_server "$existing_pid"; then
+                    DOLT_PORT="$existing_port"
+                    if tcp_check_port "$existing_port" && do_query_probe; then
+                        echo "$existing_pid" > "$PID_FILE"
+                        save_state "$existing_pid" true
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+        now_ms=$(current_time_ms) || return 1
+        remaining_ms=$((deadline_ms - now_ms))
+        if [ "$remaining_ms" -le 0 ]; then
+            return 1
+        fi
+        wait_ms=500
+        if [ "$remaining_ms" -lt "$wait_ms" ]; then
+            wait_ms="$remaining_ms"
+        fi
+        if [ "$wait_ms" -le 0 ]; then
+            return 1
+        fi
+        sleep_ms "$wait_ms" 2>/dev/null || sleep 1
+    done
+}
+
+load_stop_managed_from_gc() {
+    local gc_bin output key value status parsed=false
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_STOP_MANAGED_USED="false"
+    GC_STOP_HAD_PID="false"
+    GC_STOP_PID=""
+    GC_STOP_FORCED="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_STOP_MANAGED_USED="true"
+    output=$("$gc_bin" dolt-state stop-managed --city "$GC_CITY_PATH" --port "$DOLT_PORT" </dev/null 2>/dev/null)
+    status=$?
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            had_pid)
+                GC_STOP_HAD_PID="$value"
+                parsed=true
+                ;;
+            pid)
+                [ "$value" != "0" ] && GC_STOP_PID="$value"
+                parsed=true
+                ;;
+            forced)
+                GC_STOP_FORCED="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_STOP_MANAGED_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+load_recover_managed_from_gc() {
+    local gc_bin output key value status parsed=false
+    gc_bin=$(resolve_gc_helper_bin)
+    GC_RECOVER_MANAGED_USED="false"
+    GC_RECOVER_DIAGNOSED_READ_ONLY="false"
+    GC_RECOVER_HAD_PID="false"
+    GC_RECOVER_FORCED="false"
+    GC_RECOVER_READY="false"
+    GC_RECOVER_PID=""
+    GC_RECOVER_PORT="$DOLT_PORT"
+    GC_RECOVER_HEALTHY="false"
+    GC_RECOVER_RESTARTED="false"
+    [ -n "$gc_bin" ] || return 1
+    GC_RECOVER_MANAGED_USED="true"
+    output=$("$gc_bin" dolt-state recover-managed --city "$GC_CITY_PATH" --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --log-level "$DOLT_LOGLEVEL" --timeout-ms 30000 </dev/null 2>/dev/null)
+    status=$?
+    while IFS="$(printf '	')" read -r key value; do
+        case "$key" in
+            diagnosed_read_only)
+                GC_RECOVER_DIAGNOSED_READ_ONLY="$value"
+                parsed=true
+                ;;
+            had_pid)
+                GC_RECOVER_HAD_PID="$value"
+                parsed=true
+                ;;
+            forced)
+                GC_RECOVER_FORCED="$value"
+                parsed=true
+                ;;
+            ready)
+                GC_RECOVER_READY="$value"
+                parsed=true
+                ;;
+            pid)
+                [ "$value" != "0" ] && GC_RECOVER_PID="$value"
+                parsed=true
+                ;;
+            port)
+                [ -n "$value" ] && GC_RECOVER_PORT="$value"
+                parsed=true
+                ;;
+            healthy)
+                GC_RECOVER_HEALTHY="$value"
+                parsed=true
+                ;;
+            restarted)
+                GC_RECOVER_RESTARTED="$value"
+                parsed=true
+                ;;
+        esac
+    done <<EOF
+$output
+EOF
+    if [ "$status" -ne 0 ] && [ "$parsed" != "true" ]; then
+        GC_RECOVER_MANAGED_USED="false"
+        return 1
+    fi
+    [ "$status" -eq 0 ]
+}
+
+# find_dolt_pid finds the dolt sql-server process.
+# Priority: PID file → lsof port holder → ps grep fallback.
+find_dolt_pid() {
+    if [ -z "$DATA_DIR" ]; then
+        return
+    fi
+
+    # 1. PID file (most reliable if we wrote it).
+    if [ -f "$PID_FILE" ]; then
+        local file_pid
+        file_pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
+            echo "$file_pid"
+            return
+        fi
+        # Stale PID file — clean up.
+        rm -f "$PID_FILE"
+    fi
+
+    # 2. lsof port holder.
+    local holder
+    holder=$(find_port_holder)
+    if [ -n "$holder" ]; then
+        echo "$holder"
+        return
+    fi
+
+    # 3. ps grep fallback (least reliable) — try --config first, then --data-dir.
+    if [ -n "$CONFIG_FILE" ]; then
+        local config_pid
+        config_pid=$(ps ax -o pid,args 2>/dev/null | grep "dolt sql-server" | grep -- "--config.*$CONFIG_FILE" | grep -v grep | awk '{print $1}' | head -1)
+        if [ -n "$config_pid" ]; then
+            echo "$config_pid"
+            return
+        fi
+    fi
+    ps ax -o pid,args 2>/dev/null | grep "dolt sql-server" | grep -- "--data-dir.*$(basename "$DATA_DIR")" | grep -v grep | awk '{print $1}' | head -1
+}
+
+# allocate_port determines the dolt server port.
+# Resolution order:
+#   1. State file has a reachable port + PID is alive → reuse it
+#   2. GC_DOLT_PORT env var (initial/operator override) → use it
+#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+allocate_port() {
+    local gc_bin helper_port
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        helper_port=$("$gc_bin" dolt-state allocate-port --city "$GC_CITY_PATH" --state-file "$STATE_FILE" </dev/null 2>/dev/null || true)
+        if [ -n "$helper_port" ]; then
+            echo "$helper_port"
+            return
+        fi
+    fi
+
+    # 1. Provider state port with live PID. Long-lived agents can inherit a
+    # stale GC_DOLT_PORT after managed Dolt rolls to a new port, so validated
+    # state wins over the inherited environment.
+    if [ -f "$STATE_FILE" ]; then
+        local state_port state_pid
+        state_port=$(load_state_field port)
+        state_pid=$(load_state_field pid)
+        if [ -n "$state_port" ] && [ -n "$state_pid" ] && kill -0 "$state_pid" 2>/dev/null && tcp_check_port "$state_port"; then
+            echo "$state_port"
+            return
+        fi
+    fi
+
+    # 2. Explicit override when no live provider state is available.
+    if [ -n "$GC_DOLT_PORT" ]; then
+        echo "$GC_DOLT_PORT"
+        return
+    fi
+
+    # 3. Deterministic hash of city path, probe until free.
+    local hash_val
+    hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
+    local port="$hash_val"
+    local attempts=0
+    while [ "$attempts" -lt 100 ]; do
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$port"
+            return
+        fi
+        port=$((port + 1))
+        if [ "$port" -gt 60000 ]; then
+            port=10000
+        fi
+        attempts=$((attempts + 1))
+    done
+
+    # Exhausted probes — fall back to the hash value and hope for the best.
+    echo "$hash_val"
+}
+
+next_available_port() {
+    local port="${1:-10000}"
+    local attempts=0
+    while [ "$attempts" -lt 1000 ]; do
+        if [ "$port" -gt 60000 ]; then
+            port=10000
+        fi
+        if ! run_lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$port"
+            return
+        fi
+        port=$((port + 1))
+        attempts=$((attempts + 1))
+    done
+    echo "${1:-10000}"
+}
+
+# --- Operations ---
+
+# valid_sql_name checks that a name is safe for backtick-quoted SQL identifiers.
+# Allows alphanumeric, hyphens, underscores. Rejects empty names and names
+# containing backticks, quotes, or other special characters (upstream 38f7b380).
+valid_sql_name() {
+    case "$1" in
+        "") return 1 ;;
+        *[!a-zA-Z0-9_-]*) return 1 ;;
+    esac
+    return 0
+}
+
+is_reserved_dolt_database_name() {
+    is_system_dolt_database_name "$1"
+}
+
+# clean_stale_sockets removes stale Unix domain sockets left by a crashed
+# dolt server. Without cleanup, "unix socket set up failed: file already in
+# use" prevents clean restarts (upstream 2e058fa1).
+clean_stale_sockets() {
+    local sock
+    for sock in /tmp/dolt*.sock; do
+        [ -S "$sock" ] || continue
+        local open_status
+        set +e
+        lsof_reports_open "$sock"
+        open_status=$?
+        set -e
+        case "$open_status" in
+            0)
+                ;;
+            1)
+                echo "removing stale socket: $sock" >&2
+                rm -f "$sock"
+                ;;
+            *)
+                echo "preserving socket with unknown open-file state: $sock" >&2
+                ;;
+        esac
+    done
+}
+
+# ensure_beads_role ensures beads.role is set in global git config.
+# bd exits non-zero with "beads.role not configured" (gastownhall/beads#2950)
+# when this key is absent. That non-zero exit causes the `run_bd_pinned … ||
+# true` calls in op_init to fail silently, leaving issue_prefix and
+# types.custom unset in the Dolt database and making every subsequent
+# bd-create call fail with "database not initialized". Defaulting to
+# "maintainer" matches the role that gc-managed agents use to create beads.
+ensure_beads_role() {
+    if git config --global beads.role >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "gc-beads-bd: setting git config --global beads.role maintainer" >&2
+    git config --global beads.role maintainer || die "failed to set git config beads.role"
+}
+
+# ensure_dolt_identity ensures dolt has user.name and user.email configured.
+#
+# Resolution order per field, in order of precedence:
+#   1. dolt config --global (returned as-is if already set)
+#   2. git config --global  (copied into dolt config)
+#
+# If a field is missing from BOTH dolt and git, fail with an error that
+# names the specific field(s) the user must set — never instruct the user
+# to set a value they have already configured. Historically this function
+# would report "user.name not available" whenever EITHER field was missing
+# (because the dolt-side guard required both), which left users running
+# `dolt config --add user.name` over and over while the real culprit was
+# user.email.
+ensure_dolt_identity() {
+    # Use dolt's exit code as the canonical "is this field configured?"
+    # signal. Real dolt returns 0 with the value on stdout when the field
+    # is set, non-zero otherwise; some tests stub dolt to return 0 with
+    # empty stdout for any `config` invocation, and we treat that as
+    # configured too (matches historical behavior of this helper).
+    local dolt_has_name=0 dolt_has_email=0
+    local dolt_name="" dolt_email="" git_name git_email
+    if dolt config --global --get user.name >/dev/null 2>&1; then
+        dolt_has_name=1
+        dolt_name=$(dolt config --global --get user.name 2>/dev/null || true)
+    fi
+    if dolt config --global --get user.email >/dev/null 2>&1; then
+        dolt_has_email=1
+        dolt_email=$(dolt config --global --get user.email 2>/dev/null || true)
+    fi
+    if [ "$dolt_has_name" -eq 1 ] && [ "$dolt_has_email" -eq 1 ]; then
+        return 0
+    fi
+
+    git_name=$(git config --global user.name 2>/dev/null || true)
+    git_email=$(git config --global user.email 2>/dev/null || true)
+
+    # Accumulate missing-field hints in a semicolon-joined string rather
+    # than a bash array so this stays runnable under POSIX /bin/sh
+    # (matches the script's shebang). Each branch reports only the field
+    # that is truly missing from BOTH dolt and git — never instruct the
+    # user to set a value they have already configured.
+    local missing=""
+    if [ "$dolt_has_name" -ne 1 ] && [ -z "$git_name" ]; then
+        missing='dolt config --global --add user.name "Your Name"'
+    fi
+    if [ "$dolt_has_email" -ne 1 ] && [ -z "$git_email" ]; then
+        if [ -n "$missing" ]; then
+            missing="$missing; "
+        fi
+        missing="${missing}dolt config --global --add user.email \"you@example.com\""
+    fi
+    if [ -n "$missing" ]; then
+        die "dolt identity incomplete; run: $missing"
+    fi
+
+    # Backfill missing dolt fields from git.
+    if [ "$dolt_has_name" -ne 1 ]; then
+        dolt config --global --add user.name "$git_name" || die "failed to set dolt user.name"
+    fi
+    if [ "$dolt_has_email" -ne 1 ]; then
+        dolt config --global --add user.email "$git_email" || die "failed to set dolt user.email"
+    fi
+}
+
+# journal_corruption_signature filters stdin for the dolt startup errors that
+# indicate a corrupted noms journal ("possible data loss detected in journal
+# file at offset N: corrupted journal", "journal index is malformed"). Used on
+# captured startup output, the managed log tail, and per-database offline
+# probe output.
+journal_corruption_signature() {
+    grep -qiE 'corrupted journal|journal index is malformed|possible data loss detected in journal file'
+}
+
+# log_tail_has_journal_corruption reports whether the recent managed dolt log
+# contains a journal-corruption startup error. Bounded to the log tail so a
+# huge log cannot stall start; stale matches from earlier incidents are
+# harmless because recovery re-verifies each database with an offline probe
+# before touching anything.
+log_tail_has_journal_corruption() {
+    [ -f "$LOG_FILE" ] || return 1
+    tail -c 65536 "$LOG_FILE" 2>/dev/null | journal_corruption_signature
+}
+
+# database_journal_corrupt probes one database directory offline and reports
+# whether dolt refuses to load it with a journal-corruption error. Only safe
+# while the managed server is down — offline dolt commands contend with a
+# running server's file locks. Probe output is spooled to a temp file so stdout
+# and stderr can be scanned together without retaining the diagnostic stream
+# in a shell variable.
+database_journal_corrupt() {
+    local probe_db_dir="$1" probe_out probe_hit=1
+    probe_out=$(mktemp) || {
+        echo "gc-beads-bd: probe tempfile unavailable; treating $probe_db_dir as not corrupt" >&2
+        return 1
+    }
+    (cd "$probe_db_dir" && run_with_timeout 30 dolt status) > "$probe_out" 2>&1 || true
+    if journal_corruption_signature < "$probe_out"; then
+        probe_hit=0
+    fi
+    rm -f "$probe_out"
+    return "$probe_hit"
+}
+
+# backup_remote_url_for_recovery prints the <db>-backup remote URL recorded in
+# a database's repo_state.json. The file is plain JSON, so the URL is readable
+# even when the noms store itself can no longer be opened. Handles both the
+# object form ("backups": {"db-backup": {"url": "..."}}) and the legacy plain
+# string form.
+backup_remote_url_for_recovery() {
+    local recovery_db="$1" recovery_db_dir="$2" repo_state url
+    repo_state="$recovery_db_dir/.dolt/repo_state.json"
+    [ -f "$repo_state" ] || return 1
+    if command -v jq >/dev/null 2>&1; then
+        url=$(jq -r --arg name "${recovery_db}-backup" '.backups[$name].url? // .backups[$name] // empty' "$repo_state" 2>/dev/null)
+    else
+        url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[^}]*\"url\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        if [ -z "$url" ]; then
+            url=$(tr -d '\n' < "$repo_state" | sed -n "s/.*\"${recovery_db}-backup\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        fi
+    fi
+    [ -n "$url" ] || return 1
+    printf '%s\n' "$url"
+}
+
+# backup_restore_source_usable reports whether url points at a local backup
+# that actually has content to restore from. Only file:// remotes qualify:
+# remote backups cannot be cheaply verified, and restoring from an unverified
+# source is exactly the kind of silent data movement auto-recovery must not do.
+backup_restore_source_usable() {
+    local usable_url="$1" usable_path
+    case "$usable_url" in
+        file://*) usable_path="${usable_url#file://}" ;;
+        *) return 1 ;;
+    esac
+    [ -d "$usable_path" ] || return 1
+    [ -n "$(ls -A "$usable_path" 2>/dev/null)" ]
+}
+
+# attempt_journal_corruption_recovery scans the data dir for databases whose
+# noms journal dolt refuses to load, preserves each corrupt store under
+# $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
+# from its local <db>-backup remote (#3176). Fail-closed: when any corrupt
+# database has no usable backup or the restore fails, its store is moved back
+# so the server cannot come up silently missing a database, and the function
+# returns 1. Returns 0 only when at least one database was restored and none
+# were left unrecoverable. Everything is logged loudly — restored copies are
+# missing all writes since the last backup sync, and operators must know that.
+attempt_journal_corruption_recovery() {
+    local aside_root="$PACK_STATE_DIR/corrupt-aside"
+    local ts db_dir db aside url recovered=0
+    ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+    echo "gc-beads-bd: journal corruption reported at startup; probing databases in $DATA_DIR" >&2
+    for db_dir in "$DATA_DIR"/*/; do
+        [ -d "$db_dir/.dolt" ] || continue
+        db=$(basename "$db_dir")
+        database_journal_corrupt "$db_dir" || continue
+        echo "gc-beads-bd: journal corruption confirmed in database '$db'" >&2
+        url=$(backup_remote_url_for_recovery "$db" "$db_dir") || url=""
+        if [ -z "$url" ] || ! backup_restore_source_usable "$url"; then
+            echo "gc-beads-bd: NOT auto-recovering '$db': no usable local backup (remote url: ${url:-none})" >&2
+            echo "gc-beads-bd: manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR" >&2
+            return 1
+        fi
+        mkdir -p "$aside_root" || return 1
+        aside="$aside_root/$db.$ts"
+        if ! mv "$DATA_DIR/$db" "$aside"; then
+            echo "gc-beads-bd: could not move corrupt store $DATA_DIR/$db aside to $aside; aborting recovery" >&2
+            return 1
+        fi
+        echo "gc-beads-bd: preserved corrupt store at $aside" >&2
+        if (cd "$DATA_DIR" && run_with_timeout 600 dolt backup restore "$url" "$db") >> "$LOG_FILE" 2>&1; then
+            recovered=$((recovered + 1))
+            echo "gc-beads-bd: RESTORED '$db' from backup $url — writes since the last backup sync are NOT in the restored copy; pre-corruption store kept at $aside" >&2
+        else
+            # Fail closed: put the corrupt store back so the server cannot
+            # start without this database and silently drop it from the
+            # control plane. The partial restore output (if any) is fresh
+            # data written by the failed restore, not original state.
+            rm -rf "${DATA_DIR:?}/${db:?}" 2>/dev/null || true
+            if ! mv "$aside" "$DATA_DIR/$db"; then
+                echo "gc-beads-bd: CRITICAL: restore failed AND corrupt store could not be moved back; original data is at $aside" >&2
+            fi
+            echo "gc-beads-bd: backup restore failed for '$db' (see $LOG_FILE); not retrying" >&2
+            return 1
+        fi
+    done
+    if [ "$recovered" -eq 0 ]; then
+        echo "gc-beads-bd: no corrupt database confirmed by offline probe; not recovering" >&2
+        return 1
+    fi
+    return 0
+}
+
+# op_start starts the dolt server if not already running.
+op_start() {
+    if is_remote; then
+        # Remote server — nothing to start locally.
+        exit 2
+    fi
+
+    local gc_helper_bin
+    gc_helper_bin=$(resolve_gc_helper_bin)
+
+    ensure_dolt_identity
+
+    # Check for required tools before attempting anything.
+    if ! command -v flock >/dev/null 2>&1; then
+        die "flock is required but not installed. Install: brew install flock (macOS) or apt install util-linux (Linux)"
+    fi
+    if ! command -v dolt >/dev/null 2>&1; then
+        die "dolt is required but not installed. Install: https://github.com/dolthub/dolt/releases"
+    fi
+
+    # Create data dir and runtime state dir if needed.
+    mkdir -p "$DATA_DIR" "$(dirname "$LOCK_FILE")"
+
+    # Acquire exclusive start lock (prevents concurrent starts).
+    # Use fd 9 for the lock and keep retrying on the same inode. Deleting and
+    # recreating the lock file after retry exhaustion is unsafe because flock
+    # attaches to the inode, not the pathname, so a second starter could bypass
+    # a live holder by acquiring a brand-new file.
+    exec 9>"$LOCK_FILE"
+    local lock_acquired=false
+    local attempt=0
+    while [ "$attempt" -lt 6 ]; do
+        if flock -n 9 2>/dev/null; then
+            lock_acquired=true
+            break
+        fi
+        sleep 0.5 2>/dev/null || sleep 1
+        attempt=$((attempt + 1))
+    done
+    if [ "$lock_acquired" = "false" ]; then
+        if wait_for_concurrent_start_ready; then
+            exit 0
+        fi
+        die "could not acquire dolt start lock ($LOCK_FILE)"
+    fi
+
+    # Check if a dolt process is already serving our data dir (any port).
+    # This prevents starting a second server that dies on database locks.
+    # If the server is ours, wait for it to become ready before restarting.
+    local existing_pid holder
+    if load_existing_managed_from_gc; then
+        existing_pid="$GC_EXISTING_MANAGED_PID"
+        if [ "$GC_EXISTING_REUSABLE" = "true" ] && [ -n "$GC_EXISTING_STATE_PORT" ]; then
+            DOLT_PORT="$GC_EXISTING_STATE_PORT"
+            echo "$existing_pid" > "$PID_FILE"
+            save_state "$existing_pid" true
+            exit 0
+        fi
+        if [ -n "$existing_pid" ] && [ "$GC_EXISTING_MANAGED_OWNED" = "true" ]; then
+            graceful_stop_owned_pid "$existing_pid" || \
+                die "could not stop existing dolt server (PID $existing_pid) without risking journal corruption (check $LOG_FILE)"
+        fi
+    else
+        if ! load_managed_process_inspection_from_gc; then
+            existing_pid=$(find_dolt_pid)
+        else
+            existing_pid="$GC_MANAGED_PID"
+            holder="$GC_PORT_HOLDER_PID"
+        fi
+        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+            local existing_owned=true
+            local existing_deleted=false
+            if [ -n "${GC_MANAGED_PID:-}" ] && [ "$existing_pid" = "$GC_MANAGED_PID" ]; then
+                existing_owned="$GC_MANAGED_OWNED"
+                existing_deleted="$GC_MANAGED_DELETED"
+            else
+                if verify_our_server "$existing_pid"; then
+                    existing_owned=true
+                else
+                    existing_owned=false
+                fi
+                if wait_deleted_data_inodes "$existing_pid"; then
+                    existing_deleted=true
+                fi
+            fi
+            if [ "$existing_owned" = true ]; then
+                local existing_port
+                existing_port=$(load_state_field port)
+                if [ -n "$existing_port" ]; then
+                    DOLT_PORT="$existing_port"
+                    if wait_for_managed_pid_ready "$existing_pid" "$existing_port" 30000 true; then
+                        echo "$existing_pid" > "$PID_FILE"
+                        save_state "$existing_pid" true
+                        exit 0
+                    fi
+                fi
+
+                # Our server exists but never became ready — restart it.
+                graceful_stop_owned_pid "$existing_pid" || \
+                    die "could not stop unready dolt server (PID $existing_pid) without risking journal corruption (check $LOG_FILE)"
+            fi
+        fi
+    fi
+
+    # Check if a process already holds the port.
+    if load_probe_managed_from_gc; then
+        holder="$GC_PROBE_PORT_HOLDER_PID"
+        if [ "$GC_PROBE_RUNNING" = "true" ] && [ -n "$holder" ]; then
+            # Our server is already running — update state and exit success.
+            echo "$holder" > "$PID_FILE"
+            save_state "$holder" true
+            exit 0
+        fi
+        if [ -n "$holder" ]; then
+            if [ "$GC_PROBE_PORT_HOLDER_OWNED" = "true" ]; then
+                graceful_stop_owned_pid "$holder" || \
+                    die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
+            else
+                if [ -z "$gc_helper_bin" ]; then
+                    kill_imposter "$holder"
+                    sleep 1
+                fi
+            fi
+        fi
+    else
+        if [ -z "$holder" ]; then
+            holder=$(find_port_holder)
+        fi
+        if [ -n "$holder" ]; then
+            local holder_owned=false
+            local holder_deleted=false
+            if [ -n "${GC_PORT_HOLDER_PID:-}" ] && [ "$holder" = "$GC_PORT_HOLDER_PID" ]; then
+                holder_owned="$GC_PORT_HOLDER_OWNED"
+                holder_deleted="$GC_PORT_HOLDER_DELETED"
+            else
+                if verify_our_server "$holder"; then
+                    holder_owned=true
+                fi
+                if wait_deleted_data_inodes "$holder"; then
+                    holder_deleted=true
+                fi
+            fi
+            if [ "$holder_owned" = true ] && [ "$holder_deleted" != true ]; then
+                # Our server is already running — update state and exit success.
+                echo "$holder" > "$PID_FILE"
+                save_state "$holder" true
+                exit 0
+            else
+                # Imposter or stale local server on our port — kill it.
+                if [ -z "$gc_helper_bin" ]; then
+                    kill_imposter "$holder"
+                    sleep 1
+                fi
+            fi
+        fi
+    fi
+
+    local journal_recovery_attempted=false
+    while :; do
+        if load_start_managed_from_gc; then
+            DOLT_PORT="$GC_START_PORT"
+            return 0
+        elif [ "$GC_START_MANAGED_USED" = "true" ]; then
+            # Auto-recover from a corrupted noms journal before failing the
+            # whole control plane (#3176). One attempt per start invocation;
+            # the offline probe inside recovery confirms actual corruption
+            # before any store is touched.
+            if [ "$journal_recovery_attempted" != "true" ] && log_tail_has_journal_corruption; then
+                journal_recovery_attempted=true
+                if attempt_journal_corruption_recovery; then
+                    continue
+                fi
+            fi
+            DOLT_PORT="$GC_START_PORT"
+            rm -f "$PID_FILE"
+            save_state 0 false
+            die "dolt server could not start via gc helper (check $LOG_FILE)"
+        fi
+        break
+    done
+
+    local launch_attempt=0
+    while [ "$launch_attempt" -lt 5 ]; do
+        # Pre-launch cleanup.
+        run_preflight_cleanup
+
+        # Lock-keyed singleton guard (gastownhall/gascity#3174): never bind a
+        # data_dir whose exclusive store lock is still held. A prior instance
+        # that is shutting down holds the lock until its chunk journal is
+        # flushed; binding before release corrupts the journal. Fail closed
+        # rather than race the holder.
+        wait_dolt_data_lock_free || \
+            die "refusing to start dolt sql-server: a prior instance still holds the data dir exclusive lock (check $LOG_FILE)"
+
+        # Write managed config.yaml with timeouts and GC settings.
+        write_config_yaml
+
+        local log_offset=0
+        if [ -f "$LOG_FILE" ]; then
+            log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
+        fi
+
+        # Start dolt sql-server with config file. Close the startup lock fd in
+        # the child so the flock is released when this starter exits.
+        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
+        local server_pid=$!
+
+        # Write PID file.
+        echo "$server_pid" > "$PID_FILE"
+
+        # Save state.
+        save_state "$server_pid" true
+
+        # Wait for server: combined PID alive + TCP reachable + query-ready check.
+        # 60 iterations × 500ms = 30s max. Large data dirs with many databases
+        # can take 10-20s to start, and the TCP listener can come up before
+        # the SQL layer is ready to answer queries.
+        local ready=false
+        if load_wait_ready_from_gc "$server_pid" 30000 false; then
+            ready="$GC_WAIT_READY"
+        elif [ "$GC_WAIT_READY_USED" != "true" ]; then
+            attempt=0
+            while [ "$attempt" -lt 60 ]; do
+                # Fail fast if process crashed during startup.
+                if ! kill -0 "$server_pid" 2>/dev/null; then
+                    break
+                fi
+
+                # Check TCP reachability and a lightweight query probe.
+                if tcp_check && do_query_probe; then
+                    ready=true
+                    break
+                fi
+                sleep 0.5 2>/dev/null || sleep 1
+                attempt=$((attempt + 1))
+            done
+        fi
+
+        if [ "$ready" = true ]; then
+            return 0
+        fi
+
+        if kill -0 "$server_pid" 2>/dev/null; then
+            # Clean up: kill the stuck server and reset state to prevent double-launch.
+            kill "$server_pid" 2>/dev/null || true
+            rm -f "$PID_FILE"
+            save_state 0 false
+            die "dolt server started (PID $server_pid) but did not become query-ready after 30s (check $LOG_FILE)"
+        fi
+
+        rm -f "$PID_FILE"
+        save_state 0 false
+
+        local startup_output=""
+        if [ -f "$LOG_FILE" ]; then
+            startup_output=$(tail -c +$((log_offset + 1)) "$LOG_FILE" 2>/dev/null || true)
+        fi
+        if printf '%s' "$startup_output" | grep -qi 'address already in use'; then
+            launch_attempt=$((launch_attempt + 1))
+            DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
+            continue
+        fi
+
+        # Auto-recover from a corrupted noms journal before failing the whole
+        # control plane (#3176). One attempt per start invocation; the offline
+        # probe inside recovery confirms actual corruption before any store is
+        # touched.
+        if printf '%s' "$startup_output" | journal_corruption_signature; then
+            if [ "$journal_recovery_attempted" != "true" ]; then
+                journal_recovery_attempted=true
+                if attempt_journal_corruption_recovery; then
+                    launch_attempt=$((launch_attempt + 1))
+                    continue
+                fi
+            fi
+            die "dolt server exited during startup: noms journal corruption (check $LOG_FILE; corrupt stores are preserved under $PACK_STATE_DIR/corrupt-aside)"
+        fi
+
+        die "dolt server exited during startup (check $LOG_FILE)"
+    done
+
+    rm -f "$PID_FILE"
+    save_state 0 false
+    die "dolt server could not find a free port after repeated address-in-use failures (check $LOG_FILE)"
+
+}
+
+# op_ensure_ready is a legacy alias for start.
+op_ensure_ready() {
+    if ! is_remote; then
+        local pid state_port
+        pid=$(find_dolt_pid)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && verify_our_server "$pid"; then
+            state_port=$(load_state_field port)
+            if [ -z "$state_port" ]; then
+                state_port="$DOLT_PORT"
+            fi
+            DOLT_PORT="$state_port"
+            if wait_for_managed_pid_ready "$pid" "$state_port" 30000 true; then
+                echo "$pid" > "$PID_FILE"
+                save_state "$pid" true
+                return 0
+            fi
+        fi
+    fi
+    op_start
+}
+
+# run_bd_pinned executes bd against the already-selected Dolt backend for this
+# provider operation. Without these exports, plain bd commands can rediscover
+# or auto-start a different local server mid-init.
+run_bd_pinned() {
+    local dir="$1"
+    shift
+    local beads_dir="$dir/.beads"
+    local host
+    host=$(connect_host)
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$beads_dir"
+        export GC_DOLT_HOST="$host"
+        export BEADS_DOLT_SERVER_HOST="$host"
+        export GC_DOLT_PORT="$DOLT_PORT"
+        export BEADS_DOLT_SERVER_PORT="$DOLT_PORT"
+        export GC_DOLT_USER="$DOLT_USER"
+        export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
+        export BEADS_DOLT_SERVER_USER="$DOLT_USER"
+        export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
+        "${BD_BIN:-bd}" "$@"
+    )
+}
+
+run_bd_init_pinned() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local host="$4"
+    local force_init="${5:-false}"
+    if [ "$force_init" = "true" ]; then
+        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+        return 0
+    fi
+
+    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+}
+
+run_bd_doltlite() {
+    local dir="$1"
+    shift
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        export BEADS_BACKEND="doltlite"
+        export GC_BEADS_BACKEND="doltlite"
+        unset GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD GC_DOLT
+        unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
+        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        export BEADS_DOLT_AUTO_START=0
+        "${BD_BIN:-bd}" "$@"
+    )
+}
+
+doltlite_bd_issue_prefix() {
+    local dir="$1"
+    run_bd_doltlite "$dir" config get issue_prefix 2>/dev/null | sed 's/[[:space:]]*$//' || true
+}
+
+doltlite_bd_schema_ready() {
+    local dir="$1" prefix="$2"
+    doltlite_bd_issue_prefix "$dir" | grep -Fx "$prefix" >/dev/null 2>&1
+}
+
+run_bd_doltlite_init() {
+    local dir="$1" prefix="$2" database="$3" reinit="${4:-false}"
+    if [ "$reinit" = true ]; then
+        run_bd_doltlite "$dir" init --reinit-local --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+        return 0
+    fi
+    run_bd_doltlite "$dir" init --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+}
+
+ensure_doltlite_bd_schema() {
+    local dir="$1" prefix="$2" database="$3" reinit=false
+    if doltlite_bd_schema_ready "$dir" "$prefix"; then
+        return 0
+    fi
+    if [ -d "$dir/.beads/embeddeddolt/$database/.dolt" ]; then
+        reinit=true
+    fi
+    run_bd_doltlite_init "$dir" "$prefix" "$database" "$reinit"
+}
+
+doltlite_maintenance_due() {
+    local dir="$1"
+    local stamp="$dir/.beads/doltlite/.gc-maintenance.stamp"
+    local interval="${GC_DOLTLITE_MAINTENANCE_INTERVAL_SECONDS:-86400}"
+    local now last
+    [ "$interval" -gt 0 ] 2>/dev/null || return 0
+    [ -f "$stamp" ] || return 0
+    now=$(date +%s 2>/dev/null || echo 0)
+    last=$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp" 2>/dev/null || echo 0)
+    [ $((now - last)) -ge "$interval" ]
+}
+
+# run_doltlite_reindex rebuilds the DoltLite store's SQLite secondary indexes.
+# `bd flatten`/`bd gc` rewrite the store (like a clone/pull) and leave the
+# secondary indexes stale, so index-path reads (count/status/list) silently
+# return wrong results until a REINDEX (ga-7hei). REINDEX is SQLite-specific
+# DDL, so it must run against the physical .beads/doltlite/<db>.db file through
+# gc's in-process SQLite driver (gc dolt-config doltlite-reindex, which resolves
+# the same .db the read path opens from metadata.json). It cannot go through
+# `bd sql`: that surface speaks Dolt/MySQL and rejects REINDEX, and it is
+# refused outright in the embedded mode run_bd_doltlite forces. Best-effort and
+# non-fatal: the caller warns on non-zero exit.
+run_doltlite_reindex() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir"
+}
+
+# doltlite_reindex_supported reports whether the resolved gc helper can rebuild
+# the DoltLite SQLite indexes in process. Only a gc built with the native beads
+# SQLite driver can (gc dolt-config doltlite-reindex --check); a default build
+# returns non-zero. The maintenance path probes this BEFORE the stale-index-
+# producing flatten/gc so it never creates index corruption it cannot heal
+# (ga-7hei).
+doltlite_reindex_supported() {
+    local dir="$1"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -z "$gc_bin" ]; then
+        return 1
+    fi
+    "$gc_bin" dolt-config doltlite-reindex --dir "$dir" --check >/dev/null 2>&1
+}
+
+run_doltlite_existing_db_maintenance() {
+    local dir="$1"
+    local stamp="$dir/.beads/doltlite/.gc-maintenance.stamp"
+    if ! doltlite_maintenance_due "$dir"; then
+        return 0
+    fi
+    # flatten/gc rewrite the store and leave its SQLite secondary indexes stale;
+    # only a reindex-capable gc build can heal that (ga-7hei). If reindex is
+    # unavailable (e.g. a default, non-native gc binary), do NOT run the
+    # stale-index-producing flatten/gc at all: creating index corruption we
+    # cannot heal and then latching the maintenance stamp "done" is worse than
+    # skipping compaction. Leave the stamp untouched so a later reindex-capable
+    # binary still runs maintenance.
+    if ! doltlite_reindex_supported "$dir"; then
+        echo "warning: skipping doltlite maintenance for $dir: no reindex-capable gc helper (build gc with -tags gascity_native_beads); leaving the store un-flattened to avoid stale indexes (ga-7hei)" >&2
+        return 0
+    fi
+    echo "gc-beads-bd: running doltlite maintenance for $dir" >&2
+    run_bd_doltlite "$dir" flatten --force --json >/dev/null 2>&1 || echo "warning: bd flatten failed for $dir" >&2
+    run_bd_doltlite "$dir" gc --skip-decay --force --json >/dev/null 2>&1 || echo "warning: bd gc failed for $dir" >&2
+    # flatten/gc leave the SQLite secondary indexes stale; rebuild them so
+    # index-path reads don't silently return wrong data (ga-7hei). Only stamp
+    # maintenance complete when the reindex succeeds — a failed reindex (e.g. a
+    # transient SQLite lock) must stay visible and retryable on the next cycle,
+    # not be suppressed for the whole maintenance interval.
+    if ! run_doltlite_reindex "$dir"; then
+        echo "warning: doltlite reindex failed for $dir; leaving maintenance stamp unrefreshed so the next run retries (ga-7hei)" >&2
+        return 0
+    fi
+    mkdir -p "$dir/.beads/doltlite" 2>/dev/null || true
+    date +%s > "$stamp" 2>/dev/null || true
+}
+
+ensure_beads_dir_permissions() {
+    local dir="$1"
+    local beads_dir="$dir/.beads"
+    mkdir -p "$beads_dir" || die "failed to create $beads_dir"
+    chmod 700 "$beads_dir" || die "failed to set $beads_dir permissions to 700"
+}
+
+normalize_scope_after_init() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local gc_bin
+    gc_bin=$(resolve_gc_helper_bin)
+    if [ -n "$gc_bin" ]; then
+        if [ -n "$dolt_database" ]; then
+            "$gc_bin" dolt-config normalize-scope --city "$GC_CITY_PATH" --dir "$dir" --prefix "$prefix" --dolt-database "$dolt_database" || die "failed to normalize canonical scope state for $dir"
+        else
+            "$gc_bin" dolt-config normalize-scope --city "$GC_CITY_PATH" --dir "$dir" --prefix "$prefix" || die "failed to normalize canonical scope state for $dir"
+        fi
+        return 0
+    fi
+    rm -f "$dir/.beads/dolt-server.pid" "$dir/.beads/dolt-server.lock" "$dir/.beads/dolt-server.log" "$dir/.beads/dolt-server.port"
+}
+
+# op_init initializes beads in a directory.
+# Args: <dir> <prefix> [dolt_database]
+op_init() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="${3:-}"
+    local metadata_path="$dir/.beads/metadata.json"
+    local existing_db=""
+    local allow_reserved_existing=false
+    local bd_init_force=""
+    local database_created_by_gc=false
+    if [ -z "$dir" ] || [ -z "$prefix" ]; then
+        die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
+    fi
+
+    if [ -f "$metadata_path" ]; then
+        existing_db=$(read_existing_dolt_database "$metadata_path")
+        if [ -n "$existing_db" ] && is_legacy_managed_probe_database_name "$existing_db"; then
+            allow_reserved_existing=true
+        fi
+    fi
+
+    # Validate prefix before SQL interpolation (upstream 38f7b380).
+    if ! valid_sql_name "$prefix"; then
+        die "invalid beads prefix: $prefix (must be alphanumeric, hyphens, underscores)"
+    fi
+    if [ -n "$dolt_database" ]; then
+        if is_reserved_dolt_database_name "$dolt_database"; then
+            if [ "$allow_reserved_existing" = true ]; then
+                dolt_database="$existing_db"
+            else
+                die "reserved dolt database name: $dolt_database (used internally by gc)"
+            fi
+        fi
+        if ! valid_sql_name "$dolt_database"; then
+            die "invalid dolt database name: $dolt_database (must be alphanumeric, hyphens, underscores)"
+        fi
+    fi
+    # Filter BEADS_DIR from inherited environment to prevent bd from
+    # finding a parent directory's .beads/ database (upstream parity).
+    local beads_dir="$dir/.beads"
+    unset BEADS_DIR
+    export BEADS_DIR="$beads_dir"
+    ensure_beads_dir_permissions "$dir"
+    ensure_beads_role
+
+    if [ -z "$dolt_database" ]; then
+        # Compatibility fallback for direct gc-beads-bd invocations.
+        # GC's canonical path passes dolt_database explicitly.
+        if [ -n "$existing_db" ]; then
+            if is_reserved_dolt_database_name "$existing_db"; then
+                if [ "$allow_reserved_existing" = true ]; then
+                    # Preserve legacy probe metadata for already-initialized
+                    # scopes so startup can recover them into the canonical
+                    # migration flow. Fresh init still rejects this name.
+                    dolt_database="$existing_db"
+                else
+                    die "reserved dolt database name: $existing_db (used internally by gc)"
+                fi
+            elif ! valid_sql_name "$existing_db"; then
+                die "invalid existing dolt database name: $existing_db"
+            else
+                dolt_database="$existing_db"
+            fi
+        else
+            dolt_database="$prefix"
+        fi
+    fi
+    if is_reserved_dolt_database_name "$dolt_database" && [ "$allow_reserved_existing" != true ]; then
+        die "reserved dolt database name: $dolt_database (used internally by gc)"
+    fi
+
+    # Custom bead types for bd (extracted from beads core in v0.46.0).
+    # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
+    # "convergence" is required because gc's convergence handler creates
+    # beads with that type. "step" is required for non-root formula step
+    # beads (#1039). Must match doctor.RequiredCustomTypes.
+    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+
+    # Hosted beads-gateway: when a credential command is configured, bd
+    # authenticates to the gateway via that command (EIA-as-username over TLS) and
+    # the gateway owns database routing. The managed-local-dolt path below (raw
+    # `dolt --no-tls` reachability probes, server lifecycle, CREATE DATABASE)
+    # cannot reach a TLS+EIA gateway, so defer to bd: it connects over the gateway
+    # and inits/adopts the (provisioner-created) project database itself. Only
+    # engages for hosted scopes; managed cities have no credential command and
+    # fall through to the unchanged path.
+    if [ -n "${BEADS_DOLT_CREDENTIAL_COMMAND:-}" ]; then
+        local hosted_host
+        hosted_host=$(connect_host)
+        if ! run_bd_pinned "$dir" ready >/dev/null 2>&1; then
+            run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$hosted_host" ""
+        fi
+        ensure_beads_dir_permissions "$dir"
+        exit 0
+    fi
+
+    if is_doltlite_backend; then
+        local database already_ready
+        database="$dolt_database"
+        if [ -z "$database" ]; then
+            database="$prefix"
+        fi
+        if ! valid_sql_name "$database"; then
+            die "invalid doltlite database name: $database (must be alphanumeric, hyphens, underscores)"
+        fi
+        validate_bd_runtime_config_value "types.custom" "$custom_types"
+        ensure_beads_dir_permissions "$dir"
+        already_ready=false
+        if doltlite_bd_schema_ready "$dir" "$prefix"; then
+            already_ready=true
+        fi
+        ensure_doltlite_bd_schema "$dir" "$prefix" "$database"
+        write_doltlite_metadata "$dir" "$database"
+        if [ "$already_ready" = true ]; then
+            run_doltlite_existing_db_maintenance "$dir"
+        fi
+        exit 0
+    fi
+
+    # If already initialized on disk, ensure the database is also registered
+    # with the running server. gc's normalizeCanonicalBdScopeFilesForInit
+    # writes metadata.json (dolt_database/dolt_mode) BEFORE invoking us, so a
+    # fresh init also reaches this branch — that is intentional. The branch
+    # does NOT blindly skip init: it only exits early when the server already
+    # has a live bd schema (bd_runtime_schema_ready). Otherwise it sets
+    # bd_init_force="--force" so the fall-through bd init reinitializes over
+    # the gc-pre-seeded metadata stub instead of aborting with bd's "This
+    # workspace is already initialized" guard. Gating this branch on project_id
+    # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
+    # --force is never set and bd init aborts.
+    if [ -f "$dir/.beads/metadata.json" ]; then
+        # A pre-existing metadata.json means the store may already be
+        # initialized. Both checks below run SQL against the managed Dolt
+        # server, so a transient server-unreachable blip (port drift, an
+        # exclusive lock held by a stale dolt process, a slow server start)
+        # is indistinguishable from "schema missing" / "not registered" —
+        # and both of those branches react by forcing a DESTRUCTIVE reinit
+        # (--force), which trips bd's remote-history guard and aborts city
+        # init on an otherwise healthy store. Confirm the server actually
+        # answers before trusting a negative result; otherwise fail closed
+        # so the caller's retry loop waits for the server to come up instead
+        # of reinitializing live data.
+        if ! server_reachable; then
+            die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
+        fi
+        if ensure_database_registered "$dolt_database"; then
+            local schema_ready=false
+            local holds_bd_tables=0
+            if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+                database_created_by_gc=true
+            fi
+            if bd_runtime_schema_ready "$dolt_database"; then
+                schema_ready=true
+            else
+                # The probe found no bd schema, and the only response this branch
+                # offers is a destructive --force reinit. One failed probe cannot
+                # separate "the schema is absent" from "the server hiccuped" or
+                # "a concurrent init has not finished writing it": server_reachable
+                # above only proves a database-less SELECT 1 answered a moment
+                # earlier, on a different connection. Ask the database itself
+                # before acting, and skip the extra work entirely when it says it
+                # is empty, which is the ordinary fresh-init path.
+                bd_runtime_store_holds_bd_tables "$dolt_database" || holds_bd_tables=$?
+                if [ "$holds_bd_tables" -ne 1 ]; then
+                    if wait_for_bd_runtime_schema "$dolt_database"; then
+                        schema_ready=true
+                    elif [ "$holds_bd_tables" -eq 0 ]; then
+                        die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+                    else
+                        # Undetermined: the table count never answered, so there is
+                        # no evidence either way. Keep the pre-existing behaviour
+                        # rather than inventing a new way for init to fail, but say
+                        # so, because this is the one path that still reinitializes
+                        # on an unverified negative.
+                        echo "warning: could not determine whether '$dolt_database' holds bd tables; reinitializing on an unverified schema probe" >&2
+                    fi
+                fi
+            fi
+            if [ "$schema_ready" = true ]; then
+                # GC owns canonical metadata/config normalization after this backend
+                # bridge returns. Keep the backend focused on database registration
+                # and bd-specific bootstrap only.
+                ensure_beads_dir_permissions "$dir"
+                normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+                ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
+                ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
+                ensure_project_identity "$dir"
+                exit 0
+            fi
+            echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
+            bd_init_force="--force"
+        else
+            echo "warning: database '$dolt_database' not registered; re-initializing" >&2
+            bd_init_force="--force"
+        fi
+    fi
+
+    local host
+    host=$(connect_host)
+
+    # Register the database with the running server first. CREATE DATABASE
+    # IF NOT EXISTS both creates the on-disk directory and registers it in
+    # the server's catalog. This is the upstream gastown pattern — when the
+    # server is running, always go through SQL rather than dolt init on disk.
+    #
+    # Failure here is a hard stop: bd init in server mode requires the
+    # database to exist on the server. The previous `|| true` swallowed
+    # CREATE DATABASE failures and let bd init fail later with a cryptic
+    # "database not found" error — root cause of the gascity-3 reproducer
+    # where the city's hq database was never created on first start.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
+    fi
+    if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" = true ]; then
+        database_created_by_gc=true
+    fi
+
+    # Gas City creates its managed server root at .beads/dolt before bd init.
+    # For a database proven to have been created above by this invocation,
+    # record the current bd version before bd's legacy-workspace guard runs.
+    # Pre-existing databases deliberately receive no marker here.
+    if [ "$database_created_by_gc" = true ]; then
+        seed_fresh_managed_bd_version_witness "$dir"
+    fi
+
+    # Run bd init in server mode through the pinned wrapper so the fallback
+    # path uses the same authenticated Dolt target as the rest of init.
+    # Metadata-only scopes already look initialized to bd, so schema-repair
+    # fallback must force reinit to seed the missing tables into the pinned DB.
+    # Always pass the pinned server database explicitly; `-p` controls the
+    # visible issue prefix, while `--database` tells bd which existing Dolt
+    # database to initialize. Without `--database`, bd can seed beads_<prefix>
+    # and leave the pinned database schema-less.
+    run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+
+    # Re-register post-init: if bd init didn't catalog-register the DB
+    # (server-mode quirk), do it now. After a successful bd init this is a
+    # no-op via the USE check inside ensure_database_registered. Failure
+    # here means bd init claimed success but the server can't see the DB —
+    # equally a hard stop, equally previously swallowed by `|| true`.
+    if ! ensure_database_registered "$dolt_database"; then
+        die "Dolt database '$dolt_database' is unreachable on the server after bd init reported success; see warnings above. probable causes: server crashed mid-init, port collision, or stale catalog state."
+    fi
+
+    # GC owns canonical metadata/config normalization after this backend
+    # bridge returns. Keep bd-specific config/migration here only.
+    ensure_beads_dir_permissions "$dir"
+    if ! wait_for_bd_runtime_schema "$dolt_database"; then
+        if [ "${GC_BD_INIT_RETRY:-0}" != "1" ]; then
+            if [ -n "$bd_init_force" ]; then
+                # Metadata-only scopes can still confuse bd's first forced server init.
+                # Drop the preseeded metadata and retry through a fresh top-level
+                # invocation, matching the successful manual recovery path.
+                rm -f "$dir/.beads/metadata.json"
+            fi
+            echo "warning: bd schema for '$dolt_database' not visible after init; retrying init" >&2
+            GC_BD_INIT_RETRY=1 exec "$0" init "$dir" "$prefix" "$dolt_database"
+            die "failed to re-exec init for $dir"
+        fi
+        die "bd schema not visible for $dolt_database after init"
+    fi
+
+    # Configure custom bead types without invoking `bd config set`, which can
+    # spend tens of seconds in auto-migrate on populated stores. The canonical
+    # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
+    # here we only register the types in bd's runtime SQL config table.
+    ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
+
+    # Keep bd's runtime config in sync with GC's canonical prefix. This is
+    # compatibility state for raw bd operations, not a second GC authority.
+    ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
+
+    ensure_project_identity "$dir"
+
+    # Drop orphan database created by bd init (upstream gt-sv1h) only after
+    # the pinned database schema is visible. Some bd builds appear to stage
+    # schema work before the pinned catalog entry is fully adopted; deleting
+    # beads_<prefix> too early can discard the only initialized schema.
+    local orphan_db="beads_${prefix}"
+    if [ "$orphan_db" != "$dolt_database" ]; then
+        server_sql "DROP DATABASE IF EXISTS \`$orphan_db\`" >/dev/null 2>&1 || true
+    fi
+
+    normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+}
+
+
+scope_store_dir() {
+    if [ -n "${GC_STORE_ROOT:-}" ]; then
+        printf '%s\n' "$GC_STORE_ROOT"
+        return
+    fi
+    printf '%s\n' "$GC_CITY_PATH"
+}
+
+op_store_bridge() {
+    local scope_dir host gc_bin
+    scope_dir=$(scope_store_dir)
+    host=$(connect_host)
+
+    gc_bin=$(resolve_gc_bin)
+    if [ -z "$gc_bin" ]; then
+        die "gc binary not found for exec store operations"
+    fi
+
+    GC_DOLT_PASSWORD="$DOLT_PASSWORD"     BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"     "$gc_bin" bd-store-bridge         --dir "$scope_dir"         --host "$host"         --port "$DOLT_PORT"         --user "$DOLT_USER"         "$@"
+    return $?
+}
+op_health() {
+    local conn_count="" read_only_status
+
+    # TCP check.
+    if ! tcp_check; then
+        die "dolt server not reachable on $(connect_host):$DOLT_PORT"
+    fi
+
+    if load_health_check_from_gc; then
+        if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
+            die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+        if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
+            die "dolt server is in read-only mode"
+        fi
+        if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "unknown" ]; then
+            echo "warning: dolt read-only probe inconclusive" >&2
+        fi
+        conn_count="$GC_HEALTH_CONNECTION_COUNT"
+    else
+        # Query probe.
+        if ! do_query_probe; then
+            die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+
+        # Imposter detection disabled: TCP + query probe passed, server is
+        # healthy. False-positive imposter kills (caused by inherited supervisor
+        # fds and stale state files) were actively harmful — killing the
+        # managed dolt server and losing all in-flight work.
+
+        # Read-only detection (local only).
+        if ! is_remote; then
+            set +e
+            check_read_only
+            read_only_status=$?
+            set -e
+            case "$read_only_status" in
+                0) die "dolt server is in read-only mode" ;;
+                1) ;;
+                *) echo "warning: dolt read-only probe inconclusive" >&2 ;;
+            esac
+        fi
+
+        # Connection capacity warning (non-fatal, single query).
+        conn_count=$(get_connection_count 2>/dev/null) || conn_count=""
+    fi
+
+    if [ -n "$conn_count" ] && [ "$conn_count" -ge 800 ] 2>/dev/null; then
+        echo "warning: connection count ($conn_count) near capacity (80% of 1000)" >&2
+    fi
+}
+
+# op_probe checks if the dolt server is available.
+# Exit 0 = running, exit 2 = not running.
+op_probe() {
+    if is_remote; then
+        # Remote server — check TCP.
+        if tcp_check; then
+            exit 0
+        else
+            exit 2
+        fi
+    fi
+
+    if load_probe_managed_from_gc; then
+        if [ "$GC_PROBE_RUNNING" = "true" ]; then
+            exit 0
+        fi
+        exit 2
+    fi
+
+    # Local server — check port holder and verify identity.
+    local holder
+    if load_managed_process_inspection_from_gc; then
+        holder="$GC_PORT_HOLDER_PID"
+        if [ -n "$holder" ]; then
+            if [ "$GC_PORT_HOLDER_OWNED" = true ] && tcp_check; then
+                exit 0
+            fi
+            exit 2
+        fi
+    fi
+    holder=$(find_port_holder)
+    if [ -z "$holder" ]; then
+        exit 2
+    fi
+
+    # Verify it's our server.
+    if verify_our_server "$holder" && tcp_check; then
+        exit 0
+    fi
+
+    # Imposter or unreachable.
+    exit 2
+}
+
+enospc_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-enospc.sh"
+if [ -r "$enospc_helper" ]; then
+    . "$enospc_helper"
+else
+    # Some focused shell harnesses execute gc-beads-bd's prelude as a single
+    # temporary file without sibling assets. Keep the production helper as the
+    # canonical copy, but preserve the same detector behavior for those harnesses.
+    recovery_should_skip_due_to_enospc() {
+        [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        tail -n 1000 "$LOG_FILE" 2>/dev/null \
+            | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
+            || return 1
+        return 0
+    }
+fi
+
+# op_recover stops the dolt server, restarts it, and verifies health.
+op_recover() {
+    local read_only_status
+
+    if is_remote; then
+        die "recovery not supported for remote dolt servers"
+    fi
+
+    # Skip auto-recovery when dolt has been failing due to disk exhaustion.
+    # Restarting dolt does not free disk space, and the recovery cycle
+    # itself amplifies the failure: each restart triggers a conjoin/backup
+    # sync that writes another partial table file to the backup remote.
+    # Require manual intervention (free disk space) before recovery
+    # resumes. See gastownhall/gascity#2158.
+    if recovery_should_skip_due_to_enospc; then
+        echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
+        echo "  free disk space, then re-run health checks" >&2
+        die "dolt recovery skipped: ENOSPC detected"
+    fi
+
+    if load_recover_managed_from_gc; then
+        if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then
+            echo "detected read-only dolt server — restarting" >&2
+        fi
+        DOLT_PORT="$GC_RECOVER_PORT"
+        return 0
+    elif [ "$GC_RECOVER_MANAGED_USED" = "true" ]; then
+        if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then
+            echo "detected read-only dolt server — restarting" >&2
+        fi
+        DOLT_PORT="$GC_RECOVER_PORT"
+        die "dolt recovery via gc helper failed"
+    fi
+
+    # Diagnose: check for read-only before stopping.
+    if tcp_check; then
+        if load_health_check_from_gc; then
+            if [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
+                echo "detected read-only dolt server — restarting" >&2
+            fi
+        else
+            set +e
+            check_read_only
+            read_only_status=$?
+            set -e
+            case "$read_only_status" in
+                0) echo "detected read-only dolt server — restarting" >&2 ;;
+                2) echo "dolt read-only probe inconclusive before recovery" >&2 ;;
+            esac
+        fi
+    fi
+
+    # Stop.
+    op_stop_impl || true
+
+    # Clean startup artifacts before restart.
+    run_preflight_cleanup
+
+    # Wait a moment for cleanup.
+    sleep 1
+
+    # Restart.
+    op_start
+
+    # Verify health.
+    op_health
+}
+
+# op_stop_impl is the internal stop implementation (no exit on "not running").
+op_stop_impl() {
+    GC_STOP_HAD_PID="false"
+    if is_remote; then
+        return 0
+    fi
+
+    if load_stop_managed_from_gc; then
+        return 0
+    elif [ "$GC_STOP_MANAGED_USED" = "true" ]; then
+        return 1
+    fi
+
+    local pid owned holder
+    owned="false"
+    if ! load_managed_process_inspection_from_gc; then
+        pid=$(find_dolt_pid)
+        if [ -n "$pid" ] && verify_our_server "$pid"; then
+            owned="true"
+        else
+            holder=$(find_port_holder)
+            if [ -n "$holder" ] && verify_our_server "$holder"; then
+                pid="$holder"
+                owned="true"
+            else
+                pid=""
+            fi
+        fi
+    else
+        if [ -n "${GC_MANAGED_PID:-}" ] && [ "${GC_MANAGED_OWNED:-false}" = "true" ]; then
+            pid="$GC_MANAGED_PID"
+            owned="true"
+        elif [ -n "${GC_PORT_HOLDER_PID:-}" ] && [ "${GC_PORT_HOLDER_OWNED:-false}" = "true" ]; then
+            pid="$GC_PORT_HOLDER_PID"
+            owned="true"
+        else
+            pid=""
+        fi
+    fi
+    if [ -z "$pid" ] || [ "$owned" != "true" ]; then
+        # No controllable process, but a crashed server's flushing descendant
+        # can still hold the store lock. The stop contract says success means
+        # the data dir is released — fail closed instead of green-lighting a
+        # mid-flush data-dir consumer (gastownhall/gascity#3174).
+        wait_dolt_data_lock_free || return 1
+        # No process found — clean up state files.
+        save_state 0 false
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    GC_STOP_HAD_PID="true"
+
+    drain_connections_before_stop
+
+    # SIGTERM and wait (60 × 500ms = 30s grace, matching the gc helper's
+    # default dolt_stop_timeout), then a
+    # lock-gated force kill: SIGKILL is only safe when the dolt exclusive
+    # store lock is free — a holder is mid-flush, and killing it tears the
+    # noms journal (gastownhall/gascity#3174). graceful_stop_owned_pid also
+    # blocks until the lock is released after exit, so a follow-up start
+    # cannot bind the data_dir mid-flush.
+    graceful_stop_owned_pid "$pid" || return 1
+
+    # Clean up state files.
+    save_state 0 false
+    rm -f "$PID_FILE"
+}
+
+# op_stop stops the dolt server.
+op_stop() {
+    if is_remote; then
+        exit 2
+    fi
+
+    if ! op_stop_impl; then
+        die "failed to stop managed dolt server"
+    fi
+    if [ "$GC_STOP_HAD_PID" != "true" ]; then
+        exit 2
+    fi
+}
+
+# op_shutdown is a legacy alias for stop.
+op_shutdown() {
+    op_stop
+}
+
+# --- Main ---
+
+# GC_DOLT=skip → no-op for all operations.
+if [ "$GC_DOLT" = "skip" ]; then
+    exit 2
+fi
+
+op="$1"
+shift || true
+
+# Validate GC_CITY_PATH.
+if [ -z "$GC_CITY_PATH" ]; then
+    die "GC_CITY_PATH not set"
+fi
+
+# Set derived paths.
+GC_DIR="$GC_CITY_PATH/.gc"
+BEADS_DIR_ROOT="$GC_CITY_PATH/.beads"
+
+# Prefer GC-owned runtime layout derivation when the current gc binary is
+# available. Fall back to the legacy shell derivation for compatibility.
+if ! load_runtime_layout_from_gc; then
+    if [ -n "$GC_PACK_STATE_DIR" ]; then
+        PACK_STATE_DIR="$GC_PACK_STATE_DIR"
+    elif [ -n "$GC_CITY_RUNTIME_DIR" ]; then
+        PACK_STATE_DIR="$GC_CITY_RUNTIME_DIR/packs/dolt"
+    else
+        PACK_STATE_DIR="$GC_DIR/runtime/packs/dolt"
+    fi
+
+    # All data lives under .beads/dolt by default. Runtime state (logs, PID,
+    # lock) lives under PACK_STATE_DIR. GC may project the fully resolved paths so
+    # this backend bridge does not have to own runtime layout policy.
+    DATA_DIR="${GC_DOLT_DATA_DIR:-$BEADS_DIR_ROOT/dolt}"
+    LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
+    STATE_FILE="${GC_DOLT_STATE_FILE:-$PACK_STATE_DIR/dolt-provider-state.json}"
+    PID_FILE="${GC_DOLT_PID_FILE:-$PACK_STATE_DIR/dolt.pid}"
+    LOCK_FILE="${GC_DOLT_LOCK_FILE:-$PACK_STATE_DIR/dolt.lock}"
+    CONFIG_FILE="${GC_DOLT_CONFIG_FILE:-$PACK_STATE_DIR/dolt-config.yaml}"
+fi
+if is_doltlite_backend; then
+    mkdir -p "$PACK_STATE_DIR"
+else
+    mkdir -p "$DATA_DIR" "$PACK_STATE_DIR"
+fi
+
+# Resolve DOLT_PORT now that STATE_FILE is set.
+DOLT_PORT=$(allocate_port)
+
+case "$op" in
+    start)        op_start ;;
+    ensure-ready) op_ensure_ready ;;
+    init)         op_init "$@" ;;
+    create|get|update|close|reopen|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
+                  op_store_bridge "$op" "$@" ;;
+    health)       op_health ;;
+    probe)        op_probe ;;
+    recover)      op_recover ;;
+    stop)         op_stop ;;
+    shutdown)     op_shutdown ;;
+    *)            exit 2 ;;  # Unknown operation — forward compatible.
+esac

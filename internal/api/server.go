@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -10,26 +9,94 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/featureflags"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/webhookverify"
+	"github.com/gastownhall/gascity/internal/worker"
+	"golang.org/x/sync/singleflight"
 )
 
-// Server is the GC API HTTP server. It serves /v0/* endpoints and /health.
+// extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
+// extmsg inbound/outbound handlers so they cannot leak across server
+// lifetimes or block shutdown on a slow downstream.
+const extmsgNotifyTimeout = 30 * time.Second
+
+// runBackground owns one detached, bounded task. The task is visible to
+// waitForBackground so tests and a future server shutdown path can wait for
+// side effects before releasing the state they use.
+func (s *Server) runBackground(run func(context.Context)) {
+	s.backgroundTasks.Add(1)
+	go func() {
+		defer s.backgroundTasks.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), extmsgNotifyTimeout)
+		defer cancel()
+		run(ctx)
+	}()
+}
+
+func (s *Server) waitForBackground() {
+	s.backgroundTasks.Wait()
+}
+
+// Server is the per-city handler-host. It owns the per-city State and
+// holds every per-city HTTP handler method (humaHandle*, checkXxxStream,
+// streamXxx, handleServiceProxy, etc.). Per-city Huma operations are
+// registered on the supervisor's single Huma API at their real
+// /v0/city/{cityName}/... paths via SupervisorMux.registerCityRoutes;
+// the supervisor resolves and calls these methods through bindCity.
+//
+// Server's mux is used only for the /svc/* workspace-service
+// pass-through, which is explicitly excluded from the typed control
+// plane (it proxies arbitrary bodies to user-provided service
+// processes).
 type Server struct {
 	state    State
 	mux      *http.ServeMux
-	server   *http.Server
-	readOnly bool // when true, POST endpoints return 403
+	readOnly bool // mirrors supervisor's read-only flag for /svc/ enforcement
+
+	// bootFlags is the rollout-gate snapshot latched at Server construction —
+	// from the State's boot latch when it implements RolloutFlagsProvider, else
+	// resolved once from Config(). Immutable for the Server lifetime, mirroring
+	// readOnly; the S2+/S3 handler consumers read it.
+	bootFlags rollout.Flags
+
+	runCensusSource RunCensusSource
+
+	backgroundTasks sync.WaitGroup
 
 	// sessionLogSearchPaths overrides the default search paths for Claude
-	// session JSONL files. Nil means use sessionlog.DefaultSearchPaths().
+	// session JSONL files. Nil means use worker.DefaultSearchPaths().
 	sessionLogSearchPaths []string
+
+	// structuredPeekPoll overrides the structured fallback stream's periodic
+	// history check in tests. Nil uses outputStreamPollInterval.
+	structuredPeekPoll <-chan time.Time
 
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
+
+	// rigIdem is the in-process live index + request_id state machine backing
+	// async server-side rig-create (POST /v0/city/{n}/rigs with a git_url). It
+	// starts empty at boot and is authoritative for admission (G13). One index
+	// per per-city Server (the supervisor caches one Server per city).
+	rigIdem *rigIdemIndex
 
 	// lookPathCache caches exec.LookPath results with a short TTL to avoid
 	// repeated filesystem scans on every GET /v0/agents request.
 	lookPathMu      sync.Mutex
 	lookPathEntries map[string]lookPathEntry
+
+	// activityMemo memoizes the whole-mirror activity derivation zcode
+	// sessions need on every State poll. workerFactory builds a fresh
+	// worker.Factory per request, so the memo lives here — one per Server —
+	// and is threaded into each factory; otherwise every poll re-parses an
+	// unchanged mirror.
+	activityMemo *worker.DerivedActivityMemo
+
+	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
+	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
+	agentVisibilityWaitTimeout time.Duration
 
 	// responseCache memoizes expensive read responses for a short TTL so
 	// repeated UI polls do not re-run the same bead-store subprocesses when
@@ -37,8 +104,92 @@ type Server struct {
 	responseCacheMu      sync.Mutex
 	responseCacheEntries map[string]responseCacheEntry
 
+	// responseRefreshing tracks response-cache keys with a background
+	// stale-while-revalidate refresh already in flight (ra-4u2eqc), guarded
+	// by responseCacheMu alongside responseCacheEntries. See
+	// beginResponseRefresh / endResponseRefresh in response_cache.go.
+	responseRefreshing map[string]bool
+
+	// storeHealth caches the on-disk size walk and maintenance-log read
+	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
+	// store directories produce a zero-value entry so repeated requests
+	// don't re-walk a fresh city between maintenance runs.
+	storeHealthMu       sync.Mutex
+	storeHealthEntry    *StatusStoreHealth
+	storeHealthExpires  time.Time
+	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
+	storeHealthFlight   singleflight.Group
+
+	// componentVersions caches the dolt engine and bd CLI versions the
+	// supervisor drives for /v0/status. Binary versions are immutable for
+	// the process lifetime, so they are resolved once on first read.
+	// componentVersionsProbe overrides the real subprocess probe in tests;
+	// nil uses the PATH-resolved binaries.
+	componentVersionsOnce  sync.Once
+	componentVersionsValue componentVersions
+	componentVersionsProbe func() componentVersions
+
+	// dashboardBase reports the browser-reachable base URL of the dashboard
+	// mounted on the process serving this city's API, or "" when unmounted.
+	// Nil (the default) also means unmounted — the standalone controller
+	// [api] port serves /v0 without the SPA — so handlers omit dashboard
+	// deep links. Populated from SupervisorMux.WithDashboardBase when the
+	// supervisor builds per-city servers.
+	dashboardBase func() string
+
 	// LookPathFunc can be overridden in tests. Defaults to exec.LookPath.
 	LookPathFunc func(string) (string, error)
+
+	// SlingRunnerFunc can be overridden in tests. When nil, uses a real
+	// shell runner. Set this to inject a fake runner for unit tests.
+	SlingRunnerFunc sling.SlingRunner
+
+	// webhookEvents overrides the E8 webhook.received / webhook.rejected sink.
+	// Nil (the default) forwards to the city event bus via cityEventWebhookSink;
+	// tests inject a fake to assert emitted events. See webhookEventSink.
+	webhookEvents WebhookEventSink
+
+	// webhookDedup is the E8 delivery-idempotency store, keyed (webhook,
+	// delivery-id). Shared across deliveries for the process lifetime of this
+	// per-city Server (the supervisor caches one Server per city).
+	webhookDedup *webhookDedupCache
+
+	// webhookLimiter is the E8 per-webhook token-bucket rate limiter.
+	webhookLimiter *webhookRateLimiter
+
+	// webhookVerifiers memoizes the built E4 verifier per webhook so a stateful
+	// verifier (the jwt-jwks JWKS cache) persists across deliveries instead of
+	// being rebuilt — and its JWKS refetched — on every request. Keyed by webhook
+	// name; a cheap config fingerprint guards each entry so a config hot-reload
+	// that changes the verify config rebuilds the verifier. Secret resolution
+	// stays per-request; only the verifier (the stateful part) is reused.
+	webhookVerifiersMu sync.Mutex
+	webhookVerifiers   map[string]cachedWebhookVerifier
+
+	// webhookAccessFaultLogged latches which pre-limiter access-gate operator
+	// faults (a misconfigured allowed_cidrs, or an unset/empty bearer_env on a
+	// hook that still passes config load) have already been reported, so a flood
+	// against a misconfigured public hook logs the fault ONCE, not once per
+	// request. These gates run BEFORE the delivery limiter, so — unlike the
+	// limiter-throttled verifier fault — an unbounded per-request log/event here
+	// would be the CWE-400 amplifier the receiver exists to avoid; the 503 itself
+	// is still returned per request (as cheap as the other pre-limiter rejects)
+	// and is deliberately non-evented. Keyed by (webhook name, fault detail) so a
+	// different or changed misconfiguration reports again; keys derive from
+	// operator config, never attacker input, so the set is bounded by config.
+	webhookAccessFaultMu     sync.Mutex
+	webhookAccessFaultLogged map[string]struct{}
+
+	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
+	// defaultMaxWebhookBodyBytes.
+	webhookMaxBody int64
+}
+
+// cachedWebhookVerifier is a memoized verifier plus the config fingerprint it
+// was built from; a fingerprint mismatch on the next delivery triggers a rebuild.
+type cachedWebhookVerifier struct {
+	verifier    webhookverify.Verifier
+	fingerprint string
 }
 
 type lookPathEntry struct {
@@ -92,245 +243,155 @@ func (s *Server) resolveTitleProvider() *config.ResolvedProvider {
 	return rp
 }
 
-// New creates a Server with all routes registered. Does not start listening.
+// New creates a per-city Server. The Server owns the per-city State and
+// the /svc/* pass-through mux. CSRF and read-only enforcement on the
+// typed Huma surface happen on the supervisor's middleware, not here;
+// the readOnly flag mirrored on Server is used only by handleServiceProxy
+// to gate non-direct service mutations (workspace services live outside
+// the typed control plane, so the supervisor's middleware does not run
+// for /svc/* requests).
 func New(state State) *Server {
-	s := &Server{
-		state: state,
-		mux:   http.NewServeMux(),
-		idem:  newIdempotencyCache(30 * time.Minute),
-	}
-	s.registerRoutes()
-	return s
+	syncFeatureFlags(state.Config())
+	return newServer(state, false)
 }
 
-// NewReadOnly creates a read-only Server that rejects all mutation requests.
-// Use this when the server binds to a non-localhost address.
+// NewReadOnly is New with readOnly=true.
 func NewReadOnly(state State) *Server {
+	syncFeatureFlags(state.Config())
+	return newServer(state, true)
+}
+
+func newServer(state State, readOnly bool) *Server {
+	mux := http.NewServeMux()
 	s := &Server{
-		state:    state,
-		mux:      http.NewServeMux(),
-		readOnly: true,
-		idem:     newIdempotencyCache(30 * time.Minute),
+		state:          state,
+		mux:            mux,
+		readOnly:       readOnly,
+		idem:           newIdempotencyCache(30 * time.Minute),
+		rigIdem:        newRigIdemIndex(),
+		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
+		webhookLimiter: newWebhookRateLimiter(),
+		activityMemo:   worker.NewDerivedActivityMemo(),
 	}
-	s.registerRoutes()
+	// Latch the rollout snapshot once: prefer the State's boot latch (the
+	// production controllerState); fall back to resolving from Config() for
+	// States without it (test fakes). A Resolve error leaves the zero Flags —
+	// the documented degraded-safe legacy value; the production root already
+	// surfaced the error at boot, and this fallback only runs for provider-less
+	// States, so the error is intentionally not re-surfaced here.
+	if p, ok := state.(RolloutFlagsProvider); ok {
+		s.bootFlags = p.RolloutFlags()
+	} else if cfg := state.Config(); cfg != nil {
+		s.bootFlags, _ = rollout.Resolve(cfg, rollout.ResolveOptions{})
+	}
+	mux.HandleFunc("/svc/", s.handleServiceProxy)
+	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
+	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),
+	// so it lives on the per-city mux outside the typed Huma control plane; its
+	// gates are the R2 perimeter + E4 signature verification, not Huma middleware.
+	mux.HandleFunc("/hook/", s.handleHookProxy)
 	return s
 }
 
-// ServeHTTP implements http.Handler for testing with httptest.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.handler().ServeHTTP(w, r)
+// syncFeatureFlags enables/disables graph-formula and graph-apply
+// feature flags based on the city's daemon config. Called from New
+// and NewReadOnly so both modes observe the same flag state.
+func syncFeatureFlags(cfg *config.City) {
+	featureflags.Apply(featureflags.FromConfig(cfg))
 }
 
-func (s *Server) handler() http.Handler {
-	apiInner := withCSRFCheck(s.mux)
-	if s.readOnly {
-		apiInner = withReadOnly(apiInner)
+type singleStateResolver struct {
+	state State
+}
+
+func (r *singleStateResolver) ListCities() []CityInfo {
+	return []CityInfo{{
+		Name:    r.state.CityName(),
+		Path:    r.state.CityPath(),
+		Running: true,
+	}}
+}
+
+func (r *singleStateResolver) CityState(name string) State {
+	if name == r.state.CityName() {
+		return r.state
 	}
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/svc/") {
-			// Workspace services apply their own publication and CSRF rules in
-			// handleServiceProxy; they do not inherit controller API policy.
-			s.mux.ServeHTTP(w, r)
+	return nil
+}
+
+func (s *Server) legacySessionHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
+	mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
+	mux.HandleFunc("GET /v0/session/{id}", s.handleSessionGet)
+	mux.HandleFunc("GET /v0/session/{id}/transcript", s.handleSessionTranscript)
+	mux.HandleFunc("GET /v0/session/{id}/pending", s.handleSessionPending)
+	mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
+	mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
+	mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
+	mux.HandleFunc("POST /v0/session/{id}/permission-mode", s.handleSessionPermissionMode)
+	mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
+	mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
+	mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)
+	mux.HandleFunc("POST /v0/session/{id}/suspend", s.handleSessionSuspend)
+	mux.HandleFunc("POST /v0/session/{id}/close", s.handleSessionClose)
+	mux.HandleFunc("POST /v0/session/{id}/wake", s.handleSessionWake)
+	mux.HandleFunc("POST /v0/session/{id}/rename", s.handleSessionRename)
+	mux.HandleFunc("GET /v0/session/{id}/agents", s.handleSessionAgentList)
+	mux.HandleFunc("GET /v0/session/{id}/agents/{agentId}", s.handleSessionAgentGet)
+	return mux
+}
+
+func (s *Server) legacyAgentHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
 			return
 		}
-		apiInner.ServeHTTP(w, r)
+		path := strings.TrimPrefix(r.URL.Path, "/v0/agent/")
+		switch {
+		case strings.HasSuffix(path, "/output/stream"):
+			name := strings.TrimSuffix(path, "/output/stream")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutputStream(w, r, name)
+		case strings.HasSuffix(path, "/output"):
+			name := strings.TrimSuffix(path, "/output")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutput(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
 	})
-	return withLogging(withRecovery(withRequestID(withCORS(root))))
 }
 
-// ListenAndServe starts the HTTP listener. Blocks until stopped.
-func (s *Server) ListenAndServe(addr string) error {
-	s.server = &http.Server{
-		Addr:    addr,
-		Handler: s.handler(),
+// ServeHTTP exists for tests that exercise a caller-provided *Server directly.
+// It delegates through the real SupervisorMux so the direct path exercises the
+// same typed routes and middleware as production. Legacy no-city session URLs
+// are rewritten onto the city-scoped Huma surface for compatibility.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.URL.Path, "/v0/city/") &&
+		(strings.HasPrefix(r.URL.Path, "/v0/session/") || r.URL.Path == "/v0/session" ||
+			strings.HasPrefix(r.URL.Path, "/v0/sessions")) {
+		s.legacySessionHandler().ServeHTTP(w, r)
+		return
 	}
-	return s.server.ListenAndServe()
-}
-
-// Serve accepts connections on lis. Blocks until stopped.
-// Use this with a pre-created listener for synchronous bind validation.
-func (s *Server) Serve(lis net.Listener) error {
-	s.server = &http.Server{
-		Handler: s.handler(),
+	if !strings.HasPrefix(r.URL.Path, "/v0/city/") && strings.HasPrefix(r.URL.Path, "/v0/agent/") {
+		s.legacyAgentHandler().ServeHTTP(w, r)
+		return
 	}
-	return s.server.Serve(lis)
-}
 
-// Shutdown gracefully shuts down the server.
-func (s *Server) Shutdown(ctx context.Context) error {
-	if s.server == nil {
-		return nil
-	}
-	return s.server.Shutdown(ctx)
-}
+	sm := NewSupervisorMux(&singleStateResolver{state: s.state}, nil, s.readOnly, "test", "", time.Now())
+	sm.WithAnyHostAllowed()
+	sm.cacheMu.Lock()
+	sm.cache[s.state.CityName()] = cachedCityServer{state: s.state, srv: s}
+	sm.cacheMu.Unlock()
 
-func (s *Server) registerRoutes() {
-	// Status + Health
-	s.mux.HandleFunc("GET /v0/status", s.handleStatus)
-	s.mux.HandleFunc("GET /health", s.handleHealth)
-
-	// City
-	s.mux.HandleFunc("GET /v0/provider-readiness", handleProviderReadiness)
-	s.mux.HandleFunc("GET /v0/readiness", handleReadiness)
-	s.mux.HandleFunc("GET /v0/city", s.handleCityGet)
-	s.mux.HandleFunc("PATCH /v0/city", s.handleCityPatch)
-	s.mux.HandleFunc("POST /v0/city", handleCityCreate)
-
-	// Agents — read
-	s.mux.HandleFunc("GET /v0/agents", s.handleAgentList)
-	s.mux.HandleFunc("GET /v0/agent/{name...}", s.handleAgent)
-	// Agents — CRUD
-	s.mux.HandleFunc("POST /v0/agents", s.handleAgentCreate)
-	s.mux.HandleFunc("PATCH /v0/agent/{name...}", s.handleAgentUpdate)
-	s.mux.HandleFunc("DELETE /v0/agent/{name...}", s.handleAgentDelete)
-	// Agents — actions
-	s.mux.HandleFunc("POST /v0/agent/{name...}", s.handleAgentAction)
-
-	// Config
-	s.mux.HandleFunc("GET /v0/config", s.handleConfigGet)
-	s.mux.HandleFunc("GET /v0/config/explain", s.handleConfigExplain)
-	s.mux.HandleFunc("GET /v0/config/validate", s.handleConfigValidate)
-
-	// Patches — agent patches
-	s.mux.HandleFunc("GET /v0/patches/agents", s.handleAgentPatchList)
-	s.mux.HandleFunc("GET /v0/patches/agent/{name...}", s.handleAgentPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/agents", s.handleAgentPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/agent/{name...}", s.handleAgentPatchDelete)
-	// Patches — rig patches
-	s.mux.HandleFunc("GET /v0/patches/rigs", s.handleRigPatchList)
-	s.mux.HandleFunc("GET /v0/patches/rig/{name}", s.handleRigPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/rigs", s.handleRigPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/rig/{name}", s.handleRigPatchDelete)
-	// Patches — provider patches
-	s.mux.HandleFunc("GET /v0/patches/providers", s.handleProviderPatchList)
-	s.mux.HandleFunc("GET /v0/patches/provider/{name}", s.handleProviderPatchGet)
-	s.mux.HandleFunc("PUT /v0/patches/providers", s.handleProviderPatchSet)
-	s.mux.HandleFunc("DELETE /v0/patches/provider/{name}", s.handleProviderPatchDelete)
-
-	// Providers — read
-	s.mux.HandleFunc("GET /v0/providers", s.handleProviderList)
-	s.mux.HandleFunc("GET /v0/provider/{name}", s.handleProviderGet)
-	// Providers — CRUD
-	s.mux.HandleFunc("POST /v0/providers", s.handleProviderCreate)
-	s.mux.HandleFunc("PATCH /v0/provider/{name}", s.handleProviderUpdate)
-	s.mux.HandleFunc("DELETE /v0/provider/{name}", s.handleProviderDelete)
-
-	// Rigs — read
-	s.mux.HandleFunc("GET /v0/rigs", s.handleRigList)
-	s.mux.HandleFunc("GET /v0/rig/{name}", s.handleRig)
-	// Rigs — CRUD
-	s.mux.HandleFunc("POST /v0/rigs", s.handleRigCreate)
-	s.mux.HandleFunc("PATCH /v0/rig/{name}", s.handleRigUpdate)
-	s.mux.HandleFunc("DELETE /v0/rig/{name}", s.handleRigDelete)
-	// Rigs — actions
-	s.mux.HandleFunc("POST /v0/rig/{name}/{action}", s.handleRigAction)
-
-	// Beads
-	s.mux.HandleFunc("GET /v0/beads", s.handleBeadList)
-	s.mux.HandleFunc("GET /v0/beads/graph/{rootID}", s.handleBeadGraph)
-	s.mux.HandleFunc("GET /v0/beads/ready", s.handleBeadReady)
-	s.mux.HandleFunc("POST /v0/beads", s.handleBeadCreate)
-	s.mux.HandleFunc("GET /v0/bead/{id}", s.handleBeadGet)
-	s.mux.HandleFunc("GET /v0/bead/{id}/deps", s.handleBeadDeps)
-	s.mux.HandleFunc("POST /v0/bead/{id}/close", s.handleBeadClose)
-	s.mux.HandleFunc("POST /v0/bead/{id}/reopen", s.handleBeadReopen)
-	s.mux.HandleFunc("POST /v0/bead/{id}/update", s.handleBeadUpdate)
-	s.mux.HandleFunc("PATCH /v0/bead/{id}", s.handleBeadUpdate)
-	s.mux.HandleFunc("POST /v0/bead/{id}/assign", s.handleBeadAssign)
-	s.mux.HandleFunc("DELETE /v0/bead/{id}", s.handleBeadDelete)
-
-	// Mail
-	s.mux.HandleFunc("GET /v0/mail", s.handleMailList)
-	s.mux.HandleFunc("POST /v0/mail", s.handleMailSend)
-	s.mux.HandleFunc("GET /v0/mail/count", s.handleMailCount)
-	s.mux.HandleFunc("GET /v0/mail/thread/{id}", s.handleMailThread)
-	s.mux.HandleFunc("GET /v0/mail/{id}", s.handleMailGet)
-	s.mux.HandleFunc("POST /v0/mail/{id}/read", s.handleMailRead)
-	s.mux.HandleFunc("POST /v0/mail/{id}/mark-unread", s.handleMailMarkUnread)
-	s.mux.HandleFunc("POST /v0/mail/{id}/archive", s.handleMailArchive)
-	s.mux.HandleFunc("POST /v0/mail/{id}/reply", s.handleMailReply)
-	s.mux.HandleFunc("DELETE /v0/mail/{id}", s.handleMailDelete)
-
-	// Convoys
-	s.mux.HandleFunc("GET /v0/convoys", s.handleConvoyList)
-	s.mux.HandleFunc("POST /v0/convoys", s.handleConvoyCreate)
-	s.mux.HandleFunc("GET /v0/convoy/{id}", s.handleConvoyGet)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/add", s.handleConvoyAdd)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/remove", s.handleConvoyRemove)
-	s.mux.HandleFunc("GET /v0/convoy/{id}/check", s.handleConvoyCheck)
-	s.mux.HandleFunc("POST /v0/convoy/{id}/close", s.handleConvoyClose)
-	s.mux.HandleFunc("DELETE /v0/convoy/{id}", s.handleConvoyDelete)
-
-	// Events
-	s.mux.HandleFunc("GET /v0/events", s.handleEventList)
-	s.mux.HandleFunc("GET /v0/events/stream", s.handleEventStream)
-	s.mux.HandleFunc("POST /v0/events", s.handleEventEmit)
-
-	// Orders
-	s.mux.HandleFunc("GET /v0/orders", s.handleOrderList)
-	s.mux.HandleFunc("GET /v0/orders/feed", s.handleOrdersFeed)
-	s.mux.HandleFunc("GET /v0/orders/check", s.handleOrderCheck)
-	s.mux.HandleFunc("GET /v0/orders/history", s.handleOrderHistory)
-	s.mux.HandleFunc("GET /v0/order/history/{bead_id}", s.handleOrderHistoryDetail)
-	s.mux.HandleFunc("GET /v0/order/{name}", s.handleOrderGet)
-	s.mux.HandleFunc("POST /v0/order/{name}/enable", s.handleOrderEnable)
-	s.mux.HandleFunc("POST /v0/order/{name}/disable", s.handleOrderDisable)
-	s.mux.HandleFunc("GET /v0/formulas", s.handleFormulaList)
-	s.mux.HandleFunc("GET /v0/formulas/feed", s.handleFormulaFeed)
-	s.mux.HandleFunc("GET /v0/formulas/{name}/runs", s.handleFormulaRuns)
-	s.mux.HandleFunc("GET /v0/formulas/{name}", s.handleFormulaDetail)
-	s.mux.HandleFunc("GET /v0/formula/{name}", s.handleFormulaDetail)
-	// Backwards-compatible aliases for the old /v0/workflow routes.
-	// New code uses /v0/convoy/{id} which delegates to the graph handler
-	// for formula-compiled convoys.
-	s.mux.HandleFunc("GET /v0/workflow/{workflow_id}", s.handleWorkflowGet)
-	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
-
-	// Sessions (chat sessions) — id accepts bead ID, alias, or runtime session_name
-	s.mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
-	s.mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
-	s.mux.HandleFunc("GET /v0/session/{id}", s.handleSessionGet)
-	s.mux.HandleFunc("GET /v0/session/{id}/transcript", s.handleSessionTranscript)
-	s.mux.HandleFunc("GET /v0/session/{id}/pending", s.handleSessionPending)
-	s.mux.HandleFunc("GET /v0/session/{id}/stream", s.handleSessionStream)
-	s.mux.HandleFunc("PATCH /v0/session/{id}", s.handleSessionPatch)
-	s.mux.HandleFunc("POST /v0/session/{id}/submit", s.handleSessionSubmit)
-	s.mux.HandleFunc("POST /v0/session/{id}/messages", s.handleSessionMessage)
-	s.mux.HandleFunc("POST /v0/session/{id}/stop", s.handleSessionStop)
-	s.mux.HandleFunc("POST /v0/session/{id}/kill", s.handleSessionKill)
-	s.mux.HandleFunc("POST /v0/session/{id}/respond", s.handleSessionRespond)
-	s.mux.HandleFunc("POST /v0/session/{id}/suspend", s.handleSessionSuspend)
-	s.mux.HandleFunc("POST /v0/session/{id}/close", s.handleSessionClose)
-	s.mux.HandleFunc("POST /v0/session/{id}/wake", s.handleSessionWake)
-	s.mux.HandleFunc("POST /v0/session/{id}/rename", s.handleSessionRename)
-	s.mux.HandleFunc("GET /v0/session/{id}/agents", s.handleSessionAgentList)
-	s.mux.HandleFunc("GET /v0/session/{id}/agents/{agentId}", s.handleSessionAgentGet)
-
-	// Packs
-	s.mux.HandleFunc("GET /v0/packs", s.handlePackList)
-
-	// Sling (dispatch)
-	s.mux.HandleFunc("POST /v0/sling", s.handleSling)
-
-	// Workspace services
-	s.mux.HandleFunc("GET /v0/services", s.handleServiceList)
-	s.mux.HandleFunc("GET /v0/service/{name}", s.handleServiceGet)
-	s.mux.HandleFunc("POST /v0/service/{name}/restart", s.handleServiceRestart)
-	s.mux.HandleFunc("/svc/", s.handleServiceProxy)
-
-	// External messaging (extmsg)
-	s.mux.HandleFunc("POST /v0/extmsg/inbound", s.handleExtMsgInbound)
-	s.mux.HandleFunc("POST /v0/extmsg/outbound", s.handleExtMsgOutbound)
-	s.mux.HandleFunc("GET /v0/extmsg/bindings", s.handleExtMsgBindingList)
-	s.mux.HandleFunc("POST /v0/extmsg/bind", s.handleExtMsgBind)
-	s.mux.HandleFunc("POST /v0/extmsg/unbind", s.handleExtMsgUnbind)
-	s.mux.HandleFunc("GET /v0/extmsg/groups", s.handleExtMsgGroupLookup)
-	s.mux.HandleFunc("POST /v0/extmsg/groups", s.handleExtMsgGroupEnsure)
-	s.mux.HandleFunc("POST /v0/extmsg/participants", s.handleExtMsgParticipantUpsert)
-	s.mux.HandleFunc("DELETE /v0/extmsg/participants", s.handleExtMsgParticipantRemove)
-	s.mux.HandleFunc("GET /v0/extmsg/transcript", s.handleExtMsgTranscriptList)
-	s.mux.HandleFunc("POST /v0/extmsg/transcript/ack", s.handleExtMsgTranscriptAck)
-	s.mux.HandleFunc("GET /v0/extmsg/adapters", s.handleExtMsgAdapterList)
-	s.mux.HandleFunc("POST /v0/extmsg/adapters", s.handleExtMsgAdapterRegister)
-	s.mux.HandleFunc("DELETE /v0/extmsg/adapters", s.handleExtMsgAdapterUnregister)
+	req := r.Clone(r.Context())
+	sm.Handler().ServeHTTP(w, req)
 }

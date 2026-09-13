@@ -110,13 +110,15 @@ operation" (forward compatible).
 
 A bead exists, but no agent knows about it yet. Discovery is how agents
 find work. Gas City uses the **pull model**: agents poll for available
-work rather than being pushed assignments.
+work rather than being pushed assignments. Routed agents normally discover
+work through the claim protocol rendered into the session startup prompt:
+the protocol calls `gc hook`, claims exactly one returned bead with
+`bd update --claim`, and then the agent works that claimed bead.
 
 ### The hook mechanism (gc hook)
 
-Every agent has a `work_query` config field. When the agent's session
-provider fires a hook (e.g., Claude's Stop hook), it runs `gc hook`
-(`cmd/gc/cmd_hook.go`). The flow:
+Every agent has a `work_query` config field. `gc hook`
+(`cmd/gc/cmd_hook.go`) runs that query for plain hook discovery. The flow:
 
 1. `cmdHook()` resolves the agent from `$GC_AGENT` or a positional arg
 2. Loads city config, checks suspension status
@@ -134,20 +136,20 @@ the bd CLI filters by label server-side.
 
 ### The --inject mode
 
-With `--inject`, `gc hook` wraps output in a `<system-reminder>` XML block
-for LLM context injection. Hook-enabled agents discover work automatically
-between turns. If no work exists, `--inject` emits nothing and exits 0.
+`gc hook --inject` is legacy Stop-hook compatibility. It exits 0 without
+running the work query and emits no output. Routed discovery belongs in the
+session startup claim protocol or an explicit plain `gc hook` invocation.
 
-### Ready() and GUPP
+### Ready() and the run-what-you-find rule
 
 `Store.Ready()` returns all beads with status `"open"` -- the fundamental
 discovery primitive. For BdStore: `bd ready --json --limit=0`. For
 exec.Store: the script receives `ready` as its operation argument.
 
-Discovery feeds into GUPP: "If you find work on your hook, YOU RUN IT."
-No confirmation, no waiting. This principle lives in prompt templates, not
-Go code. Gas City ensures the work is visible; the prompt tells the agent
-what to do.
+Discovery feeds into the run-what-you-find rule: "If you find work on your
+hook, YOU RUN IT." No confirmation, no waiting. This principle lives in
+prompt templates, not Go code. Gas City ensures the work is visible; the
+prompt tells the agent what to do.
 
 ## Phase 3: Claiming
 
@@ -201,9 +203,9 @@ convoy -- no auto-convoy is created.
 ## Phase 4: Execution
 
 The bead is now `in_progress` with an assignee. The agent works on it.
-Gas City's infrastructure is mostly hands-off during this phase -- ZFC
-(Zero Framework Cognition) means Go code does not make decisions about
-work execution.
+Gas City's infrastructure is mostly hands-off during this phase -- the
+framework moves work but does not reason about it, so Go code does not
+make decisions about work execution.
 
 ### Status updates and metadata
 
@@ -222,12 +224,13 @@ operations.
 
 ### Health patrol during execution
 
-While the agent works, the controller's reconciliation loop
-(`doReconcileAgents()` in `cmd/gc/reconcile.go`) monitors agent health.
-If an agent crashes mid-execution, the bead persists in its current state
-(NDI -- Nondeterministic Idempotence). When the agent restarts, it
-rediscovers the in-progress bead through its hook and resumes. The bead
-is the durable record; sessions are ephemeral.
+While the agent works, the controller's bead-driven session reconciler
+(`reconcileSessionBeads()` in `cmd/gc/session_reconciler.go`) monitors
+session health.
+If an agent crashes mid-execution, the bead persists in its current state,
+so the system converges because the work itself survives. When the agent
+restarts, it rediscovers the in-progress bead through its hook and resumes.
+The bead is the durable record; sessions are ephemeral.
 
 ## Phase 5: Completion
 
@@ -259,7 +262,7 @@ Bead lifecycle events are recorded on the event bus. The event types
 - `bead.updated` -- emitted on updates
 - `convoy.closed` -- emitted when a convoy auto-closes
 
-These events feed into order gates. An `event` gate type triggers
+These events feed into order triggers. An `event` trigger type fires
 when a specific event type occurs, enabling reactive order chains.
 
 ### Convoy auto-close
@@ -331,7 +334,11 @@ order fires, a bead is created with label `order-run:<name>`.
 On the next tick, `Store.ListByLabel("order-run:<name>", 1)` finds
 the most recent run. If it is younger than the cooldown period, the
 order is suppressed. The tracking bead's afterlife IS the cooldown
-mechanism.
+mechanism. Closed tracking history beyond
+`[beads.policies.order_tracking].delete_after_close` is pruned by
+`gc order sweep-tracking` and the maintenance exec order, defaulting
+to 7d while always keeping at least the latest 10 closed tracking
+beads per order.
 
 ## State Transition Summary
 
@@ -347,9 +354,10 @@ mechanism.
 ```
 
 **Status mapping.** The bd CLI uses six statuses (open, in_progress,
-blocked, review, testing, closed). `mapBdStatus()` in
-`internal/beads/bdstore.go` collapses these to Gas City's three: closed
-maps to closed, in_progress maps to in_progress, everything else to open.
+blocked, review, testing, closed), but the `beads.Store` contract stays
+three-state: open, in_progress, closed. `BdStore` therefore maps bd's
+blocked/review/testing values to open. An empty status from a backend is
+also normalized to open.
 
 ## Code Map
 
@@ -384,9 +392,10 @@ maps to closed, in_progress maps to in_progress, everything else to open.
   and pools, including container expansion
 - [Formulas architecture](formulas.md) -- formula parsing, molecule
   instantiation, and step dependency resolution
-- [Orders architecture](orders.md) -- gate conditions, cooldown
+- [Orders architecture](orders.md) -- trigger conditions, cooldown
   tracking via order-run labels, and wisp dispatch
 - [Messaging architecture](messaging.md) -- how mail composes on top of
   beads (messages are beads with type "message")
 - [Glossary](glossary.md) -- authoritative definitions of bead, molecule,
-  convoy, wisp, GUPP, NDI, and other terms used in this document
+  convoy, wisp, the run-what-you-find rule, convergence through persistent
+  work, and other terms used in this document

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "running",
+    "pid",
+    "socket_path",
+    "checked_paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "ok": {
+      "const": true
+    },
+    "running": {
+      "type": "boolean"
+    },
+    "pid": {
+      "type": "integer"
+    },
+    "socket_path": {
+      "type": "string"
+    },
+    "checked_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

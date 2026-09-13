@@ -3,16 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,9 +28,13 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/sdnotify"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/transcriptmeta"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/spf13/cobra"
 )
@@ -59,6 +67,7 @@ to add cities.`,
 }
 
 func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the machine-wide supervisor in the background",
@@ -67,44 +76,151 @@ func newSupervisorStartCmd(stdout, stderr io.Writer) *cobra.Command {
 This forks "gc supervisor run", verifies it became ready, and returns.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doSupervisorStart(stdout, stderr) != 0 {
+			if doSupervisorStartJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func newSupervisorStopCmd(stdout, stderr io.Writer) *cobra.Command {
+	var wait bool
+	var waitTimeout time.Duration
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the machine-wide supervisor",
-		Long:  `Stop the running machine-wide supervisor and all its cities.`,
-		Args:  cobra.NoArgs,
+		Long: `Stop the running machine-wide supervisor and all its cities.
+
+By default, returns as soon as the supervisor acknowledges the stop
+request — shutdown continues asynchronously. Pass --wait to block
+until the supervisor socket is no longer answering, which is what
+most callers that need deterministic cleanup want (e.g., integration
+tests that then expect to remove temp directories without racing
+against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
+
+When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
+'systemctl [--user] stop <unit>' instead of the control-socket stop.
+The systemctl invocation is synchronous and bounded by --wait-timeout
+whether or not --wait is set, gc then verifies a previously-running
+supervisor actually exited (failing with its PID when the unit does
+not manage it), and stop with nothing running still exits 1.`,
+		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if stopSupervisor(stdout, stderr) != 0 {
+			if stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the supervisor to finish stopping all managed cities and release its socket before returning")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Second, "Maximum time to wait when --wait is set (in delegated mode, bounds the synchronous systemctl stop regardless of --wait)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 func newSupervisorStatusCmd(stdout, stderr io.Writer) *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check if the supervisor is running",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if supervisorStatus(stdout, stderr) != 0 {
+			if supervisorStatusWithOptions(stdout, stderr, asJSON) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	return cmd
+}
+
+// supervisorLogTeeEnv, when set to "0" in the supervisor's environment,
+// disables teeing `gc supervisor run` output into the supervisor log file so
+// the service manager's log (e.g. journald under systemd) is the single
+// sink. Any other value, including unset, keeps the default tee behavior.
+const supervisorLogTeeEnv = "GC_SUPERVISOR_LOG_TEE"
+
+// supervisorLogTeeDisabled reports whether GC_SUPERVISOR_LOG_TEE=0 opts the
+// supervisor out of teeing its output into the supervisor log file.
+func supervisorLogTeeDisabled() bool {
+	return os.Getenv(supervisorLogTeeEnv) == "0"
+}
+
+// openSupervisorLogForTee opens the supervisor log file in append mode for
+// runSupervisor to tee output into.
+func openSupervisorLogForTee() (*os.File, error) {
+	f, err := os.OpenFile(supervisorLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("opening supervisor log %s: %w", supervisorLogPath(), err)
+	}
+	return f, nil
+}
+
+// shouldTeeSupervisorLog reports whether w is distinct from supervisor.log.
+// Service managers and manual background start can hand this process
+// fd-backed stdout/stderr that already append to supervisor.log while still
+// carrying cosmetic names like /dev/stdout. Compare open file identity instead
+// of names so those paths do not double-log.
+func shouldTeeSupervisorLog(w io.Writer, logFile *os.File) bool {
+	if w == nil || logFile == nil {
+		return false
+	}
+	wf, ok := fileWriterForSupervisorLog(w)
+	if !ok {
+		return true
+	}
+	same, err := sameOpenFile(wf, logFile)
+	if err != nil {
+		return true
+	}
+	return !same
+}
+
+func fileWriterForSupervisorLog(w io.Writer) (*os.File, bool) {
+	switch v := w.(type) {
+	case *os.File:
+		return v, true
+	case *switchableWriter:
+		if v == nil || v.target == nil {
+			return nil, false
+		}
+		return fileWriterForSupervisorLog(v.target)
+	default:
+		return nil, false
+	}
+}
+
+func sameOpenFile(a, b *os.File) (bool, error) {
+	aInfo, err := a.Stat()
+	if err != nil {
+		return false, err
+	}
+	bInfo, err := b.Stat()
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(aInfo, bInfo), nil
+}
+
+// supervisorLockPath returns the path of the supervisor instance lock
+// file. The file's existence (independent of the flock held on it) is
+// evidence that a supervisor instance ran on this machine before.
+func supervisorLockPath() string {
+	return filepath.Join(supervisor.RuntimeDir(), "supervisor.lock")
 }
 
 // acquireSupervisorLock takes an exclusive flock on the supervisor lock file.
@@ -113,7 +229,7 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("creating runtime dir: %w", err)
 	}
-	path := filepath.Join(dir, "supervisor.lock")
+	path := supervisorLockPath()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
@@ -169,12 +285,352 @@ type reconcileRequest struct {
 	done chan struct{}
 }
 
+type supervisorShutdownMode int32
+
+const (
+	supervisorShutdownNone supervisorShutdownMode = iota
+	supervisorShutdownPreserveSessions
+	supervisorShutdownDestructive
+)
+
+const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"
+
+// supervisorOmitProviderCredsEnv, when set to "1" at the time the supervisor
+// service file is generated, causes env vars matched by the shared
+// provider-credential predicate to be excluded from the generated launchd
+// plist or systemd unit. The source of truth is internal/processenv. Default
+// behavior is unchanged.
+// When opted out, the user is responsible for delivering provider creds to
+// the supervisor's environment via some other mechanism (e.g. a wrapper
+// around `gc supervisor run` that sources a credentials file).
+const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
+
+// 32768 is the Linux kernel default for net.ipv4.ip_local_port_range lower bound.
+const supervisorEphemeralPortWarningThreshold = 32768
+
+var supervisorShutdownSettleDelay = 50 * time.Millisecond
+
+var supervisorSignalNotify = signal.Notify
+
+// supervisorLoadConfig follows the package's test-double convention; tests
+// that replace it must not run in parallel.
+var supervisorLoadConfig = supervisor.LoadConfig
+
+// supervisorHardExitCodeRepeatedShutdown is the exit code for repeated
+// destructive shutdown escalation. 130 approximates the shell SIGINT
+// convention; the supervisor does not retain which destructive signal caused
+// the escalation.
+const supervisorHardExitCodeRepeatedShutdown = 130
+
+// supervisorExitCodePortInUse is returned when the API port is already bound
+// by another supervisor. Only one supervisor may own the port machine-wide, so
+// a collision means this process is a duplicate install. The generated systemd
+// unit lists this code in RestartPreventExitStatus so the duplicate exits once
+// with a clear diagnostic instead of crash-looping on the shared port forever.
+const supervisorExitCodePortInUse = 3
+
+// supervisorAddrInUse reports whether err indicates the listen address was
+// already bound (EADDRINUSE) — the signature of a second supervisor competing
+// for the shared API port, as opposed to any other listen failure.
+func supervisorAddrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// supervisorPortInUseMessage returns the loud, actionable diagnostic emitted
+// when the API port is already held by another gc supervisor (confirmed by
+// supervisorRespondingGCSupervisor). It names the address and both remedies
+// so a duplicate install fails legibly instead of emitting an opaque "bind:
+// address already in use" on every restart.
+//
+// The restart-behavior line is platform-conditioned: on systemd,
+// RestartPreventExitStatus (see supervisorExitCodePortInUse) actually stops
+// the restart loop, but launchd's KeepAlive has no per-exit-code equivalent —
+// any nonzero exit is "Crashed" and gets restarted regardless — so claiming
+// "without restart" on darwin would be false.
+func supervisorPortInUseMessage(addr, configPath string) string {
+	restartBehavior := "This instance is a duplicate and is exiting without restart."
+	if supervisorRuntimeGOOS == "darwin" {
+		restartBehavior = "This instance is a duplicate. launchd will keep restarting it " +
+			"regardless of exit code (macOS has no RestartPreventExitStatus equivalent) " +
+			"until you resolve the collision below."
+	}
+	return fmt.Sprintf(
+		"gc supervisor: API address %s is already in use.\n"+
+			"Another gc supervisor already owns this port — only one supervisor may run per machine.\n"+
+			"%s To resolve, either:\n"+
+			"  - stop the other supervisor (gc supervisor stop) before starting this one, or\n"+
+			"  - give this supervisor its own port: set [supervisor] port = <N> in %s\n",
+		addr, restartBehavior, configPath)
+}
+
+// supervisorHealthProbeTimeout bounds how long we wait for a /health response
+// when confirming that an EADDRINUSE binder is actually another gc
+// supervisor. Short enough to not stall startup on a dead or foreign binder.
+// Overridable for tests.
+var supervisorHealthProbeTimeout = 2 * time.Second
+
+// supervisorRespondingGCSupervisor reports whether the process bound to addr
+// answers like a gc supervisor. Overridable for tests.
+//
+// EADDRINUSE only proves *something* is bound to addr — it does not prove
+// that something is another gc supervisor. The genuine same-GC_HOME
+// duplicate is already caught earlier by acquireSupervisorLock's exclusive
+// flock, so by the time we reach the port collision, the binder is either a
+// different user's gc supervisor (a true duplicate) or an unrelated foreign
+// process that happens to hold the shared port. Only a positive /health
+// identification justifies the exit-3 duplicate path (and, on systemd,
+// refusing to restart); anything else falls through to the current
+// self-healing exit-1 behavior so a transient or foreign binder recovers via
+// normal restart instead of a sticky outage.
+var supervisorRespondingGCSupervisor = func(addr string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), supervisorHealthProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
+	if resp.StatusCode/100 != 2 {
+		return false
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
+		return false
+	}
+	return body.Status == "ok"
+}
+
+// supervisorHardExit terminates the supervisor immediately. It intentionally
+// bypasses graceful cleanup and may leave managed sessions or child processes
+// alive for operator recovery. Overridable for tests.
+var supervisorHardExit = func(stderr io.Writer, code int) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	fmt.Fprintln(stderr, "gc supervisor: repeated shutdown request received; exiting immediately") //nolint:errcheck
+	os.Exit(code)
+}
+
+func supervisorPreserveSessionsOnSignal() bool {
+	return os.Getenv(supervisorPreserveSessionsOnSignalEnv) == "1"
+}
+
+func supervisorShutdownModeForSignal(sig os.Signal) supervisorShutdownMode {
+	if sig == syscall.SIGTERM && supervisorPreserveSessionsOnSignal() {
+		return supervisorShutdownPreserveSessions
+	}
+	return supervisorShutdownDestructive
+}
+
+type supervisorShutdownController struct {
+	mode                 atomic.Int32
+	destructiveRequested atomic.Bool
+	destructiveOnce      sync.Once
+	destructiveCh        chan struct{}
+}
+
+func newSupervisorShutdownController() *supervisorShutdownController {
+	return &supervisorShutdownController{destructiveCh: make(chan struct{})}
+}
+
+// shutdownTrigger carries the attribution for a supervisor shutdown so
+// the requestShutdown wrapper can log and emit it before the context is
+// canceled. Source values are "signal" or "socket_stop".
+type shutdownTrigger struct {
+	Source     string
+	Signal     string
+	ClientAddr string
+}
+
+// supervisorShutdownModeName returns the stable string for a shutdown
+// mode, used in log lines and structured event payloads.
+func supervisorShutdownModeName(mode supervisorShutdownMode) string {
+	switch mode {
+	case supervisorShutdownPreserveSessions:
+		return "preserve_sessions"
+	case supervisorShutdownDestructive:
+		return "destructive"
+	default:
+		return "unknown"
+	}
+}
+
+func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCtl *supervisorShutdownController, cancel context.CancelFunc, mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+	modeName := supervisorShutdownModeName(mode)
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log via the
+	// launchd/systemd-redirected stream. This is the canonical place
+	// operators look after an unexpected graceful exit.
+	fmt.Fprintf(stderr, "gc supervisor: shutdown requested: source=%s signal=%q client=%q mode=%s\n", //nolint:errcheck
+		trigger.Source, trigger.Signal, trigger.ClientAddr, modeName)
+	if rec != nil {
+		payload := api.SupervisorShutdownPayload{
+			Source:     trigger.Source,
+			Signal:     trigger.Signal,
+			ClientAddr: trigger.ClientAddr,
+			Mode:       modeName,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal shutdown event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorShutdownRequested,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	repeatedDestructive := shutdownCtl.request(mode)
+	if !repeatedDestructive {
+		cancel()
+	}
+	return repeatedDestructive
+}
+
+// emitSupervisorStarted records the supervisor.started event with
+// restart-cause attribution and mirrors it on the OTel log path.
+// previousExit is one of the supervisor.PreviousExit* classifications
+// describing how the previous supervisor instance exited. detail, when
+// non-nil, explains an otherwise ambiguous classification (an unknown
+// from an unremovable handoff token); it is surfaced only on the stderr
+// breadcrumb — the wire payload carries the classification alone.
+func emitSupervisorStarted(stderr io.Writer, rec events.Recorder, previousExit string, detail error) {
+	// Plain-text breadcrumb to stderr -> ~/.gc/supervisor.log, mirroring
+	// the shutdown-attribution breadcrumb so operators can correlate
+	// start cause with the previous exit without parsing events.jsonl.
+	if detail != nil {
+		fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s reason=%v\n", previousExit, detail) //nolint:errcheck
+	} else {
+		fmt.Fprintf(stderr, "gc supervisor: started: previous_exit=%s\n", previousExit) //nolint:errcheck
+	}
+	if rec != nil {
+		payload := api.SupervisorStartedPayload{PreviousExit: previousExit}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: marshal started event: %v\n", err) //nolint:errcheck
+		} else {
+			rec.Record(events.Event{
+				Type:    events.SupervisorStarted,
+				Actor:   "supervisor",
+				Subject: "supervisor",
+				Payload: raw,
+			})
+		}
+	}
+	telemetry.RecordSupervisorStarted(context.Background(), previousExit)
+}
+
+func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, requestReconcile func(), stderr io.Writer) {
+	for {
+		select {
+		case sig := <-sigCh:
+			if sig == nil {
+				continue
+			}
+			if sig == syscall.SIGHUP {
+				requestReconcile()
+				continue
+			}
+			mode := supervisorShutdownModeForSignal(sig)
+			if requestShutdown(mode, shutdownTrigger{
+				Source: "signal",
+				Signal: sig.String(),
+			}) {
+				supervisorHardExit(stderr, supervisorHardExitCodeRepeatedShutdown)
+				return
+			}
+		case <-done:
+			return
+		}
+	}
+}
+
+// request records shutdown intent and reports whether this is a repeated
+// destructive shutdown request. Signal callers use a repeated destructive
+// request as the hard-exit trigger; socket callers keep the request local.
+func (c *supervisorShutdownController) request(mode supervisorShutdownMode) bool {
+	if mode == supervisorShutdownDestructive {
+		if !c.destructiveRequested.CompareAndSwap(false, true) {
+			return true
+		}
+		c.mode.Store(int32(supervisorShutdownDestructive))
+		c.destructiveOnce.Do(func() {
+			if c.destructiveCh != nil {
+				close(c.destructiveCh)
+			}
+		})
+		return false
+	}
+	if mode == supervisorShutdownPreserveSessions {
+		c.mode.CompareAndSwap(int32(supervisorShutdownNone), int32(supervisorShutdownPreserveSessions))
+	}
+	return false
+}
+
+func (c *supervisorShutdownController) preservesSessions() bool {
+	if c.destructiveRequested.Load() {
+		return false
+	}
+	return supervisorShutdownMode(c.mode.Load()) == supervisorShutdownPreserveSessions
+}
+
+func (c *supervisorShutdownController) preservesSessionsAfterSettle(timeout time.Duration) bool {
+	if !c.preservesSessions() || timeout <= 0 {
+		return c.preservesSessions()
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.destructiveCh:
+		return false
+	case <-timer.C:
+		return c.preservesSessions()
+	}
+}
+
 var (
 	supervisorReloadQueueTimeout = 5 * time.Second
 	supervisorReloadWaitTimeout  = 5 * time.Minute
 )
 
-func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest) (net.Listener, error) {
+// shutdownState tracks the supervisor's shutdown progress so socket
+// handlers can report the final result to --wait clients. done is closed
+// when shutdown has finished (successful or not). err is populated (may
+// be nil on clean shutdown) before done is closed.
+type shutdownState struct {
+	done chan struct{}
+	err  atomic.Pointer[shutdownResult]
+}
+
+type shutdownResult struct {
+	err error
+}
+
+func supervisorShutdownExitCode(shutErr error) int {
+	if shutErr != nil {
+		return 1
+	}
+	return 0
+}
+
+func newShutdownState() *shutdownState {
+	return &shutdownState{done: make(chan struct{})}
+}
+
+// finish records the shutdown result and closes done. Safe to call once.
+func (s *shutdownState) finish(err error) {
+	s.err.Store(&shutdownResult{err: err})
+	close(s.done)
+}
+
+func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
 	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
 	lis, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -192,7 +648,7 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 				fmt.Fprintf(os.Stderr, "gc supervisor: socket accept: %v\n", err) //nolint:errcheck
 				continue
 			}
-			go handleSupervisorConn(conn, cancelFn, reconcileCh)
+			go handleSupervisorConn(conn, requestShutdown, reconcileCh, shut)
 		}
 	}()
 	return lis, nil
@@ -201,15 +657,52 @@ func startSupervisorSocket(sockPath string, cancelFn context.CancelFunc, reconci
 // handleSupervisorConn reads from a connection and dispatches commands.
 // Supported: "stop" (shutdown), "ping" (liveness check, returns PID),
 // "reload" (trigger immediate reconciliation of all cities).
-func handleSupervisorConn(conn net.Conn, cancelFn context.CancelFunc, reconcileCh chan reconcileRequest) {
+//
+// For "stop", the handler first sends "ok\n" (backward compatible ACK),
+// then — if the client keeps the connection open — blocks until shutdown
+// completes and sends a second line "done:ok\n" or "done:err:<detail>\n"
+// so --wait clients can distinguish clean shutdown from partial failure.
+func handleSupervisorConn(conn net.Conn, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
 	if scanner.Scan() {
 		switch scanner.Text() {
 		case "stop":
-			cancelFn()
-			conn.Write([]byte("ok\n")) //nolint:errcheck
+			peer := ""
+			if addr := conn.RemoteAddr(); addr != nil {
+				peer = addr.String()
+			}
+			_ = requestShutdown(supervisorShutdownDestructive, shutdownTrigger{
+				Source:     "socket_stop",
+				ClientAddr: peer,
+			})
+			if _, err := conn.Write([]byte("ok\n")); err != nil {
+				return
+			}
+			if shut == nil {
+				return
+			}
+			// Wait for shutdown to complete (or client to disconnect)
+			// so we can report the final result.
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Minute)) //nolint:errcheck
+			select {
+			case <-shut.done:
+			case <-time.After(5 * time.Minute):
+				return
+			}
+			res := shut.err.Load()
+			if res == nil || res.err == nil {
+				conn.Write([]byte("done:ok\n")) //nolint:errcheck
+			} else {
+				// Collapse newlines in the error so the protocol stays line-oriented.
+				msg := strings.ReplaceAll(res.err.Error(), "\n", "; ")
+				fmt.Fprintf(conn, "done:err:%s\n", msg) //nolint:errcheck
+			}
+			// One command per connection — return explicitly instead of
+			// falling through to scanner.Scan() again. The read deadline
+			// would close us anyway, but this makes the contract explicit.
+			return
 		case "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck
 		case "reload":
@@ -247,13 +740,33 @@ func runningSupervisorSocket() (string, int) {
 }
 
 func supervisorAliveAtPath(sockPath string) int {
-	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	return supervisorAliveAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+}
+
+// supervisorAliveAtPathUntil is supervisorAliveAtPath with a total budget.
+// Dial and read timeouts are each capped to the remaining time before
+// deadline so a wedged socket cannot stretch the probe beyond the caller's
+// wait budget.
+func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	dialTimeout := 500 * time.Millisecond
+	if dialTimeout > remaining {
+		dialTimeout = remaining
+	}
+	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()                                    //nolint:errcheck
-	conn.Write([]byte("ping\n"))                          //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	defer conn.Close()           //nolint:errcheck
+	conn.Write([]byte("ping\n")) //nolint:errcheck
+	readDeadline := time.Now().Add(2 * time.Second)
+	if readDeadline.After(deadline) {
+		readDeadline = deadline
+	}
+	conn.SetReadDeadline(readDeadline) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
 	if err != nil || n == 0 {
@@ -266,14 +779,56 @@ func supervisorAliveAtPath(sockPath string) int {
 	return pid
 }
 
-// stopSupervisor sends a stop command to the running supervisor.
-// It also unloads the platform service (without removing the unit file)
-// so launchd/systemd doesn't immediately restart the supervisor.
+// stopSupervisor sends a stop command to the running supervisor and returns
+// as soon as the supervisor acknowledges. Shutdown continues asynchronously.
+// Callers that need to block until the supervisor process has actually
+// exited should use stopSupervisorWithWait(stdout, stderr, true, timeout).
 func stopSupervisor(stdout, stderr io.Writer) int {
-	// Unload the platform service first so the service manager doesn't
-	// restart the supervisor after we send the stop command.
-	unloadSupervisorService()
+	return stopSupervisorWithWait(stdout, stderr, false, 0)
+}
 
+// stopSupervisorWithWait is stopSupervisor with an optional wait-for-exit
+// phase. When wait is true, after the supervisor ACKs the stop command the
+// function keeps the control connection open and reads the post-shutdown
+// status line (done:ok or done:err:<detail>) that runSupervisor emits once
+// every managed city has quiesced. If the supervisor predates that protocol
+// or drops the connection early, we fall back to polling the socket until
+// it stops answering. This is the shape tests and shell scripts want: on
+// return, the supervisor has fully shut down and any failure is visible.
+//
+// It also unloads the platform service (without removing the unit file) after
+// the supervisor acknowledges the destructive socket stop, so launchd/systemd
+// will not restart it when the process exits.
+//
+// When GC_SUPERVISOR_SYSTEMD_UNIT is set, the stop is redirected to the
+// delegated unit instead of the socket protocol. Callers that must stop
+// gc's OWN supervisor regardless of delegation (e.g. uninstall cleaning
+// up gc's legacy unit) use stopSupervisorViaSocket directly.
+func stopSupervisorWithWait(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
+	return stopSupervisorWithWaitJSON(stdout, stderr, wait, waitTimeout, false)
+}
+
+func stopSupervisorWithWaitJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
+	delegation, delegated, err := supervisorSystemdDelegation()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if delegated {
+		return delegatedSupervisorStop(delegation, stdout, stderr, wait, waitTimeout, jsonOut)
+	}
+	return stopSupervisorViaSocketJSON(stdout, stderr, wait, waitTimeout, jsonOut)
+}
+
+// stopSupervisorViaSocket drives the control-socket stop protocol against
+// gc's own supervisor, ignoring any configured systemd delegation. It is
+// the stop path for internal cleanup of gc-owned services (uninstall),
+// which must never stop the operator's delegated unit as a side effect.
+func stopSupervisorViaSocket(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration) int {
+	return stopSupervisorViaSocketJSON(stdout, stderr, wait, waitTimeout, false)
+}
+
+func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeout time.Duration, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
@@ -287,28 +842,203 @@ func stopSupervisor(stdout, stderr io.Writer) int {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.Write([]byte("stop\n"))                           //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	buf := make([]byte, 64)
-	n, _ := conn.Read(buf)
-	if n > 0 && string(buf[:n]) == "ok\n" {
+	reader := bufio.NewReader(conn)
+	ackLine, err := reader.ReadString('\n')
+	if err != nil || strings.TrimSpace(ackLine) != "ok" {
+		fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
+		return 1
+	}
+	if !jsonOut {
 		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
+	}
+	serviceErr := unloadSupervisorServiceHook()
+	if !wait {
+		if serviceErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+			return 1
+		}
+		if jsonOut {
+			return writeSupervisorStopSuccess(stdout, stderr, wait)
+		}
 		return 0
 	}
-	fmt.Fprintln(stderr, "gc supervisor stop: no acknowledgment from supervisor") //nolint:errcheck
-	return 1
+	if waitTimeout <= 0 {
+		waitTimeout = 30 * time.Second
+	}
+
+	// Wait for the supervisor's post-shutdown status line. An older
+	// supervisor binary won't send one; the connection will just close.
+	// Treat EOF / timeout / unexpected input as "fall back to polling".
+	deadline := time.Now().Add(waitTimeout)
+	conn.SetReadDeadline(deadline) //nolint:errcheck
+	statusLine, statusErr := reader.ReadString('\n')
+	switch {
+	case statusErr == nil:
+		line := strings.TrimSpace(statusLine)
+		switch {
+		case line == "done:ok":
+			// Confirm the socket actually goes away, but with a small
+			// budget — the server already told us shutdown finished.
+			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if serviceErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+				return 1
+			}
+			if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if jsonOut {
+				return writeSupervisorStopSuccess(stdout, stderr, wait)
+			}
+			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+			return 0
+		case strings.HasPrefix(line, "done:err:"):
+			fmt.Fprintf(stderr, "gc supervisor stop: %s\n", strings.TrimPrefix(line, "done:err:")) //nolint:errcheck
+			return 1
+		default:
+			fmt.Fprintf(stderr, "gc supervisor stop: unexpected status %q\n", line) //nolint:errcheck
+			// Still make sure the process actually goes away.
+			if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			return 1
+		}
+	case errors.Is(statusErr, io.EOF):
+		// Older supervisor — no done:* line. Fall through to polling.
+	default:
+		// Likely i/o deadline hit on ReadString. The absolute deadline is
+		// already consumed, so the fall-through waitForSupervisorExitUntil
+		// will surface the timeout error directly — there is no additional
+		// budget to retry the probe.
+	}
+
+	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if serviceErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+		return 1
+	}
+	if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if jsonOut {
+		return writeSupervisorStopSuccess(stdout, stderr, wait)
+	}
+	fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
+	return 0
 }
 
-// supervisorStatus checks and reports whether the supervisor is running.
-func supervisorStatus(stdout, _ io.Writer) int {
-	pid := supervisorAlive()
+func writeSupervisorStopSuccess(stdout, stderr io.Writer, wait bool) int {
+	return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor stop", lifecycleActionJSON{
+		Command: "supervisor stop",
+		Action:  "stop",
+		Message: "Supervisor stopped.",
+		Wait:    lifecycleBoolPtr(wait),
+	})
+}
+
+// waitForSupervisorExitUntil polls the supervisor socket until it stops
+// answering (i.e., supervisorAliveAtPathUntil returns 0), or until the
+// absolute deadline elapses. Each probe is capped to the remaining budget
+// so a half-open socket cannot stretch the total wait past the deadline.
+// The original total budget is reconstructed for the timeout error so
+// operators can see which budget was exhausted in CI logs.
+func waitForSupervisorExitUntil(sockPath string, deadline time.Time) error {
+	startBudget := time.Until(deadline)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for supervisor at %s to exit", startBudget, sockPath)
+		}
+		if supervisorAliveAtPathUntil(sockPath, deadline) == 0 {
+			return nil
+		}
+		remaining := time.Until(deadline)
+		sleep := 100 * time.Millisecond
+		if sleep > remaining {
+			sleep = remaining
+		}
+		if sleep <= 0 {
+			continue
+		}
+		time.Sleep(sleep)
+	}
+}
+
+func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
+	sockPath, pid := runningSupervisorSocket()
+	running := pid > 0
+	pidSource := ""
 	if pid > 0 {
-		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
+		pidSource = "control_socket"
+	}
+	// A broken delegation env (e.g. a GC_SUPERVISOR_SYSTEMD_SCOPE typo) must
+	// surface here: status is the first command operators and monitoring run
+	// against a delegated supervisor, every mutating lifecycle sibling
+	// hard-errors on the same typo, and the service-manager fallback below
+	// skips its unit probe when the scope is unparseable — without this
+	// diagnostic, the config error reads as a bare "not running".
+	_, _, delegationErr := supervisorSystemdDelegation()
+	if delegationErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor status: warning: %v\n", delegationErr) //nolint:errcheck
+	}
+	// Fallback liveness when the control socket is unreachable (gascity#2984):
+	// a launchd/systemd-managed supervisor may bind its socket at a path the
+	// CLI environment does not resolve. Trust the service manager, then the API.
+	if !running {
+		switch {
+		case supervisorServiceManagerActive():
+			running, pidSource = true, "service_manager"
+		case supervisorAPIReachable():
+			running, pidSource = true, "api"
+		}
+	}
+	if asJSON {
+		payload := map[string]any{
+			"schema_version": "1",
+			"running":        running,
+			"pid":            pid,
+			"socket_path":    sockPath,
+			"checked_paths":  supervisorSocketPathCandidates(),
+		}
+		if pidSource != "" {
+			payload["pid_source"] = pidSource
+		}
+		if running && pid == 0 {
+			// Distinct diagnostic state (gascity#2984): running per service
+			// manager / API, but pid discovery via the socket failed.
+			payload["socket_status"] = "unreachable"
+		}
+		if delegationErr != nil {
+			payload["config_error"] = delegationErr.Error()
+		}
+		if err := writeCLIJSONLine(stdout, payload); err != nil {
+			return 1
+		}
 		return 0
 	}
-	fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
-	return 1
+	switch {
+	case pid > 0:
+		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
+		return 0
+	case running:
+		fmt.Fprintf(stdout, "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via %s)\n", pidSource) //nolint:errcheck
+		return 0
+	default:
+		fmt.Fprintln(stdout, "Supervisor is not running") //nolint:errcheck
+		return 1
+	}
 }
 
 func newSupervisorReloadCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "reload",
 		Short: "Trigger immediate reconciliation of all cities",
@@ -318,17 +1048,22 @@ after killing a child process to force the supervisor to detect the
 change and restart it without waiting for the next patrol tick.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if reloadSupervisor(stdout, stderr) != 0 {
+			if reloadSupervisorJSON(stdout, stderr, jsonOut) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL summary")
 	return cmd
 }
 
 // reloadSupervisor sends a reload command to the running supervisor.
 func reloadSupervisor(stdout, stderr io.Writer) int {
+	return reloadSupervisorJSON(stdout, stderr, false)
+}
+
+func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	sockPath, _ := runningSupervisorSocket()
 	if sockPath == "" {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
@@ -347,6 +1082,13 @@ func reloadSupervisor(stdout, stderr io.Writer) int {
 	resp := strings.TrimSpace(string(buf[:n]))
 	switch resp {
 	case "ok":
+		if jsonOut {
+			return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor reload", lifecycleActionJSON{
+				Command: "supervisor reload",
+				Action:  "reload",
+				Message: "Reconciliation triggered.",
+			})
+		}
 		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck
 		return 0
 	case "busy":
@@ -372,6 +1114,16 @@ type managedCity struct {
 	tombstoned atomic.Bool   // set before Remove() in shutdown paths for teardown safety
 }
 
+// deleteManagedCityIfCurrent prevents a stale city goroutine from removing
+// a replacement city that has already been published at the same path.
+func deleteManagedCityIfCurrent(cities map[string]*managedCity, path string, current *managedCity) bool {
+	if published, ok := cities[path]; ok && published == current {
+		delete(cities, path)
+		return true
+	}
+	return false
+}
+
 // managedCityStopTimeout returns the grace period for a city stop.
 // Only ShutdownTimeoutDuration is used — startup and drift-drain timeouts
 // are intentionally excluded because they govern unrelated lifecycle phases.
@@ -383,12 +1135,52 @@ func managedCityStopTimeout(mc *managedCity) time.Duration {
 	return mc.cr.cfg.Daemon.ShutdownTimeoutDuration()
 }
 
-func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
-	if mc == nil {
+func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
+	timeout := managedCityStopTimeout(mc)
+	if timeout <= 0 {
+		return timeout
+	}
+	return timeout * 5
+}
+
+// runCityShutdownBounded runs mc.cr.shutdown() in its own goroutine and waits
+// for it to finish, bounded by the forced-stop timeout (or mc.done closing
+// first). shutdown() is idempotent (guarded by sync.Once), so if it is
+// genuinely hung — e.g. on a beads/session call with no context of its own —
+// abandoning the goroutine past the bound is safe: it either completes later
+// on its own or blocks harmlessly forever without doing further work. This
+// keeps a hung shutdown() from blocking the caller's own bounded wait for
+// mc.done (#5256).
+func runCityShutdownBounded(mc *managedCity) {
+	if mc == nil || mc.cr == nil {
 		return
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer func() { recover() }() //nolint:errcheck
+		defer close(shutdownDone)
+		mc.cr.shutdown()
+	}()
+	select {
+	case <-shutdownDone:
+	case <-mc.done:
+	case <-time.After(managedCityForcedStopTimeout(mc)):
+	}
+}
+
+// stopManagedCity cancels a city's context, waits up to its configured
+// grace period for it to exit, forces shutdown if it doesn't, and then
+// closes the bead provider and file recorder. It returns a non-nil error
+// when the city did not exit cleanly within the budget. Stderr still
+// receives a trace line for operability; the returned error is for
+// callers (runSupervisor) that need to aggregate shutdown status.
+func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
+	if mc == nil {
+		return nil
 	}
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
+	var stopErr error
 	if timeout > 0 {
 		select {
 		case <-mc.done:
@@ -398,22 +1190,44 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 			if mc.closer != nil {
 				mc.closer.Close() //nolint:errcheck
 			}
-			return
+			return nil
 		case <-time.After(timeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
+	forceTimeout := managedCityForcedStopTimeout(mc)
 	if mc.cr != nil {
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-	}
-	if timeout > 0 {
+		if mc.cr.forceStopShutdown != nil {
+			mc.cr.forceStopShutdown.Store(true)
+		}
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each: runCityShutdownBounded can return early (its
+		// shutdownDone fires as soon as mc.cr.shutdown() itself returns,
+		// which says nothing about whether mc.done has closed yet), so the
+		// remaining wait for mc.done must shrink by however long that
+		// already took rather than restart a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
+			select {
+			case <-mc.done:
+				// Forced shutdown completed within its budget — the city
+				// is out. Clear the pending error so we report success.
+				stopErr = nil
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+			}
+		}
+	} else if forceTimeout > 0 {
 		select {
 		case <-mc.done:
-		case <-time.After(timeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+			stopErr = nil
+		case <-time.After(forceTimeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -422,68 +1236,206 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	if mc.closer != nil {
 		mc.closer.Close() //nolint:errcheck
 	}
+	return stopErr
+}
+
+func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writer) error {
+	if mc == nil {
+		return nil
+	}
+	if mc.cr != nil {
+		mc.cr.preserveSessionsOnShutdown()
+	}
+	mc.cancel()
+	timeout := managedCityStopTimeout(mc)
+	var stopErr error
+	waitForRuntimeShutdown := timeout <= 0
+	if timeout > 0 {
+		select {
+		case <-mc.done:
+		case <-time.After(timeout):
+			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode cancel\n", mc.name, timeout) //nolint:errcheck
+			stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode cancel", mc.name, timeout)
+			waitForRuntimeShutdown = true
+		}
+	}
+	if waitForRuntimeShutdown && mc.cr != nil {
+		forceTimeout := managedCityForcedStopTimeout(mc)
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each — see stopManagedCity for the full rationale:
+		// runCityShutdownBounded can return early (its shutdownDone fires as
+		// soon as mc.cr.shutdown() itself returns, which says nothing about
+		// whether mc.done has closed yet), so the remaining wait for mc.done
+		// must shrink by however long that already took rather than restart
+		// a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
+			select {
+			case <-mc.done:
+				stopErr = nil
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, forceTimeout)
+			}
+		}
+	}
+	if mc.closer != nil {
+		mc.closer.Close() //nolint:errcheck
+	}
+	return stopErr
+}
+
+// notifySdState reports supervisor lifecycle state to a notify-aware
+// service manager (systemd Type=notify) via sd_notify. It is a plain
+// no-op when NOTIFY_SOCKET is unset; send failures are logged but
+// never affect supervisor operation.
+func notifySdState(stderr io.Writer, state string) {
+	if _, err := sdnotify.Notify(state); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: sd_notify %s: %v\n", state, err) //nolint:errcheck
+	}
+}
+
+// Go enables heap profiling by default (MemProfileRate = 512 KiB), and
+// runtime.mProf_Flush walks the entire mprof bucket list on every GC
+// cycle, at the tail of gcMarkTermination. It runs immediately after the
+// world restarts, not inside the STW pause -- see the Go 1.26.6 runtime
+// (mgc.go): "This is relatively expensive, so we don't do it with the
+// world stopped." So the cost is CPU plus delayed post-GC progress on the
+// mark-termination path, not GC pause time.
+//
+// It is still substantial on a long-lived daemon: a 90s profile of a
+// 7-day-old supervisor found mProf_Flush was ~23% of all on-CPU time and
+// effectively the whole of the gcMarkTermination cost -- building a heap
+// profile nothing reads. Zeroing the rate here stops the bucket set
+// accumulating across the daemon's long-running phase; buckets created
+// during CLI setup are a small fixed set and are still flushed.
+//
+// gc only serves pprof under GC_PPROF=1 (api.StartPprof), so reuse that
+// same gate rather than introducing a second knob.
+
+// configureSupervisorRuntime tunes runtime knobs for the long-lived supervisor
+// daemon. See the comment above for why heap profiling is disabled by default.
+func configureSupervisorRuntime() {
+	if os.Getenv("GC_PPROF") != "1" {
+		goruntime.MemProfileRate = 0
+	}
 }
 
 // runSupervisor is the main supervisor loop. It acquires the lock,
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
+	configureSupervisorRuntime()
+
 	if pid := supervisorAlive(); pid != 0 {
 		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
 		return 1
 	}
 
-	lock, err := acquireSupervisorLock()
+	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
+	// manually (mkdir + open log file before spawning the child), but the
+	// systemd/launchd/container paths jump straight to `gc supervisor run`
+	// without that prep — which leaves operators with `gc supervisor logs`
+	// reporting "log file not found" and no way to see startup errors.
+	if err := os.MkdirAll(supervisor.DefaultHome(), 0o700); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: ensuring home dir %s: %v\n", supervisor.DefaultHome(), err) //nolint:errcheck
+		return 1
+	}
+	// Capture prior-instance evidence before acquireSupervisorLockAndRotateLog
+	// (re)creates the lock file: its existence means a supervisor ran
+	// on this machine before, which lets the restart-cause derivation
+	// distinguish a crashed prior instance from a first start.
+	_, lockStatErr := os.Stat(supervisorLockPath())
+	priorInstanceRan := lockStatErr == nil
+
+	// Bound supervisor.log before attaching to it. A supervisor that fails
+	// the same way on every start crash-loops under its service manager
+	// (systemd Restart=always, launchd KeepAlive) and appends identical
+	// failure lines through every restart — 645MB in one two-day
+	// bind-conflict incident (#3897) — so every start size-gates the log
+	// and archives it at the cap, under the single-instance lock so racing
+	// starts cannot interleave the compress/truncate sequence. Rotation
+	// failures are surfaced but never block startup: a supervisor with an
+	// oversized log beats no supervisor.
+	lock, err := acquireSupervisorLockAndRotateLog(supervisorLogPath(), time.Now(), stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck
+	// Always tee to ~/.gc/supervisor.log so `gc supervisor logs` works
+	// regardless of how the supervisor was invoked. We skip the tee when
+	// stdout/stderr already point at the same file (manual `gc supervisor
+	// start` path) to avoid double-logging, and when GC_SUPERVISOR_LOG_TEE=0
+	// opts out entirely so the service manager's log (e.g. journald under
+	// systemd) is the single sink.
+	if supervisorLogTeeDisabled() {
+		fmt.Fprintf(stderr, "gc supervisor: log tee disabled (%s=0); not writing %s\n", supervisorLogTeeEnv, supervisorLogPath()) //nolint:errcheck
+	} else if logFile, err := openSupervisorLogForTee(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: tee disabled: %v\n", err) //nolint:errcheck
+	} else {
+		defer logFile.Close() //nolint:errcheck // keep after later run-loop cleanup defers
+		if shouldTeeSupervisorLog(stdout, logFile) {
+			stdout = io.MultiWriter(stdout, logFile)
+		}
+		if shouldTeeSupervisorLog(stderr, logFile) {
+			stderr = io.MultiWriter(stderr, logFile)
+		}
+	}
+
+	// Holding the instance lock, consume the clean-shutdown handoff
+	// token the previous instance's STOPPING path left behind (if any)
+	// and classify how that instance exited.
+	previousExit, previousExitDetail := supervisor.ConsumePreviousExit(supervisor.DefaultHome(), priorInstanceRan)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	shutdownCtl := newSupervisorShutdownController()
+	// Track managed cities via atomic-snapshot registry. API reads are
+	// lock-free (atomic pointer load); mutations go through citiesMu.
+	registry := newCityRegistry()
+	supEvPath := filepath.Join(supervisor.RuntimeDir(), "events.jsonl")
+	if supFR, supErr := newFileEventsRecorder(supEvPath, config.EventsConfig{}, stderr); supErr == nil {
+		registry.SetSupervisorRecorder(supFR)
+		defer supFR.Close() //nolint:errcheck
+	}
+	emitSupervisorStarted(stderr, registry.SupervisorEventRecorder(), previousExit, previousExitDetail)
+	requestShutdown := func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
+		return requestSupervisorShutdown(stderr, registry.SupervisorEventRecorder(), shutdownCtl, cancel, mode, trigger)
+	}
 
 	// Reconcile channel — triggers immediate reconciliation from SIGHUP
 	// or the "reload" socket command.
 	reconcileCh := make(chan reconcileRequest, 1)
 
 	// Signal handler: SIGINT/SIGTERM → shutdown, SIGHUP → immediate reconcile.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	sigCh := make(chan os.Signal, 2)
+	supervisorSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
-	go func() {
-		for {
-			select {
-			case sig := <-sigCh:
-				if sig == syscall.SIGHUP {
-					fmt.Fprintln(stderr, "SIGHUP received, triggering reconciliation...") //nolint:errcheck
-					select {
-					case reconcileCh <- reconcileRequest{}:
-					default: // reconcile already pending
-					}
-					continue
-				}
-				// SIGINT/SIGTERM → shutdown.
-				cancel()
-				return
-			case <-ctx.Done():
-				return
-			}
+	shutdownSignalsDone := make(chan struct{})
+	defer close(shutdownSignalsDone)
+	go supervisorSignalLoop(sigCh, shutdownSignalsDone, requestShutdown, func() {
+		fmt.Fprintln(stderr, "SIGHUP received, triggering reconciliation...") //nolint:errcheck
+		select {
+		case reconcileCh <- reconcileRequest{}:
+		default: // reconcile already pending
 		}
-	}()
+	}, stderr)
 
 	// Load supervisor config.
-	supCfg, err := supervisor.LoadConfig(supervisor.ConfigPath())
+	supCfg, err := supervisorLoadConfig(supervisor.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
 		return 1
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-
-	// Track managed cities via atomic-snapshot registry. API reads are
-	// lock-free (atomic pointer load); mutations go through citiesMu.
-	registry := newCityRegistry()
+	if err := cleanupSupervisorWorkspaceServicesForSupervisorStart(supervisor.DefaultHome()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: workspace-service startup cleanup: %v\n", err) //nolint:errcheck
+		return 1
+	}
 
 	// Start API server with city-namespaced routing (Phase 2).
 	startedAt := time.Now()
@@ -494,12 +1446,98 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if readOnly {
 		fmt.Fprintf(stderr, "gc supervisor: binding to %s — mutation endpoints disabled (non-localhost)\n", bind) //nolint:errcheck
 	}
-	apiMux := api.NewSupervisorMux(registry, readOnly, version, startedAt)
+	cityInitSvc, err := newCityInitService()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	apiMux := api.NewSupervisorMux(registry, cityInitSvc, readOnly, version, commit, startedAt)
+	if len(supCfg.Supervisor.AllowedOrigins) > 0 {
+		apiMux.WithAllowedOrigins(supCfg.Supervisor.AllowedOrigins)
+	}
+	if len(supCfg.Supervisor.AllowedHosts) > 0 {
+		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
+	}
+	// Gate city-config mutations on a signed write grant when configured. Fail
+	// closed at boot if write-auth is required but no key is set, or if a
+	// non-loopback + allow_mutations bind has no key and no ack knob (G10), so the
+	// multi-city supervisor cannot silently serve mutations unguarded.
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired, api.WriteAuthBindContext{
+		NonLocal:        nonLocal,
+		AllowMutations:  supCfg.Supervisor.AllowMutations,
+		AllowUnverified: supCfg.Supervisor.WriteAuthAllowUnverified,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// Gate city reads on a signed read grant when configured. Fail closed at boot
+	// if read-auth is required but no key is set, so the supervisor cannot
+	// silently serve reads unguarded.
+	if err := api.InstallReadAuth(apiMux, supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: read-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// G23: a hardened supervisor bind (non-loopback + allow_mutations) previously
+	// booted silent. Emit the loud unauthenticated-read-plane warning (shared with
+	// the standalone controller seam) so an operator sees the read surface needs a
+	// network front. grantGated and readAuthInstalled are resolved the same way
+	// InstallWriteAuth/InstallReadAuth did; a read-auth verifier suppresses the
+	// warning because the read plane is then authenticated.
+	if nonLocal && supCfg.Supervisor.AllowMutations {
+		grantGated := false
+		if v, verr := api.ResolveWriteAuthVerifier(supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); verr == nil && v != nil {
+			grantGated = true
+		}
+		readAuthInstalled := false
+		if v, verr := api.ResolveReadAuthVerifier(supCfg.Supervisor.ReadAuthVerifyKey, supCfg.Supervisor.ReadAuthRequired); verr == nil && v != nil {
+			readAuthInstalled = true
+		}
+		warnUnauthenticatedReadPlane(stderr, bind, grantGated, readAuthInstalled)
+	}
+
+	// Host the embedded dashboard SPA + host-side /api plane on the same
+	// listener (same-origin), so the supervisor serves the dashboard for all
+	// registered cities. Disabled with GC_SUPERVISOR_DASHBOARD=0.
+	dashboardPlane, dashErr := attachDashboard(apiMux, registry, readOnly, bind, port)
+	if dashErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
+		return 1
+	}
+	dashboardMounted := dashboardPlane != nil
+	if dashboardPlane == nil {
+		// The typed run census is available even when the embedded dashboard is
+		// disabled. Keep its incremental plane unmounted in that posture.
+		dashboardPlane = newRunCensusPlane(apiMux, registry)
+	}
+	dashboardPlane.Start(ctx)
+	defer dashboardPlane.Stop()
+
+	pprofSrv, pprofErr := api.StartPprof("")
+	if pprofErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", pprofErr) //nolint:errcheck
+	}
+	if pprofSrv != nil {
+		defer func() {
+			shutCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
+			defer c()
+			pprofSrv.Shutdown(shutCtx) //nolint:errcheck
+		}()
+	}
+
 	addr := net.JoinHostPort(bind, strconv.Itoa(port))
 	apiLis, apiErr := net.Listen("tcp", addr)
 	if apiErr != nil {
+		if supervisorAddrInUse(apiErr) && supervisorRespondingGCSupervisor(addr) {
+			fmt.Fprint(stderr, supervisorPortInUseMessage(addr, supervisor.ConfigPath())) //nolint:errcheck
+			return supervisorExitCodePortInUse
+		}
 		fmt.Fprintf(stderr, "gc supervisor: api: listen %s failed: %v\n", addr, apiErr) //nolint:errcheck
 		return 1
+	}
+	if port >= supervisorEphemeralPortWarningThreshold {
+		_, _ = fmt.Fprintf(stderr,
+			"gc supervisor: WARNING: API binding to ephemeral port %d -- "+
+				"set port = 8372 in ~/.gc/supervisor.toml\n", port)
 	}
 	go func() {
 		if err := apiMux.Serve(apiLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -512,6 +1550,21 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
+	writeSupervisorDashboardStartup(stdout, dashboardMounted, readOnly, bind, port)
+
+	// External event forwarders consume the typed supervisor stream without
+	// configuring [events.export]. Allow that long-lived supervisor unit to arm
+	// the same transcript correlation sidecars independently.
+	armSupervisorTranscriptMetaFromEnv(stderr)
+
+	// Redacted event export (opt-in via [events.export]). No-op unless an
+	// endpoint is configured.
+	if supCfg.Events.Export.Enabled() {
+		// The returned drain handle is intentionally discarded: the supervisor's
+		// home dir outlives the process, so there is nothing to wait for before
+		// teardown. Tests that own a transient home (t.TempDir) Wait on it.
+		_ = startEventExport(ctx, supCfg.Events.Export, apiMux.EventProviders, supervisor.DefaultHome(), stderr)
+	}
 
 	// Control socket — uses supervisor-specific path, not the per-city controller socket.
 	sockPath := supervisorSocketPath()
@@ -519,15 +1572,42 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: creating socket dir: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	lis, err := startSupervisorSocket(sockPath, cancel, reconcileCh)
+	shut := newShutdownState()
+	lis, err := startSupervisorSocket(sockPath, requestShutdown, reconcileCh, shut)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	defer lis.Close()         //nolint:errcheck
-	defer os.Remove(sockPath) //nolint:errcheck
+	// Socket teardown order matters. Defers run in LIFO, so listed last =
+	// executes first. We want:
+	//   1. Signal shutdown completion (shut.finish) so blocked "stop"
+	//      handlers can write their done:* line.
+	//   2. Brief pause (0.5s) so those writes reach the client before the
+	//      socket closes.
+	//   3. Close listener + remove socket path.
+	// The ctx.Done() branch below calls shut.finish directly before it
+	// returns; this defer is the safety net for any other return path
+	// (early errors, panics) so socket handlers never block forever.
+	defer func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	}()
+	defer func() {
+		select {
+		case <-shut.done:
+		default:
+			shut.finish(fmt.Errorf("supervisor exited before shutdown aggregation"))
+		}
+		// Give in-flight "stop" handlers a short window to emit their
+		// done:* line before the listener closes.
+		time.Sleep(500 * time.Millisecond)
+	}()
 
 	fmt.Fprintln(stdout, "Supervisor started.") //nolint:errcheck
+
+	// Tell a notify-aware service manager (systemd Type=notify) that
+	// startup is complete: flock held, control socket and API serving.
+	notifySdState(stderr, sdnotify.Ready)
 
 	// Reconciliation loop.
 	interval := supCfg.Supervisor.PatrolIntervalDuration()
@@ -542,7 +1622,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "gc supervisor: reconcile panicked: %v\n", r) //nolint:errcheck
 			}
 		}()
-		reconcileCities(reg, registry, supCfg.Publication, stdout, stderr)
+		reconcileCities(ctx, reg, registry, supCfg.Publication, stdout, stderr)
+		// Pet the service-manager watchdog (WatchdogSec=) only after a
+		// reconcile cycle completes; a panic above skips this, so a
+		// wedged reconcile loop surfaces as a watchdog timeout even
+		// while the API stays responsive.
+		notifySdState(stderr, sdnotify.Watchdog)
 	}
 
 	// Initial reconcile.
@@ -553,6 +1638,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		case <-ticker.C:
 			safeReconcile()
 		case req := <-reconcileCh:
+			// Reload-triggered reconcile (SIGHUP or the "reload" socket
+			// command): bracket it with RELOADING=1/READY=1 so a
+			// notify-aware service manager sees the reload lifecycle.
+			// Ticker and initial reconciles are not reloads and must
+			// not emit RELOADING.
+			notifySdState(stderr, sdnotify.Reloading)
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).
@@ -562,10 +1653,13 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					v.cs.Poke()
 				}
 			}
+			// Per sd_notify(3) a reload ends with READY=1.
+			notifySdState(stderr, sdnotify.Ready)
 			if req.done != nil {
 				close(req.done)
 			}
 		case <-ctx.Done():
+			notifySdState(stderr, sdnotify.Stopping)
 			// Shutdown all cities. Collect under lock, then stop outside
 			// to avoid blocking API requests during graceful shutdown.
 			var toStop map[string]*managedCity
@@ -582,13 +1676,42 @@ func runSupervisor(stdout, stderr io.Writer) int {
 					delete(cities, k)
 				}
 			})
+			preserveSessions := shutdownCtl.preservesSessionsAfterSettle(supervisorShutdownSettleDelay)
+			var stopFailures []string
 			for name, mc := range toStop {
-				fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
-				stopManagedCity(mc, name, stderr)
-				fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+				if preserveSessions {
+					fmt.Fprintf(stdout, "Preserving city '%s' sessions for re-adoption...\n", name) //nolint:errcheck
+				} else {
+					fmt.Fprintf(stdout, "Stopping city '%s'...\n", name) //nolint:errcheck
+				}
+				stopFn := stopManagedCity
+				if preserveSessions {
+					stopFn = stopManagedCityPreservingSessions
+				}
+				if err := stopFn(mc, name, stderr); err != nil {
+					stopFailures = append(stopFailures, fmt.Sprintf("%s: %s", name, err.Error()))
+					fmt.Fprintf(stdout, "City '%s' stop reported error (see stderr).\n", name) //nolint:errcheck
+				} else {
+					if preserveSessions {
+						fmt.Fprintf(stdout, "City '%s' preserved.\n", name) //nolint:errcheck
+					} else {
+						fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+					}
+				}
+			}
+			var shutErr error
+			if len(stopFailures) > 0 {
+				shutErr = fmt.Errorf("%d cities did not shut down cleanly: %s", len(stopFailures), strings.Join(stopFailures, "; "))
+				fmt.Fprintf(stderr, "gc supervisor: %v\n", shutErr) //nolint:errcheck
+			}
+			shut.finish(shutErr)
+			// STOPPING path complete — leave the clean-shutdown handoff
+			// token for the next instance's restart-cause derivation.
+			if err := supervisor.WriteShutdownMarker(supervisor.DefaultHome()); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 			}
 			fmt.Fprintln(stdout, "Supervisor stopped.") //nolint:errcheck
-			return 0
+			return supervisorShutdownExitCode(shutErr)
 		}
 	}
 }
@@ -608,11 +1731,70 @@ type initFailRecord struct {
 	backoff   time.Time
 	configMod time.Time // mtime of city.toml at last failure
 	lastError string    // last error message for user-facing feedback
+	dirAbsent int       // consecutive failures where the city directory is gone
 }
+
+const staleCityDirAbsentThreshold = 3
+
+// structuralInitFailureBackoff is the retry interval for init failures
+// classified as structural (see isStructuralInitFailureMessage) -- far
+// longer than the transient-failure ceiling, since retrying sooner cannot
+// help: the failure requires an out-of-band fix no in-city action can
+// trigger (#4484).
+const structuralInitFailureBackoff = time.Hour
+
+// isStructuralInitFailureMessage reports whether msg indicates an init
+// failure that no amount of retrying -- or editing city.toml -- can ever
+// resolve, e.g. a bd schema-version gate ("database is at vN, binary
+// knows up to vM"), which requires an out-of-band bd binary upgrade.
+// Mirrors runtime.IsSessionGone's message-substring classification style
+// for external-subprocess errors with no typed sentinel available.
+func isStructuralInitFailureMessage(msg string) bool {
+	return strings.Contains(msg, "schema version mismatch")
+}
+
+// initFailureBackoffDelay computes the retry backoff for the count-th
+// consecutive init failure. Transient failures use capped exponential
+// backoff (10s doubling to a 5-minute ceiling, unchanged from before
+// #4484); structural failures (see isStructuralInitFailureMessage) back
+// off to structuralInitFailureBackoff immediately, since the standard
+// escalation cannot help a failure retrying will never resolve.
+func initFailureBackoffDelay(count int, msg string) time.Duration {
+	if isStructuralInitFailureMessage(msg) {
+		return structuralInitFailureBackoff
+	}
+	exp := count - 1
+	if exp > 5 {
+		exp = 5
+	}
+	delay := time.Duration(10<<exp) * time.Second
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	return delay
+}
+
+// supervisorBootStepReportThreshold is how long a named boot step has to take
+// before it is worth a line in the supervisor log. Every step of a city start
+// that can plausibly exceed it runs under a phase name, so a slow boot is
+// attributable from the log alone rather than appearing as an unnamed gap
+// between two phases (ga-1e78j).
+const supervisorBootStepReportThreshold = time.Second
+
+// supervisorBootStepNow is the clock the boot-phase timer reads. It is a
+// variable so tests can prove the phase wiring without sleeping through the
+// threshold; production never replaces it.
+var supervisorBootStepNow = time.Now
 
 // reconcileCities compares the registry against running cities and
 // starts/stops as needed. All state access goes through the cityRegistry.
+//
+// ctx is the supervisor's shutdown signal. It gates only the START fan-out:
+// cities already booting are left to finish, and cities not yet submitted are
+// dropped and have their queued markers released so the next supervisor run
+// selects them again.
 func reconcileCities(
+	ctx context.Context,
 	reg *supervisor.Registry,
 	cr *cityRegistry,
 	publication supervisor.PublicationConfig,
@@ -651,9 +1833,13 @@ func reconcileCities(
 	})
 
 	for i, mc := range toStop {
-		name := filepath.Base(toStopPaths[i])
-		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", name) //nolint:errcheck
-		stopManagedCity(mc, toStopPaths[i], stderr)
+		path := toStopPaths[i]
+		cityName := mc.name
+		if cityName == "" {
+			cityName = filepath.Base(path)
+		}
+		fmt.Fprintf(stdout, "Unregistered city '%s', stopping...\n", cityName) //nolint:errcheck
+		stopErr := stopManagedCity(mc, path, stderr)
 		// Clear backoff so re-registering starts immediately.
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
@@ -661,10 +1847,31 @@ func reconcileCities(
 			initFailures map[string]*initFailRecord,
 			panicHistory map[string]*panicRecord,
 		) {
-			delete(panicHistory, toStopPaths[i])
-			delete(initFailures, toStopPaths[i])
+			delete(panicHistory, path)
+			delete(initFailures, path)
 		})
-		fmt.Fprintf(stdout, "City '%s' stopped.\n", name) //nolint:errcheck
+		// Emit the terminal unregister event to the city's event log
+		// so /v0/events/stream subscribers observe completion without
+		// polling. The event lands on disk BEFORE the running-city
+		// provider is dropped from the multiplexer, so connected
+		// subscribers see the event via the running-provider path.
+		// Best-effort: a failure to open the recorder just means
+		// subscribers learn via GET /v0/cities instead.
+		reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+		if consumeErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.unregister completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+		}
+		if !hasReqID {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': no pending request_id for city.unregister completion event (path=%s)\n", cityName, path) //nolint:errcheck
+		}
+		if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+			emitCityUnregisterTerminalEvent(supRec, reqID, cityName, path, stopErr)
+			if stopErr == nil {
+				fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
+			}
+		} else if stopErr == nil {
+			fmt.Fprintf(stdout, "City '%s' stopped.\n", cityName) //nolint:errcheck
+		}
 	}
 
 	// Clear panicHistory and initFailures for any path no longer in the
@@ -712,75 +1919,106 @@ func reconcileCities(
 	})
 	for i, mc := range nameDriftCities {
 		fmt.Fprintf(stdout, "City name changed at '%s', restarting...\n", nameDriftPaths[i]) //nolint:errcheck
-		stopManagedCity(mc, nameDriftPaths[i], stderr)
+		_ = stopManagedCity(mc, nameDriftPaths[i], stderr)
 	}
 
-	// Start new cities (and name-drifted restarts). Build list under lock,
-	// then release lock for I/O-heavy initialization (config loading, bead
-	// lifecycle, formula materialization, etc.).
-	var toStart []supervisor.CityEntry
-	cr.ReadCallback(func(
-		cities map[string]*managedCity,
-		initStatus map[string]cityInitProgress,
-		_ map[string]*initFailRecord,
-		_ map[string]*panicRecord,
-	) {
-		for path, entry := range desired {
-			if _, running := cities[path]; !running {
-				if _, initializing := initStatus[path]; initializing {
-					continue
-				}
-				toStart = append(toStart, entry)
-			}
-		}
+	// Start new cities (and name-drifted restarts). Selection marks each
+	// candidate queued under the same lock, so the workers below can run
+	// outside it without a second pass re-entering a city that is already
+	// starting.
+	toStart := selectCitiesToStart(cr, desired, supervisorBootPriority())
+	skipped := startCityWorkers(ctx, toStart, supervisorBootConcurrency(), stderr, func(entry supervisor.CityEntry) {
+		startOneCity(entry, reg, cr, publication, stdout, stderr)
 	})
+	// A city dropped for shutdown never ran, so it never cleared the marker
+	// selectCitiesToStart gave it. Releasing it here is what lets the next
+	// supervisor run pick the city up instead of inheriting a stale entry.
+	for _, entry := range skipped {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': not started, supervisor is shutting down\n", entry.EffectiveName()) //nolint:errcheck
+		releaseQueuedCityStart(cr, entry.Path)
+	}
+}
 
-	for _, entry := range toStart {
-		path := entry.Path
-		name := entry.EffectiveName()
+// startOneCity brings up one registered city: config load, city preparation,
+// session provider, runtime, controller state, boot sweeps, pool hooks, and the
+// goroutine that runs it. It is called from a bounded worker pool, so every
+// piece of state it touches is either iteration-local or reached through the
+// registry's own lock.
+//
+// The city's initStatus entry is already present when this is called — set to
+// [cityInitStatusQueued] by selectCitiesToStart. Ordinary exits clear it as part
+// of what they do: the failure branches through recordInitFailure, the success
+// branch through publishManagedCity. Those cover every exit this function takes
+// deliberately, and none of them covers a PANIC, which is why the deferred
+// release below is unconditional rather than a tidy-up for the early returns. A
+// leaked entry wedges the city out of the reconcile loop for the life of the
+// process, with no backoff and no retry.
+func startOneCity(
+	entry supervisor.CityEntry,
+	reg *supervisor.Registry,
+	cr *cityRegistry,
+	publication supervisor.PublicationConfig,
+	stdout, stderr io.Writer,
+) {
+	path := entry.Path
+	name := entry.EffectiveName()
 
-		// Crash-loop backoff: skip cities that panicked recently.
-		skipBackoff := func() bool {
-			var skip bool
-			cr.ReadCallback(func(
-				_ map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				panicHistory map[string]*panicRecord,
-			) {
-				pr := panicHistory[path]
-				skip = pr != nil && time.Now().Before(pr.backoff)
-			})
-			return skip
-		}()
-		if skipBackoff {
-			continue
-		}
+	// Release this city's initStatus entry however this attempt ends. The three
+	// branches below that return before the config load — crash-loop backoff, an
+	// absent directory, an init backoff that has not elapsed — record no failure,
+	// so nothing else would clear it; and a PANIC anywhere further down skips
+	// recordInitFailure and publishManagedCity alike. selectCitiesToStart skips
+	// any path holding an entry, and it does so BEFORE it consults either
+	// backoff, so whatever is left behind here is not a stale row in a map: it is
+	// a city that is never started again. On the ordinary exits the entry is
+	// already gone and this is a no-op.
+	defer releaseQueuedCityStart(cr, path)
 
-		// Init failure backoff: skip cities whose init failed recently,
-		// unless the config file has been modified (user may have fixed it).
-		tomlPath := filepath.Join(path, "city.toml")
-		var skipInit bool
-		var ifr *initFailRecord
+	// Crash-loop backoff: skip cities that panicked recently.
+	skipBackoff := func() bool {
+		var skip bool
 		cr.ReadCallback(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			panicHistory map[string]*panicRecord,
+		) {
+			pr := panicHistory[path]
+			skip = pr != nil && time.Now().Before(pr.backoff)
+		})
+		return skip
+	}()
+	if skipBackoff {
+		return
+	}
+
+	// Auto-unregister cities whose directory no longer exists. If the
+	// directory has been absent for staleCityDirAbsentThreshold
+	// consecutive reconciliation cycles, remove the registration so
+	// the supervisor stops retrying. This catches leftover registrations
+	// from test runs or tutorials where the directory was cleaned up
+	// but the city was never unregistered.
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		var absentCount int
+		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
 			_ map[string]cityInitProgress,
 			initFailures map[string]*initFailRecord,
 			_ map[string]*panicRecord,
 		) {
-			rec := initFailures[path]
-			if rec != nil && time.Now().Before(rec.backoff) {
-				skipInit = true
-				cp := *rec
-				ifr = &cp
+			ifrec := initFailures[path]
+			if ifrec == nil {
+				ifrec = &initFailRecord{}
+				initFailures[path] = ifrec
 			}
+			ifrec.dirAbsent++
+			absentCount = ifrec.dirAbsent
 		})
-		if skipInit {
-			// Check if config was modified since last failure.
-			if info, err := os.Stat(tomlPath); err != nil || !info.ModTime().After(ifr.configMod) {
-				continue
+		if absentCount >= staleCityDirAbsentThreshold {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': directory %s absent for %d cycles, auto-unregistering\n", name, path, absentCount) //nolint:errcheck
+			if unregErr := reg.Unregister(path); unregErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': auto-unregister failed: %v\n", name, unregErr) //nolint:errcheck
 			}
-			// Config changed — reset backoff and retry.
 			cr.BatchUpdate(func(
 				_ map[string]*managedCity,
 				_ map[string]cityInitProgress,
@@ -790,518 +2028,659 @@ func reconcileCities(
 				delete(initFailures, path)
 			})
 		}
+		return
+	}
 
-		// recordInitFailure logs the error and records backoff state.
-		recordInitFailure := func(cityName, msg string) {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
-			var configMod time.Time
-			if info, stErr := os.Stat(tomlPath); stErr == nil {
-				configMod = info.ModTime()
+	// Init failure backoff: skip cities whose init failed recently,
+	// unless the config file has been modified (user may have fixed it).
+	tomlPath := filepath.Join(path, "city.toml")
+	var skipInit bool
+	var ifr *initFailRecord
+	cr.ReadCallback(func(
+		_ map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		initFailures map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		rec := initFailures[path]
+		if rec != nil && time.Now().Before(rec.backoff) {
+			skipInit = true
+			cp := *rec
+			ifr = &cp
+		}
+	})
+	if skipInit {
+		// Check if config was modified since last failure.
+		if info, err := os.Stat(tomlPath); err != nil || !info.ModTime().After(ifr.configMod) {
+			return
+		}
+		// Config changed — reset backoff and retry.
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			initFailures map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initFailures, path)
+		})
+	}
+
+	// recordInitFailure logs the error, ends the attempt, and records
+	// backoff state.
+	//
+	// Clearing initStatus is part of recording the failure, not a courtesy
+	// each branch performs for itself. reconcileCities selects cities to
+	// start by skipping any with a live initStatus entry, and it consults
+	// that skip BEFORE the backoff and its config-mtime reset. So a branch
+	// that records a failure but leaves the entry behind wedges the city out
+	// of the loop for the life of the process: it logs "next retry in 10s"
+	// and is then never selected again, and neither editing city.toml nor
+	// `gc start` recovers it — only a supervisor restart does.
+	//
+	// Three of the branches below used to clear it and three did not, which
+	// is what the split produced. Every call site either has already cleared
+	// it (the pre-runtime branches, and publishManagedCity for everything
+	// after it) or needs it cleared, so the delete belongs here, once.
+	recordInitFailure := func(cityName, msg string) {
+		fmt.Fprintln(stderr, logutil.FormatFatalLine(msg))                              //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': %s (skipping)\n", cityName, msg) //nolint:errcheck
+		var configMod time.Time
+		if info, stErr := os.Stat(tomlPath); stErr == nil {
+			configMod = info.ModTime()
+		}
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			initFailures map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+			ifrec := initFailures[path]
+			if ifrec == nil {
+				ifrec = &initFailRecord{}
+				initFailures[path] = ifrec
 			}
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				initFailures map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				ifrec := initFailures[path]
-				if ifrec == nil {
-					ifrec = &initFailRecord{}
-					initFailures[path] = ifrec
-				}
-				ifrec.count++
-				exp := ifrec.count - 1
-				if exp > 5 {
-					exp = 5
-				}
-				delay := time.Duration(10<<exp) * time.Second
-				if delay > 5*time.Minute {
-					delay = 5 * time.Minute
-				}
-				ifrec.backoff = time.Now().Add(delay)
-				ifrec.configMod = configMod
-				ifrec.lastError = msg
+			ifrec.count++
+			ifrec.dirAbsent = 0
+			delay := initFailureBackoffDelay(ifrec.count, msg)
+			ifrec.backoff = time.Now().Add(delay)
+			ifrec.configMod = configMod
+			ifrec.lastError = msg
+			if isStructuralInitFailureMessage(msg) {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s': STRUCTURAL init failure (retrying cannot resolve this — needs an out-of-band fix), next check in %s\n", cityName, delay) //nolint:errcheck
+			} else {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': init failure #%d, next retry in %s\n", cityName, ifrec.count, delay) //nolint:errcheck
-			})
-		}
-
-		// Quick-parse city.toml for pre-load tasks (same as doStart).
-		quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath)
-
-		// Materialize gastown packs before full config load if needed.
-		if qErr == nil && usesGastownPack(quickCfg) {
-			if err := MaterializeGastownPacks(path); err != nil {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gastown packs: %v\n", name, err) //nolint:errcheck
 			}
-		}
+		})
+	}
 
-		// Auto-fetch remote packs before full config load (same as doStart).
-		if qErr == nil && len(quickCfg.Packs) > 0 {
-			if fErr := config.FetchPacks(quickCfg.Packs, path); fErr != nil {
-				recordInitFailure(name, fmt.Sprintf("fetching packs: %v", fErr))
-				continue
-			}
-		}
+	if err := ensureLegacyNamedPacksCached(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
+		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
+		return
+	}
 
-		// Load city config with provenance so WatchDirs covers included files.
-		// System packs are appended as extra includes for normal pack expansion.
-		cfg, prov, loadErr := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, builtinPackIncludes(path)...)
-		if loadErr != nil {
-			recordInitFailure(name, loadErr.Error())
-			continue
-		}
+	// Load city config with provenance so WatchTargets covers included files.
+	// System packs are appended as extra includes for normal pack expansion.
+	cfg, prov, loadErr := loadSupervisorCityConfig(path)
+	if loadErr != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_config_failed", loadErr, stderr)
+		recordInitFailure(name, loadErr.Error())
+		return
+	}
+	emitSupervisorLoadCityConfigWarnings(stderr, path, prov)
 
-		// Use registered name as authoritative identity. Warn if live
-		// config has a different workspace.name (name drift).
-		cityName := name // from entry.EffectiveName()
-		if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': workspace.name changed to %q (re-register to update)\n", //nolint:errcheck
-				cityName, liveName)
-		}
+	// Use registered name as authoritative identity. city.toml may keep a
+	// different workspace.name because registration aliases are machine-local.
+	cityName := name // from entry.EffectiveName()
+	if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
+			cityName, liveName)
+	}
+	applyRuntimeCityIdentity(cfg, cityName)
 
-		// Track initialization progress for the API.
+	// Track initialization progress for the API.
+	cr.BatchUpdate(func(
+		_ map[string]*managedCity,
+		initStatus map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		initStatus[path] = cityInitProgress{name: cityName, status: "loading_config"}
+	})
+
+	// Run critical city initialization (same steps as cmd_start.go).
+	if err := prepareCityForSupervisor(path, cityName, cfg, stderr, func(status string) {
 		cr.BatchUpdate(func(
 			_ map[string]*managedCity,
 			initStatus map[string]cityInitProgress,
 			_ map[string]*initFailRecord,
 			_ map[string]*panicRecord,
 		) {
-			initStatus[path] = cityInitProgress{name: cityName, status: "loading_config"}
+			initStatus[path] = cityInitProgress{name: cityName, status: status}
 		})
-
-		// Run critical city initialization (same steps as cmd_start.go).
-		if err := prepareCityForSupervisor(path, cityName, cfg, stderr, func(status string) {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
-			})
-		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
-			continue
-		}
-
-		runPostPrepareStep := func(status string, fn func() error) error {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				initStatus[path] = cityInitProgress{name: cityName, status: status}
-			})
-			started := time.Now()
-			err := fn()
-			if dur := time.Since(started); dur > time.Second {
-				fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
-			}
-			return err
-		}
-
-		// Warn if city has its own API port.
-		if cfg.API.Port > 0 {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' has [api] port=%d which is ignored under supervisor mode\n", //nolint:errcheck
-				cityName, cfg.API.Port)
-		}
-
-		var sp runtime.Provider
-		spErr := runPostPrepareStep("creating_session_provider", func() error {
-			var err error
-			sp, err = newSessionProviderByName(
-				effectiveProviderName(cfg.Session.Provider), cfg.Session, cityName, path)
-			return err
-		})
-		if spErr != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
-			continue
-		}
-
-		// Fail-fast image pre-check for container providers (same as doStart).
-		if err := runPostPrepareStep("checking_agent_images", func() error {
-			return checkAgentImages(sp, cfg.Agents, stderr)
-		}); err != nil {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			recordInitFailure(cityName, err.Error())
-			continue
-		}
-
-		rec := events.Discard
-		var eventProv events.Provider
-		evPath := filepath.Join(path, ".gc", "events.jsonl")
-		fr, frErr := events.NewFileRecorder(evPath, stderr)
-		if frErr == nil {
-			rec = fr
-			eventProv = fr
-		}
-
-		dops := newDrainOps(sp)
-		poolSessions := computePoolSessions(cfg, cityName, path, sp)
-		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp)
-		watchDirs := config.WatchDirs(prov, cfg, path)
-		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
-		pokeCh := make(chan struct{}, 1)
-		cityCtx, cityCancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
-		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
-
-		convergenceReqCh := make(chan convergenceRequest, 16)
-		controlDispatcherCh := make(chan struct{}, 1)
-
-		var cityRuntime *CityRuntime
-		if err := runPostPrepareStep("building_city_runtime", func() error {
-			cityRuntime = newCityRuntime(CityRuntimeParams{
-				CityPath:                path,
-				CityName:                cityName,
-				TomlPath:                tomlPath,
-				WatchDirs:               watchDirs,
-				ConfigRev:               configRev,
-				Cfg:                     cfg,
-				SP:                      sp,
-				Publication:             publication,
-				BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-				BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
-				Dops:                    dops,
-				Rec:                     rec,
-				PoolSessions:            poolSessions,
-				PoolDeathHandlers:       poolDeathHandlers,
-				ConvergenceReqCh:        convergenceReqCh,
-				PokeCh:                  pokeCh,
-				ControlDispatcherCh:     controlDispatcherCh,
-				OnStarted: func() {
-					cr.UpdateCallback(path, func(m *managedCity) {
-						m.started = true
-					})
-				},
-				OnStatus: func(status string) {
-					cr.UpdateCallback(path, func(m *managedCity) {
-						m.status = status
-					})
-				},
-				LogPrefix: "gc supervisor",
-				Stdout:    stdout,
-				Stderr:    stderr,
-			})
-			return nil
-		}); err != nil {
-			recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
-			continue
-		}
-		mc.cr = cityRuntime
-
-		// Wire API state.
-		var cs *controllerState
-		if err := runPostPrepareStep("opening_controller_state", func() error {
-			cs = newControllerState(cfg, sp, eventProv, cityName, path)
-			return nil
-		}); err != nil {
-			recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
-			continue
-		}
-		cs.ct = cityRuntime.crashTrack()
-		cs.pokeCh = pokeCh
-		cs.services = cityRuntime.svc
-		cs.startBeadEventWatcher(cityCtx)
-		cityRuntime.setControllerState(cs)
-
-		// Run pool on_boot hooks (same as runController does).
-		if err := runPostPrepareStep("running_pool_on_boot", func() error {
-			runPoolOnBoot(cfg, path, shellRunHook, stderr)
-			return nil
-		}); err != nil {
-			recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
-			continue
-		}
-
-		// Insert into map BEFORE launching goroutine to prevent races
-		// where an early panic deletes a non-existent entry, leaving a
-		// zombie after the post-launch insertion.
-		alreadyRunning := publishManagedCity(cr, path, mc)
-		if alreadyRunning {
-			cr.BatchUpdate(func(
-				_ map[string]*managedCity,
-				initStatus map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(initStatus, path)
-			})
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			continue
-		}
-
-		// Acquire controller lock to prevent split-brain with standalone
-		// controllers (mirrors runController in controller.go).
-		lock, lockErr := acquireControllerLock(path)
-		if lockErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
-			continue
-		}
-
-		// Start controller socket AFTER the alreadyRunning check so we
-		// never destroy a live city's socket or leak a listener.
-		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, convergenceReqCh, pokeCh, controlDispatcherCh)
-		if lisErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
-			lock.Close()                                                                               //nolint:errcheck // no socket to race with
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
-			continue
-		}
-
-		// Generate controller token for convergence ACL
-		// (mirrors runController in controller.go).
-		controllerToken, tokenErr := convergence.GenerateToken()
-		if tokenErr != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller token: %v\n", cityName, tokenErr) //nolint:errcheck
-			lis.Close()                                                                                 //nolint:errcheck
-			os.Remove(sockPath)                                                                         //nolint:errcheck
-			lock.Close()                                                                                //nolint:errcheck // lock released last
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("controller token: %v", tokenErr))
-			continue
-		}
-		_ = controllerToken // available for future waves via function parameters
-		if err := convergence.WriteToken(path, controllerToken); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': writing controller token: %v\n", cityName, err) //nolint:errcheck
-			lis.Close()                                                                                    //nolint:errcheck
-			os.Remove(sockPath)                                                                            //nolint:errcheck
-			lock.Close()                                                                                   //nolint:errcheck // lock released last
-			cityCancel()
-			cityRuntime.shutdown()
-			if fr != nil {
-				fr.Close() //nolint:errcheck
-			}
-			cr.BatchUpdate(func(
-				cities map[string]*managedCity,
-				_ map[string]cityInitProgress,
-				_ map[string]*initFailRecord,
-				_ map[string]*panicRecord,
-			) {
-				delete(cities, path)
-			})
-			recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
-			continue
-		}
-
-		// Capture the socket's os.FileInfo so the goroutine can perform
-		// ownership-safe socket removal on exit via os.SameFile — a
-		// replacement city that re-bound the same path won't have its
-		// socket unlinked. Uses os.SameFile for cross-platform safety.
-		sockInfo, _ := os.Stat(sockPath)
-
-		// Disable automatic socket unlinking on listener close so our
-		// ownership-safe removal logic is the sole path for cleanup.
-		// Without this, l.Close() unconditionally unlinks the socket
-		// file, defeating the SameFile check.
-		if ul, ok := lis.(*net.UnixListener); ok {
-			ul.SetUnlinkOnClose(false)
-		}
-
-		go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
-			// Recovery and close(done) defer is pushed FIRST so it
-			// executes LAST (Go LIFO), preserving the invariant that
-			// completion is signaled only after all resource cleanup.
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
-					// Gracefully stop agents so they aren't orphaned.
-					// Wrap in recovery to prevent nested panic from crashing
-					// the entire supervisor.
-					func() {
-						defer func() { recover() }() //nolint:errcheck
-						cityRuntime.shutdown()
-					}()
-					if err := shutdownBeadsProvider(p); err != nil {
-						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
-					}
-					// Close the file recorder (only on panic — normal exit
-					// leaves it for the external caller via mc.closer).
-					if cityFr != nil {
-						cityFr.Close() //nolint:errcheck
-					}
-					// Record panic for crash-loop backoff and remove from
-					// cities map in a single batch update.
-					cr.BatchUpdate(func(
-						cities map[string]*managedCity,
-						_ map[string]cityInitProgress,
-						_ map[string]*initFailRecord,
-						panicHistory map[string]*panicRecord,
-					) {
-						pr := panicHistory[p]
-						if pr == nil {
-							pr = &panicRecord{}
-							panicHistory[p] = pr
-						}
-						pr.count++
-						// Exponential backoff: 10s, 20s, 40s, ... capped at 5 min.
-						exp := pr.count - 1
-						if exp > 5 {
-							exp = 5 // prevent int overflow at high panic counts
-						}
-						delay := time.Duration(10<<exp) * time.Second
-						if delay > 5*time.Minute {
-							delay = 5 * time.Minute
-						}
-						pr.backoff = time.Now().Add(delay)
-						fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
-						delete(cities, p)
-					})
-				} else {
-					// Normal exit (context canceled) — reset panic counter
-					// and remove from map in a single critical section.
-					cr.BatchUpdate(func(
-						cities map[string]*managedCity,
-						_ map[string]cityInitProgress,
-						_ map[string]*initFailRecord,
-						panicHistory map[string]*panicRecord,
-					) {
-						delete(panicHistory, p)
-						delete(cities, p)
-					})
-				}
-				// Signal completion last — ensures all cleanup is done before
-				// waiters (shutdown/unregister paths) proceed.
-				close(done)
-			}()
-			// Resource cleanup defers pushed AFTER recovery/done so they
-			// execute BEFORE it in LIFO order: resources are released,
-			// then done is closed.
-			defer lk.Close()                 //nolint:errcheck // release controller lock (last released)
-			defer convergence.RemoveToken(p) //nolint:errcheck // best-effort cleanup
-			defer func() {
-				// Ownership-safe socket removal: only unlink if the
-				// on-disk file is the same one we created, so a
-				// replacement city's socket is never destroyed.
-				if origSockInfo != nil {
-					if cur, err := os.Stat(sock); err == nil {
-						if os.SameFile(origSockInfo, cur) {
-							os.Remove(sock) //nolint:errcheck
-						}
-					}
-				}
-			}()
-			defer l.Close() //nolint:errcheck // close listener (after socket removal)
-			defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
-			cityRuntime.run(cityCtx)
-		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
-
-		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-		telemetry.RecordControllerLifecycle(context.Background(), "started")
-		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "city_init_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
+		return
 	}
 
-	// Reconcile the global rig index from all registered cities.
-	reconcileRigIndex(reg, stderr)
+	runPostPrepareStep := func(status string, fn func() error) error {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			initStatus[path] = cityInitProgress{name: cityName, status: status}
+		})
+		started := supervisorBootStepNow()
+		err := fn()
+		if dur := supervisorBootStepNow().Sub(started); dur > supervisorBootStepReportThreshold {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': %s took %s\n", cityName, status, dur.Round(10*time.Millisecond)) //nolint:errcheck
+		}
+		return err
+	}
+
+	// Warn if city has its own API port.
+	if cfg.API.Port > 0 {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s' has [api] port=%d which is ignored under supervisor mode\n", //nolint:errcheck
+			cityName, cfg.API.Port)
+	}
+
+	var sp runtime.Provider
+	spErr := runPostPrepareStep("creating_session_provider", func() error {
+		providerName := effectiveProviderName(cfg.Session.Provider)
+		ctx := sessionProviderContextForCity(cfg, path, providerName)
+		snapshot := loadProviderSessionSnapshot(ctx)
+		resolvedSP, err := newSessionProviderFromContext(ctx, snapshot)
+		if err != nil {
+			return err
+		}
+		sp = resolvedSP
+		return nil
+	})
+	if spErr != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "session_provider_failed", spErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("session provider: %v", spErr))
+		return
+	}
+
+	// Fail-fast image pre-check for container providers (same as doStart).
+	if err := runPostPrepareStep("checking_agent_images", func() error {
+		return checkAgentImages(sp, cfg.Agents, stderr)
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "agent_image_check_failed", err, stderr)
+		recordInitFailure(cityName, err.Error())
+		return
+	}
+
+	rec := events.Discard
+	var eventProv events.Provider
+	evPath := filepath.Join(path, ".gc", "events.jsonl")
+	fr, frErr := newFileEventsRecorder(evPath, cfg.Events, stderr)
+	if frErr == nil {
+		rec = fr
+		eventProv = fr
+	}
+
+	dops := newDrainOps(sp)
+	poolSessions := computePoolSessions(cfg, cityName, path, sp)
+	poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, path, sp, stderr)
+	watchTargets := config.WatchTargets(prov, cfg, path)
+	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
+	pokeCh := make(chan struct{}, 1)
+	configDirty := &atomic.Bool{}
+	forceShutdown := &atomic.Bool{}
+	reloadReqCh := make(chan reloadRequest)
+	cityCtx, cityCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
+
+	convergenceReqCh := make(chan convergenceRequest, 16)
+	controlDispatcherCh := make(chan struct{}, 1)
+
+	var cityRuntime *CityRuntime
+	if err := runPostPrepareStep("building_city_runtime", func() error {
+		var runtimeErr error
+		cityRuntime, runtimeErr = newCityRuntime(CityRuntimeParams{
+			CityPath:                path,
+			CityName:                cityName,
+			TomlPath:                tomlPath,
+			WatchTargets:            watchTargets,
+			ConfigRev:               configRev,
+			ConfigDirty:             configDirty,
+			Cfg:                     cfg,
+			SP:                      sp,
+			Publication:             publication,
+			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
+			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			Dops:                    dops,
+			Rec:                     rec,
+			PoolSessions:            poolSessions,
+			PoolDeathHandlers:       poolDeathHandlers,
+			ForceStopShutdown:       forceShutdown,
+			ReloadReqCh:             reloadReqCh,
+			ConvergenceReqCh:        convergenceReqCh,
+			PokeCh:                  pokeCh,
+			ControlDispatcherCh:     controlDispatcherCh,
+			TranscriptMetaEnabled:   transcriptmeta.Enabled(),
+			OnStarted: func() {
+				cr.UpdateCallback(path, func(m *managedCity) {
+					m.started = true
+				})
+				emitPendingCityCreateResult(cr, path, cityName, stderr)
+			},
+			OnStatus: func(status string) {
+				cr.UpdateCallback(path, func(m *managedCity) {
+					m.status = status
+				})
+			},
+			LogPrefix: "gc supervisor",
+			Stdout:    stdout,
+			Stderr:    stderr,
+		})
+		return runtimeErr
+	}); err != nil {
+		emitPendingCityCreateFailure(cr, path, cityName, "city_runtime_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("city runtime: %v", err))
+		return
+	}
+	mc.cr = cityRuntime
+
+	// Wire API state.
+	var cs *controllerState
+	if err := runPostPrepareStep("opening_controller_state", func() error {
+		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		return nil
+	}); err != nil {
+		// The runtime is already built, and it holds this city's storage
+		// binding, its trace file and its workspace services. Abandoning it
+		// here would leave the engine open for the life of the supervisor —
+		// including across the next attempt to start this same city.
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_state_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller state: %v", err))
+		return
+	}
+	cs.ct = cityRuntime.crashTrack()
+	cs.pokeCh = pokeCh
+	cs.configDirty = configDirty
+	cs.services = cityRuntime.svc
+	cityRuntime.setControllerState(cs)
+
+	// One-time startup hygiene: release stale runtime name claims held by
+	// closed configured named-session beads so on-demand respawn is not
+	// blocked by pre-fix legacy entries inherited across a supervisor
+	// restart (ga-n2d Gap C). Best-effort, mirrors runController — a sweep
+	// failure must never block city startup.
+	_ = runPostPrepareStep("releasing_stale_name_claims", func() error {
+		if cs.cityBeadStore == nil {
+			return nil
+		}
+		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': stale name-claim sweep: %v\n", cityName, err) //nolint:errcheck
+		} else if released > 0 {
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': released %d stale configured name claim(s) at startup\n", cityName, released) //nolint:errcheck
+		}
+		return nil
+	})
+
+	_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
+		cs.startBeadEventWatcher(cityCtx)
+		cs.startMaintenanceLoop(cityCtx)
+		return nil
+	})
+
+	// G13 §6 sweep-before-serve: reconcile this city's orphan in_flight
+	// rig-create idem records before it is published into the registry (and
+	// thus before the SupervisorMux can route a rig-create/sling request to
+	// it), so a same-id retry can never re-clone over un-torn-down debris.
+	_ = runPostPrepareStep("sweeping_rig_provisions", func() error {
+		if err := cs.sweepOrphanRigProvisions(cityCtx); err != nil {
+			fmt.Fprintf(stderr, "api: rig-create boot sweep (%s): %v\n", cityName, err) //nolint:errcheck // best-effort stderr
+		}
+		return nil
+	})
+
+	// Run pool on_boot hooks (same as runController does).
+	if err := runPostPrepareStep("running_pool_on_boot", func() error {
+		runPoolOnBoot(cfg, path, shellRunHook, stderr)
+		return nil
+	}); err != nil {
+		// Same as the controller-state branch above: the runtime is built,
+		// so it is shut down rather than abandoned with its storage binding
+		// still open.
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		emitPendingCityCreateFailure(cr, path, cityName, "pool_on_boot_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("pool on_boot: %v", err))
+		return
+	}
+
+	// Insert into map BEFORE launching goroutine to prevent races
+	// where an early panic deletes a non-existent entry, leaving a
+	// zombie after the post-launch insertion.
+	alreadyRunning := publishManagedCity(cr, path, mc)
+	if alreadyRunning {
+		cr.BatchUpdate(func(
+			_ map[string]*managedCity,
+			initStatus map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(initStatus, path)
+		})
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		return
+	}
+
+	// Acquire controller lock to prevent split-brain with standalone
+	// controllers (mirrors runController in controller.go).
+	lock, lockErr := acquireControllerLock(path)
+	if lockErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller lock: %v\n", cityName, lockErr) //nolint:errcheck
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_lock_failed", lockErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller lock: %v", lockErr))
+		return
+	}
+
+	// The lock holder — and only the lock holder — is this process's
+	// residency answer for the city. The runtime above already opened its
+	// binding, but registering it at construction time would let a
+	// replacement that LOSES this lock repoint the live city's release
+	// sweeps at a handle it is about to close. Same reason the socket is
+	// started after the lock rather than before it.
+	registerResidencyRoutes(path, cityRuntime.storageRoutes, cityRuntime.cityBeadStore)
+
+	// Start controller socket AFTER the alreadyRunning check so we
+	// never destroy a live city's socket or leak a listener.
+	sockPath := controllerSocketPath(path)
+	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	if lisErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
+		lock.Close()                                                                               //nolint:errcheck // no socket to race with
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_socket_failed", lisErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller socket: %v", lisErr))
+		return
+	}
+
+	// Generate controller token for convergence ACL
+	// (mirrors runController in controller.go).
+	controllerToken, tokenErr := convergence.GenerateToken()
+	if tokenErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller token: %v\n", cityName, tokenErr) //nolint:errcheck
+		lis.Close()                                                                                 //nolint:errcheck
+		os.Remove(sockPath)                                                                         //nolint:errcheck
+		lock.Close()                                                                                //nolint:errcheck // lock released last
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_token_failed", tokenErr, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller token: %v", tokenErr))
+		return
+	}
+	_ = controllerToken // available for future waves via function parameters
+	if err := convergence.WriteToken(path, controllerToken); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': writing controller token: %v\n", cityName, err) //nolint:errcheck
+		lis.Close()                                                                                    //nolint:errcheck
+		os.Remove(sockPath)                                                                            //nolint:errcheck
+		lock.Close()                                                                                   //nolint:errcheck // lock released last
+		cityCancel()
+		cityRuntime.shutdown()
+		if fr != nil {
+			fr.Close() //nolint:errcheck
+		}
+		cr.BatchUpdate(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			delete(cities, path)
+		})
+		emitPendingCityCreateFailure(cr, path, cityName, "controller_token_write_failed", err, stderr)
+		recordInitFailure(cityName, fmt.Sprintf("controller token write: %v", err))
+		return
+	}
+
+	// Capture the socket's os.FileInfo so the goroutine can perform
+	// ownership-safe socket removal on exit via os.SameFile — a
+	// replacement city that re-bound the same path won't have its
+	// socket unlinked. Uses os.SameFile for cross-platform safety.
+	sockInfo, _ := os.Stat(sockPath)
+
+	// Disable automatic socket unlinking on listener close so our
+	// ownership-safe removal logic is the sole path for cleanup.
+	// Without this, l.Close() unconditionally unlinks the socket
+	// file, defeating the SameFile check.
+	if ul, ok := lis.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+
+	go func(n, p string, cityFr *events.FileRecorder, l net.Listener, sock string, origSockInfo os.FileInfo, lk *os.File) {
+		// Recovery and close(done) defer is pushed FIRST so it
+		// executes LAST (Go LIFO), preserving the invariant that
+		// completion is signaled only after all resource cleanup.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' panicked: %v\n", n, r) //nolint:errcheck
+				reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(p)
+				if consumeErr != nil {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create panic event failed (path=%s): %v\n", n, p, consumeErr) //nolint:errcheck
+				}
+				if hasReqID {
+					if supRec := cr.SupervisorEventRecorder(); supRec != nil {
+						api.EmitTypedEvent(supRec, events.RequestFailed, n, api.RequestFailedPayload{
+							RequestID:    reqID,
+							Operation:    api.RequestOperationCityCreate,
+							ErrorCode:    "internal_error",
+							ErrorMessage: fmt.Sprintf("panic: %v", r),
+						})
+					}
+				}
+				// Gracefully stop agents so they aren't orphaned.
+				// Wrap in recovery to prevent nested panic from crashing
+				// the entire supervisor.
+				func() {
+					defer func() { recover() }() //nolint:errcheck
+					cityRuntime.shutdown()
+				}()
+				if err := shutdownBeadsProvider(p); err != nil {
+					fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
+				}
+				// Close the file recorder (only on panic — normal exit
+				// leaves it for the external caller via mc.closer).
+				if cityFr != nil {
+					cityFr.Close() //nolint:errcheck
+				}
+				// Record panic for crash-loop backoff and remove from
+				// cities map in a single batch update.
+				cr.BatchUpdate(func(
+					cities map[string]*managedCity,
+					_ map[string]cityInitProgress,
+					_ map[string]*initFailRecord,
+					panicHistory map[string]*panicRecord,
+				) {
+					pr := panicHistory[p]
+					if pr == nil {
+						pr = &panicRecord{}
+						panicHistory[p] = pr
+					}
+					pr.count++
+					// Exponential backoff: 10s, 20s, 40s, ... capped at 5 min.
+					exp := pr.count - 1
+					if exp > 5 {
+						exp = 5 // prevent int overflow at high panic counts
+					}
+					delay := time.Duration(10<<exp) * time.Second
+					if delay > 5*time.Minute {
+						delay = 5 * time.Minute
+					}
+					pr.backoff = time.Now().Add(delay)
+					fmt.Fprintf(stderr, "gc supervisor: city '%s' panic #%d, next retry in %s\n", n, pr.count, delay) //nolint:errcheck
+					deleteManagedCityIfCurrent(cities, p, mc)
+				})
+			} else {
+				// Normal exit (context canceled) — reset panic counter
+				// and remove from map in a single critical section.
+				cr.BatchUpdate(func(
+					cities map[string]*managedCity,
+					_ map[string]cityInitProgress,
+					_ map[string]*initFailRecord,
+					panicHistory map[string]*panicRecord,
+				) {
+					delete(panicHistory, p)
+					deleteManagedCityIfCurrent(cities, p, mc)
+				})
+			}
+			// Signal completion last — ensures all cleanup is done before
+			// waiters (shutdown/unregister paths) proceed.
+			close(done)
+		}()
+		// Resource cleanup defers pushed AFTER recovery/done so they
+		// execute BEFORE it in LIFO order: resources are released,
+		// then done is closed.
+		defer lk.Close()                 //nolint:errcheck // release controller lock (last released)
+		defer convergence.RemoveToken(p) //nolint:errcheck // best-effort cleanup
+		defer func() {
+			// Ownership-safe socket removal: only unlink if the
+			// on-disk file is the same one we created, so a
+			// replacement city's socket is never destroyed.
+			if origSockInfo != nil {
+				if cur, err := os.Stat(sock); err == nil {
+					if os.SameFile(origSockInfo, cur) {
+						os.Remove(sock) //nolint:errcheck
+					}
+				}
+			}
+		}()
+		defer l.Close() //nolint:errcheck // close listener (after socket removal)
+		defer telemetry.RecordControllerLifecycle(context.Background(), "stopped")
+		cityRuntime.run(cityCtx)
+	}(cityName, path, fr, lis, sockPath, sockInfo, lock)
+
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 }
 
-// reconcileRigIndex rebuilds the [[rigs]] section of cities.toml from the
-// rig definitions in each registered city's city.toml.
-func reconcileRigIndex(reg *supervisor.Registry, stderr io.Writer) {
-	cities, err := reg.List()
-	if err != nil {
+func emitPendingCityCreateResult(cr *cityRegistry, path, cityName string, stderr io.Writer) {
+	reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+	if consumeErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create completion event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+	}
+	if supRec := cr.SupervisorEventRecorder(); supRec != nil && hasReqID {
+		api.EmitTypedEvent(supRec, events.RequestResultCityCreate, cityName, api.CityCreateSucceededPayload{
+			RequestID: reqID,
+			Name:      cityName,
+			Path:      path,
+		})
+	}
+}
+
+func emitPendingCityCreateFailure(cr *cityRegistry, path, cityName, errorCode string, err error, stderr io.Writer) {
+	reqID, hasReqID, consumeErr := cr.ConsumePendingRequestID(path)
+	if consumeErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': consume pending request_id for city.create failure event failed (path=%s): %v\n", cityName, path, consumeErr) //nolint:errcheck
+	}
+	if !hasReqID {
 		return
 	}
-
-	var mappings []supervisor.RigCityMapping
-	var loadFailed bool
-	for _, c := range cities {
-		cfg, err := loadCityConfig(c.Path)
-		if err != nil {
-			// Abort reconciliation if any city can't be loaded — a partial
-			// snapshot would cause ReconcileRigs to drop rigs from the
-			// errored city.
-			fmt.Fprintf(stderr, "gc supervisor: skipping rig reconcile: city %q config error: %v\n", c.EffectiveName(), err) //nolint:errcheck
-			loadFailed = true
-			break
-		}
-		for _, rig := range cfg.Rigs {
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(c.Path, rigPath)
-			}
-			rigPath = filepath.Clean(rigPath)
-			mappings = append(mappings, supervisor.RigCityMapping{
-				RigPath:  rigPath,
-				RigName:  rig.Name,
-				CityPath: c.Path,
-			})
-		}
+	if supRec := cr.SupervisorEventRecorder(); supRec != nil {
+		api.EmitTypedEvent(supRec, events.RequestFailed, cityName, api.RequestFailedPayload{
+			RequestID:    reqID,
+			Operation:    api.RequestOperationCityCreate,
+			ErrorCode:    errorCode,
+			ErrorMessage: err.Error(),
+		})
 	}
+}
 
-	if loadFailed {
+func emitCityUnregisterTerminalEvent(rec events.Recorder, requestID, cityName, path string, stopErr error) {
+	if stopErr == nil {
+		api.EmitTypedEvent(rec, events.RequestResultCityUnregister, cityName, api.CityUnregisterSucceededPayload{
+			RequestID: requestID,
+			Name:      cityName,
+			Path:      path,
+		})
 		return
 	}
-	if err := reg.ReconcileRigs(mappings); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: reconciling rig index: %v\n", err) //nolint:errcheck
+	api.EmitTypedEvent(rec, events.RequestFailed, cityName, api.RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    api.RequestOperationCityUnregister,
+		ErrorCode:    "city_unregister_failed",
+		ErrorMessage: stopErr.Error(),
+	})
+}
+
+var supervisorLoadWarningSeen sync.Map
+
+func emitSupervisorLoadCityConfigWarnings(w io.Writer, cityPath string, prov *config.Provenance) {
+	if w == nil || prov == nil || len(prov.Warnings) == 0 {
+		return
+	}
+	seen := make(map[string]struct{}, len(prov.Warnings))
+	for _, warning := range prov.Warnings {
+		if !shouldEmitLoadCityConfigWarning(warning) {
+			continue
+		}
+		if _, dup := seen[warning]; dup {
+			continue
+		}
+		seen[warning] = struct{}{}
+		key := filepath.Clean(cityPath) + "\x00" + warning
+		if _, loaded := supervisorLoadWarningSeen.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		fmt.Fprintln(w, warning) //nolint:errcheck // best-effort warning emission
 	}
 }
 
@@ -1319,16 +2698,20 @@ func publishManagedCity(cr *cityRegistry, path string, mc *managedCity) bool {
 			alreadyRunning = true
 			return
 		}
-		// The controller state and per-city API are fully wired at this point.
-		// Mark the city started before the first reconcile so slow bead scans
-		// don't keep supervisor startup and API availability blocked.
-		mc.started = true
+		// The controller state and per-city API are wired at this point, but
+		// initial reconciliation has not yet materialized startup session
+		// beads. Keep the city in startup status until CityRuntime.OnStarted
+		// runs after that reconciliation completes.
 		mc.status = "starting_agents"
 		cities[path] = mc
 		delete(initStatus, path)
 		delete(initFailures, path) // clear backoff on successful init
 	})
 	return alreadyRunning
+}
+
+func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	return loadCityConfigWithBuiltinPacks(cityPath)
 }
 
 // prepareCityForSupervisor runs the critical city initialization steps
@@ -1354,30 +2737,24 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("validate webhooks: %w", err)
+	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}
 
-	// Materialize the gc-beads-bd script.
-	if _, err := MaterializeBeadsBdScript(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': materializing gc-beads-bd: %v\n", cityName, err) //nolint:errcheck
-		// Non-fatal.
-	}
-
-	// Materialize builtin packs (system packs are auto-included via LoadWithIncludes).
-	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+	// Refresh builtin packs after config validation so commands and managed
+	// provider assets are present before the bead lifecycle starts.
+	// gc-beads-bd now ships inside the bd pack's assets/scripts/ and is
+	// materialized alongside the rest of the pack content.
+	if err := EnsureBuiltinRuntimeAssets(cityPath, os.Stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin packs: %v\n", cityName, err) //nolint:errcheck
 		// Non-fatal.
 	}
 
-	// Materialize builtin prompts and formulas.
-	if err := materializeBuiltinPrompts(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin prompts: %v\n", cityName, err) //nolint:errcheck
-	}
-	if err := materializeBuiltinFormulas(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': builtin formulas: %v\n", cityName, err) //nolint:errcheck
-	}
-	ensureInitArtifacts(cityPath, cfg, stderr, "gc supervisor")
+	// Install local agent hooks after builtin packs are refreshed.
+	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
@@ -1395,15 +2772,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		// Non-fatal.
 	}
 
-	// Materialize system formulas into the city formulas/ directory.
-	if err := runStep("materializing_system_formulas", func() error {
-		_, sysErr := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-		return sysErr
-	}); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': system formulas: %v\n", cityName, err) //nolint:errcheck
-	}
-
 	// Resolve formula symlinks.
+	// System formulas/orders now arrive via the core bootstrap pack.
 	if progress != nil {
 		progress("resolving_formulas")
 	}
@@ -1431,26 +2801,44 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 	}
 
-	// Materialize Claude skill stubs.
-	if cfg.Workspace.Provider == "claude" {
-		dirs := []string{cityPath}
-		for _, r := range cfg.Rigs {
-			if r.Path != "" {
-				dirs = append(dirs, r.Path)
-			}
-		}
-		if err := runStep("materializing_skill_stubs", func() error {
-			return materializeSkillStubs(dirs...)
-		}); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': skill stubs: %v\n", cityName, err) //nolint:errcheck
-		}
+	// Prune legacy top-level scripts/ symlinks left by pre-PackV2 runtimes.
+	if progress != nil {
+		progress("pruning_legacy_scripts")
 	}
+	pruneLegacyConfiguredScripts(cityPath, cfg, func(scope string, err error) {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': pruning legacy %s scripts: %v\n", cityName, scope, err) //nolint:errcheck
+	})
 
 	// Validate agents.
 	if err := runStep("validating_agents", func() error {
 		return config.ValidateAgents(cfg.Agents)
 	}); err != nil {
 		return fmt.Errorf("validate agents: %w", err)
+	}
+
+	// Skill collision validation precedes materialization so a
+	// collision cannot produce half-written sinks. Errors abort the
+	// tick without touching materialization state; the operator
+	// sees the collision message on the supervisor's stderr stream.
+	if err := runStep("validating_skill_collisions", func() error {
+		return checkSkillCollisions(cfg, cityPath)
+	}); err != nil {
+		return fmt.Errorf("validate skill collisions: %w", err)
+	}
+
+	// Stage-1 skill materialization. Runs on every tick so
+	// catalog edits land without requiring a supervisor restart.
+	// Idempotent — converged passes create nothing new.
+	// runStage1SkillMaterialization logs all errors inline and
+	// returns nil; this step cannot fail the tick.
+	_ = runStep("materializing_skills", func() error {
+		return runStage1SkillMaterialization(cityPath, cfg, stderr)
+	})
+
+	if err := runStep("projecting_mcp", func() error {
+		return runStage1MCPProjection(cityPath, cfg, exec.LookPath, stderr)
+	}); err != nil {
+		return fmt.Errorf("project MCP: %w", err)
 	}
 
 	// Validate install_agent_hooks (workspace + all agents).
@@ -1495,7 +2883,19 @@ func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*
 func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
-		return buildDesiredStateWithSessionBeads(cityName, cityPath, beaconTime, c, sp, store, rigStores, sessionBeads, trace, stderr)
+		return buildDesiredStateWithSessionBeadsAt(
+			cityName,
+			cityPath,
+			beaconTime,
+			time.Now(),
+			c,
+			sp,
+			store,
+			rigStores,
+			sessionBeads,
+			trace,
+			stderr,
+		)
 	}
 }
 

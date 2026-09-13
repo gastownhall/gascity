@@ -1,0 +1,227 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+var managedDoltPreflightCleanupFn = preflightManagedDoltCleanup
+
+const (
+	managedDoltProcTimeout = 1500 * time.Millisecond
+	managedDoltLsofTimeout = 3 * time.Second
+)
+
+var (
+	managedDoltProcDir         = "/proc"
+	managedDoltUnixSocketTable = "/proc/net/unix"
+)
+
+func preflightManagedDoltCleanup(_ string) error {
+	return removeStaleManagedDoltSockets()
+}
+
+var errManagedDoltOpenStateUnknown = errors.New("managed dolt open-file state unknown")
+
+func removeStaleManagedDoltSockets() error {
+	for _, path := range staleManagedDoltSocketPaths() {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		open, err := fileOpenedByAnyProcess(path)
+		if err != nil {
+			if errors.Is(err, errManagedDoltOpenStateUnknown) {
+				continue
+			}
+			return err
+		}
+		if open {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func staleManagedDoltSocketPaths() []string {
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, 8)
+	add := func(path string) {
+		if strings.TrimSpace(path) == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	matches, _ := filepath.Glob("/tmp/dolt*.sock")
+	for _, match := range matches {
+		add(match)
+	}
+	return paths
+}
+
+func fileOpenedByAnyProcess(path string) (bool, error) {
+	if open, checked := unixSocketOpenStateFromTable(path); checked {
+		return open, nil
+	}
+	procCtx, procCancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
+	open, checked := fileOpenedByAnyProcessFromProc(procCtx, path)
+	procErr := procCtx.Err()
+	procCancel()
+	if checked {
+		return open, nil
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		if procErr != nil {
+			return false, fmt.Errorf("%w: proc probe timed out and lsof unavailable", errManagedDoltOpenStateUnknown)
+		}
+		return false, errManagedDoltOpenStateUnknown
+	}
+	lsofCtx, lsofCancel := context.WithTimeout(context.Background(), managedDoltLsofTimeout)
+	defer lsofCancel()
+	cmd := exec.CommandContext(lsofCtx, "lsof", path)
+	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
+	out, err := cmd.CombinedOutput()
+	if lsofCtx.Err() != nil {
+		return false, fmt.Errorf("%w: lsof probe timed out", errManagedDoltOpenStateUnknown)
+	}
+	if err == nil {
+		return true, nil
+	}
+	exitErr := &exec.ExitError{}
+	if errors.As(err, &exitErr) {
+		return false, nil
+	}
+	return false, fmt.Errorf("lsof %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+}
+
+func unixSocketOpenStateFromTable(path string) (bool, bool) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltProcTimeout)
+	defer cancel()
+	inodes, checked := unixSocketInodesForPath(ctx, path)
+	if !checked || ctx.Err() != nil {
+		return false, false
+	}
+	return len(inodes) > 0, true
+}
+
+func fileOpenedByAnyProcessFromProc(ctx context.Context, path string) (bool, bool) {
+	if ctx != nil && ctx.Err() != nil {
+		return false, false
+	}
+	info, statErr := os.Lstat(path)
+	isSocketPath := statErr == nil && info.Mode()&os.ModeSocket != 0
+	if isSocketPath {
+		socketInodes, checked := unixSocketInodesForPath(ctx, path)
+		if ctx != nil && ctx.Err() != nil {
+			return false, false
+		}
+		if checked {
+			return len(socketInodes) > 0, true
+		}
+	}
+	entries, err := os.ReadDir(managedDoltProcDir)
+	if err != nil {
+		return false, false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false, false
+	}
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return false, false
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		fdDir := filepath.Join(managedDoltProcDir, entry.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			if ctx.Err() != nil {
+				return false, false
+			}
+			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			target = strings.TrimSuffix(target, " (deleted)")
+			if samePath(target, path) {
+				return true, true
+			}
+		}
+	}
+	return false, true
+}
+
+func unixSocketInodesForPath(ctx context.Context, path string) (map[string]struct{}, bool) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(managedDoltUnixSocketTable)
+	if err != nil {
+		return nil, false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return nil, false
+	}
+	inodes := map[string]struct{}{}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		if ctx != nil && ctx.Err() != nil {
+			return nil, false
+		}
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 8 {
+			continue
+		}
+		if !samePath(fields[len(fields)-1], path) {
+			continue
+		}
+		inodes[fields[6]] = struct{}{}
+	}
+	if scanner.Err() != nil {
+		return nil, false
+	}
+	return inodes, true
+}

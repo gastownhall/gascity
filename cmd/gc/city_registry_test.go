@@ -1,9 +1,18 @@
 package main
 
 import (
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func TestCityRegistryEmptySnapshot(t *testing.T) {
@@ -17,6 +26,123 @@ func TestCityRegistryEmptySnapshot(t *testing.T) {
 	}
 	if snap.gen != 0 {
 		t.Fatalf("expected gen=0, got %d", snap.gen)
+	}
+}
+
+func TestCityRegistryPendingRequestIDCanonicalizesPath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(cityPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.StorePendingRequestID(linkPath, "req-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := reg.ConsumePendingRequestID(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("pending request ID not found by canonical path")
+	}
+	if got != "req-city" {
+		t.Fatalf("request ID = %q, want req-city", got)
+	}
+}
+
+func TestCityRegistryStorePendingRequestIDRejectsDuplicatePath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.StorePendingRequestID(cityPath, "req-first"); err != nil {
+		t.Fatal(err)
+	}
+	err := reg.StorePendingRequestID(cityPath, "req-second")
+	if !errors.Is(err, api.ErrPendingRequestExists) {
+		t.Fatalf("StorePendingRequestID duplicate error = %v, want ErrPendingRequestExists", err)
+	}
+
+	got, ok, err := reg.ConsumePendingRequestID(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
+	}
+}
+
+func TestCityRegistryConsumePendingRequestIDIsAtomic(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	reg := newCityRegistry()
+	cityPath := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.StorePendingRequestID(cityPath, "req-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := supervisor.RegistryPath() + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close() //nolint:errcheck
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		id  string
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			id, ok, err := reg.ConsumePendingRequestID(cityPath)
+			results <- result{id: id, ok: ok, err: err}
+		}()
+	}
+
+	close(start)
+	time.Sleep(50 * time.Millisecond)
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+
+	first := <-results
+	second := <-results
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	if second.err != nil {
+		t.Fatal(second.err)
+	}
+	consumed := 0
+	for _, got := range []result{first, second} {
+		if got.ok {
+			consumed++
+			if got.id != "req-city" {
+				t.Fatalf("request ID = %q, want req-city", got.id)
+			}
+		}
+	}
+	if consumed != 1 {
+		t.Fatalf("consumed request ID %d times, want exactly once; first=%+v second=%+v", consumed, first, second)
 	}
 }
 
@@ -221,6 +347,103 @@ func TestCityRegistryTombstonedBeforeRemove(t *testing.T) {
 	if got := reg.CityState("city-h"); got != nil {
 		t.Fatalf("CityState after tombstone = %v, want nil", got)
 	}
+}
+
+func TestCityRegistryTransientCityEventProvidersIncludesRegisteredAndPendingCities(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	registeredPath := writeCityEventLog(t, "registered-only")
+	pendingPath := writeCityEventLog(t, "pending-city")
+	runningPath := writeCityEventLog(t, "running-city")
+
+	regFile := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := regFile.Register(registeredPath, "registered-only"); err != nil {
+		t.Fatal(err)
+	}
+	if err := regFile.Register(runningPath, "running-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := newCityRegistry()
+	reg.Add(pendingPath, &managedCity{
+		name:   "pending-city",
+		status: "loading_config",
+		cr:     &CityRuntime{cityName: "pending-city"},
+	})
+	reg.Add(runningPath, &managedCity{
+		name:    "running-city",
+		started: true,
+		cr:      &CityRuntime{cityName: "running-city"},
+	})
+
+	providers := reg.TransientCityEventProviders()
+	t.Cleanup(func() {
+		for _, p := range providers {
+			p.Close() //nolint:errcheck
+		}
+	})
+
+	if _, ok := providers["registered-only"]; !ok {
+		t.Fatalf("registered-only missing from transient providers: %#v", providers)
+	}
+	if _, ok := providers["pending-city"]; !ok {
+		t.Fatalf("pending-city missing from transient providers: %#v", providers)
+	}
+	if _, ok := providers["running-city"]; ok {
+		t.Fatalf("running-city should be handled by running-city multiplexer path, not transient providers")
+	}
+	for name, provider := range providers {
+		if _, ok := provider.(*events.FileRecorder); ok {
+			t.Fatalf("provider %q should not retain a live file recorder", name)
+		}
+		list, err := provider.List(events.Filter{Type: events.CityCreated})
+		if err != nil {
+			t.Fatalf("List(%s): %v", name, err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("List(%s) returned %d city.created events, want 1", name, len(list))
+		}
+	}
+}
+
+func TestCityRegistryTransientCityEventProvidersSkipMissingLogs(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	missingPath := filepath.Join(t.TempDir(), "missing-city")
+	if err := os.MkdirAll(missingPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	regFile := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := regFile.Register(missingPath, "missing-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := newCityRegistry()
+	providers := reg.TransientCityEventProviders()
+	if _, ok := providers["missing-city"]; ok {
+		t.Fatalf("missing-city should be skipped when events.jsonl is absent: %#v", providers)
+	}
+	if _, err := os.Stat(filepath.Join(missingPath, ".gc", "events.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("events.jsonl stat = %v, want not exists", err)
+	}
+}
+
+func writeCityEventLog(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(path, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := events.NewFileRecorder(filepath.Join(path, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(events.Event{Type: events.CityCreated, Actor: "gc", Subject: name})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestCityRegistrySnapshotImmutability(t *testing.T) {

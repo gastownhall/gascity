@@ -1,26 +1,36 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
-	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
+var (
+	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
+	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+)
+
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose bool
+	var opts doctorOpts
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -28,165 +38,843 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
-bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+bead stores, Dolt server health, event log integrity, formula compiler
+requirements (deprecated contract = "graph.v2" opt-ins, missing
+[requires] formula_compiler = ">=2.0.0" declarations, and requirements
+the host's [daemon] formula_v2 setting cannot satisfy), v2 config
+deprecations such as legacy [formulas].dir, and per-rig health. Use
+--fix for the canonical remediation path, including any safe mechanical
+legacy-to-current pack rewrites that are available on this branch.
+
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.`,
 		Example: `  gc doctor
   gc doctor --fix
-  gc doctor --verbose`,
+  gc doctor --verbose
+  gc doctor --json
+  gc doctor --check controller
+  gc doctor --check controller --check events-log
+  gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, stdout, stderr) != 0 {
+			if doDoctor(opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
+	cmd.Flags().BoolVarP(&opts.Verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, "emit structured JSON instead of human-readable output")
+	cmd.Flags().DurationVar(&opts.CheckTimeout, "check-timeout", 60*time.Second,
+		"per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables)")
+	cmd.Flags().StringArrayVar(&opts.Checks, "check", nil,
+		"run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result")
 	return cmd
 }
 
-// doDoctor runs all health checks and prints results.
-func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
+// doctorOpts carries gc doctor's flag state. It is a struct rather than a
+// parameter list because the flags are mostly booleans, and a fifth one makes
+// the call sites unreadable.
+type doctorOpts struct {
+	Fix          bool
+	Verbose      bool
+	JSON         bool
+	CheckTimeout time.Duration
+	// Checks holds the raw --check values, still unsplit. Empty runs every
+	// registered check, which is what a plain `gc doctor` does.
+	Checks []string
+}
+
+// splitDoctorCheckNames expands the raw --check values into one name each.
+// The flag is a string array rather than pflag's stringSlice, which does the
+// comma splitting itself but reads an empty value as no values at all: that
+// would turn `gc doctor --check "$NAME"` with an unset NAME into the full
+// sweep, and gate its exit code on every registered check the caller never asked about.
+// Splitting here keeps the comma form working while an empty element survives
+// to fail the run.
+func splitDoctorCheckNames(values []string) []string {
+	var names []string
+	for _, value := range values {
+		names = append(names, strings.Split(value, ",")...)
+	}
+	return names
+}
+
+func doctorSkipsDoltChecks(cityPath string) bool {
+	if gcDoltSkip() {
+		return true
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return !cityUsesBdStoreContract(cityPath)
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	return !workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs)
+}
+
+func workspaceNeedsCityDoltCheck(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			continue
+		}
+		explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, cityPath, rig.Path)
+		if err != nil || !explicit {
+			return true
+		}
+	}
+	return false
+}
+
+func managedDoltOpsCheckSkip(cityPath string, cfg *config.City, cfgErr error) bool {
+	if gcDoltSkip() {
+		return true
+	}
+	return !doctor.ManagedLocalDoltChecksApplicableForConfig(cityPath, cfg, cfgErr)
+}
+
+type doltTopologyCheck struct {
+	cityPath string
+	cfg      *config.City
+}
+
+func newDoltTopologyCheck(cityPath string, cfg *config.City) *doltTopologyCheck {
+	return &doltTopologyCheck{cityPath: cityPath, cfg: cfg}
+}
+
+func (c *doltTopologyCheck) Name() string { return "dolt-topology" }
+
+func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := &doctor.CheckResult{Name: c.Name()}
+	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
+		r.Status = doctor.StatusOK
+		r.Message = "not using bd-backed Dolt topology"
+		return r
+	}
+	if err := validateCanonicalCompatDoltDrift(c.cityPath, c.cfg); err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("canonical/compat Dolt drift: %v", err)
+		r.FixHint = "reconcile canonical .beads config with deprecated city.toml Dolt settings"
+		return r
+	}
+	r.Status = doctor.StatusOK
+	r.Message = "canonical and deprecated Dolt endpoint config agree"
+	return r
+}
+
+func (c *doltTopologyCheck) CanFix() bool { return false }
+
+func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+type buildDoctorChecksOpts struct {
+	Stderr               io.Writer
+	ControllerRunning    bool
+	SupervisorRunning    bool
+	SkipCityDoltCheck    bool
+	SkipManagedDoltCheck bool
+	SkipRigDoltChecks    bool
+	// SkipStorePreflight suppresses the #5064 bead-store probe. Set by the
+	// `gc start` warmup path: every store-dependent check the preflight gates
+	// is WarmupEligible() == false, so warmupEligibleChecks filters all of them
+	// out and the probe's result cannot affect warmup output — it would only
+	// add up to doctorBeadStorePreflightTimeout of startup latency.
+	SkipStorePreflight bool
+	// RolloutFlags is the on-disk rollout-gate snapshot doctor renders; RolloutResolveErr
+	// is set when resolving it failed (an out-of-enum config value).
+	RolloutFlags      rollout.Flags
+	RolloutResolveErr error
+}
+
+func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	resolveStores := cachedOrderHistoryStoresResolver(cityPath, cfg, stderr)
+	return func(order orders.Order) (time.Time, error) {
+		stores, err := resolveStores(order)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
+	}
+}
+
+func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
+	var checks []doctor.Check
+	register := func(c doctor.Check) {
+		checks = append(checks, c)
+	}
+
+	managedDoltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if layout, err := resolveManagedDoltRuntimeLayout(cityPath); err == nil {
+		managedDoltDataDir = layout.DataDir
+	}
+
+	// Core checks — always run.
+	register(&doctor.CityStructureCheck{})
+	register(&doctor.CityConfigCheck{})
+	for _, c := range v2DeprecationChecks() {
+		register(c)
+	}
+	register(newProviderCatalogDoctorCheck(cityPath))
+	register(newProviderCatalogReadinessAdvisoryCheck(cityPath))
+	register(expandedConfigLoadCheck{})
+	register(&doctor.ImplicitImportCacheCheck{})
+	register(&doctor.DeprecatedAttachmentFieldsCheck{})
+
+	// Config-dependent checks run only when city.toml loaded cleanly. If it
+	// fails, the core config check above reports the parse error.
+	if cfgErr == nil && cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
+		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
+			register(newDoltTopologyCheck(cityPath, cfg))
+			register(newDoltDriftCheck(cityPath, cfg))
+		}
+		register(doctor.NewConfigValidCheck(cfg))
+		register(doctor.NewLegacySuspendedFieldCheck(cfg))
+		// Rollout gates section: one advisory line per registered gate (value +
+		// origin + notices). Never blocks the exit code.
+		for _, c := range rolloutGateChecks(opts.RolloutFlags, opts.RolloutResolveErr) {
+			register(c)
+		}
+		register(doctor.NewConfigRefsCheck(cfg, cityPath))
+		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
+		register(doctor.NewPreStartScriptsCheck(cfg))
+		register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
+		register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
+		register(doctor.NewDurationRangeCheck(cfg))
+		register(doctor.NewProviderParityCheck(cfg))
+		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
+		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
+		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
+		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
+		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
+		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), doctorLiveSessionSinks(cityPath, cfg)))
+		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
+		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
+		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
+		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
+		register(newPackRuntimesDoctorCheck(cfg))
+		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
+		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
+	}
+	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		register(newBuiltinImportDoctorCheck(cityPath))
+		register(newImportStateDoctorCheck(cityPath))
+		register(newJsonlArchiveDoctorCheck(cityPath))
+	}
+
+	// System formulas/orders now ship via the core bootstrap pack; pack
+	// materialization and the bootstrap collision checks cover what the
+	// legacy SystemFormulasCheck used to verify.
+
+	// Pack cache check (if config has remote packs).
+	if cfgErr == nil && cfg != nil && len(cfg.Packs) > 0 {
+		register(doctor.NewPackCacheCheck(cfg.Packs, cityPath))
+	}
+
+	// Pack-source credential check: validates credentials.toml load and reports
+	// which remote imports lack a matching rule.
+	if cfgErr == nil && cfg != nil {
+		register(doctor.NewPackCredentialsCheck(cfg.Imports))
+	}
+
+	// Infrastructure checks — universal dependencies.
+	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
+	// check-dolt.sh) which also verify versions and service health.
+	register(doctor.NewBinaryCheck("tmux", "", exec.LookPath))
+	register(doctor.NewBinaryCheck("git", "", exec.LookPath))
+	register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
+	register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
+	register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
+	// beads.role must be set before any bd command runs; check it here so
+	// the missing-role error appears before the downstream data/Dolt checks
+	// that will all fail for the same root cause.
+	if initNeedsBdTooling(cityPath) {
+		register(&doctor.BeadsRoleCheck{})
+	}
+
+	// Controller check + supervisor HTTP check + session checks. Session
+	// checks are read-only reporting and register regardless of controller
+	// state (GH#5742); only their Fix() remediation defers to a running
+	// controller, guarded inside ZombieSessionsCheck.Fix and
+	// OrphanSessionsCheck.Fix via doctor.IsControllerRunning.
+	controllerRunning := opts.ControllerRunning
+	register(doctor.NewControllerCheck(cityPath, controllerRunning))
+	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
+
+	if cfgErr == nil && cfg != nil {
+		cityName := loadedCityName(cfg, cityPath)
+		st := cfg.Workspace.SessionTemplate
+		sp, err := newSessionProvider()
+		if err != nil {
+			register(doctor.ErrorCheck("session-provider", err.Error()))
+		} else {
+			register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
+			register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+		}
+	}
+
+	storeFactory := openStoreForCity(cityPath)
+
+	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
+	storeOK := true
+	var storePreflightErr error
+	var activeRigs []config.Rig
+	if cfgErr == nil && cfg != nil {
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+		activeRigs = make([]config.Rig, 0, len(cfg.Rigs))
+		for _, rig := range cfg.Rigs {
+			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
+				continue
+			}
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			activeRigs = append(activeRigs, rig)
+		}
+		var probeErr error
+		if !opts.SkipStorePreflight {
+			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
+		}
+		if isBeadStoreUnreachable(probeErr) {
+			storeOK = false
+			storePreflightErr = probeErr
+			// Register early so the preflight error precedes omitted store checks.
+			skipCount := beadStorePreflightSkipCount(len(activeRigs))
+			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
+		}
+	}
+
+	// Data checks.
+	if cfgErr == nil && cfg != nil {
+		register(doctor.NewBDSplitStoreCheck(cityPath))
+		if storeOK {
+			register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
+			register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
+			register(newExecutorIdentityResidueCheck(cfg, cityPath, storeFactory))
+			register(newCensusOwnerLivenessCheck(cfg, cityPath, storeFactory))
+			register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+			register(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
+			register(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
+			register(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
+			register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
+			register(newBacklogDepthCheck(cityPath, storeFactory))
+			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
+			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			// Differential probe: the preflight above just proved the store
+			// reachable with the controller's environment, so a read that
+			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
+			register(newGateSandboxReadCheck(cityPath))
+		}
+	}
+	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
+	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
+	// Advisory + read-only (/proc/stat); no config needed.
+	register(newForkRateCheck())
+	// Managed Dolt ops checks (PR 3). Size + config drift are only
+	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
+	// can inherit the city-managed server even when the city itself is not a
+	// managed bd scope. The version check follows the same gate so file-backed
+	// and external Dolt workspaces do not get irrelevant local-binary warnings.
+	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltConfigCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(&doctor.EventsLogCheck{})
+	register(doctor.NewEventLogSizeCheck())
+	// bd auto-backup growth canary. bd's auto-backup pipeline (upstream of
+	// gascity, gastownhall/beads#2993) writes to .beads/backup/ on every bd
+	// invocation without retention. This check warns before the directory
+	// fills the disk and cascades into broken dolt writes.
+	register(doctor.NewBdBackupSizeCheckForConfig(cityPath, cfg, cfgErr))
+	// Stale bd backup state: corrupt-store quarantines that were never
+	// reclaimed and dolt-backup.json registrations pointing at deleted
+	// paths (ga-yfbs28).
+	register(doctor.NewBdBackupStateCheckForConfig(cityPath, cfg, cfgErr))
+	// Backup freshness: a configured bd backup that silently stopped syncing
+	// looks healthy to every other backup check while its recovery point ages
+	// out — the only surviving backup can be weeks stale before anyone notices.
+	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
+	// Worktree checks deliberately run even when cfgErr != nil — they
+	// only need the city path, and a broken city.toml is exactly when
+	// silent disk-fill is most likely. The zero-value DoctorConfig
+	// produces sensible 10/50 GB defaults via its accessor methods.
+	var doctorCfg config.DoctorConfig
+	if cfg != nil {
+		doctorCfg = cfg.Doctor
+	}
+	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
+	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
+
+	// Custom types / hold-label conventions — city store (gated with preflight).
+	if storeOK {
+		register(doctor.NewCustomTypesCheck(cityPath, "city"))
+		register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
+	}
+
+	// Per-rig checks. Skip effectively-suspended rigs — opening their
+	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
+	if cfgErr == nil && cfg != nil {
+		// bead-store-preflight already registered early (near city data gates) when storeOK is false.
+		for _, rig := range activeRigs {
+			register(doctor.NewRigPathCheck(rig))
+			register(doctor.NewRigGitCheck(rig))
+			register(doctor.NewRigRootBranchCheck(rig))
+			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
+			if storeOK {
+				register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
+			}
+			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
+			if storeOK {
+				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+				register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
+			}
+			// Dolt-backup registration catches the silent gap left by
+			// `gc rig add` before the rig is eligible for mol-dog backup
+			// automation. Gated to match the sibling dolt-server check:
+			// skip non-managed-bdstore rigs and GC_DOLT=skip environments.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !opts.SkipRigDoltChecks {
+				register(newDoctorDoltBackupCheck(cityPath, rig, managedDoltDataDir))
+				register(newDoctorDoltLocalOnlyCheck(cityPath, rig, managedDoltDataDir))
+			}
+		}
+	}
+
+	// Worktree integrity check.
+	register(&doctor.WorktreeCheck{})
+
+	// Pack doctor checks — scripts shipped with packs.
+	if cfgErr == nil && cfg != nil {
+		for _, entry := range cfg.PackDoctors {
+			register(&doctor.PackScriptCheck{
+				CheckName: entry.PackName + ":" + entry.Name,
+				Script:    entry.RunScript,
+				FixScript: entry.FixScript,
+				PackDir:   entry.PackDir,
+				PackName:  entry.PackName,
+				Warmup:    entry.Warmup,
+			})
+		}
+		registerLocalDoctorChecksTo(register, cityPath, cfg.Doctor.Checks)
+	}
+
+	return checks
+}
+
+// doDoctor runs the health checks and prints results. With opts.Checks set it
+// runs only those checks and derives the exit code from them alone.
+func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
-	d := &doctor.Doctor{}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
-
-	// Core checks — always run.
-	d.Register(&doctor.CityStructureCheck{})
-	d.Register(&doctor.CityConfigCheck{})
-
-	// Load config for deeper checks. If it fails, we still run the core
-	// checks above (which will report the parse error).
-	cfg, cfgErr := loadCityConfig(cityPath)
+	// Deliberately no d.Wait() here: gc doctor's whole point in bounding a check
+	// is that a wedged one cannot stall the command, and waiting on an abandoned
+	// goroutine would restore exactly that hang. Nothing this function owns
+	// outlives the process, and ctx holds no handle a late writer can corrupt --
+	// an abandoned check writes only to its own private buffer. A future caller
+	// that reuses a Doctor in-process must call Wait before releasing ctx.
+	d := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
-		d.Register(doctor.NewConfigValidCheck(cfg))
-		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
-		d.Register(doctor.NewBuiltinPackFamilyCheck(cfg, cityPath))
-		d.Register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
-		d.Register(doctor.NewDurationRangeCheck(cfg))
+		resolveRigPaths(cityPath, cfg.Rigs)
 	}
-
-	// System formulas check.
-	expected := ListEmbeddedSystemFormulas(systemFormulasFS, "system_formulas")
-	if len(expected) > 0 {
-		expectedContent := make(map[string][]byte)
-		for _, rel := range expected {
-			data, err := fs.ReadFile(systemFormulasFS, "system_formulas/"+rel)
-			if err == nil {
-				expectedContent[rel] = data
-			}
-		}
-		d.Register(&doctor.SystemFormulasCheck{
-			CityPath:        cityPath,
-			Expected:        expected,
-			ExpectedContent: expectedContent,
-			FixFn: func() error {
-				_, err := MaterializeSystemFormulas(systemFormulasFS, "system_formulas", cityPath)
-				return err
-			},
-		})
-	}
-
-	// Pack cache check (if config has remote packs).
-	if cfgErr == nil && len(cfg.Packs) > 0 {
-		d.Register(doctor.NewPackCacheCheck(cfg.Packs, cityPath))
-	}
-
-	// Infrastructure checks — universal dependencies.
-	// dolt/bd/flock are checked by pack doctor scripts (check-bd.sh,
-	// check-dolt.sh) which also verify versions and service health.
-	d.Register(doctor.NewBinaryCheck("tmux", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("git", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
-	d.Register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
-
-	// Controller check + session checks (gated by controller state).
 	controllerRunning := doctor.IsControllerRunning(cityPath)
-	d.Register(doctor.NewControllerCheck(cityPath, controllerRunning))
+	supervisorRunning := supervisorAliveHook() != 0
+	skipRigDoltChecks := gcDoltSkip()
+	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
+	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
+	// Resolve the rollout-gate snapshot for the doctor section from the on-disk
+	// config plus THIS doctor process's env (Resolve's default LookupEnv); a
+	// running controller may have latched a different value from its own boot
+	// env, so the rendered lines are advisory, not the live latch (guarded:
+	// Resolve errors on a nil cfg).
+	var rolloutFlags rollout.Flags
+	var rolloutResolveErr error
+	if cfgErr == nil && cfg != nil {
+		rolloutFlags, rolloutResolveErr = rollout.Resolve(cfg, rollout.ResolveOptions{})
+	}
+	registered := buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
+		Stderr:               stderr,
+		ControllerRunning:    controllerRunning,
+		SupervisorRunning:    supervisorRunning,
+		SkipCityDoltCheck:    skipCityDoltCheck,
+		SkipManagedDoltCheck: skipManagedDoltCheck,
+		SkipRigDoltChecks:    skipRigDoltChecks,
+		RolloutFlags:         rolloutFlags,
+		RolloutResolveErr:    rolloutResolveErr,
+	})
+	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
+	if len(unmatched) > 0 {
+		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+	}
+	for _, check := range selected {
+		d.Register(check)
+	}
 
-	if cfgErr == nil && !controllerRunning {
-		cityName := cfg.Workspace.Name
-		if cityName == "" {
-			cityName = filepath.Base(cityPath)
+	var report *doctor.Report
+	if opts.JSON {
+		report = d.RunCollect(ctx, opts.Fix)
+		if err := writeDoctorJSON(stdout, report); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
-		st := cfg.Workspace.SessionTemplate
-		sp := newSessionProvider()
-
-		d.Register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
-		d.Register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-		d.Register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+	} else {
+		report = d.Run(ctx, stdout, opts.Fix)
+		doctor.PrintSummary(stdout, report)
 	}
 
-	// Data checks.
-	if cfgErr == nil {
-		d.Register(doctor.NewBeadsStoreCheck(cityPath, openStore))
-	}
-	skipDolt := rawBeadsProvider(cityPath) != "bd" || os.Getenv("GC_DOLT") == "skip"
-	d.Register(doctor.NewDoltServerCheck(cityPath, skipDolt))
-	d.Register(&doctor.EventsLogCheck{})
-	d.Register(doctor.NewEventLogSizeCheck())
-
-	// Custom types check — city store.
-	d.Register(doctor.NewCustomTypesCheck(cityPath, "city"))
-
-	// Per-rig checks. Skip suspended rigs — opening their bead store
-	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
-	if cfgErr == nil {
-		for _, rig := range cfg.Rigs {
-			if rig.Suspended {
-				continue
-			}
-			d.Register(doctor.NewRigPathCheck(rig))
-			d.Register(doctor.NewRigGitCheck(rig))
-			d.Register(doctor.NewRigBeadsCheck(rig, openStore))
-			// Custom types check — rig store.
-			rigPath := rig.Path
-			if !filepath.IsAbs(rigPath) {
-				rigPath = filepath.Join(cityPath, rigPath)
-			}
-			d.Register(doctor.NewCustomTypesCheck(rigPath, rig.Name))
-		}
-	}
-
-	// Global rig index check + backfill.
-	if cfgErr == nil {
-		d.Register(&doctor.RigIndexCheck{
-			FixFn: backfillRigIndex,
-		})
-	}
-
-	// Worktree integrity check.
-	d.Register(&doctor.WorktreeCheck{})
-
-	// Pack doctor checks — scripts shipped with packs.
-	if cfgErr == nil {
-		allPackDirs := collectPackDirs(cfg)
-		entries := config.LoadPackDoctorEntries(fsys.OSFS{}, allPackDirs)
-		for _, info := range entries {
-			scriptPath := filepath.Join(info.TopoDir, info.Entry.Script)
-			d.Register(&doctor.PackScriptCheck{
-				CheckName: info.PackName + ":" + info.Entry.Name,
-				Script:    scriptPath,
-				PackDir:   info.TopoDir,
-				PackName:  info.PackName,
-			})
-		}
-	}
-
-	report := d.Run(ctx, stdout, fix)
-	doctor.PrintSummary(stdout, report)
-
-	if report.Failed > 0 {
+	if report.BlockingFailed > 0 {
 		return 1
 	}
 	return 0
+}
+
+// maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
+// print most of the registry inline. The full list still follows in text mode.
+const maxDoctorCheckSuggestions = 5
+
+// doctorUnknownCheckErrorCode is the error code an unresolvable --check name
+// reports under --json, so a caller can branch on it without parsing prose.
+const doctorUnknownCheckErrorCode = "unknown_check"
+
+// doctorUnknownCheckFailure is the --json payload for an unresolvable --check
+// name. It is the shared failure envelope (schemas/failure.schema.json), not a
+// doctor report, because a report-shaped payload gets ok:true from
+// withDefaultSuccessOK and carries zeroed counts with an empty results array —
+// a run that measured nothing reading clean to exactly the caller this flag
+// exists to protect. registered_checks rides along under the schema's
+// additionalProperties, so the caller learns what it could have asked for
+// without a second invocation.
+type doctorUnknownCheckFailure struct {
+	jsonSchemaErrorPayload
+	RegisteredChecks []string `json:"registered_checks,omitempty"`
+}
+
+// reportUnknownDoctorChecks fails a --check run whose names do not all resolve,
+// and tells the caller what it could have asked for. Running the names that did
+// match would be worse than erroring: a caller filtering doctor output by name
+// reads a short result set as a clean one, so a single typo would report health
+// nobody measured.
+func reportUnknownDoctorChecks(unmatched []string, registered []doctor.Check, jsonOut bool, stdout, stderr io.Writer) int {
+	names := doctor.CheckNames(registered)
+	message := unknownDoctorChecksMessage(unmatched, names)
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, doctorUnknownCheckFailure{
+			jsonSchemaErrorPayload: jsonSchemaErrorPayload{
+				SchemaVersion: "1",
+				OK:            false,
+				Error: jsonSchemaErrorDetail{
+					Code:     doctorUnknownCheckErrorCode,
+					Message:  message,
+					ExitCode: 1,
+				},
+			},
+			RegisteredChecks: names,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return 1
+	}
+	fmt.Fprintf(stderr, "gc doctor: %s\n", message)                                //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "checks registered in this workspace (%d):\n", len(names)) //nolint:errcheck // best-effort stderr
+	for _, name := range names {
+		fmt.Fprintf(stderr, "  %s\n", name) //nolint:errcheck // best-effort stderr
+	}
+	return 1
+}
+
+func unknownDoctorChecksMessage(unmatched, registered []string) string {
+	var b strings.Builder
+	b.WriteString("--check: no registered check matches ")
+	for i, name := range unmatched {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q", name)
+	}
+	if suggestions := doctorCheckSuggestions(unmatched, registered); len(suggestions) > 0 {
+		b.WriteString(" (did you mean ")
+		for i, name := range suggestions {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "%q", name)
+		}
+		b.WriteString("?)")
+	}
+	// Naming both readings matters because doctor has no static catalog of
+	// every possible check name: a skipped check registers no name at all, so
+	// a correct name and a typo are indistinguishable from here.
+	fmt.Fprintf(&b, ". This workspace registers %d checks; a check it skips —"+
+		" Dolt checks on a file-backed store, any check belonging to a suspended rig, or"+
+		" every store-dependent check when bead-store-preflight reports the store unreachable —"+
+		" registers no name to match", len(registered))
+	return b.String()
+}
+
+// maxDoctorCheckNameDistance bounds how far a suggestion may sit from what was
+// typed. Two edits catches the everyday slips — a dropped letter, a
+// transposition, a wrong one — without pairing "controller" with "custom-types".
+const maxDoctorCheckNameDistance = 2
+
+// doctorCheckSuggestions returns registered names worth offering for the
+// unmatched ones. Substring matching in both directions covers a name that is
+// merely incomplete ("dolt-server" against "rig:core:dolt-server"); edit
+// distance covers the misspelling, which substrings miss entirely — "controler"
+// is not a substring of "controller" and does not contain it either.
+func doctorCheckSuggestions(unmatched, registered []string) []string {
+	var suggestions []string
+	seen := make(map[string]bool)
+	for _, miss := range unmatched {
+		lowerMiss := strings.ToLower(strings.TrimSpace(miss))
+		if lowerMiss == "" {
+			continue
+		}
+		for _, name := range registered {
+			if seen[name] || !doctorCheckNameIsNear(lowerMiss, strings.ToLower(name)) {
+				continue
+			}
+			seen[name] = true
+			suggestions = append(suggestions, name)
+			if len(suggestions) == maxDoctorCheckSuggestions {
+				return suggestions
+			}
+		}
+	}
+	return suggestions
+}
+
+func doctorCheckNameIsNear(typed, name string) bool {
+	if strings.Contains(name, typed) || strings.Contains(typed, name) {
+		return true
+	}
+	return editDistanceAtMost(typed, name, maxDoctorCheckNameDistance)
+}
+
+// editDistanceAtMost reports whether a and b are within limit Levenshtein
+// edits, computing only the two rows the recurrence needs and bailing out as
+// soon as the whole row exceeds the limit.
+func editDistanceAtMost(a, b string, limit int) bool {
+	ar, br := []rune(a), []rune(b)
+	if len(ar) > len(br) {
+		ar, br = br, ar
+	}
+	if len(br)-len(ar) > limit {
+		return false
+	}
+	prev := make([]int, len(ar)+1)
+	curr := make([]int, len(ar)+1)
+	for i := range prev {
+		prev[i] = i
+	}
+	for j := 1; j <= len(br); j++ {
+		curr[0] = j
+		rowMin := curr[0]
+		for i := 1; i <= len(ar); i++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			curr[i] = min(min(curr[i-1]+1, prev[i]+1), prev[i-1]+cost)
+			rowMin = min(rowMin, curr[i])
+		}
+		if rowMin > limit {
+			return false
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(ar)] <= limit
+}
+
+type expandedConfigLoadCheck struct{}
+
+func (expandedConfigLoadCheck) Name() string { return "expanded-config-load" }
+
+func (expandedConfigLoadCheck) CanFix() bool { return false }
+
+func (expandedConfigLoadCheck) WarmupEligible() bool { return false }
+
+func (expandedConfigLoadCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (expandedConfigLoadCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	if _, err := loadCityConfig(ctx.CityPath, io.Discard); err != nil {
+		return errorCheck("expanded-config-load",
+			fmt.Sprintf("expanded config load error: %v", err),
+			expandedConfigLoadFixHint(err),
+			nil)
+	}
+	return okCheck("expanded-config-load", "expanded config loaded")
+}
+
+func expandedConfigLoadFixHint(err error) string {
+	var providerErr *config.ProviderCatalogError
+	if errors.As(err, &providerErr) {
+		return "run `gc doctor --fix` to add missing builtin provider aliases; add custom providers manually"
+	}
+	if config.IsFragmentLegacyV1SurfaceError(err) {
+		return "move fragment-authored legacy surfaces by hand; `gc doctor --fix` only rewrites root city.toml/pack.toml surfaces"
+	}
+	return "fix the reported config, include, import, or pack-layout error and rerun gc doctor"
+}
+
+func registerLocalDoctorChecks(d *doctor.Doctor, cityPath string, checks []config.LocalDoctorCheck) {
+	registerLocalDoctorChecksTo(d.Register, cityPath, checks)
+}
+
+func registerLocalDoctorChecksTo(register func(doctor.Check), cityPath string, checks []config.LocalDoctorCheck) {
+	for _, check := range checks {
+		checkName := "local:" + check.Name
+		script, err := resolveLocalDoctorScript(cityPath, check.Script)
+		if err != nil {
+			register(doctor.ErrorCheck(checkName, err.Error()))
+			continue
+		}
+
+		packCheck := &doctor.PackScriptCheck{
+			CheckName: checkName,
+			Script:    script,
+			PackDir:   cityPath,
+		}
+		if check.Fix != "" {
+			fixScript, err := resolveLocalDoctorFixScript(cityPath, check.Fix)
+			if err != nil {
+				register(doctor.ErrorCheck(checkName, err.Error()))
+				continue
+			}
+			packCheck.FixScript = fixScript
+		}
+		register(packCheck)
+	}
+}
+
+func resolveLocalDoctorScript(cityPath, scriptPath string) (string, error) {
+	return resolveLocalDoctorPath("script", cityPath, scriptPath)
+}
+
+func resolveLocalDoctorFixScript(cityPath, fixPath string) (string, error) {
+	return resolveLocalDoctorPath("fix path", cityPath, fixPath)
+}
+
+func resolveLocalDoctorPath(kind, cityPath, relPath string) (string, error) {
+	if relPath == "" {
+		return "", fmt.Errorf("%s must not be empty", kind)
+	}
+	if filepath.IsAbs(relPath) {
+		return "", fmt.Errorf("%s %q must be relative to the city root", kind, relPath)
+	}
+
+	candidate := filepath.Clean(filepath.Join(cityPath, relPath))
+	absCityPath, err := filepath.Abs(cityPath)
+	if err != nil {
+		return "", err
+	}
+	absCandidate, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absCityPath, absCandidate)
+	if err != nil {
+		return "", err
+	}
+	if pathutil.IsOutsideDir(rel) {
+		return "", fmt.Errorf("%s %q escapes the city directory", kind, relPath)
+	}
+	return candidate, nil
+}
+
+// doctorJSONResult mirrors doctor.CheckResult for JSON output. Keeping the
+// shape separate from the internal type keeps the wire format stable if the
+// internal struct grows new fields that shouldn't leak out.
+type doctorJSONResult struct {
+	Name         string   `json:"name"`
+	Status       string   `json:"status"`
+	Severity     string   `json:"severity"`
+	Message      string   `json:"message"`
+	FixHint      string   `json:"fix_hint,omitempty"`
+	Details      []string `json:"details,omitempty"`
+	FixAttempted bool     `json:"fix_attempted,omitempty"`
+	FixError     string   `json:"fix_error,omitempty"`
+	Fixed        bool     `json:"fixed,omitempty"`
+	// TimedOut projects CheckResult.TimedOut so automation can structurally
+	// distinguish an abandoned check (outcome unknown, worth retrying) from a
+	// check that ran and returned an ordinary advisory error.
+	TimedOut bool `json:"timed_out,omitempty"`
+}
+
+type doctorJSONReport struct {
+	Passed         int                `json:"passed"`
+	Warned         int                `json:"warned"`
+	Failed         int                `json:"failed"`
+	BlockingFailed int                `json:"blocking_failed"`
+	Fixed          int                `json:"fixed"`
+	Results        []doctorJSONResult `json:"results"`
+	Error          string             `json:"error,omitempty"`
+}
+
+func doctorStatusString(s doctor.CheckStatus) string {
+	switch s {
+	case doctor.StatusOK:
+		return "ok"
+	case doctor.StatusWarning:
+		return "warning"
+	case doctor.StatusError:
+		return "error"
+	}
+	return "unknown"
+}
+
+func doctorSeverityString(s doctor.CheckSeverity) string {
+	switch s {
+	case doctor.SeverityAdvisory:
+		return "advisory"
+	case doctor.SeverityBlocking:
+		return "blocking"
+	}
+	return "blocking"
+}
+
+func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
+	out := doctorJSONReport{
+		Passed:         report.Passed,
+		Warned:         report.Warned,
+		Failed:         report.Failed,
+		BlockingFailed: report.BlockingFailed,
+		Fixed:          report.Fixed,
+		Results:        make([]doctorJSONResult, 0, len(report.Results)),
+	}
+	for _, r := range report.Results {
+		out.Results = append(out.Results, doctorJSONResult{
+			Name:         r.Name,
+			Status:       doctorStatusString(r.Status),
+			Severity:     doctorSeverityString(r.Severity),
+			Message:      r.Message,
+			FixHint:      r.FixHint,
+			Details:      r.Details,
+			FixAttempted: r.FixAttempted,
+			FixError:     r.FixError,
+			Fixed:        r.Fixed,
+			TimedOut:     r.TimedOut,
+		})
+	}
+	return writeCLIJSONLine(w, out)
 }
 
 // collectPackDirs returns all unique pack directories from the city
@@ -211,48 +899,20 @@ func collectPackDirs(cfg *config.City) []string {
 	return result
 }
 
-// backfillRigIndex registers all rigs from the given city in the global
-// rig index and writes GT_ROOT to each rig's .beads/.env.
-func backfillRigIndex(cityPath string) error {
-	cfg, err := loadCityConfig(cityPath)
-	if err != nil {
-		return err
+// openStoreForCity creates a beads.Store factory rooted in the given city.
+// Doctor uses this so rig stores outside the city tree still inherit the
+// canonical city topology instead of guessing from the rig path.
+func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
+	return func(dirPath string) (beads.Store, error) {
+		return openStoreAtForCity(dirPath, cityPath)
 	}
-
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	for _, rig := range cfg.Rigs {
-		rigPath := rig.Path
-		if !filepath.IsAbs(rigPath) {
-			rigPath = filepath.Join(cityPath, rigPath)
-		}
-		rigPath = filepath.Clean(rigPath)
-
-		if err := reg.RegisterRig(rigPath, rig.Name, cityPath); err != nil {
-			// Non-fatal — may be a name conflict with another city's rig.
-			continue
-		}
-		// Write GT_ROOT to .beads/.env.
-		_ = writeBeadsEnvGTRoot(fsys.OSFS{}, rigPath, cityPath)
-	}
-	return nil
 }
 
-// openStore creates a beads.Store from a directory path. Used as a factory
-// for doctor checks that need to verify store accessibility.
-func openStore(dirPath string) (beads.Store, error) {
-	cityPath := cityForStoreDir(dirPath)
-	prov := rawBeadsProvider(cityPath)
-	switch {
-	case strings.HasPrefix(prov, "exec:"):
-		store := beadsexec.NewStore(strings.TrimPrefix(prov, "exec:"))
-		store.SetEnv(citylayout.CityRuntimeEnvMap(cityPath))
-		return store, nil
-	case prov == "file":
-		return beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, ".gc", "beads.json"))
-	default: // "bd"
-		if _, err := exec.LookPath("bd"); err != nil {
-			return nil, fmt.Errorf("bd not found in PATH")
-		}
-		return bdStoreForCity(dirPath, cityPath), nil
+// openStoreResultForCity is openStoreForCity's counterpart for checks that
+// need the native/fallback selection diagnostic openStoreForCity discards
+// (gastownhall/gascity#4245).
+func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult, error) {
+	return func(dirPath string) (beads.StoreOpenResult, error) {
+		return openStoreResultAtForCity(dirPath, cityPath)
 	}
 }

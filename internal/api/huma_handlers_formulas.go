@@ -1,0 +1,260 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+// FormulaListBody is the response body for GET /v0/formulas.
+type FormulaListBody struct {
+	Items   []formulaSummaryResponse `json:"items" doc:"Formula summaries."`
+	Total   int                      `json:"total" doc:"Total number of formulas in the list."`
+	Partial bool                     `json:"partial" doc:"Whether the list is partial."`
+}
+
+// FormulaListOutput is the response envelope for GET /v0/formulas.
+type FormulaListOutput struct {
+	Body FormulaListBody
+}
+
+// humaHandleFormulaList is the Huma-typed handler for GET /v0/formulas.
+func (s *Server) humaHandleFormulaList(_ context.Context, input *FormulaListInput) (*FormulaListOutput, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
+	}
+
+	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	if status != 200 {
+		if status == 404 {
+			return nil, apierr.ScopeNotFound.Msg(msg)
+		}
+		if status == 503 {
+			return nil, apierr.ServiceUnavailable.Msg(msg)
+		}
+		return nil, apierr.InvalidRequest.Msg(msg)
+	}
+
+	items, err := buildFormulaCatalog(paths)
+	if err != nil {
+		return nil, apierr.Internal.Msg("formula catalog failed")
+	}
+
+	out := &FormulaListOutput{}
+	out.Body.Items = items
+	out.Body.Total = len(items)
+	out.Body.Partial = false
+	return out, nil
+}
+
+// humaHandleFormulaRuns is the Huma-typed handler for GET /v0/formulas/{name}/runs.
+func (s *Server) humaHandleFormulaRuns(_ context.Context, input *FormulaRunsInput) (*struct {
+	Body formulaRunsResponse
+}, error,
+) {
+	// Name non-empty-whitespace is enforced by minLength + pattern on FormulaRunsInput.
+	name := input.Name
+
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
+	}
+	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
+		if status == 404 {
+			return nil, apierr.ScopeNotFound.Msg(msg)
+		}
+		if status == 503 {
+			return nil, apierr.ServiceUnavailable.Msg(msg)
+		}
+		return nil, apierr.InvalidRequest.Msg(msg)
+	}
+
+	limit := defaultFormulaRunsLimit
+	if input.Limit > 0 {
+		limit = normalizeFormulaRunsLimit(input.Limit)
+	}
+
+	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
+	if err != nil {
+		return nil, apierr.Internal.Msg("formula runs failed")
+	}
+
+	return &struct {
+		Body formulaRunsResponse
+	}{Body: *resp}, nil
+}
+
+// humaHandleFormulaDetail is the Huma-typed handler for GET /v0/formulas/{name}
+// and GET /v0/formula/{name}. Returns a compiled preview with declared
+// variables at their defaults. Callers that need to supply variable
+// values use humaHandleFormulaPreview (POST /preview) so the variable
+// dictionary is a spec-visible typed body.
+//
+// Deprecation note: older clients used `GET ?var.<name>=<value>` query
+// params to supply variable values. Those values are now ignored. We detect
+// legacy callers by scanning the raw request URL via the FormulaDetailInput
+// resolver and return 400 with a migration hint, rather than silently
+// returning a default-substituted preview the caller thinks is customized.
+func (s *Server) humaHandleFormulaDetail(ctx context.Context, input *FormulaDetailInput) (*struct {
+	Body formulaDetailResponse
+}, error,
+) {
+	return s.formulaDetail(ctx, input.Name, input.ScopeKind, input.ScopeRef, input.Target, nil, false)
+}
+
+// humaHandleFormulaPreview is the Huma-typed handler for
+// POST /v0/city/{cityName}/formulas/{name}/preview. It accepts a typed
+// body carrying the variable dictionary so the preview inputs are
+// fully described by the OpenAPI spec.
+func (s *Server) humaHandleFormulaPreview(ctx context.Context, input *FormulaPreviewInput) (*struct {
+	Body formulaDetailResponse
+}, error,
+) {
+	return s.formulaDetail(ctx, input.Name, input.Body.ScopeKind, input.Body.ScopeRef, input.Body.Target, input.Body.Vars, true)
+}
+
+// formulaDetail is the shared backing implementation for the GET detail
+// and POST preview endpoints. The two endpoints differ only in how they
+// receive the variable dictionary: GET compiles with defaults, POST
+// accepts a caller-supplied map.
+func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawScopeRef, rawTarget string, vars map[string]string, validateRuntimeVars bool) (*struct {
+	Body formulaDetailResponse
+}, error,
+) {
+	name := strings.TrimSpace(rawName)
+	if name == "" {
+		return nil, apierr.InvalidRequest.Msg("formula name is required")
+	}
+
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(rawScopeKind, rawScopeRef)
+	if scopeErr != "" {
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
+	}
+	target := strings.TrimSpace(rawTarget)
+	if target == "" {
+		return nil, apierr.InvalidRequest.Msg("target is required")
+	}
+
+	paths, status, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	if status != 200 {
+		if status == 404 {
+			return nil, apierr.ScopeNotFound.Msg(msg)
+		}
+		if status == 503 {
+			return nil, apierr.ServiceUnavailable.Msg(msg)
+		}
+		return nil, apierr.InvalidRequest.Msg(msg)
+	}
+
+	// Workflow roots persist the routed agent identity as gc.routed_to
+	// (ga-eld2x / #2763), and run-detail clients echo that identity back as
+	// the preview target. A configured agent identity has no bead-store
+	// entry, so resolve it against the city config and let the graph.v2
+	// preview substitute a synthetic input convoy instead of failing the
+	// bead lookup. Targets that match neither a bead nor a configured agent
+	// keep the existing not-found error. Resolved only after
+	// formulaSearchPaths succeeds so the config-unavailable state keeps
+	// returning the typed 503 above.
+	_, targetIsRoutingIdentity := findAgentByQualifiedTemplate(s.state.Config(), target)
+
+	store := s.state.CityBeadStore()
+	if scopeKind == "rig" {
+		store = s.state.BeadStore(scopeRef)
+	}
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
+	if err != nil {
+		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
+			return nil, apierr.FormulaNotFound.Msg(err.Error())
+		}
+		errMsg := err.Error()
+		// A not-found target already failed the configured-agent identity
+		// match above, so say so: without this context a stale or mistyped
+		// agent identity reads as a bead-store problem.
+		if !targetIsRoutingIdentity && errors.Is(err, beads.ErrNotFound) {
+			errMsg += "; target matches neither a bead/convoy nor a configured agent identity"
+		}
+		return nil, apierr.InvalidRequest.Msg(errMsg)
+	}
+
+	return &struct {
+		Body formulaDetailResponse
+	}{Body: *detail}, nil
+}
+
+// formulaFeedBody is the response body for GET /v0/formulas/feed.
+type formulaFeedBody struct {
+	Items         []monitorFeedItemResponse `json:"items"`
+	Partial       bool                      `json:"partial"`
+	PartialErrors []string                  `json:"partial_errors,omitempty"`
+}
+
+// humaHandleFormulaFeed is the Huma-typed handler for GET /v0/formulas/feed.
+func (s *Server) humaHandleFormulaFeed(_ context.Context, input *FormulaFeedInput) (*struct {
+	Body formulaFeedBody
+}, error,
+) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(input.ScopeKind, input.ScopeRef)
+	if scopeErr != "" {
+		return nil, apierr.InvalidRequest.Msg(scopeErr)
+	}
+	if _, status, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != http.StatusOK {
+		if status == http.StatusNotFound {
+			return nil, apierr.ScopeNotFound.Msg(msg)
+		}
+		if status == http.StatusServiceUnavailable {
+			return nil, apierr.ServiceUnavailable.Msg(msg)
+		}
+		return nil, apierr.InvalidRequest.Msg(msg)
+	}
+
+	limit := normalizeFeedLimit(input.Limit)
+
+	// The feed body is O(store history) to build (a full active scan plus a
+	// closed-history workflow-roots scan per rig). Key its cache entry on a
+	// time bucket, not the event index: on a busy city the index advances
+	// every tick, so the index-keyed entry missed on nearly every poll and
+	// the slow body was rebuilt per request — the #3208 feed latency. The
+	// endpoint has no blocking variant, so there is no strict-freshness
+	// caller to bypass for (same lever as /status in gascity#3186).
+	cacheKey := "formula-feed?" + scopeKind + "|" + scopeRef + "|" + strconv.Itoa(input.Limit)
+	bucket := responseCacheTimeBucket(time.Now())
+	if body, ok := cachedResponseAs[formulaFeedBody](s, cacheKey, bucket); ok {
+		return &struct {
+			Body formulaFeedBody
+		}{Body: body}, nil
+	}
+
+	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
+	if err != nil {
+		return nil, apierr.Internal.Msg("formula feed failed")
+	}
+
+	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
+	for _, run := range projections.Items {
+		items = append(items, workflowRunProjectionFeedItem(run))
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+
+	body := formulaFeedBody{
+		Items:   items,
+		Partial: projections.Partial,
+	}
+	if len(projections.PartialErrors) > 0 {
+		body.PartialErrors = projections.PartialErrors
+	}
+
+	s.storeResponse(cacheKey, bucket, body)
+
+	return &struct {
+		Body formulaFeedBody
+	}{Body: body}, nil
+}

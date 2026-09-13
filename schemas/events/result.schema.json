@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "actor": {
+      "type": "string"
+    },
+    "city": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "payload": true,
+    "seq": {
+      "type": "integer"
+    },
+    "subject": {
+      "type": "string"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ok",
+    "actor",
+    "seq",
+    "ts",
+    "type"
+  ],
+  "additionalProperties": true
+}

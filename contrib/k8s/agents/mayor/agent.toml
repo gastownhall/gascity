@@ -1,0 +1,4 @@
+install_hooks = ["claude"]
+process_names = ["claude"]
+ready_prompt_prefix = "claude"
+nudge = "Check mail and hook status, then act accordingly."

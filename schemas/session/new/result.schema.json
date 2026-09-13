@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "session_id", "session_name", "template", "transport", "work_dir", "deferred_start", "attached"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "session_id": { "type": "string" },
+    "session_name": { "type": "string" },
+    "alias": { "type": "string" },
+    "template": { "type": "string" },
+    "transport": { "type": "string" },
+    "work_dir": { "type": "string" },
+    "deferred_start": { "type": "boolean" },
+    "attached": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

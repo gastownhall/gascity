@@ -1,0 +1,1996 @@
+package contract
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+func TestConfigHasEndpointAuthority(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  ConfigState
+		want bool
+	}{
+		{name: "empty", cfg: ConfigState{}, want: false},
+		{name: "origin only", cfg: ConfigState{EndpointOrigin: EndpointOriginManagedCity}, want: true},
+		{name: "host only", cfg: ConfigState{DoltHost: "db.example.com"}, want: true},
+		{name: "port only", cfg: ConfigState{DoltPort: "3307"}, want: true},
+		{name: "user only", cfg: ConfigState{DoltUser: "root"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ConfigHasEndpointAuthority(tc.cfg); got != tc.want {
+				t.Fatalf("ConfigHasEndpointAuthority() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScopeHasEndpointAuthority(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	if ScopeHasEndpointAuthority(fs, scope) {
+		t.Fatal("ScopeHasEndpointAuthority(missing) = true, want false")
+	}
+	if err := fs.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+`), 0o644); err == nil {
+		t.Fatal("write should fail without .beads dir")
+	}
+	if err := fs.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ScopeHasEndpointAuthority(fs, scope) {
+		t.Fatal("ScopeHasEndpointAuthority(legacy-minimal) = true, want false")
+	}
+	if err := fs.WriteFile(filepath.Join(scope, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !ScopeHasEndpointAuthority(fs, scope) {
+		t.Fatal("ScopeHasEndpointAuthority(authoritative) = false, want true")
+	}
+}
+
+func TestIsLegacyMinimalEndpointConfig(t *testing.T) {
+	if !IsLegacyMinimalEndpointConfig(ConfigState{}) {
+		t.Fatal("IsLegacyMinimalEndpointConfig(empty) = false, want true")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  ConfigState
+	}{
+		{name: "origin", cfg: ConfigState{EndpointOrigin: EndpointOriginManagedCity}},
+		{name: "status", cfg: ConfigState{EndpointStatus: EndpointStatusVerified}},
+		{name: "host", cfg: ConfigState{DoltHost: "db.example.com"}},
+		{name: "port", cfg: ConfigState{DoltPort: "3307"}},
+		{name: "user", cfg: ConfigState{DoltUser: "root"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if IsLegacyMinimalEndpointConfig(tc.cfg) {
+				t.Fatalf("IsLegacyMinimalEndpointConfig(%s) = true, want false", tc.name)
+			}
+		})
+	}
+}
+
+func TestEnsureCanonicalConfigCreatesManagedShape(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes for new file")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"issue_prefix: gc",
+		"issue-prefix: gc",
+		"dolt.auto-start: false",
+		"export.auto: false",
+		"backup.enabled: false",
+		"dolt:",
+		"disable-event-flush: true",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, text)
+		}
+	}
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || !*dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want disable-event-flush true", dolt, ok)
+	}
+	for _, forbidden := range []string{"dolt.host:", "dolt.port:", "dolt.user:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("config should not contain %q:\n%s", forbidden, text)
+		}
+	}
+}
+
+func TestEnsureCanonicalConfigPreservesUnknownKeysAndScrubsDeprecatedOnes(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"custom_key: keepme",
+		"issue-prefix: old",
+		"dolt.auto-start: true",
+		"dolt_server_port: 3307",
+		"dolt_port: 4406",
+		"dolt.password: should-not-stay",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "custom_key: keepme") {
+		t.Fatalf("config should preserve unknown keys:\n%s", text)
+	}
+	for _, forbidden := range []string{"dolt.password", "dolt_server_port", "dolt_port", "dolt.auto-start: true"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("config should scrub %q:\n%s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "issue_prefix: gc") || !strings.Contains(text, "issue-prefix: gc") {
+		t.Fatalf("config should normalize prefix keys:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigCollapsesDuplicateManagedKeys(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: old",
+		"issue_prefix: stale",
+		"issue-prefix: old",
+		"issue-prefix: stale",
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: unverified",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: true",
+		"dolt.auto-start: true",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report duplicate cleanup changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"issue_prefix: gc",
+		"issue-prefix: gc",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		"dolt.auto-start: false",
+	} {
+		if count := countLineOccurrences(text, needle); count != 1 {
+			t.Fatalf("config should contain exactly one %q, found %d:%c%s", needle, count, 10, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"issue_prefix: stale",
+		"issue-prefix: stale",
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: unverified",
+		"dolt.auto-start: true",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("config should scrub stale duplicate %q:%c%s", forbidden, 10, text)
+		}
+	}
+}
+
+func TestEnsureCanonicalConfigForcesAutoExportOff(t *testing.T) {
+	// bd's export.auto defaults to true and triggers a full-file import-then-export
+	// cycle on every write. Managed cities never consume issues.jsonl (Dolt is the
+	// source of truth), so this must be forced off at config time — not just via
+	// BD_EXPORT_AUTO env-var suppression, which leaks when bd is invoked outside
+	// the gc wrapper (agents, humans, bd setup).
+	t.Run("sets false when key is absent", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"dolt.auto-start: false",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "export.auto: false") {
+			t.Fatalf("config should force export.auto: false:\n%s", data)
+		}
+	})
+
+	t.Run("overrides explicit true", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"export.auto: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Contains(text, "export.auto: true") {
+			t.Fatalf("config should scrub export.auto: true:\n%s", text)
+		}
+		if !strings.Contains(text, "export.auto: false") {
+			t.Fatalf("config should force export.auto: false:\n%s", text)
+		}
+	})
+}
+
+func TestEnsureCanonicalConfigForcesAutoBackupOff(t *testing.T) {
+	// bd's PersistentPostRun auto-backup (the hardcoded "backup_export" Dolt
+	// remote) syncs on nearly every invocation. A stuck-looping backup_export
+	// sync saturated the commit path and wedged the whole town on 2026-06-08
+	// (ga-0eq). Managed scopes back up through mol-dog-backup, so this must be
+	// forced off at config time — not just via BD_BACKUP_ENABLED env-var
+	// suppression, which leaks when bd is invoked outside the gc wrapper
+	// (agents, humans, bd setup) or before a rig scope is canonicalized.
+	t.Run("sets false when key is absent", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"dolt.auto-start: false",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "backup.enabled: false") {
+			t.Fatalf("config should force backup.enabled: false:\n%s", data)
+		}
+	})
+
+	t.Run("overrides explicit true", func(t *testing.T) {
+		fs := fsys.OSFS{}
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		input := strings.Join([]string{
+			"issue-prefix: gc",
+			"backup.enabled: true",
+			"",
+		}, "\n")
+		if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+			IssuePrefix:    "gc",
+			EndpointOrigin: EndpointOriginManagedCity,
+			EndpointStatus: EndpointStatusVerified,
+		}); err != nil {
+			t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+		}
+
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Contains(text, "backup.enabled: true") {
+			t.Fatalf("config should scrub backup.enabled: true:\n%s", text)
+		}
+		if !strings.Contains(text, "backup.enabled: false") {
+			t.Fatalf("config should force backup.enabled: false:\n%s", text)
+		}
+	})
+}
+
+func TestEnsureCanonicalConfigPreservesDoltDisableEventFlushOptOut(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt:",
+		"  disable-event-flush: false",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes for endpoint normalization")
+	}
+
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || *dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want explicit disable-event-flush false", dolt, ok)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  disable-event-flush: false") {
+		t.Fatalf("config should preserve nested Dolt opt-out:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should not write flat Dolt telemetry key:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigCanonicalizesFlatDoltDisableEventFlush(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt.disable-event-flush: false",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  disable-event-flush: false") {
+		t.Fatalf("config should move flat Dolt telemetry setting into object:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should scrub flat Dolt telemetry setting:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigFallbackPreservesFlatDoltDisableEventFlushOptOutInExistingDoltBlock(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: gc",
+		"dolt:",
+		"  host: 127.0.0.1",
+		"dolt.disable-event-flush: false",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes")
+	}
+
+	dolt, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok || dolt.DisableEventFlush == nil || *dolt.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig() = (%+v, %v), want explicit disable-event-flush false", dolt, ok)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "dolt:\n  host: 127.0.0.1\n  disable-event-flush: false") {
+		t.Fatalf("config should insert nested Dolt opt-out into existing block:\n%s", text)
+	}
+	if strings.Contains(text, "dolt.disable-event-flush") {
+		t.Fatalf("config should scrub flat Dolt telemetry setting:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigWritesExternalFields(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: EndpointOriginExplicit,
+		EndpointStatus: EndpointStatusUnverified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "3307",
+		DoltUser:       "agent",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"gc.endpoint_origin: explicit",
+		"gc.endpoint_status: unverified",
+		"dolt.host: db.example.com",
+		"dolt.port: 3307",
+		"dolt.user: agent",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("config missing %q:\n%s", needle, text)
+		}
+	}
+}
+
+func TestEnsureCanonicalConfigIsIdempotent(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	state := ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, state)
+	if err != nil {
+		t.Fatalf("first EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("first EnsureCanonicalConfig() should report changes")
+	}
+
+	changed, err = EnsureCanonicalConfig(fs, path, state)
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatal("second EnsureCanonicalConfig() should be idempotent")
+	}
+}
+
+// TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine guards against the
+// ga-um7 reproducer: `bd init` against a git repo with a remote can leave
+// `.beads/config.yaml` with the `sync.remote:` line lacking a trailing
+// newline, so the next emitted key gets glued onto its value. The next
+// EnsureCanonicalConfig call must restructure the file into valid YAML
+// rather than silently passing the corrupt line through.
+func TestEnsureCanonicalConfigRepairsGluedSyncRemoteLine(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: si",
+		"issue-prefix: si",
+		"dolt.auto-start: false",
+		"export.auto: false",
+		"gc.endpoint_origin: inherited_city",
+		"gc.endpoint_status: verified",
+		"",
+		`sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"  types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step`,
+		"types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes when repairing glued line")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+
+	// The repaired file must parse as YAML.
+	if _, err := readConfigDoc(fs, path); err != nil {
+		t.Fatalf("repaired config must parse as YAML, got error %v\n%s", err, text)
+	}
+
+	// sync.remote line must be a standalone key/value, not glued to anything.
+	if !strings.Contains(text, `sync.remote: "git+ssh://git@example.com/foo/service-inventory.git"`+"\n") &&
+		!strings.Contains(text, "sync.remote: git+ssh://git@example.com/foo/service-inventory.git\n") {
+		t.Fatalf("sync.remote line must be standalone, got:\n%s", text)
+	}
+	if strings.Contains(text, `"types.custom`) {
+		t.Fatalf("types.custom must not be glued to a quoted value:\n%s", text)
+	}
+
+	// types.custom must appear at most once.
+	if got := countLineOccurrences(text, "types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step"); got != 1 {
+		t.Fatalf("types.custom should appear exactly once, found %d:\n%s", got, text)
+	}
+
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "si",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatalf("second EnsureCanonicalConfig() should be idempotent:\n%s", text)
+	}
+}
+
+// TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair ensures
+// that when fallback rewrites malformed input, duplicate top-level keys are
+// collapsed even when they aren't in the managed set. YAML semantics say
+// last-write-wins, and this fallback rewrite should match.
+func TestEnsureCanonicalConfigDedupsUnmanagedKeysOnMalformedRepair(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Include a malformed marker so the fallback path runs.
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		"types.custom: first-value",
+		"types.custom: second-value",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "types.custom: first-value") {
+		t.Fatalf("first duplicate value should be dropped:\n%s", text)
+	}
+	if count := countLineOccurrences(text, "types.custom: second-value"); count != 1 {
+		t.Fatalf("expected exactly one types.custom line, found %d:\n%s", count, text)
+	}
+}
+
+func TestEnsureCanonicalConfigFallbackPreservesEmptyKeyMalformedLines(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: gc",
+		": first malformed line",
+		": second malformed line",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	}); err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{": first malformed line", ": second malformed line"} {
+		if got := countLineOccurrences(text, needle); got != 1 {
+			t.Fatalf("expected malformed line %q to be preserved once, found %d:\n%s", needle, got, text)
+		}
+	}
+}
+
+func TestSplitGluedConfigLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "adjacent key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "horizontal whitespace before glued key",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"  types.custom: molecule`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				"types.custom: molecule",
+			},
+		},
+		{
+			name: "recursive chain",
+			line: `sync.remote: "git+ssh://git@example.com/foo.git"types.custom: "molecule"gc.endpoint_origin: managed_city`,
+			want: []string{
+				`sync.remote: "git+ssh://git@example.com/foo.git"`,
+				`types.custom: "molecule"`,
+				"gc.endpoint_origin: managed_city",
+			},
+		},
+		{
+			name: "comment line",
+			line: `# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`# sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "indented line",
+			line: `  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`,
+			want: []string{`  sync.remote: "git+ssh://git@example.com/foo.git"types.custom: molecule`},
+		},
+		{
+			name: "unbalanced quote",
+			line: `sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`,
+			want: []string{`sync.remote: "git+ssh://git@example.com/foo.gittypes.custom: molecule`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitGluedConfigLine(tc.line)
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitGluedConfigLine() = %#v, want %#v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("splitGluedConfigLine()[%d] = %q, want %q; all got %#v", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureCanonicalConfigFallsBackToLineRewriteOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue-prefix: stale",
+		"dolt.auto-start: true",
+		"dolt_server_port: 3307",
+		"dolt.password: should-not-stay",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginManagedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes for malformed YAML")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, needle := range []string{
+		"issue_prefix: gc",
+		"issue-prefix: gc",
+		"dolt.auto-start: false",
+		"gc.endpoint_origin: managed_city",
+		"gc.endpoint_status: verified",
+		": not yaml",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("config missing %q after malformed fallback:\n%s", needle, text)
+		}
+	}
+	if strings.Contains(text, "dolt_server_port") {
+		t.Fatalf("config should scrub deprecated port key after malformed fallback:\n%s", text)
+	}
+}
+
+func TestEnsureCanonicalConfigFallbackIgnoresNestedManagedKeys(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"extra:",
+		"  dolt.host: preserve-me",
+		"dolt.host: stale.example.com",
+		": not yaml",
+		"",
+	}, string(rune(10)))
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{
+		IssuePrefix:    "gc",
+		EndpointOrigin: EndpointOriginExplicit,
+		EndpointStatus: EndpointStatusUnverified,
+		DoltHost:       "db.example.com",
+		DoltPort:       "4406",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() should report changes for malformed YAML")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "  dolt.host: preserve-me") {
+		t.Fatalf("fallback should preserve nested child content:%c%s", 10, text)
+	}
+	needle := string(rune(10)) + "dolt.host: db.example.com" + string(rune(10))
+	if !strings.Contains(text, needle) {
+		t.Fatalf("fallback should normalize the top-level host:%c%s", 10, text)
+	}
+}
+
+func TestReadIssuePrefixPrefersCanonicalKey(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("issue_prefix: gc\nissue-prefix: old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadIssuePrefix(fs, path)
+	if err != nil {
+		t.Fatalf("ReadIssuePrefix() error = %v", err)
+	}
+	if !ok || got != "gc" {
+		t.Fatalf("ReadIssuePrefix() = (%q, %v), want (%q, true)", got, ok, "gc")
+	}
+}
+
+func TestReadIssuePrefixFallsBackToLineScanOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("issue_prefix: gc\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadIssuePrefix(fs, path)
+	if err != nil {
+		t.Fatalf("ReadIssuePrefix() error = %v", err)
+	}
+	if !ok || got != "gc" {
+		t.Fatalf("ReadIssuePrefix() = (%q, %v), want (%q, true)", got, ok, "gc")
+	}
+}
+
+func TestReadIssuePrefixLineScanIgnoresNestedKeysOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte(`extra:
+  issue_prefix: nested
+: not yaml
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadIssuePrefix(fs, path)
+	if err == nil {
+		t.Fatal("ReadIssuePrefix() should surface malformed config when no top-level prefix exists")
+	}
+	if ok {
+		t.Fatalf("ReadIssuePrefix() = (%q, %v), want no top-level prefix", got, ok)
+	}
+}
+
+func TestReadAutoStartDisabledLineScanIgnoresNestedKeysOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte(`extra:
+  dolt.auto-start: false
+: not yaml
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled, err := ReadAutoStartDisabled(fs, path)
+	if err == nil {
+		t.Fatal("ReadAutoStartDisabled() should surface malformed config when no top-level flag exists")
+	}
+	if disabled {
+		t.Fatal("ReadAutoStartDisabled() should ignore nested malformed fallback keys")
+	}
+}
+
+func TestReadAutoStartDisabled(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("dolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled, err := ReadAutoStartDisabled(fs, path)
+	if err != nil {
+		t.Fatalf("ReadAutoStartDisabled() error = %v", err)
+	}
+	if !disabled {
+		t.Fatal("ReadAutoStartDisabled() = false, want true")
+	}
+}
+
+func TestReadAutoStartDisabledFallsBackToLineScanOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("dolt.auto-start: false\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled, err := ReadAutoStartDisabled(fs, path)
+	if err != nil {
+		t.Fatalf("ReadAutoStartDisabled() error = %v", err)
+	}
+	if !disabled {
+		t.Fatal("ReadAutoStartDisabled() = false, want true")
+	}
+}
+
+func TestReadExportAuto(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantValue bool
+		wantOK    bool
+	}{
+		{
+			name:      "explicit false",
+			yaml:      "issue_prefix: zz\nexport.auto: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "explicit true",
+			yaml:      "issue_prefix: zz\nexport.auto: true\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "absent",
+			yaml:      "issue_prefix: zz\n",
+			wantValue: false,
+			wantOK:    false,
+		},
+		{
+			// Garbage value: strict parsing returns ok=false rather than
+			// silently treating it as "false". This matters because callers
+			// gate destructive cleanup on ok=true && value=false.
+			name:      "non-boolean string returns absent",
+			yaml:      "issue_prefix: zz\nexport.auto: yes\n",
+			wantValue: false,
+			wantOK:    false,
+		},
+		{
+			name:      "numeric one parses as true",
+			yaml:      "issue_prefix: zz\nexport.auto: 1\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "numeric zero parses as false",
+			yaml:      "issue_prefix: zz\nexport.auto: 0\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			gotValue, gotOK, err := ReadExportAuto(fs, path)
+			if err != nil {
+				t.Fatalf("ReadExportAuto() error = %v", err)
+			}
+			if gotOK != tt.wantOK {
+				t.Errorf("ReadExportAuto() ok = %v, want %v", gotOK, tt.wantOK)
+			}
+			if gotValue != tt.wantValue {
+				t.Errorf("ReadExportAuto() value = %v, want %v", gotValue, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestReadExportAutoOnMissingFileReturnsAbsent(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing.yaml")
+
+	gotValue, gotOK, err := ReadExportAuto(fs, path)
+	if err != nil {
+		t.Fatalf("ReadExportAuto() error = %v, want nil for missing file", err)
+	}
+	if gotOK {
+		t.Errorf("ReadExportAuto() ok = true, want false for missing file")
+	}
+	if gotValue {
+		t.Errorf("ReadExportAuto() value = true, want false for missing file")
+	}
+}
+
+func TestReadDoltConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		yaml      string
+		wantValue bool
+		wantOK    bool
+	}{
+		{
+			name:      "nested explicit false",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "nested explicit true",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: true\n",
+			wantValue: true,
+			wantOK:    true,
+		},
+		{
+			name:      "flat compatibility false",
+			yaml:      "issue_prefix: zz\ndolt.disable-event-flush: false\n",
+			wantValue: false,
+			wantOK:    true,
+		},
+		{
+			name:      "absent",
+			yaml:      "issue_prefix: zz\n",
+			wantValue: true,
+			wantOK:    false,
+		},
+		{
+			name:      "garbage value returns absent",
+			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: maybe\n",
+			wantValue: true,
+			wantOK:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			got, _, err := ReadDoltConfig(fs, path)
+			if err != nil {
+				t.Fatalf("ReadDoltConfig() error = %v", err)
+			}
+			gotOK := got.DisableEventFlush != nil
+			if gotOK != tt.wantOK {
+				t.Errorf("ReadDoltConfig().DisableEventFlush present = %v, want %v", gotOK, tt.wantOK)
+			}
+			if got.DisableEventFlushEnabled() != tt.wantValue {
+				t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = %v, want %v", got.DisableEventFlushEnabled(), tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestReadDoltConfigFallsBackToNestedDisableEventFlushOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	input := strings.Join([]string{
+		"issue_prefix: zz",
+		"dolt:",
+		"  disable-event-flush: false",
+		": not yaml",
+		"",
+	}, "\n")
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ReadDoltConfig() ok = false, want true")
+	}
+	if got.DisableEventFlush == nil || *got.DisableEventFlush {
+		t.Fatalf("ReadDoltConfig().DisableEventFlush = %v, want explicit false", got.DisableEventFlush)
+	}
+}
+
+func TestReadDoltConfigDefaultsDisableEventFlushOnMissingFile(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing.yaml")
+
+	got, ok, err := ReadDoltConfig(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltConfig() error = %v, want nil for missing file", err)
+	}
+	if ok {
+		t.Errorf("ReadDoltConfig() ok = true, want false for missing file")
+	}
+	if !got.DisableEventFlushEnabled() {
+		t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = false, want default true")
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"legacy","database":"old","dolt_database":"legacydb","custom":"keep","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+	for _, key := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain %q: %s", key, data)
+		}
+	}
+	if got := trimmedString(meta["dolt_database"]); got != "hq" {
+		t.Fatalf("dolt_database = %q, want %q", got, "hq")
+	}
+}
+
+func TestEnsureCanonicalMetadataRegeneratesProjectIDFromL1(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"stale-L2-id","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectIdentity(fs, scope, "L1-pinned-id"); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report L1 project_id regeneration")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["project_id"]); got != "L1-pinned-id" {
+		t.Fatalf("project_id = %q, want %q", got, "L1-pinned-id")
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesProjectIDWhenL1Absent(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"legacy-L2-id"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() changed legacy project_id without L1")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["project_id"]); got != "legacy-L2-id" {
+		t.Fatalf("project_id = %q, want %q", got, "legacy-L2-id")
+	}
+}
+
+func TestEnsureCanonicalMetadataSurfacesL1ParseError(t *testing.T) {
+	fs := fsys.OSFS{}
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"legacy-L2-id"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile(ProjectIdentityPath(scope), []byte("not valid toml ===\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err == nil {
+		t.Fatal("EnsureCanonicalMetadata() error = nil, want corrupt L1 error")
+	}
+	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "identity.toml") && !strings.Contains(msg, "project identity") {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v, want identity context", err)
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesExistingDoltDatabaseWhenStateOmitsIt(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"legacydb","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database: "dolt",
+		Backend:  "dolt",
+		DoltMode: "server",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() should preserve existing dolt_database when state omits it")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["dolt_database"]); got != "legacydb" {
+		t.Fatalf("dolt_database = %q, want %q", got, "legacydb")
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+}
+
+func TestReadDoltDatabase(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	if err := fs.WriteFile(path, []byte(`{"dolt_database":"fe"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ReadDoltDatabase(fs, path)
+	if err != nil {
+		t.Fatalf("ReadDoltDatabase() error = %v", err)
+	}
+	if !ok || got != "fe" {
+		t.Fatalf("ReadDoltDatabase() = (%q, %v), want (%q, true)", got, ok, "fe")
+	}
+}
+
+func countLineOccurrences(text, needle string) int {
+	count := 0
+	for _, line := range strings.Split(text, "\n") {
+		if line == needle {
+			count++
+		}
+	}
+	return count
+}
+
+// metadataFixturePath joins the testdata fixture directory.
+func metadataFixturePath(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join("testdata", "metadata", name)
+}
+
+// copyMetadataFixture copies a fixture into a temp dir and returns the
+// destination path. The fixture is read with the OS filesystem so its bytes
+// match what would land on disk in production.
+func copyMetadataFixture(t *testing.T, fs fsys.FS, name string) (dst string, original []byte) {
+	t.Helper()
+	src := metadataFixturePath(t, name)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", src, err)
+	}
+	dst = filepath.Join(t.TempDir(), "metadata.json")
+	if err := fs.WriteFile(dst, data, 0o644); err != nil {
+		t.Fatalf("write fixture copy: %v", err)
+	}
+	return dst, data
+}
+
+func TestLoadMetadataStateReturnsZeroWhenFileMissing(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+
+	state, ok, err := LoadMetadataState(fs, path)
+	if err != nil {
+		t.Fatalf("LoadMetadataState() error = %v, want nil", err)
+	}
+	if ok {
+		t.Fatal("LoadMetadataState() ok = true, want false for missing file")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState() state = %+v, want zero value", state)
+	}
+}
+
+func TestLoadMetadataStateAcceptsEmptyObject(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := fs.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state, ok, err := LoadMetadataState(fs, path)
+	if err != nil {
+		t.Fatalf("LoadMetadataState({}) error = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatal("LoadMetadataState({}) ok = false, want true")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState({}) state = %+v, want zero value", state)
+	}
+}
+
+func TestLoadMetadataStateValidFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name    string
+		fixture string
+		want    MetadataState
+	}{
+		{
+			name:    "dolt round-trip",
+			fixture: "valid_dolt.json",
+			want: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "a backend gc does not implement leaves its own keys alone",
+			fixture: "dolt_with_foreign_backend_residue.json",
+			want: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "empty backend permitted",
+			fixture: "valid_empty_backend.json",
+			want: MetadataState{
+				Database: "beads",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, _ := copyMetadataFixture(t, fs, tc.fixture)
+			got, ok, err := LoadMetadataState(fs, path)
+			if err != nil {
+				t.Fatalf("LoadMetadataState(%s) error = %v, want nil", tc.fixture, err)
+			}
+			if !ok {
+				t.Fatalf("LoadMetadataState(%s) ok = false, want true", tc.fixture)
+			}
+			if got != tc.want {
+				t.Fatalf("LoadMetadataState(%s) = %+v, want %+v", tc.fixture, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadMetadataStateRejectFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name            string
+		fixture         string
+		wantErrContains string
+	}{
+		{
+			name:            "E1 invalid json",
+			fixture:         "reject_invalid_json.json",
+			wantErrContains: "invalid metadata.json:",
+		},
+		{
+			name:            "E2 unknown backend",
+			fixture:         "reject_unknown_backend.json",
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, _ := copyMetadataFixture(t, fs, tc.fixture)
+
+			state, ok, err := LoadMetadataState(fs, path)
+			if err == nil {
+				t.Fatalf("LoadMetadataState(%s) error = nil, want %q", tc.fixture, tc.wantErrContains)
+			}
+			if ok {
+				t.Fatalf("LoadMetadataState(%s) ok = true, want false on rejection", tc.fixture)
+			}
+			if state != (MetadataState{}) {
+				t.Fatalf("LoadMetadataState(%s) state = %+v, want zero value on rejection", tc.fixture, state)
+			}
+
+			var parseErr *MetadataParseError
+			if !errors.As(err, &parseErr) {
+				t.Fatalf("LoadMetadataState(%s) error %T = %v, want *MetadataParseError", tc.fixture, err, err)
+			}
+			if parseErr.Path != path {
+				t.Fatalf("MetadataParseError.Path = %q, want %q", parseErr.Path, path)
+			}
+			if !strings.Contains(parseErr.Reason, tc.wantErrContains) {
+				t.Fatalf("MetadataParseError.Reason = %q, want substring %q", parseErr.Reason, tc.wantErrContains)
+			}
+			wantWrapped := "load metadata " + path + ": " + parseErr.Reason
+			if err.Error() != wantWrapped {
+				t.Fatalf("MetadataParseError.Error() = %q, want %q", err.Error(), wantWrapped)
+			}
+		})
+	}
+}
+
+// TestLoadMetadataStateRejectionOrderIsPinned holds the documented E1 → E2
+// ladder in place.
+//
+// The order is a contract, not an accident: an operator whose metadata is wrong
+// in several ways must see the same top-most message on every gc invocation, or
+// the fix they are told to make changes between two runs of the same command.
+// Each case below violates both rungs at once and asserts which one speaks, so
+// swapping the checks in LoadMetadataState fails here.
+//
+// The ladder is two rungs long because the rungs that once followed E2 all
+// validated a connection shape for a backend gc no longer implements. E2 is now
+// the last question the loader asks, and the fields of a backend it does not
+// register are none of its business — a scope bound to one is recognized, and
+// served, before metadata parsing is reached at all.
+func TestLoadMetadataStateRejectionOrderIsPinned(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name     string
+		metadata string
+		want     string
+		loses    string
+	}{
+		{
+			name:     "E1 parse beats E2 unknown backend",
+			metadata: `{"backend":"postgress","dolt_database":"hq"`,
+			want:     "invalid metadata.json:",
+			loses:    "unsupported backend",
+		},
+		{
+			name:     "E2 unknown backend speaks once the file parses",
+			metadata: `{"backend":"postgress","database":"beads"}`,
+			want:     `unsupported backend "postgress"`,
+			loses:    "invalid metadata.json:",
+		},
+		{
+			name:     "E2 refuses a backend whose own keys are complete",
+			metadata: `{"backend":"postgres","postgres_host":"h","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads"}`,
+			want:     `unsupported backend "postgres"`,
+			loses:    "invalid metadata.json:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			if err := fs.WriteFile(path, []byte(tc.metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, ok, err := LoadMetadataState(fs, path)
+			if err == nil || ok {
+				t.Fatalf("LoadMetadataState() = ok %v, err %v, want a rejection", ok, err)
+			}
+			var parseErr *MetadataParseError
+			if !errors.As(err, &parseErr) {
+				t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+			}
+			if !strings.Contains(parseErr.Reason, tc.want) {
+				t.Fatalf("top-most rejection = %q, want substring %q", parseErr.Reason, tc.want)
+			}
+			if strings.Contains(parseErr.Reason, tc.loses) {
+				t.Fatalf("rejection %q reports the later check %q — the ladder was reordered", parseErr.Reason, tc.loses)
+			}
+		})
+	}
+}
+
+// TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet asserts the
+// content of the E2 refusal, not just that one happened.
+//
+// The message is the deliverable. gc is assembled in more than one shape, and a
+// refusal that recites a list some other assembly's author typed sends the
+// operator to debug a build they do not have. Reading the enumeration back out
+// of the registry is what keeps the sentence true wherever it is printed.
+func TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet(t *testing.T) {
+	fs := fsys.OSFS{}
+	path, _ := copyMetadataFixture(t, fs, "reject_unknown_backend.json")
+
+	_, _, err := LoadMetadataState(fs, path)
+	if err == nil {
+		t.Fatal("LoadMetadataState() accepted an unregistered backend")
+	}
+	if !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("LoadMetadataState() error = %v, want ErrUnknownBackend", err)
+	}
+
+	registered, regErr := RegisteredBackends()
+	if regErr != nil {
+		t.Fatal(regErr)
+	}
+	var parseErr *MetadataParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+	}
+	want := `unsupported backend "postgress" (supported: ` + strings.Join(registered, ", ") + `); ` + BackendNotOpenedGuarantee
+	if parseErr.Reason != want {
+		t.Fatalf("E2 reason = %q, want %q", parseErr.Reason, want)
+	}
+	for _, name := range registered {
+		if !strings.Contains(parseErr.Reason, name) {
+			t.Fatalf("E2 reason %q omits registered backend %q", parseErr.Reason, name)
+		}
+	}
+	if !strings.Contains(parseErr.Reason, BackendNotOpenedGuarantee) {
+		t.Fatalf("E2 reason %q drops the data-safety guarantee", parseErr.Reason)
+	}
+}
+
+func TestLoadMetadataStateSurfacesIOErrors(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := fs.MkdirAll(subdir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(subdir, 0o755) })
+
+	state, ok, err := LoadMetadataState(fs, filepath.Join(subdir, "metadata.json"))
+	if err == nil {
+		t.Skip("filesystem does not enforce mode 0000 (likely running as root); cannot exercise IO error path")
+	}
+	if ok {
+		t.Fatalf("LoadMetadataState() ok = true on IO error")
+	}
+	if state != (MetadataState{}) {
+		t.Fatalf("LoadMetadataState() state = %+v on IO error, want zero", state)
+	}
+	var parseErr *MetadataParseError
+	if errors.As(err, &parseErr) {
+		t.Fatalf("LoadMetadataState() returned *MetadataParseError on IO error; want plain error: %v", err)
+	}
+}
+
+func TestEnsureCanonicalMetadataIsByteIdempotentOnValidFixtures(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name    string
+		fixture string
+		state   MetadataState
+	}{
+		{
+			name:    "dolt",
+			fixture: "valid_dolt.json",
+			state: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "dolt carrying the keys of a backend gc does not implement",
+			fixture: "dolt_with_foreign_backend_residue.json",
+			state: MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "empty backend",
+			fixture: "valid_empty_backend.json",
+			state: MetadataState{
+				Database: "beads",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, original := copyMetadataFixture(t, fs, tc.fixture)
+
+			changed, err := EnsureCanonicalMetadata(fs, path, tc.state)
+			if err != nil {
+				t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+			}
+			if changed {
+				got, readErr := fs.ReadFile(path)
+				if readErr != nil {
+					t.Fatalf("read after canonicalise: %v", readErr)
+				}
+				t.Fatalf("EnsureCanonicalMetadata() reported changes for canonical fixture %s\nbefore: %s\nafter:  %s", tc.fixture, original, got)
+			}
+
+			got, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read after no-op canonicalise: %v", err)
+			}
+			if !bytes.Equal(got, original) {
+				t.Fatalf("EnsureCanonicalMetadata() rewrote bytes for canonical fixture %s\nbefore: %s\nafter:  %s", tc.fixture, original, got)
+			}
+		})
+	}
+}
+
+// TestEnsureCanonicalMetadataPreservesKeysGCDoesNotOwn holds the round-trip
+// promise: a key gc does not write is a key gc does not touch.
+//
+// The keys under test belong to a backend served by the linked beads library,
+// which is the case that matters — gc cannot tell an inert leftover from live
+// configuration for a backend it does not implement, and hand-converting a
+// shape bd itself writes is not something an operator should ever be asked to
+// do. Idempotence is asserted alongside preservation because a canonicalise
+// that rewrites bytes on every pass is a preservation bug with a slow fuse.
+func TestEnsureCanonicalMetadataPreservesKeysGCDoesNotOwn(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","postgres_dsn":"postgres://bd@db.example.test:5432/beads","postgres_schema":"city_x","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		after, _ := fs.ReadFile(path)
+		t.Fatalf("EnsureCanonicalMetadata() rewrote metadata carrying only keys it does not own\nbefore: %s\nafter:  %s", input, after)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for key, want := range map[string]string{
+		"postgres_dsn":    "postgres://bd@db.example.test:5432/beads",
+		"postgres_schema": "city_x",
+		"custom":          "keep",
+		"dolt_database":   "hq",
+	} {
+		if got := trimmedString(meta[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestEnsureCanonicalMetadataScrubsDoltModeOnDoltliteCanonicalise pins the one
+// key gc does scrub: dolt_mode on a doltlite scope is gc's own key, written by
+// gc for a backend gc implements, and meaningless on the embedded engine.
+func TestEnsureCanonicalMetadataScrubsDoltModeOnDoltliteCanonicalise(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	input := `{"backend":"doltlite","database":"doltlite","dolt_mode":"server","dolt_database":"hq","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "doltlite",
+		Backend:      "doltlite",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should scrub dolt_mode when canonicalising for backend=doltlite")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if _, ok := meta["dolt_mode"]; ok {
+		t.Fatalf("metadata should scrub dolt_mode on backend=doltlite: %s", data)
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+	if got := trimmedString(meta["dolt_database"]); got != "hq" {
+		t.Fatalf("dolt_database = %q, want %q", got, "hq")
+	}
+}
+
+// TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig verifies that
+// EnsureCanonicalConfig writes dolt.mode: server to a new config when
+// ConfigState.DoltMode is "server".
+func TestEnsureCanonicalConfigWritesDoltModeOnAbsentConfig(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig() changed = false, want true for new file with DoltMode")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "dolt.mode: server") {
+		t.Fatalf("config missing dolt.mode: server:\n%s", data)
+	}
+}
+
+// TestEnsureCanonicalConfigDoltModeIdempotent verifies that a second call with
+// the same DoltMode:"server" on an already-canonical config returns changed=false.
+func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	state := ConfigState{DoltMode: "server"}
+	if _, err := EnsureCanonicalConfig(fs, path, state); err != nil {
+		t.Fatalf("first EnsureCanonicalConfig() error = %v", err)
+	}
+
+	changed, err := EnsureCanonicalConfig(fs, path, state)
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		data, _ := fs.ReadFile(path)
+		t.Fatalf("second EnsureCanonicalConfig() changed = true, want false (idempotent):\n%s", data)
+	}
+}
+
+// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
+// that a pre-existing dolt.mode: server in config is not removed or changed
+// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
+func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// Pre-write a config that already has dolt.mode: server.
+	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"}); err != nil {
+		t.Fatalf("setup EnsureCanonicalConfig() error = %v", err)
+	}
+
+	// Now call with DoltMode:"" — existing dolt.mode must be preserved unchanged.
+	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) error = %v", err)
+	}
+	if changed {
+		data, _ := fs.ReadFile(path)
+		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "dolt.mode: server") {
+		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	}
+}
+
+// TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites pins both halves of the
+// scrub rule: it removes the metadata key "dolt_mode" (underscore) from a
+// doltlite scope and never the config key "dolt.mode" (dot-separated, which
+// lives in config.yaml), and it removes nothing at all for every other backend
+// — a key gc does not write is not gc's to delete.
+func TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites(t *testing.T) {
+	scrub := crossBackendKeysToScrub("doltlite")
+	if len(scrub) != 1 || scrub[0] != "dolt_mode" {
+		t.Fatalf("crossBackendKeysToScrub(doltlite) = %v, want exactly [dolt_mode]", scrub)
+	}
+	for _, backend := range []string{"", "dolt", "postgres", "anything-else"} {
+		if got := crossBackendKeysToScrub(backend); len(got) != 0 {
+			t.Fatalf("crossBackendKeysToScrub(%q) = %v, want no keys scrubbed", backend, got)
+		}
+	}
+}
+
+func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"database":"beads","backend":"","dolt_mode":"server","dolt_database":"hq","postgres_host":"db.example.com","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database: "beads",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if changed {
+		t.Fatal("EnsureCanonicalMetadata() should be a no-op for backend=\"\" with all unknowns preserved")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range []string{"dolt_mode", "dolt_database", "postgres_host", "custom"} {
+		if _, ok := meta[key]; !ok {
+			t.Fatalf("metadata should preserve %q when backend is empty: %s", key, data)
+		}
+	}
+}

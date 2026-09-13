@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "message"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "supervisor stop" },
+    "action": { "const": "stop" },
+    "message": { "type": "string" },
+    "wait": { "type": "boolean" }
+  },
+  "additionalProperties": true
+}

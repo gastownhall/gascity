@@ -1,7 +1,9 @@
 // Command fakeacp is a minimal ACP server for integration tests.
 // It reads JSON-RPC from stdin and responds to the ACP handshake.
 // On session/prompt it echoes the text as a session/update notification
-// then sends the response. Stays alive until SIGTERM.
+// then sends the response. Stays alive until SIGTERM (SIGINT is ignored,
+// mirroring real ACP agents for which Interrupt is a soft prompt cancel,
+// not session teardown).
 package main
 
 import (
@@ -14,16 +16,16 @@ import (
 )
 
 type message struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      *int64           `json:"id,omitempty"`
-	Method  string           `json:"method,omitempty"`
-	Params  json.RawMessage  `json:"params,omitempty"`
-	Result  json.RawMessage  `json:"result,omitempty"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      *int64          `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
 }
 
 type promptParams struct {
-	SessionID string           `json:"sessionId"`
-	Messages  []promptMessage  `json:"messages"`
+	SessionID string          `json:"sessionId"`
+	Messages  []promptMessage `json:"messages"`
 }
 
 type promptMessage struct {
@@ -40,22 +42,32 @@ func respond(id *int64, result any) {
 	data, _ := json.Marshal(result)
 	msg := message{JSONRPC: "2.0", ID: id, Result: data}
 	out, _ := json.Marshal(msg)
-	fmt.Fprintln(os.Stdout, string(out))
+	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
+		return
+	}
 }
 
 func notify(method string, params any) {
 	data, _ := json.Marshal(params)
 	msg := message{JSONRPC: "2.0", Method: method, Params: data}
 	out, _ := json.Marshal(msg)
-	fmt.Fprintln(os.Stdout, string(out))
+	if _, err := fmt.Fprintln(os.Stdout, string(out)); err != nil {
+		return
+	}
 }
 
 func main() {
 	const sessionID = "fakeacp-session-1"
 
-	// Handle SIGTERM gracefully.
+	// Ignore SIGINT — ACP Interrupt is a soft prompt-cancel signal, not a
+	// teardown signal. Real agents keep running through Ctrl-C; the fake
+	// must too, otherwise the test-side SIGINT from Interrupt races with
+	// our lifecycle cleanup (see Provider.Nudge for the SDK-side fix).
+	signal.Ignore(syscall.SIGINT)
+
+	// Exit on SIGTERM.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM)
 	go func() {
 		<-sigCh
 		os.Exit(0)
@@ -95,7 +107,10 @@ func main() {
 				}
 				notify("session/update", map[string]any{
 					"sessionId": sessionID,
-					"content":   []contentBlock{{Type: "text", Text: "echo: " + text}},
+					"update": map[string]any{
+						"sessionUpdate": "agent_message_chunk",
+						"content":       map[string]any{"type": "text", "text": "echo: " + text},
+					},
 				})
 			}
 			respond(msg.ID, map[string]any{})

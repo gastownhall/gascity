@@ -1,0 +1,9 @@
+# GitHub logins allowed to run sponsored Blacksmith CI automatically.
+# One login per line. Blank lines and # comments are ignored.
+#
+# Blacksmith is limited to pull requests from these users. Pushes,
+# schedules, manual runs, and other contributors use GitHub-hosted runners.
+julianknutsen
+csells
+sjarmak
+quad341

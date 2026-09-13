@@ -21,7 +21,7 @@ import (
 // createGitRig creates a minimal git repo suitable for gc rig add.
 func createGitRig(t *testing.T) string {
 	t.Helper()
-	rigDir := filepath.Join(t.TempDir(), "testrig")
+	rigDir := filepath.Join(helpers.TempDir(t), "testrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("creating rig dir: %v", err)
 	}
@@ -52,7 +52,7 @@ func createGitRig(t *testing.T) string {
 
 func TestRigListGastownCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	t.Run("ListSucceeds", func(t *testing.T) {
 		out, err := c.GC("rig", "list")
@@ -79,7 +79,7 @@ func TestRigListGastownCity(t *testing.T) {
 
 func TestRigLifecycle(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	c.InitFromNoStart(filepath.Join(helpers.ExamplesDir(), "gastown"))
 
 	rigDir := createGitRig(t)
 	rigName := "testrig"
@@ -116,10 +116,17 @@ func TestRigLifecycle(t *testing.T) {
 			t.Fatalf("gc rig suspend %s: %v\n%s", rigName, err, out)
 		}
 
-		// Verify suspended state in config.
-		toml := c.ReadFile("city.toml")
-		if !strings.Contains(toml, "suspended") {
-			t.Error("city.toml should contain 'suspended' after rig suspend")
+		// Suspension is recorded in the unified runtime state file, not
+		// city.toml, so each clone can have its own suspended-rig
+		// profile. City, rig, and (future) agent overrides share one
+		// .gc/runtime/suspension-state.json.
+		if !c.HasFile(filepath.Join(".gc", "runtime", "suspension-state.json")) {
+			t.Error(".gc/runtime/suspension-state.json should exist after rig suspend")
+		} else {
+			state := c.ReadFile(filepath.Join(".gc", "runtime", "suspension-state.json"))
+			if !strings.Contains(state, rigName) || !strings.Contains(state, "\"suspended\": true") {
+				t.Errorf("suspension-state.json should mark %q suspended, got:\n%s", rigName, state)
+			}
 		}
 
 		// Resume.
@@ -148,7 +155,7 @@ func TestRigLifecycle(t *testing.T) {
 
 func TestRigErrors(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("StatusMissingName", func(t *testing.T) {
 		_, err := c.GC("rig", "status")

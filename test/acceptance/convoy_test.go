@@ -20,7 +20,7 @@ import (
 // None of these subtests mutate convoy state, so order doesn't matter.
 func TestConvoyErrors(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("NoSubcommand", func(t *testing.T) {
 		out, err := c.GC("convoy")
@@ -117,7 +117,7 @@ func TestConvoyErrors(t *testing.T) {
 // city. Subtests run sequentially so state accumulates across them.
 func TestConvoyLifecycle(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	// IDs captured by earlier subtests for use by later ones.
 	var basicID string
@@ -342,7 +342,7 @@ func TestConvoyLifecycle(t *testing.T) {
 // TestConvoyEmptyCity exercises commands on a fresh city with no convoys.
 func TestConvoyEmptyCity(t *testing.T) {
 	c := helpers.NewCity(t, testEnv)
-	c.Init("claude")
+	c.InitNoStart("claude")
 
 	t.Run("List_Empty", func(t *testing.T) {
 		out, err := c.GC("convoy", "list")

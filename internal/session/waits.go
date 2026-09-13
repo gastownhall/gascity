@@ -1,6 +1,10 @@
 package session
 
 import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -19,7 +23,33 @@ const (
 	waitStateCanceled = "canceled"
 	waitStateExpired  = "expired"
 	waitStateFailed   = "failed"
+
+	// SessionWaitLookupLimit bounds per-session wait bead lookups.
+	SessionWaitLookupLimit = 1000
 )
+
+// WakeConflictError reports a lifecycle state that cannot accept an explicit
+// wake request.
+type WakeConflictError struct {
+	SessionID string
+	State     string
+}
+
+func (e *WakeConflictError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("session %s is %s", e.SessionID, e.State)
+}
+
+// WakeConflictState extracts the conflicting lifecycle state from err.
+func WakeConflictState(err error) (string, bool) {
+	var conflict *WakeConflictError
+	if errors.As(err, &conflict) && conflict != nil {
+		return conflict.State, true
+	}
+	return "", false
+}
 
 // IsWaitTerminalState reports whether a durable wait has reached a terminal lifecycle state.
 func IsWaitTerminalState(state string) bool {
@@ -55,110 +85,113 @@ func IsWaitBead(b beads.Bead) bool {
 	return sessionID != "" && beadHasLabel(b, "session:"+sessionID)
 }
 
-// WaitNudgeIDs returns queued nudge IDs for the session's currently open waits.
-func WaitNudgeIDs(store beads.Store, sessionID string) ([]string, error) {
-	if store == nil || sessionID == "" {
-		return nil, nil
-	}
-	waits, err := store.List(beads.ListQuery{
-		Label: "session:" + sessionID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(waits))
-	seen := make(map[string]bool, len(waits))
-	for _, wait := range waits {
-		if wait.Status == "closed" {
-			continue
-		}
-		if !IsWaitBead(wait) {
-			continue
-		}
-		if wait.Metadata["session_id"] != sessionID {
-			continue
-		}
-		nudgeID := wait.Metadata["nudge_id"]
-		if nudgeID == "" || seen[nudgeID] {
-			continue
-		}
-		seen[nudgeID] = true
-		ids = append(ids, nudgeID)
-	}
-	return ids, nil
+// WaitInfo is the typed projection of a durable session wait bead: the domain
+// view of a wait that callers read and decide against without touching
+// *beads.Bead. It carries only bead-stored facts (metadata keys, description,
+// status, created-at, labels), so a wait bead round-trips to the same WaitInfo
+// regardless of which backend stored it.
+//
+// Bead serialization for waits is confined to this file: WaitInfoFromBead is the
+// only place the wait-read paths learn these facts come from a bead. The wait
+// write paths (metadata batches, retry clones, create) still speak *beads.Bead —
+// that is the deliberate serialization edge, mirroring session.Store.
+type WaitInfo struct {
+	// ID is the wait bead ID.
+	ID string
+	// SessionID is the session bead ID the wait is registered against (metadata session_id).
+	SessionID string
+	// SessionName is the runtime session name recorded at registration (metadata session_name).
+	SessionName string
+	// Kind is the wait kind, e.g. "deps" or "probe" (metadata kind).
+	Kind string
+	// State is the wait lifecycle state, e.g. "pending"/"ready" (metadata state).
+	State string
+	// DepIDs are the dependency bead IDs the wait watches, comma-split and
+	// trimmed with empties dropped (metadata dep_ids). It is nil when unset.
+	DepIDs []string
+	// DepMode is "all" or "any" (metadata dep_mode).
+	DepMode string
+	// RegisteredEpoch is the session continuation epoch at registration (metadata registered_epoch).
+	RegisteredEpoch string
+	// DeliveryAttempt is the current delivery attempt counter (metadata delivery_attempt).
+	DeliveryAttempt string
+	// NudgeID is the shadow wait-nudge ID once dispatched (metadata nudge_id).
+	NudgeID string
+	// ExpiresAt is the raw RFC3339 expiry string kept verbatim; consumers parse
+	// it and tolerate malformed values (metadata expires_at).
+	ExpiresAt string
+	// Note is the reminder text delivered when the wait is satisfied (bead Description, untrimmed).
+	Note string
+	// Status is the persisted bead status ("open"/"closed").
+	Status string
+	// CreatedAt is the bead creation time.
+	CreatedAt time.Time
+	// Labels are the bead labels.
+	Labels []string
 }
 
-// WakeSession clears hold/quarantine state and cancels open waits, returning
-// any queued wait-nudge IDs that should be eagerly withdrawn.
-func WakeSession(store beads.Store, sessionBead beads.Bead, now time.Time) ([]string, error) {
-	if store == nil || sessionBead.ID == "" {
-		return nil, nil
+// WaitInfoFromBead projects a durable wait bead onto WaitInfo. It is pure,
+// side-effect-free, and backend-invariant: it reads only stored bead fields and
+// applies the same key-for-key decoding (and dep_ids split/trim) the wait render
+// and decision paths previously performed inline.
+func WaitInfoFromBead(b beads.Bead) WaitInfo {
+	return WaitInfo{
+		ID:              b.ID,
+		SessionID:       b.Metadata["session_id"],
+		SessionName:     b.Metadata["session_name"],
+		Kind:            b.Metadata["kind"],
+		State:           b.Metadata["state"],
+		DepIDs:          splitWaitDepIDs(b.Metadata["dep_ids"]),
+		DepMode:         b.Metadata["dep_mode"],
+		RegisteredEpoch: b.Metadata["registered_epoch"],
+		DeliveryAttempt: b.Metadata["delivery_attempt"],
+		NudgeID:         b.Metadata["nudge_id"],
+		ExpiresAt:       b.Metadata["expires_at"],
+		Note:            b.Description,
+		Status:          b.Status,
+		CreatedAt:       b.CreatedAt,
+		Labels:          b.Labels,
 	}
-	nudgeIDs, err := WaitNudgeIDs(store, sessionBead.ID)
-	if err != nil {
-		return nil, err
-	}
-	if err := CancelWaits(store, sessionBead.ID, now); err != nil {
-		return nil, err
-	}
-	batch := map[string]string{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
-	}
-	sr := sessionBead.Metadata["sleep_reason"]
-	if sr == "user-hold" || sr == "wait-hold" || sr == "quarantine" || sr == "context-churn" {
-		batch["sleep_reason"] = ""
-	}
-	if err := store.SetMetadataBatch(sessionBead.ID, batch); err != nil {
-		return nil, err
-	}
-	return nudgeIDs, nil
 }
 
-// CancelWaits marks all non-terminal waits for the session as canceled.
-func CancelWaits(store beads.Store, sessionID string, now time.Time) error {
-	if store == nil || sessionID == "" {
+// splitWaitDepIDs splits a comma-separated dep_ids value into trimmed, non-empty
+// IDs, returning nil for a blank value. It is the confined codec for the wait
+// dependency-ID list (formerly cmd/gc's splitWaitIDs).
+func splitWaitDepIDs(value string) []string {
+	if strings.TrimSpace(value) == "" {
 		return nil
 	}
-	waits, err := store.List(beads.ListQuery{
-		Label: "session:" + sessionID,
-	})
-	if err != nil {
-		return err
-	}
-	canceledAt := now.UTC().Format(time.RFC3339)
-	for _, wait := range waits {
-		if wait.Status == "closed" {
-			continue
-		}
-		if !IsWaitBead(wait) {
-			continue
-		}
-		if wait.Metadata["session_id"] != sessionID {
-			continue
-		}
-		if IsWaitTerminalState(wait.Metadata["state"]) {
-			continue
-		}
-		if err := store.SetMetadataBatch(wait.ID, map[string]string{
-			"state":       waitStateCanceled,
-			"canceled_at": canceledAt,
-		}); err != nil {
-			return err
-		}
-		if err := store.Close(wait.ID); err != nil {
-			return err
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
 		}
 	}
-	return nil
+	return out
+}
+
+// StampWaitLookupCapMetadata adds the shared durable wait lookup cap
+// diagnostic metadata to batch.
+func StampWaitLookupCapMetadata(batch map[string]string, label string, limit int, now time.Time, source string) {
+	if batch == nil {
+		return
+	}
+	if source == "" {
+		source = "wait-lookup"
+	}
+	batch["wait_lookup_capped_at"] = now.UTC().Format(time.RFC3339)
+	batch["wait_lookup_capped_label"] = label
+	batch["wait_lookup_capped_limit"] = strconv.Itoa(limit)
+	batch["wait_lookup_capped_source"] = source
 }
 
 func beadHasLabel(b beads.Bead, want string) bool {
-	for _, label := range b.Labels {
+	return labelsContain(b.Labels, want)
+}
+
+func labelsContain(labels []string, want string) bool {
+	for _, label := range labels {
 		if label == want {
 			return true
 		}

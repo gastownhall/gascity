@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,9 +42,9 @@ func TestRegistryRegisterAndList(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	// Register canonicalizes via filepath.EvalSymlinks; resolve expected
-	// path so the comparison holds on macOS (/var → /private/var).
-	wantCity, _ := filepath.EvalSymlinks(cityPath)
+	// Register stores the same canonical comparison form used by runtime
+	// path comparisons.
+	wantCity := testutil.CanonicalPath(cityPath)
 	if entries[0].Path != wantCity {
 		t.Errorf("expected path %s, got %s", wantCity, entries[0].Path)
 	}
@@ -122,6 +123,66 @@ func TestRegistryUnregister(t *testing.T) {
 	}
 }
 
+func TestRegistryPendingCityRequestIDCanonicalizesPath(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityPath := filepath.Join(dir, "cities", "alpha")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "alpha-link")
+	if err := os.Symlink(cityPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.StorePendingCityRequestID(linkPath, "req-alpha"); err != nil {
+		t.Fatalf("StorePendingCityRequestID: %v", err)
+	}
+
+	reopened := NewRegistry(filepath.Join(dir, "cities.toml"))
+	got, ok, err := reopened.ConsumePendingCityRequestID(cityPath)
+	if err != nil {
+		t.Fatalf("ConsumePendingCityRequestID: %v", err)
+	}
+	if !ok {
+		t.Fatal("pending request ID was not persisted")
+	}
+	if got != "req-alpha" {
+		t.Fatalf("request ID = %q, want req-alpha", got)
+	}
+
+	if got, ok, err := reopened.ConsumePendingCityRequestID(cityPath); err != nil || ok || got != "" {
+		t.Fatalf("second consume = (%q, %t, %v), want empty false nil", got, ok, err)
+	}
+}
+
+func TestRegistryStorePendingCityRequestIDRejectsDuplicatePath(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityPath := filepath.Join(dir, "cities", "alpha")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.StorePendingCityRequestID(cityPath, "req-first"); err != nil {
+		t.Fatalf("StorePendingCityRequestID first: %v", err)
+	}
+	err := r.StorePendingCityRequestID(cityPath, "req-second")
+	if !errors.Is(err, ErrPendingCityRequestExists) {
+		t.Fatalf("StorePendingCityRequestID duplicate error = %v, want ErrPendingCityRequestExists", err)
+	}
+
+	got, ok, err := r.ConsumePendingCityRequestID(cityPath)
+	if err != nil {
+		t.Fatalf("ConsumePendingCityRequestID: %v", err)
+	}
+	if !ok || got != "req-first" {
+		t.Fatalf("consumed pending request = (%q, %t), want req-first true", got, ok)
+	}
+}
+
 func TestRegistryUnregisterNotFound(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry(filepath.Join(dir, "cities.toml"))
@@ -168,9 +229,9 @@ func TestRegistryMultipleCities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Register canonicalizes via filepath.EvalSymlinks; resolve expected
-	// path so the comparison holds on macOS (/var → /private/var).
-	wantPath2, _ := filepath.EvalSymlinks(path2)
+	// Register stores the same canonical comparison form used by runtime
+	// path comparisons.
+	wantPath2 := testutil.CanonicalPath(path2)
 	if len(entries) != 1 || entries[0].Path != wantPath2 {
 		t.Errorf("expected only city-b, got %v", entries)
 	}
@@ -361,6 +422,72 @@ func TestRigUnregisterNotFound(t *testing.T) {
 	err := r.UnregisterRig(filepath.Join(dir, "nonexistent"))
 	if err == nil {
 		t.Fatal("expected error for unregistering non-existent rig")
+	}
+}
+
+func TestRegistryMutatorsRefuseHostRegistryDuringTests(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	hostRegistry := filepath.Join(home, ".gc", "cities.toml")
+	r := NewRegistry(hostRegistry)
+
+	tests := []struct {
+		name string
+		call func(*Registry)
+	}{
+		{
+			name: "Register",
+			call: func(r *Registry) {
+				_ = r.Register(filepath.Join(home, "cities", "alpha"), "alpha")
+			},
+		},
+		{
+			name: "Unregister",
+			call: func(r *Registry) {
+				_ = r.Unregister(filepath.Join(home, "cities", "alpha"))
+			},
+		},
+		{
+			name: "RegisterRig",
+			call: func(r *Registry) {
+				_ = r.RegisterRig(filepath.Join(home, "rigs", "alpha"), "alpha", "")
+			},
+		},
+		{
+			name: "UnregisterRig",
+			call: func(r *Registry) {
+				_ = r.UnregisterRig(filepath.Join(home, "rigs", "alpha"))
+			},
+		},
+		{
+			name: "SetRigDefault",
+			call: func(r *Registry) {
+				_ = r.SetRigDefault(filepath.Join(home, "rigs", "alpha"), filepath.Join(home, "cities", "alpha"))
+			},
+		},
+		{
+			name: "ReconcileRigs",
+			call: func(r *Registry) {
+				_ = r.ReconcileRigs([]RigCityMapping{{
+					RigPath:  filepath.Join(home, "rigs", "alpha"),
+					RigName:  "alpha",
+					CityPath: filepath.Join(home, "cities", "alpha"),
+				}})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered == nil {
+					t.Fatalf("expected panic for %s against host registry path", tc.name)
+				}
+			}()
+			tc.call(r)
+		})
 	}
 }
 
@@ -634,6 +761,103 @@ func TestPathHasPrefix(t *testing.T) {
 	for _, tt := range tests {
 		if got := pathHasPrefix(tt.path, tt.prefix); got != tt.want {
 			t.Errorf("pathHasPrefix(%q, %q) = %v, want %v", tt.path, tt.prefix, got, tt.want)
+		}
+	}
+}
+
+func TestLookupCityByName(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+
+	cityA := filepath.Join(dir, "alpha")
+	cityB := filepath.Join(dir, "beta")
+	for _, p := range []string{cityA, cityB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Register(cityA, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(cityB, "beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, ok := r.LookupCityByName("alpha")
+	if !ok {
+		t.Fatal("expected to find city by name 'alpha'")
+	}
+	testutil.AssertSamePath(t, entry.Path, cityA)
+	if entry.EffectiveName() != "alpha" {
+		t.Fatalf("entry name = %q, want alpha", entry.EffectiveName())
+	}
+
+	entry, ok = r.LookupCityByName("beta")
+	if !ok {
+		t.Fatal("expected to find city by name 'beta'")
+	}
+	testutil.AssertSamePath(t, entry.Path, cityB)
+
+	if _, ok := r.LookupCityByName("nonexistent"); ok {
+		t.Fatal("expected no match for nonexistent name")
+	}
+	// Match is exact and case-sensitive (mirrors Register dedup).
+	if _, ok := r.LookupCityByName("Alpha"); ok {
+		t.Fatal("expected case-sensitive lookup to miss 'Alpha'")
+	}
+}
+
+func TestLookupCityByNameEmptyRegistry(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(filepath.Join(dir, "cities.toml"))
+	if _, ok := r.LookupCityByName("anything"); ok {
+		t.Fatal("expected no match against an empty/missing registry")
+	}
+}
+
+func TestLookupCityByNameESurfacesLoadError(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "cities.toml")
+	// Corrupt registry: malformed TOML so loadLocked fails to parse it.
+	if err := os.WriteFile(regPath, []byte("[[city]\nname = \"broken\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(regPath)
+
+	// The bool API collapses the read error into a plain miss.
+	if _, ok := r.LookupCityByName("broken"); ok {
+		t.Fatal("expected no match from a corrupt registry")
+	}
+	// The error-returning variant surfaces the underlying load failure so the
+	// caller can distinguish a corrupt registry from a genuine miss.
+	if _, ok, err := r.LookupCityByNameE("broken"); ok || err == nil {
+		t.Fatalf("LookupCityByNameE on corrupt registry = (ok=%v, err=%v), want (false, non-nil)", ok, err)
+	}
+}
+
+func TestIsValidCityName(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"chris-city", true},
+		{"a.b", true},
+		{"a_b", true},
+		{"1city", true},
+		{"  chris-city  ", true}, // surrounding whitespace ignored
+		{"a/b", false},           // names cannot contain a separator -> it's a path
+		{"./x", false},
+		{"../x", false},
+		{"~/x", false},
+		{"/abs", false},
+		{"", false},
+		{"has space", false},
+		{"-leading-dash", false}, // must start alphanumeric
+		{".leading-dot", false},
+	}
+	for _, tt := range tests {
+		if got := IsValidCityName(tt.in); got != tt.want {
+			t.Errorf("IsValidCityName(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
 }

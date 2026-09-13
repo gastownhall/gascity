@@ -1,0 +1,146 @@
+name: Setup Gas City macOS CI
+description: Install the shared macOS dependencies for Gas City CI jobs on ARM64 macOS runners
+
+inputs:
+  go-version:
+    description: >-
+      Go version to install. Empty (the default) reads the version from go.mod,
+      so the toolchain can never skew from the module directive. Pass an
+      explicit version only to test against a different toolchain.
+    required: false
+    default: ""
+  node-version:
+    description: Node.js version to install
+    required: false
+    default: "22"
+  dolt-version:
+    description: Dolt version to install (without leading v)
+    required: true
+  bd-version:
+    description: Beads release version to install (with leading v)
+    required: true
+  install-claude-cli:
+    description: Whether to install the Claude CLI
+    required: false
+    default: "true"
+  claude-version:
+    description: Claude Code version to install with the native binary installer
+    required: false
+    default: "2.1.123"
+  install-system-deps:
+    description: Whether to run brew to install tmux, jq, and flock
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify macOS
+      shell: bash
+      run: |
+        if [[ "$(uname)" != "Darwin" ]]; then
+          echo "setup-gascity-macos must run on macOS; uname=$(uname)" >&2
+          exit 1
+        fi
+        arch="$(uname -m)"
+        if [[ "$arch" != "arm64" ]]; then
+          echo "setup-gascity-macos currently targets arm64; got $arch" >&2
+          exit 1
+        fi
+
+    - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      with:
+        # Resolved from go.mod, not a literal pin, exactly as
+        # setup-gascity-ubuntu already does. A hardcoded version here skews
+        # from the module directive the moment go.mod is bumped, and it
+        # surfaces as a false "Mac-only" regression on every open PR:
+        #   go: go.mod requires go >= 1.26.6 (running go 1.26.5; GOTOOLCHAIN=local)
+        # That is ga-1qp5qo — nightly main was red on it continuously from
+        # 2026-08-15, with at least five open PRs red on this and nothing else.
+        go-version: ${{ inputs.go-version }}
+        go-version-file: ${{ inputs.go-version == '' && 'go.mod' || '' }}
+        # Keep macOS parity deterministic across hosted and reused runners.
+        cache: false
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install system dependencies (brew)
+      if: ${{ inputs.install-system-deps == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v brew >/dev/null 2>&1; then
+          echo "Homebrew is required on the macOS runner but was not found on PATH" >&2
+          exit 1
+        fi
+        # Bootstrap flock first (relying on Homebrew's internal lock to
+        # serialize any concurrent brew runs). We need flock installed
+        # *before* we take our own lock, otherwise concurrent matrix jobs
+        # on a fresh runner would all race past the missing-flock branch
+        # unguarded — the exact failure Homebrew's "Another active
+        # process" error surfaces as.
+        if ! command -v flock >/dev/null 2>&1; then
+          echo "Bootstrapping flock..."
+          brew install flock
+        fi
+        # Now we can safely lock-guard the remaining installs so parallel
+        # matrix jobs don't interleave brew's output (or worse, corrupt
+        # its caches on an exotic failure).
+        lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
+        mkdir -p "$(dirname "$lock_file")"
+        pkgs=(tmux jq flock)
+        install_missing() {
+          local missing=()
+          for pkg in "${pkgs[@]}"; do
+            if ! brew list --formula "$pkg" >/dev/null 2>&1; then
+              missing+=("$pkg")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Installing missing formulae: ${missing[*]}"
+            brew install "${missing[@]}"
+          else
+            echo "All required formulae already installed: ${pkgs[*]}"
+          fi
+        }
+        (
+          flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
+          install_missing
+        ) 9>"$lock_file"
+        for cmd in tmux jq flock lsof; do
+          command -v "$cmd" >/dev/null 2>&1 || {
+            echo "Required command '$cmd' missing after install" >&2
+            exit 1
+          }
+        done
+
+    - name: Install dolt v${{ inputs.dolt-version }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}" --cache
+
+    - name: Install released bd v${{ inputs.bd-version }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}" --cache
+
+    - name: Install Claude CLI
+      if: ${{ inputs.install-claude-cli == 'true' }}
+      shell: bash
+      run: ${{ github.action_path }}/../../scripts/install-claude-native.sh "${{ inputs.claude-version }}" --cache
+
+    - name: Pin CI git identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Dolt inherits its commit identity from the user's global git config
+        # (see cmd/gc/gc-beads-bd ensure_dolt_identity).
+        #
+        # Force-set a deterministic CI identity unconditionally. Don't log
+        # the resolved value — on a reused runner any preexisting identity
+        # from a prior maintenance session would otherwise leak into the
+        # job log (real maintainer name/email), and a shared writable
+        # `~/.gitconfig` would leave Dolt commit metadata nondeterministic
+        # between runs.
+        git config --global user.name "Gas City CI"
+        git config --global user.email "ci@gascity.local"

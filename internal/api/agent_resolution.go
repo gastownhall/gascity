@@ -9,9 +9,9 @@ import (
 // resolveSessionTemplateAgent resolves only configured templates.
 //
 // The API intentionally has no ambient rig-context shortcut. Bare names only
-// resolve when they are city-unique; otherwise callers must send the fully
-// qualified template identity (for example "corp/maya"). Session creation
-// must target template identities, not derived pool members.
+// resolve for city-scoped templates; rig-scoped templates require fully
+// qualified identities (for example "corp/maya"). Session creation may layer
+// its own compatibility fallback above this stricter resolver.
 func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, bool) {
 	if a, ok := findAgentByQualifiedTemplate(cfg, input); ok {
 		return a, true
@@ -20,6 +20,22 @@ func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, 
 		return config.Agent{}, false
 	}
 
+	var matches []config.Agent
+	for _, a := range cfg.Agents {
+		if a.Dir == "" && a.Name == input {
+			matches = append(matches, a)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return config.Agent{}, false
+}
+
+func findUniqueAgentTemplateByBareName(cfg *config.City, input string) (config.Agent, bool) {
+	if strings.Contains(input, "/") {
+		return config.Agent{}, false
+	}
 	var matches []config.Agent
 	for _, a := range cfg.Agents {
 		if a.Name == input {
@@ -32,10 +48,18 @@ func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, 
 	return config.Agent{}, false
 }
 
+// findAgentByQualifiedTemplate returns the configured agent whose identity
+// matches identity, if any. The nil-config guard backstops a concurrent config
+// swap-to-nil between an earlier availability check and this lookup (for
+// example formulaDetail returns a typed 503 via formulaSearchPaths before
+// resolving routing identities here), so the helper stays panic-safe even when
+// called independently of that ordering.
 func findAgentByQualifiedTemplate(cfg *config.City, identity string) (config.Agent, bool) {
-	dir, name := config.ParseQualifiedName(identity)
+	if cfg == nil {
+		return config.Agent{}, false
+	}
 	for _, a := range cfg.Agents {
-		if a.Dir == dir && a.Name == name {
+		if config.AgentMatchesIdentity(&a, identity) {
 			return a, true
 		}
 	}

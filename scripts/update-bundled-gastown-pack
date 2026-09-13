@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""Sync gc's gastown release pins to the latest gascity-packs registry release.
+
+The gastown pack content reaches the gc binary through the
+github.com/gastownhall/gascity-packs Go module; nothing is vendored in this
+repository. For the latest non-withdrawn gastown release in the registry,
+this tool:
+
+  1. verifies the release's registry content hash against its commit,
+  2. pins go.mod to that commit (go get module@commit),
+  3. verifies the pinned module's gastown tree matches the registry hash,
+  4. updates the internal/config/public_packs.go constants,
+  5. updates the examples/gastown pins (pack.toml, city.toml, packs.lock),
+  6. updates the pinned-import examples in docs/guides/gastown-config-recipes.md.
+
+--check verifies all of the above without modifying the checkout.
+
+Note on the go.mod version form: `go get module@commit` resolves to whatever
+version Go derives for that commit -- a tag pointing at exactly that commit,
+or a pseudo-version. When the registry release commit differs from the
+module's tagged commit, the operator may hand-finish go.mod to a
+content-identical tagged version afterwards. --check validates the pinned
+module's *content* against the registry hash, not the version string, so
+both forms pass.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+
+
+DEFAULT_GASCITY_PACKS_REPO = "https://github.com/gastownhall/gascity-packs.git"
+MODULE = "github.com/gastownhall/gascity-packs"
+PACK_NAME = "gastown"
+PUBLIC_PACKS_GO = Path("internal/config/public_packs.go")
+EXAMPLE_DIR = Path("examples/gastown")
+RECIPES_DOC = Path("docs/guides/gastown-config-recipes.md")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Sync gastown release pins from the latest gascity-packs registry release."
+    )
+    parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--repo", default=DEFAULT_GASCITY_PACKS_REPO)
+    parser.add_argument("--registry", help="path to registry.toml; defaults to <repo>/registry.toml")
+    parser.add_argument("--check", action="store_true", help="verify without modifying the checkout")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    repo_root = Path(args.repo_root).resolve()
+    public_packs = (repo_root / PUBLIC_PACKS_GO).resolve()
+    require_within(repo_root, public_packs)
+
+    with maybe_clone_repo(args.repo) as packs_repo:
+        registry_path = Path(args.registry).resolve() if args.registry else packs_repo / "registry.toml"
+        release = latest_registry_release(registry_path)
+        pack_path = source_pack_path(release["source"])
+        if not pack_path:
+            raise SystemExit(f"{PACK_NAME}: registry source does not include a pack path: {release['source']}")
+
+        files = git_pack_files(packs_repo, release["commit"], pack_path)
+        actual_hash = git_pack_hash(packs_repo, files)
+        if actual_hash != release["hash"]:
+            raise SystemExit(f"{PACK_NAME}: registry hash mismatch: got {actual_hash}, want {release['hash']}")
+
+        # The gascity pack is embedded from the SAME module pin, so its
+        # canonical pin must stay in lockstep: the module tree at the
+        # gastown pin must match the latest gascity registry release.
+        gascity_release = latest_registry_release(registry_path, "gascity")
+
+    if args.check:
+        errors = check_local_state(repo_root, public_packs, release)
+        errors += check_gascity_lockstep(repo_root, public_packs, gascity_release)
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        print(
+            f"gastown pins match registry release "
+            f"{release['version']} ({release['commit'][:12]})"
+        )
+        return 0
+
+    pin_module(repo_root, release["commit"])
+    module_hash = module_gastown_hash(repo_root)
+    if module_hash != release["hash"]:
+        raise SystemExit(
+            f"{PACK_NAME}: pinned module content hash = {module_hash}, want registry {release['hash']}"
+        )
+    gascity_module_hash = module_pack_hash(repo_root, "gascity")
+    if gascity_module_hash != gascity_release["hash"]:
+        raise SystemExit(
+            "gascity: pinned module content hash = "
+            f"{gascity_module_hash}, want registry {gascity_release['hash']} "
+            f"(release {gascity_release['version']}); the gascity pack changed "
+            "since its last registry release — cut a gascity release in "
+            "gascity-packs first so its canonical pin stays honest"
+        )
+    write_public_pack_constants(public_packs, release)
+    write_gascity_pin(public_packs, gascity_release)
+    update_example_pins(repo_root, release)
+    update_doc_pins(repo_root, release)
+    print(f"pinned gastown to registry release {release['version']} ({release['commit'][:12]})")
+    print(f"gascity pin verified against registry release {gascity_release['version']} ({gascity_release['commit'][:12]})")
+    return 0
+
+
+def write_gascity_pin(path: Path, release: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    new_version = "sha:" + release["commit"]
+    current = re.search(r'\bPublicGascityPackVersion\s*=\s*"([^"]*)"', text)
+    if current and current.group(1) == new_version:
+        return
+    if current and current.group(1):
+        old_pin = current.group(1)
+        list_pattern = re.compile(
+            r"(var SupersededPublicGascityPackVersions \[\]string)\b"
+        )
+        # The gascity superseded list starts as a nil-slice declaration;
+        # convert it to a literal carrying the old pin.
+        text, count = list_pattern.subn(
+            rf'\g<1> = []string{{\n\t"{old_pin}",\n}}', text, count=1
+        )
+        if count != 1:
+            # Already a literal list: append into it instead.
+            literal = re.compile(
+                r"(var SupersededPublicGascityPackVersions = \[\]string\{\n)"
+            )
+            text, count = literal.subn(rf'\g<1>\t"{old_pin}",\n', text, count=1)
+            if count != 1:
+                raise SystemExit(
+                    "could not record superseded PublicGascityPackVersion"
+                )
+    text = replace_go_string_const(text, "PublicGascityPackVersion", new_version)
+    path.write_text(text, encoding="utf-8")
+
+
+def check_gascity_lockstep(repo_root: Path, public_packs: Path, release: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    text = public_packs.read_text(encoding="utf-8")
+    match = re.search(r'\bPublicGascityPackVersion\s*=\s*"([^"]*)"', text)
+    want = "sha:" + release["commit"]
+    if not match or match.group(1) != want:
+        errors.append(
+            f"PublicGascityPackVersion = {match.group(1) if match else None!r}, want {want!r}"
+        )
+    try:
+        module_hash = module_pack_hash(repo_root, "gascity")
+    except (OSError, SystemExit) as exc:
+        errors.append(f"hashing pinned module gascity content: {exc}")
+    else:
+        if module_hash != release["hash"]:
+            errors.append(
+                f"pinned module gascity hash = {module_hash}, want registry {release['hash']}"
+            )
+    return errors
+
+
+def require_within(root: Path, path: Path) -> None:
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"refusing to write outside repo root: {path}") from exc
+
+
+class maybe_clone_repo:
+    def __init__(self, repo: str):
+        self.repo = repo
+        self.tempdir: tempfile.TemporaryDirectory[str] | None = None
+        self.path: Path | None = None
+
+    def __enter__(self) -> Path:
+        local = Path(self.repo).expanduser()
+        if local.exists():
+            self.path = local.resolve()
+            return self.path
+        self.tempdir = tempfile.TemporaryDirectory(prefix="gascity-packs-")
+        self.path = Path(self.tempdir.name) / "repo"
+        run(["git", "clone", "--quiet", self.repo, str(self.path)])
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.tempdir is not None:
+            self.tempdir.cleanup()
+
+
+def latest_registry_release(registry_path: Path, pack_name: str = PACK_NAME) -> dict[str, str]:
+    with registry_path.open("rb") as handle:
+        catalog = tomllib.load(handle)
+    matches = [pack for pack in catalog.get("pack", []) if pack.get("name") == pack_name]
+    if len(matches) != 1:
+        raise SystemExit(f"registry must contain exactly one {pack_name!r} pack entry, got {len(matches)}")
+    pack = matches[0]
+    releases = [
+        release
+        for release in pack.get("release", [])
+        if not release.get("withdrawn", False)
+    ]
+    if not releases:
+        raise SystemExit(f"{pack_name}: registry has no non-withdrawn releases")
+    release = max(releases, key=lambda item: semver_key(item.get("version", "")))
+    return {
+        "source": pack["source"],
+        "version": release["version"],
+        "ref": release["ref"],
+        "commit": release["commit"],
+        "hash": release["hash"],
+    }
+
+
+def semver_key(version: str) -> tuple[int, int, int]:
+    parts = version.split(".")
+    if len(parts) not in {2, 3}:
+        raise SystemExit(f"{PACK_NAME}: unsupported release version {version!r}")
+    nums = [int(part) for part in parts]
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums)
+
+
+def source_pack_path(source: str) -> str:
+    git_subdir = re.search(r"\.git//([^#]+)", source)
+    if git_subdir:
+        return git_subdir.group(1).strip("/")
+    tree_path = re.search(r"/tree/[^/]+/([^#]+)", source)
+    if tree_path:
+        return tree_path.group(1).strip("/")
+    return ""
+
+
+def git_pack_files(repo: Path, commit: str, pack_path: str) -> list[dict[str, str]]:
+    out = run_bytes([
+        "git",
+        "-C",
+        str(repo),
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        commit,
+        "--",
+        pack_path,
+    ])
+    records = out.rstrip(b"\0").split(b"\0") if out else []
+    files: list[dict[str, str]] = []
+    for record in records:
+        if not record:
+            continue
+        meta, git_path = record.split(b"\t", 1)
+        mode, object_type, object_id = meta.decode().split()
+        if object_type != "blob":
+            raise SystemExit(f"{PACK_NAME}: unsupported git object type {object_type!r} for {git_path!r}")
+        rel = relative_pack_path(git_path.decode(), pack_path)
+        perm = manifest_perm(mode, rel)
+        files.append({"rel": rel, "mode": mode, "object": object_id, "perm": perm})
+    if not files:
+        raise SystemExit(f"{PACK_NAME}: pack path {pack_path!r} has no files at {commit}")
+    return files
+
+
+def relative_pack_path(git_path: str, pack_path: str) -> str:
+    prefix = pack_path.rstrip("/") + "/"
+    if not git_path.startswith(prefix):
+        raise SystemExit(f"{PACK_NAME}: git path {git_path!r} is outside pack path {pack_path!r}")
+    return git_path[len(prefix):]
+
+
+def manifest_perm(mode: str, rel: str) -> str:
+    if mode == "100644":
+        return "0644"
+    if mode == "100755":
+        return "0755"
+    raise SystemExit(f"{PACK_NAME}: unsupported git file mode {mode!r} for {rel}")
+
+
+def git_pack_hash(repo: Path, files: list[dict[str, str]]) -> str:
+    entries = []
+    for file in files:
+        data = git_blob(repo, file["object"])
+        digest = hashlib.sha256(data).hexdigest()
+        entries.append(f"{file['rel']} {file['perm']} {digest}")
+    entries.sort()
+    return "sha256:" + hashlib.sha256("\n".join(entries).encode()).hexdigest()
+
+
+def git_blob(repo: Path, object_id: str) -> bytes:
+    return run_bytes(["git", "-C", str(repo), "cat-file", "blob", object_id])
+
+
+def pin_module(repo_root: Path, commit: str) -> None:
+    run(["go", "get", f"{MODULE}@{commit}"], cwd=repo_root)
+
+
+def module_version(repo_root: Path) -> str:
+    out = run_bytes(["go", "list", "-m", "-f", "{{.Version}}", MODULE], cwd=repo_root)
+    return out.decode().strip()
+
+
+def module_dir(repo_root: Path) -> Path:
+    version = module_version(repo_root)
+    out = run_bytes(["go", "mod", "download", "-json", f"{MODULE}@{version}"], cwd=repo_root)
+    info = json.loads(out)
+    directory = info.get("Dir", "")
+    if not directory:
+        raise SystemExit(f"{PACK_NAME}: go mod download did not report a module dir for {MODULE}@{version}")
+    return Path(directory)
+
+
+def module_gastown_hash(repo_root: Path) -> str:
+    return module_pack_hash(repo_root, PACK_NAME)
+
+
+def module_pack_hash(repo_root: Path, pack_name: str) -> str:
+    target = module_dir(repo_root) / pack_name
+    entries: list[str] = []
+    for path in sorted(target.rglob("*")):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(target).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(f"{PACK_NAME}: unsupported symlink {rel} in module content")
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"{PACK_NAME}: unsupported non-regular file {rel} in module content")
+        # Go module zips do not preserve file modes, so derive the manifest
+        # perm the same way the runtime materializer does (extension-based,
+        # internal/builtinpacks.MaterializedFileMode). A registry release
+        # whose git modes break that convention will hash-mismatch here,
+        # which is exactly the drift this check exists to catch.
+        perm = "0755" if rel.endswith((".sh", ".py", ".bash")) else "0644"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        entries.append(f"{rel} {perm} {digest}")
+    if not entries:
+        raise SystemExit(f"{PACK_NAME}: module content has no pack files under {target}")
+    # Sort the final manifest strings exactly like git_pack_hash and Go's
+    # SyntheticContentHash do; Path.rglob sorts by path components, which
+    # can disagree with string order for sibling names like "a/" vs "a-b/".
+    entries.sort()
+    return "sha256:" + hashlib.sha256("\n".join(entries).encode()).hexdigest()
+
+
+def write_public_pack_constants(path: Path, release: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8")
+    new_version = "sha:" + release["commit"]
+
+    # A bumped canonical pin strands cities locked at the previous pin on
+    # the real-fetch path; appending the old pin to the superseded list
+    # lets the packv2-import-state doctor fix re-pin them offline.
+    current = re.search(r'\bPublicGastownPackVersion\s*=\s*"([^"]*)"', text)
+    if current and current.group(1) and current.group(1) != new_version:
+        old_pin = current.group(1)
+        if old_pin not in text.split("SupersededPublicGastownPackVersions", 1)[-1]:
+            list_pattern = re.compile(
+                r"(var SupersededPublicGastownPackVersions = \[\]string\{\n)"
+            )
+            text, count = list_pattern.subn(rf'\g<1>\t"{old_pin}",\n', text)
+            if count != 1:
+                raise SystemExit(
+                    "expected exactly one SupersededPublicGastownPackVersions list"
+                )
+
+    replacements = {
+        "PublicGastownPackSource": release["source"],
+        "PublicGastownPackVersion": new_version,
+    }
+    for name, value in replacements.items():
+        text = replace_go_string_const(text, name, value)
+    path.write_text(text, encoding="utf-8")
+
+
+def replace_go_string_const(text: str, name: str, value: str) -> str:
+    pattern = re.compile(rf'(\b{name}\s*=\s*)"[^"]*"')
+    updated, count = pattern.subn(rf'\1"{value}"', text)
+    if count != 1:
+        raise SystemExit(f"expected exactly one {name} constant, replaced {count}")
+    return updated
+
+
+def pinned_import_pattern(source: str) -> re.Pattern[str]:
+    # Group 2 captures the current pin so the same pattern serves both
+    # update (subn) and check (findall) paths.
+    return re.compile(
+        rf'(source = "{re.escape(source)}"\nversion = ")(sha:[0-9a-f]+)(")'
+    )
+
+
+def update_pinned_import_versions(path: Path, release: dict[str, str]) -> None:
+    version = "sha:" + release["commit"]
+    text = path.read_text(encoding="utf-8")
+    updated, count = pinned_import_pattern(release["source"]).subn(
+        rf"\g<1>{version}\g<3>", text
+    )
+    if count == 0:
+        raise SystemExit(f"{path}: no pinned gastown import found to update")
+    path.write_text(updated, encoding="utf-8")
+
+
+def update_example_pins(repo_root: Path, release: dict[str, str]) -> None:
+    version = "sha:" + release["commit"]
+    for rel in ("pack.toml", "city.toml"):
+        update_pinned_import_versions(repo_root / EXAMPLE_DIR / rel, release)
+
+    # Rewrite ONLY the gastown lock entry in place: the example's packs.lock
+    # also pins the bundled core/bd imports, which must survive a pin bump.
+    lock_path = repo_root / EXAMPLE_DIR / "packs.lock"
+    lock_text = lock_path.read_text(encoding="utf-8")
+    lock_pattern = re.compile(
+        rf'(\[packs\."{re.escape(release["source"])}"\]\n'
+        rf'version = ")sha:[0-9a-f]+("\ncommit = ")[0-9a-f]+(")'
+    )
+    lock_updated, lock_count = lock_pattern.subn(
+        rf"\g<1>{version}\g<2>{release['commit']}\g<3>", lock_text
+    )
+    if lock_count != 1:
+        raise SystemExit(
+            f"{lock_path}: expected exactly one gastown lock entry, found {lock_count}"
+        )
+    lock_path.write_text(lock_updated, encoding="utf-8")
+
+
+def update_doc_pins(repo_root: Path, release: dict[str, str]) -> None:
+    update_pinned_import_versions(repo_root / RECIPES_DOC, release)
+
+
+def check_local_state(repo_root: Path, public_packs: Path, release: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    current = read_public_pack_constants(public_packs)
+    for key, value in {
+        "PublicGastownPackSource": release["source"],
+        "PublicGastownPackVersion": "sha:" + release["commit"],
+    }.items():
+        if current.get(key) != value:
+            errors.append(f"{key} = {current.get(key)!r}, want {value!r}")
+
+    try:
+        module_hash = module_gastown_hash(repo_root)
+    except (OSError, SystemExit) as exc:
+        errors.append(f"hashing pinned module gastown content: {exc}")
+    else:
+        if module_hash != release["hash"]:
+            errors.append(f"pinned module gastown hash = {module_hash}, want {release['hash']}")
+
+    version = "sha:" + release["commit"]
+    import_tables = {
+        "pack.toml": ("imports", PACK_NAME),
+        "city.toml": ("defaults", "rig", "imports", PACK_NAME),
+    }
+    for rel, table_keys in import_tables.items():
+        path = repo_root / EXAMPLE_DIR / rel
+        try:
+            entry = toml_table(load_toml(path), *table_keys)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            errors.append(f"{EXAMPLE_DIR / rel}: reading gastown import pin: {exc}")
+            continue
+        if entry.get("source") != release["source"]:
+            errors.append(
+                f"{EXAMPLE_DIR / rel}: gastown import source = "
+                f"{entry.get('source')!r}, want {release['source']!r}"
+            )
+        if entry.get("version") != version:
+            errors.append(
+                f"{EXAMPLE_DIR / rel}: gastown import version = "
+                f"{entry.get('version')!r}, want {version!r}"
+            )
+
+    lock_rel = EXAMPLE_DIR / "packs.lock"
+    try:
+        lock_entry = toml_table(load_toml(repo_root / lock_rel), "packs", release["source"])
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        errors.append(f"{lock_rel}: reading gastown lock entry: {exc}")
+    else:
+        if lock_entry.get("version") != version:
+            errors.append(
+                f"{lock_rel}: lock version = {lock_entry.get('version')!r}, want {version!r}"
+            )
+        if lock_entry.get("commit") != release["commit"]:
+            errors.append(
+                f"{lock_rel}: lock commit = {lock_entry.get('commit')!r}, "
+                f"want {release['commit']!r}"
+            )
+
+    try:
+        doc_text = (repo_root / RECIPES_DOC).read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"{RECIPES_DOC}: reading pinned import examples: {exc}")
+    else:
+        doc_pins = [
+            match[1]
+            for match in pinned_import_pattern(release["source"]).findall(doc_text)
+        ]
+        if not doc_pins:
+            errors.append(f"{RECIPES_DOC}: no pinned gastown import examples found")
+        for pin in doc_pins:
+            if pin != version:
+                errors.append(
+                    f"{RECIPES_DOC}: pinned import example uses {pin!r}, want {version!r}"
+                )
+    return errors
+
+
+def load_toml(path: Path) -> dict[str, object]:
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def toml_table(data: object, *keys: str) -> dict[str, object]:
+    for key in keys:
+        if not isinstance(data, dict):
+            return {}
+        data = data.get(key)
+    return data if isinstance(data, dict) else {}
+
+
+def read_public_pack_constants(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    names = [
+        "PublicGastownPackSource",
+        "PublicGastownPackVersion",
+    ]
+    found: dict[str, str] = {}
+    for name in names:
+        match = re.search(rf'\b{name}\s*=\s*"([^"]*)"', text)
+        if match:
+            found[name] = match.group(1)
+    return found
+
+
+def run(args: list[str], cwd: Path | None = None) -> None:
+    subprocess.run(args, check=True, cwd=cwd)
+
+
+def run_bytes(args: list[str], cwd: Path | None = None) -> bytes:
+    return subprocess.run(args, check=True, stdout=subprocess.PIPE, cwd=cwd).stdout
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

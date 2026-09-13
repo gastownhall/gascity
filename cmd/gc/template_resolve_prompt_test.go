@@ -1,7 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var testBeaconTime = time.Unix(1_700_000_000, 0)
@@ -87,6 +92,89 @@ func TestTemplateParamsToConfigFlagModePrependsFlag(t *testing.T) {
 	}
 }
 
+func TestTemplateParamsToConfigACPUsesProtocolNudgeForStartupPrompt(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "You are an agent.",
+		IsACP:   true,
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.Command != "opencode acp" {
+		t.Fatalf("Command = %q, want ACP server command unchanged", cfg.Command)
+	}
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	if cfg.PromptFlag != "" {
+		t.Fatalf("PromptFlag = %q, want empty for ACP startup prompt", cfg.PromptFlag)
+	}
+	if cfg.Nudge != "You are an agent." {
+		t.Fatalf("Nudge = %q, want startup prompt delivered over ACP", cfg.Nudge)
+	}
+	if cfg.Env[startupPromptDeliveredEnv] != "1" {
+		t.Fatalf("%s not marked for ACP startup prompt delivery", startupPromptDeliveredEnv)
+	}
+}
+
+func TestTemplateParamsToConfigACPCombinesStartupPromptWithExistingNudge(t *testing.T) {
+	tp := TemplateParams{
+		Command: "opencode acp",
+		Prompt:  "startup prompt",
+		IsACP:   true,
+		Hints: agent.StartupHints{
+			Nudge: "existing nudge",
+		},
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "opencode",
+			Command:    "opencode",
+			PromptMode: "flag",
+			PromptFlag: "--prompt",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty for ACP startup prompt", cfg.PromptSuffix)
+	}
+	want := "startup prompt\n\n---\n\nexisting nudge"
+	if cfg.Nudge != want {
+		t.Fatalf("Nudge = %q, want %q", cfg.Nudge, want)
+	}
+}
+
+func TestTemplateParamsToConfigFlagModeMissingFlagDoesNotMarkPromptDelivered(t *testing.T) {
+	tp := TemplateParams{
+		Command: "myprovider",
+		Prompt:  "You are an agent.",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:       "myprovider",
+			Command:    "myprovider",
+			PromptMode: "flag",
+		},
+	}
+
+	cfg := templateParamsToConfig(tp)
+
+	if cfg.PromptSuffix == "" {
+		t.Fatal("PromptSuffix should preserve the rendered prompt for diagnostics")
+	}
+	if cfg.PromptFlag != "" {
+		t.Fatalf("PromptFlag = %q, want empty when provider metadata has no prompt flag", cfg.PromptFlag)
+	}
+	if cfg.Env != nil && cfg.Env[startupPromptDeliveredEnv] == "1" {
+		t.Fatalf("%s marked despite missing flag delivery metadata", startupPromptDeliveredEnv)
+	}
+}
+
 // TestTemplateParamsToConfigNoneModeUsesNudge verifies that when PromptMode is
 // "none" and hooks are not available, startup instructions are delivered via
 // runtime.Config.Nudge instead of PromptSuffix.
@@ -111,7 +199,117 @@ func TestTemplateParamsToConfigNoneModeUsesNudge(t *testing.T) {
 	}
 }
 
-func TestTemplateParamsToConfigNoneModeWithHooksSkipsStartupNudge(t *testing.T) {
+func TestResolveTemplateControlDispatcherSuppressesStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   config.ControlDispatcherStartCommandFor("gascity/" + config.ControlDispatcherAgentName),
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"gc"},
+		Implicit:       true,
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty for deterministic control dispatcher", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want empty", cfg.PromptSuffix)
+	}
+	if cfg.Nudge != "" {
+		t.Fatalf("Nudge = %q, want empty", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs == nil || *cfg.AcceptStartupDialogs {
+		t.Fatalf("AcceptStartupDialogs = %v, want false", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"gc"}) {
+		t.Fatalf("ProcessNames = %v, want [gc]", cfg.ProcessNames)
+	}
+}
+
+func TestResolveTemplateExplicitControlDispatcherKeepsStartupPrompt(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeFS := fsys.NewFake()
+	promptPath := filepath.Join(cityPath, "prompts", "control-dispatcher.template.md")
+	if err := fakeFS.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+		t.Fatalf("create prompt directory: %v", err)
+	}
+	if err := fakeFS.WriteFile(promptPath, []byte("startup prompt for {{.AgentName}}"), 0o644); err != nil {
+		t.Fatalf("write prompt template: %v", err)
+	}
+	params := &agentBuildParams{
+		fs:              fakeFS,
+		cityName:        "maintainer-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "maintainer-city"},
+		providers:       map[string]config.ProviderSpec{},
+		lookPath:        func(string) (string, error) { return "", fmt.Errorf("not found") },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           config.ControlDispatcherAgentName,
+		Dir:            "gascity",
+		PromptTemplate: "prompts/control-dispatcher.template.md",
+		StartCommand:   "custom-control-dispatcher --serve",
+		Nudge:          "configured startup nudge",
+		ProcessNames:   []string{"custom-control-dispatcher"},
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Prompt = %q, want rendered startup prompt for explicit agent", tp.Prompt)
+	}
+	cfg := templateParamsToConfig(tp)
+	if cfg.PromptSuffix != "" {
+		t.Fatalf("PromptSuffix = %q, want prompt delivered by nudge for start_command prompt_mode=none", cfg.PromptSuffix)
+	}
+	if !strings.Contains(cfg.Nudge, "startup prompt for "+agent.QualifiedName()) {
+		t.Fatalf("Nudge = %q, want startup prompt for explicit agent", cfg.Nudge)
+	}
+	if !strings.Contains(cfg.Nudge, "configured startup nudge") {
+		t.Fatalf("Nudge = %q, want configured nudge preserved", cfg.Nudge)
+	}
+	if cfg.AcceptStartupDialogs != nil {
+		t.Fatalf("AcceptStartupDialogs = %v, want no deterministic suppression override", cfg.AcceptStartupDialogs)
+	}
+	if !reflect.DeepEqual(cfg.ProcessNames, []string{"custom-control-dispatcher"}) {
+		t.Fatalf("ProcessNames = %v, want [custom-control-dispatcher]", cfg.ProcessNames)
+	}
+}
+
+func TestTemplateParamsToConfigNoneModeWithHooksStillUsesStartupNudge(t *testing.T) {
 	tp := TemplateParams{
 		Command: "opencode",
 		Prompt:  "You are an agent. Do work.",
@@ -132,8 +330,56 @@ func TestTemplateParamsToConfigNoneModeWithHooksSkipsStartupNudge(t *testing.T) 
 	if cfg.PromptSuffix != "" {
 		t.Errorf("PromptSuffix should be empty for none mode, got %q", cfg.PromptSuffix)
 	}
-	if cfg.Nudge != "existing nudge" {
-		t.Errorf("Nudge = %q, want existing nudge only", cfg.Nudge)
+	want := "You are an agent. Do work.\n\n---\n\nexisting nudge"
+	if cfg.Nudge != want {
+		t.Errorf("Nudge = %q, want %q", cfg.Nudge, want)
+	}
+}
+
+func TestTemplateParamsToConfigHookEnabledProviderStillUsesLaunchPrompt(t *testing.T) {
+	tests := []struct {
+		name       string
+		promptMode string
+		promptFlag string
+	}{
+		{name: "arg mode", promptMode: "arg"},
+		{name: "flag mode", promptMode: "flag", promptFlag: "--prompt"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tp := TemplateParams{
+				Command: "claude",
+				Prompt:  "startup prompt",
+				Hints: agent.StartupHints{
+					Nudge: "existing nudge",
+				},
+				HookEnabled: true,
+				ResolvedProvider: &config.ResolvedProvider{
+					Name:          "claude",
+					Command:       "claude",
+					PromptMode:    tt.promptMode,
+					PromptFlag:    tt.promptFlag,
+					SupportsHooks: true,
+				},
+			}
+
+			cfg := templateParamsToConfig(tp)
+
+			if cfg.PromptSuffix == "" {
+				t.Fatalf("PromptSuffix should still carry the startup prompt when hooks are enabled")
+			}
+			if tt.promptMode == "flag" {
+				if cfg.PromptFlag != "--prompt" {
+					t.Fatalf("PromptFlag = %q, want %q", cfg.PromptFlag, "--prompt")
+				}
+			} else if cfg.PromptFlag != "" {
+				t.Fatalf("PromptFlag should be empty for arg mode, got %q", cfg.PromptFlag)
+			}
+			if cfg.Nudge != "existing nudge" {
+				t.Fatalf("Nudge = %q, want existing nudge only", cfg.Nudge)
+			}
+		})
 	}
 }
 
@@ -235,7 +481,135 @@ func TestTemplateParamsToConfigNilResolvedProvider(t *testing.T) {
 	}
 }
 
-func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
+func TestResolveTemplateCarriesOneShotLifecycleToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "scripted",
+		StartCommand: "env GC_LOG_LEVEL=debug custom-once --work",
+		Lifecycle:    config.AgentLifecycleOneShot,
+		Nudge:        "Check your hook for work.",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("TemplateParams.Hints.Lifecycle = %q, want %q", got, want)
+	}
+	if got, want := templateParamsToConfig(tp).Lifecycle, runtime.LifecycleOneShot; got != want {
+		t.Fatalf("runtime config Lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTemplateCarriesMouseModeToRuntimeConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "operator",
+		StartCommand: "claude",
+		MouseMode:    "on",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = false, want true")
+	}
+	if !templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = false, want true")
+	}
+}
+
+// TestResolveTemplateHeadlessAgentStaysMouseOff is the ga-c4w guard for
+// acceptance #2/#4: the new interactive mouse-on default (sessionCreateHints
+// in internal/api) must NOT bleed into the headless agent path. An agent with
+// no mouse_mode resolves MouseOn=false, so the runtime runs
+// disableMouseAndActivity and the session stays mouse-off — controller-poll
+// safety. This path derives MouseOn from cfgAgent.MouseModeOn(), independent
+// of sessionCreateHints, and is unchanged by this bead.
+func TestResolveTemplateHeadlessAgentStaysMouseOff(t *testing.T) {
+	cityPath := t.TempDir()
+	params := &agentBuildParams{
+		fs:         fsys.NewFake(),
+		cityName:   "bright-lights",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Name: "bright-lights"},
+		beaconTime: testBeaconTime,
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name:         "pool-worker",
+		StartCommand: "claude",
+		// no MouseMode set → headless default (mouse-off)
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.Hints.MouseOn {
+		t.Fatal("TemplateParams.Hints.MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+	if templateParamsToConfig(tp).MouseOn {
+		t.Fatal("runtime config MouseOn = true, want false (headless agent must stay mouse-off)")
+	}
+}
+
+// TestTemplateParamsToConfigInteractiveSessionEnablesMouse locks ga-c4w finding
+// #1 for the MANAGED `gc session new` deferred-start path: the reconciler starts
+// a session_origin=manual bead through templateParamsToConfig (see
+// buildPreparedStartWithWorkDirResolver). A manual session must resolve
+// MouseOn=true even when the agent config sets no mouse_mode, while ephemeral
+// pool agents stay MouseOn=false (controller-poll safety). This is the seam the
+// original API-only fix missed: MouseOn for `gc session new` never flowed through
+// internal/api sessionCreateHints.
+//
+// Scope is deliberately session_origin=manual only. MouseOn is a core-fingerprint
+// field (locked by runtime.TestConfigFingerprintIncludesMouseOn), so auto-flipping
+// it for long-lived config-declared/named sessions would change their drift hash
+// and force a one-time reconciler restart; named sessions follow their resolved
+// Hints.MouseOn (mouse_mode) instead.
+func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
+	// Managed-deferred `gc session new` → session_origin=manual → ManualSession.
+	manual := TemplateParams{ManualSession: true}
+	if !templateParamsToConfig(manual).MouseOn {
+		t.Error("templateParamsToConfig(manual).MouseOn = false, want true (gc session new managed-deferred, ga-c4w)")
+	}
+	// Ephemeral pool agent has no interactive marker → stays mouse-off (poll-safe).
+	pool := TemplateParams{}
+	if templateParamsToConfig(pool).MouseOn {
+		t.Error("templateParamsToConfig(pool).MouseOn = true, want false (pool agent must stay mouse-off, ga-c4w)")
+	}
+	// Named/config sessions are intentionally out of scope: they must not gain a
+	// MouseOn drift from this default (they follow mouse_mode via Hints.MouseOn).
+	named := TemplateParams{ConfiguredNamedIdentity: "operator"}
+	if templateParamsToConfig(named).MouseOn {
+		t.Error("templateParamsToConfig(named).MouseOn = true, want false (named out of scope to avoid fingerprint drift, ga-c4w)")
+	}
+}
+
+func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()
 	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
@@ -263,13 +637,94 @@ func TestResolveTemplateNoneModeRetainsPromptForDeferredDelivery(t *testing.T) {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 	if tp.Prompt == "" {
-		t.Fatal("Prompt should be preserved for PromptMode=none providers so it can be delivered via nudge")
+		t.Fatal("Prompt should be preserved for flag-mode providers so it can be delivered at startup")
+	}
+	if tp.ResolvedProvider == nil || tp.ResolvedProvider.PromptMode != "flag" || tp.ResolvedProvider.PromptFlag != "--prompt" {
+		t.Fatalf("ResolvedProvider prompt delivery = %#v, want flag --prompt", tp.ResolvedProvider)
 	}
 	if !strings.Contains(tp.Prompt, "pool prompt body") {
 		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
 	}
 	if !strings.Contains(tp.Prompt, "[bright-lights] opencode") {
 		t.Fatalf("Prompt missing beacon: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateExplicitTmuxUsesProviderCommandForOpenCode(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
+
+	params := &agentBuildParams{
+		fs:        fs,
+		cityName:  "bright-lights",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Name: "bright-lights", Provider: "gemini"},
+		providers: map[string]config.ProviderSpec{
+			"gemini": {
+				Base:        stringPtr("builtin:opencode"),
+				Command:     "opencode",
+				PathCheck:   "opencode",
+				Args:        []string{"--model", "google/gemini-3.1-pro-preview"},
+				PromptMode:  "flag",
+				PromptFlag:  "--prompt",
+				SupportsACP: boolPtr(true),
+				ACPArgs:     []string{"acp"},
+			},
+		},
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "gemini",
+		PromptTemplate: "prompts/pool-worker.md",
+		Provider:       "gemini",
+		Session:        "tmux",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.IsACP {
+		t.Fatal("IsACP = true, want false for explicit tmux transport")
+	}
+	want := "opencode --model google/gemini-3.1-pro-preview"
+	if tp.Command != want {
+		t.Fatalf("Command = %q, want %q", tp.Command, want)
+	}
+}
+
+func TestResolveTemplateRejectsUnknownSessionTransport(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/pool-worker.md"] = []byte("pool prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "opencode",
+		PromptTemplate: "prompts/pool-worker.md",
+		Provider:       "opencode",
+		Session:        "stdio",
+	}
+
+	_, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown session transport") {
+		t.Fatalf("resolveTemplate() error = %v, want unknown session transport", err)
 	}
 }
 
@@ -308,5 +763,518 @@ func TestResolveTemplateHookEnabledOpencodeOmitsPrimeInstruction(t *testing.T) {
 	}
 	if strings.Contains(tp.Prompt, "Run `gc prime`") {
 		t.Fatalf("hook-enabled prompt should omit manual gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+// A non-hook agent whose rendered prompt is inlined below the beacon already
+// holds the exact bytes `gc prime` would return, so instructing it to run
+// `gc prime` costs a turn and duplicates its context.
+func TestResolveTemplateInlinedPromptOmitsPrimeInstruction(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/mayor.md"] = []byte("mayor prompt body")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.HookEnabled {
+		t.Fatal("HookEnabled = true, want false for this fixture")
+	}
+	if !strings.Contains(tp.Prompt, "mayor prompt body") {
+		t.Fatalf("Prompt missing rendered template body: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "Run `gc prime`") {
+		t.Fatalf("prompt inlined below the beacon should omit the gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+// The instruction is still the only way a non-hook agent gets its context when
+// the beacon ships alone, so that path must keep it.
+func TestResolveTemplateBeaconOnlyKeepsPrimeInstruction(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:     "mayor",
+		Provider: "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Run `gc prime`") {
+		t.Fatalf("beacon-only prompt must keep the gc prime instruction: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
+	cityPath := t.TempDir()
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.md"] = []byte("worker prompt body")
+
+	base := "builtin:claude"
+	providers := config.BuiltinProviders()
+	providers["kiro"] = config.ProviderSpec{
+		Base:             &base,
+		Command:          "kiro-cli",
+		Args:             []string{"chat", "--no-interactive", "--agent", "gascity", "--trust-all-tools"},
+		PromptMode:       "arg",
+		ReadyDelayMs:     5000,
+		ProcessNames:     []string{"kiro-cli", "kiro", "node"},
+		InstructionsFile: "AGENTS.md",
+	}
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights"},
+		providers:       providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/kiro-cli", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.md",
+		Provider:       "kiro",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if got, want := tp.Hints.ProviderName, "claude"; got != want {
+		t.Fatalf("ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := tp.Hints.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+
+	cfg := templateParamsToConfig(tp)
+	if got, want := cfg.ProviderName, "claude"; got != want {
+		t.Fatalf("runtime ProviderName = %q, want launch family %q", got, want)
+	}
+	if got, want := cfg.ProviderOverlayName, "kiro"; got != want {
+		t.Fatalf("runtime ProviderOverlayName = %q, want concrete provider %q", got, want)
+	}
+}
+
+func TestResolveTemplateExpandsPromptCommandTemplates(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Work={{ .WorkQuery }}\nAssigned={{ .AssignedReadyQuery }}\nSling={{ .SlingQuery }}")
+
+	params := &agentBuildParams{
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		rigs:            []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		Dir:            "demo",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+		WorkQuery:      "echo {{.CityName}} {{.Rig}} {{.AgentBase}}",
+		SlingQuery:     "dispatch {} --route={{.Rig}}/{{.AgentBase}} --city={{.CityName}}",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Work=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded WorkQuery: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "Assigned=echo demo-city demo worker") {
+		t.Fatalf("Prompt missing expanded AssignedReadyQuery: %q", tp.Prompt)
+	}
+	if strings.Contains(tp.Prompt, "gc.routed_to") {
+		t.Fatalf("Prompt assigned-ready query should not include routed pool demand: %q", tp.Prompt)
+	}
+	if !strings.Contains(tp.Prompt, "Sling=dispatch {} --route=demo/worker --city=demo-city") {
+		t.Fatalf("Prompt missing expanded SlingQuery: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateAssignedReadyQueryUsesBD105Compatibility(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "demo-city")
+	fs := fsys.NewFake()
+	fs.Files[cityPath+"/prompts/worker.template.md"] = []byte("Assigned={{ .AssignedReadyQuery }}")
+
+	params := &agentBuildParams{
+		city:            &config.City{Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		fs:              fs,
+		cityName:        "",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "opencode"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/opencode", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "worker",
+		PromptTemplate: "prompts/worker.template.md",
+		Provider:       "opencode",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+		t.Fatalf("Prompt missing bd-1.0.5 assigned ready query: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateClaudeProjectsCityDotClaudeSettingsIntoRuntimeFile(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "mayor.md"), []byte("mayor prompt body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".claude", "settings.json"), []byte(`{"custom": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "claude"},
+		providers:       config.BuiltinProviders(),
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "claude",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Command, `.gc/settings.json`) {
+		t.Fatalf("command missing Claude settings path: %q", tp.Command)
+	}
+	runtimePath := filepath.Join(cityPath, ".gc", "settings.json")
+	data, err := os.ReadFile(runtimePath)
+	if err != nil {
+		t.Fatalf("resolveTemplate did not materialize %s: %v", runtimePath, err)
+	}
+	rendered := string(data)
+	if !strings.Contains(rendered, `"custom": true`) {
+		t.Fatalf("runtime settings missing city .claude override:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "SessionStart") {
+		t.Fatalf("runtime settings lost default Claude hooks:\n%s", rendered)
+	}
+}
+
+func TestResolveTemplateWrappedClaudeProjectsSettings(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, "prompts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "prompts", "mayor.md"), []byte("mayor prompt body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := "builtin:claude"
+	providers := config.BuiltinProviders()
+	providers["claude-max"] = config.ProviderSpec{Base: &base}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "bright-lights",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Name: "bright-lights", Provider: "claude-max"},
+		providers:       providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		sessionTemplate: "",
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+	agent := &config.Agent{
+		Name:           "mayor",
+		PromptTemplate: "prompts/mayor.md",
+		Provider:       "claude-max",
+	}
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	wantSettings := fmt.Sprintf("--settings %q", filepath.Join(cityPath, ".gc", "settings.json"))
+	if !strings.Contains(tp.Command, wantSettings) {
+		t.Fatalf("wrapped Claude command missing settings:\n  got:  %s\n  want: ...%s...", tp.Command, wantSettings)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "settings.json")); err != nil {
+		t.Fatalf("resolveTemplate did not materialize wrapped Claude settings: %v", err)
+	}
+}
+
+func TestResolveTemplateCityAppendFragmentsApplyToImportedPackAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/imported"]
+
+[providers.claude]
+base = "builtin:claude"
+
+[agent_defaults]
+append_fragments = ["city-footer"]
+`)
+	write("packs/imported/pack.toml", `
+[pack]
+name = "imported"
+schema = 2
+
+[[agent]]
+name = "mayor"
+provider = "claude"
+scope = "city"
+prompt_template = "agents/mayor/prompt.template.md"
+`)
+	write("packs/imported/agents/mayor/prompt.template.md", "Hello")
+	write("packs/imported/agents/mayor/template-fragments/city-footer.template.md", `{{ define "city-footer" }}City Footer{{ end }}`)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var agentCfg config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if !a.Implicit && a.Name == "mayor" {
+			agentCfg = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected explicit imported mayor agent, got %v", cfg.Agents)
+	}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "test",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       cfg.Providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		packDirs:        cfg.PackDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "City Footer") {
+		t.Fatalf("prompt missing city append fragment: %q", tp.Prompt)
+	}
+}
+
+func TestResolveTemplateScopesRigPackFragmentsByCurrentRig(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("agents/alpha-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("agents/bravo-worker/prompt.template.md", `{{ template "work-query" . }}`)
+	write("packs/alpha/template-fragments/work-query.template.md", `{{ define "work-query" }}alpha-work-query{{ end }}`)
+	write("packs/bravo/template-fragments/work-query.template.md", `{{ define "work-query" }}bravo-work-query{{ end }}`)
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "stub"},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {Command: "/bin/echo"},
+		},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "bravo", Path: "rigs/bravo"},
+		},
+		RigPackDirs: map[string][]string{
+			"alpha": {filepath.Join(cityPath, "packs", "alpha")},
+			"bravo": {filepath.Join(cityPath, "packs", "bravo")},
+		},
+	}
+	alphaAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "alpha",
+		Provider:       "stub",
+		PromptTemplate: "agents/alpha-worker/prompt.template.md",
+	}
+	bravoAgent := config.Agent{
+		Name:           "worker",
+		Dir:            "bravo",
+		Provider:       "stub",
+		PromptTemplate: "agents/bravo-worker/prompt.template.md",
+	}
+
+	params := newAgentBuildParams("test", cityPath, cfg, nil, testBeaconTime, nil, io.Discard)
+	alpha, err := resolveTemplate(params, &alphaAgent, alphaAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(alpha): %v", err)
+	}
+	if !strings.Contains(alpha.Prompt, "alpha-work-query") || strings.Contains(alpha.Prompt, "bravo-work-query") {
+		t.Fatalf("alpha prompt used wrong rig fragment: %q", alpha.Prompt)
+	}
+
+	bravo, err := resolveTemplate(params, &bravoAgent, bravoAgent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate(bravo): %v", err)
+	}
+	if !strings.Contains(bravo.Prompt, "bravo-work-query") || strings.Contains(bravo.Prompt, "alpha-work-query") {
+		t.Fatalf("bravo prompt used wrong rig fragment: %q", bravo.Prompt)
+	}
+}
+
+func TestResolveTemplateConventionAgentAppendFragments(t *testing.T) {
+	cityPath := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	write("city.toml", `
+	[workspace]
+	name = "test"
+	provider = "claude"
+	includes = ["packs/imported"]
+
+	[providers.claude]
+	base = "builtin:claude"
+	`)
+	write("packs/imported/pack.toml", `
+	[pack]
+	name = "imported"
+	schema = 2
+	`)
+	write("packs/imported/agents/mayor/agent.toml", `
+	scope = "city"
+	append_fragments = ["discord-v0"]
+	`)
+	write("packs/imported/agents/mayor/prompt.template.md", "Hello")
+	write("packs/imported/agents/mayor/template-fragments/discord-v0.template.md", `{{ define "discord-v0" }}Discord Ready{{ end }}`)
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	var agentCfg config.Agent
+	found := false
+	for _, a := range cfg.Agents {
+		if !a.Implicit && a.Name == "mayor" {
+			agentCfg = a
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected explicit imported mayor agent, got %v", cfg.Agents)
+	}
+	params := &agentBuildParams{
+		fs:              fsys.OSFS{},
+		cityName:        "test",
+		cityPath:        cityPath,
+		workspace:       &cfg.Workspace,
+		providers:       cfg.Providers,
+		lookPath:        func(string) (string, error) { return "/usr/bin/claude", nil },
+		beaconTime:      testBeaconTime,
+		packDirs:        cfg.PackDirs,
+		globalFragments: cfg.Workspace.GlobalFragments,
+		appendFragments: mergeFragmentLists(cfg.AgentDefaults.AppendFragments, cfg.AgentsDefaults.AppendFragments),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &agentCfg, agentCfg.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if !strings.Contains(tp.Prompt, "Discord Ready") {
+		t.Fatalf("prompt missing per-agent append fragment: %q", tp.Prompt)
 	}
 }

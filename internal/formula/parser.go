@@ -1,7 +1,10 @@
 package formula
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,14 +13,22 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
-// Formula file extensions. TOML is preferred, JSON is legacy fallback.
+// Formula file extensions. Canonical TOML is preferred, infixed TOML remains
+// supported at lower precedence, and JSON is a legacy fallback.
 const (
-	FormulaExtTOML = ".formula.toml"
-	FormulaExtJSON = ".formula.json"
-	FormulaExt     = FormulaExtJSON // Legacy alias for backwards compatibility
+	FormulaExtTOML       = CanonicalTOMLExt
+	FormulaLegacyExtTOML = LegacyTOMLExt
+	FormulaExtJSON       = ".formula.json"
+	FormulaExt           = FormulaExtJSON // Legacy alias for backwards compatibility
 )
+
+const descriptionFileInlineMaxBytes = 4 * 1024
+
+// ErrVarValidation reports invalid formula variable input.
+var ErrVarValidation = errors.New("variable validation failed")
 
 // Parser handles loading and resolving formulas.
 //
@@ -27,6 +38,12 @@ const (
 type Parser struct {
 	// searchPaths are directories to search for formulas (in order).
 	searchPaths []string
+
+	// source reads formula files. Defaults to FSSource (working-tree
+	// state). Callers that want ref-stable resolution pass a
+	// GitRefSource (typically via SourceFromEnv) using SetSource.
+	// See #2030.
+	source Source
 
 	// cache stores loaded formulas by name.
 	cache map[string]*Formula
@@ -41,6 +58,10 @@ type Parser struct {
 // NewParser creates a new formula parser.
 // searchPaths are directories to search for formulas when resolving extends.
 // Default paths are: .beads/formulas, ~/.beads/formulas, $GT_ROOT/.beads/formulas
+//
+// The Parser starts with FSSource (working-tree resolution, the historical
+// behavior). Callers that want ref-stable resolution call SetSource with a
+// GitRefSource (typically via formula.SourceFromEnv).
 func NewParser(searchPaths ...string) *Parser {
 	paths := searchPaths
 	if len(paths) == 0 {
@@ -48,11 +69,27 @@ func NewParser(searchPaths ...string) *Parser {
 	}
 	return &Parser{
 		searchPaths:    paths,
+		source:         FSSource{},
 		cache:          make(map[string]*Formula),
 		resolvingSet:   make(map[string]bool),
 		resolvingChain: nil,
 	}
 }
+
+// SetSource swaps the formula-file Source used by the Parser. A nil
+// argument is ignored so callers can pass conditional sources without
+// guarding. Returns the Parser for chained construction.
+func (p *Parser) SetSource(s Source) *Parser {
+	if s != nil {
+		p.source = s
+	}
+	return p
+}
+
+// Source returns the active Source. Useful for diagnostics and for
+// derived parsers (compile.go, fragment.go) that need to propagate
+// the same Source to child constructions.
+func (p *Parser) Source() Source { return p.source }
 
 // defaultSearchPaths returns the default formula search paths.
 func defaultSearchPaths() []string {
@@ -77,7 +114,8 @@ func defaultSearchPaths() []string {
 }
 
 // ParseFile parses a formula from a file path.
-// Detects format from extension: .formula.toml or .formula.json
+// Supported extensions are .toml, .formula.toml, and .formula.json.
+// For .formula.toml, the ".formula" infix is stripped from the symbolic name.
 func (p *Parser) ParseFile(path string) (*Formula, error) {
 	// Check cache first
 	absPath, err := filepath.Abs(path)
@@ -89,40 +127,87 @@ func (p *Parser) ParseFile(path string) (*Formula, error) {
 		return cached, nil
 	}
 
-	// Read and parse the file
-	// #nosec G304 -- absPath comes from controlled search paths or explicit user input
-	data, err := os.ReadFile(absPath)
+	// Read via the configured Source so ref-stable resolution honors
+	// the committed file at p.source's ref rather than working-tree
+	// state. See #2030.
+	data, err := p.source.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
+	return p.parseResolvedAt(data, absPath, path)
+}
+
+// ParseTOMLAt parses formula content as though it had been read from srcPath,
+// resolving description_file references relative to srcPath's directory (the
+// documented ../assets/ form is still shadowed through the parser's layer order)
+// and caching the result under srcPath and the formula name. Authoring and
+// validation paths that hold draft bytes not yet written to disk use this so a
+// relative description_file such as "../prompts/x.md" resolves against the
+// draft's eventual on-disk location instead of an unrelated temporary directory.
+func (p *Parser) ParseTOMLAt(content []byte, srcPath string) (*Formula, error) {
+	absPath, err := filepath.Abs(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve path: %w", err)
+	}
+	return p.parseResolvedAt(content, absPath, srcPath)
+}
+
+// parseResolvedAt parses formula bytes destined for absPath: it selects the
+// decoder from absPath's extension, stamps Source and ContentHash, resolves
+// description_file references relative to absPath's directory, and caches the
+// formula by absPath and name. label is the caller-facing path used in error
+// messages (the pre-Abs path the caller supplied).
+func (p *Parser) parseResolvedAt(data []byte, absPath, label string) (*Formula, error) {
 	// Detect format from extension
-	var formula *Formula
-	if strings.HasSuffix(path, FormulaExtTOML) {
-		formula, err = p.ParseTOML(data)
+	var f *Formula
+	var err error
+	if IsTOMLFilename(absPath) {
+		f, err = p.ParseTOML(data)
 	} else {
-		formula, err = p.Parse(data)
+		f, err = p.Parse(data)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", label, err)
 	}
 
-	formula.Source = absPath
+	f.Source = absPath
+	f.ContentHash = contentHash(data)
 
 	// Set source tracing info on all steps (gt-8tmz.18)
-	SetSourceInfo(formula)
+	SetSourceInfo(f)
 
-	// Resolve description_file references relative to the formula file's directory.
-	formulaDir := filepath.Dir(absPath)
-	resolveDescriptionFiles(formula.Steps, formulaDir)
-	resolveDescriptionFiles(formula.Template, formulaDir)
+	// Resolve description_file references relative to the real formula file's
+	// directory, with asset references shadowed through formula layer order.
+	// Pack formulas may be symlinked into a city's formula directory; relative
+	// prompt files should stay pack-relative, not city-relative. Graph.v2
+	// formulas fail fast on missing files; legacy formulas keep the historical
+	// best-effort behavior.
+	formulaDir := descriptionFileBaseDir(absPath)
+	strictDescriptionFiles := UsesGraphCompiler(f)
+	if err := p.resolveDescriptionFiles(f.Steps, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
+	}
+	if err := p.resolveDescriptionFiles(f.Template, formulaDir, strictDescriptionFiles, f.Vars); err != nil {
+		return nil, fmt.Errorf("resolve description_file in %s: %w", label, err)
+	}
+	if err := p.resolveCheckPaths(f.Steps, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve check path in %s: %w", label, err)
+	}
+	if err := p.resolveCheckPaths(f.Template, formulaDir, strictDescriptionFiles); err != nil {
+		return nil, fmt.Errorf("resolve check path in %s: %w", label, err)
+	}
 
-	p.cache[absPath] = formula
+	p.cache[absPath] = f
 
 	// Also cache by name for extends resolution
-	p.cache[formula.Formula] = formula
+	p.cache[f.Formula] = f
 
-	return formula, nil
+	return f, nil
+}
+
+func descriptionFileBaseDir(path string) string {
+	return filepath.Dir(pathutil.NormalizePathForCompare(path))
 }
 
 // Parse parses a formula from JSON bytes.
@@ -133,9 +218,6 @@ func (p *Parser) Parse(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -151,9 +233,6 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 	}
 
 	// Set defaults
-	if formula.Version == 0 {
-		formula.Version = 1
-	}
 	if formula.Type == "" {
 		formula.Type = TypeWorkflow
 	}
@@ -185,15 +264,23 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		return formula, nil
 	}
 
+	compilerConstraints := directFormulaCompilerConstraints(formula)
+
 	// Build merged formula from parents
 	merged := &Formula{
 		Formula:     formula.Formula,
 		Description: formula.Description,
-		Version:     formula.Version,
+		Catalog:     formula.Catalog,
+		Metadata:    cloneFormulaMetadata(formula.Metadata),
+		Contract:    formula.Contract,
+		Requires:    cloneRequirements(formula.Requires),
 		Type:        formula.Type,
 		Source:      formula.Source,
+		Phase:       formula.Phase,
+		Pour:        formula.Pour,
 		Vars:        make(map[string]*VarDef),
 		Steps:       nil,
+		Template:    nil,
 		Compose:     nil,
 	}
 
@@ -210,6 +297,38 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
 		}
 
+		parentConstraints, err := formulaCompilerConstraints(parent)
+		if err != nil {
+			return nil, fmt.Errorf("resolve parent %s: %w", parentName, err)
+		}
+		compilerConstraints = append(compilerConstraints, parentConstraints...)
+
+		if merged.Contract == "" {
+			merged.Contract = parent.Contract
+		}
+		if merged.Requires == nil {
+			merged.Requires = cloneRequirements(parent.Requires)
+		}
+
+		// Phase cascades from the first parent that declares one; child
+		// declaration wins because merged was seeded from the child.
+		if merged.Phase == "" {
+			merged.Phase = parent.Phase
+		}
+
+		// Pour is an opt-in escalation: any parent or the child requesting
+		// pour promotes the merged formula. With a plain bool the zero value
+		// is indistinguishable from "unset", so OR is the simplest coherent
+		// rule that preserves monotonic opt-in; a *bool field would allow
+		// explicit child opt-out but isn't worth the complexity for this flag.
+		if !merged.Pour {
+			merged.Pour = parent.Pour
+		}
+
+		// Merge parent metadata with child and earlier parents taking
+		// precedence. Nested tables are merged recursively.
+		merged.Metadata = mergeFormulaMetadata(parent.Metadata, merged.Metadata)
+
 		// Merge parent vars (parent vars are inherited, child overrides)
 		for name, varDef := range parent.Vars {
 			if _, exists := merged.Vars[name]; !exists {
@@ -219,6 +338,10 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 
 		// Merge parent steps (append, child steps come after)
 		merged.Steps = append(merged.Steps, parent.Steps...)
+
+		// Parent templates append in declaration order. Only the child gets
+		// override semantics so parent-parent conflicts still surface later.
+		merged.Template = append(merged.Template, parent.Template...)
 
 		// Merge parent compose rules
 		merged.Compose = mergeComposeRules(merged.Compose, parent.Compose)
@@ -232,6 +355,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	// Merge child steps: override parent steps by ID (preserving position),
 	// append new child steps at the end.
 	merged.Steps = mergeSteps(merged.Steps, formula.Steps)
+	merged.Template = mergeSteps(merged.Template, formula.Template)
 
 	merged.Compose = mergeComposeRules(merged.Compose, formula.Compose)
 
@@ -240,33 +364,40 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		merged.Description = formula.Description
 	}
 
+	if err := validateFormulaCompilerConstraintSet(merged.Formula, compilerConstraints); err != nil {
+		return nil, err
+	}
+	setFormulaCompilerConstraints(merged, compilerConstraints)
+
 	if err := merged.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateResolvedGraphV2DescriptionFiles(merged); err != nil {
 		return nil, err
 	}
 
 	return merged, nil
 }
 
-// loadFormula loads a formula by name from search paths.
-// Tries TOML first (.formula.toml), then falls back to JSON (.formula.json).
+// loadFormula loads a formula by name from search paths. Search paths are
+// ordered lowest→highest priority (matching ComputeFormulaLayers); the
+// highest-priority path containing the formula wins. Within a single path,
+// plain .toml beats infixed .formula.toml beats legacy .formula.json.
+//
+// Both the existence probe and the read use p.source so ref-stable
+// callers (Source set via SetSource) observe a single coherent ref —
+// the existence check and the content read cannot diverge across
+// working-tree vs. committed state. See #2030.
 func (p *Parser) loadFormula(name string) (*Formula, error) {
-	// Check cache first
 	if cached, ok := p.cache[name]; ok {
 		return cached, nil
 	}
 
-	// Search for the formula file - try TOML first, then JSON
-	extensions := []string{FormulaExtTOML, FormulaExtJSON}
-	for _, dir := range p.searchPaths {
-		for _, ext := range extensions {
-			path := filepath.Join(dir, name+ext)
-			if _, err := os.Stat(path); err == nil {
-				return p.ParseFile(path)
-			}
-		}
+	path, ok := ResolveWithSource(p.source, p.searchPaths, name)
+	if !ok {
+		return nil, fmt.Errorf("formula %q not found in search paths", name)
 	}
-
-	return nil, fmt.Errorf("formula %q not found in search paths", name)
+	return p.ParseFile(path)
 }
 
 // LoadByName loads a formula by name from search paths.
@@ -301,6 +432,82 @@ func mergeSteps(parent, child []*Step) []*Step {
 	}
 
 	return result
+}
+
+func mergeFormulaMetadata(base, overlay map[string]any) map[string]any {
+	if len(base) == 0 {
+		return cloneFormulaMetadata(overlay)
+	}
+	if len(overlay) == 0 {
+		return cloneFormulaMetadata(base)
+	}
+
+	result := cloneFormulaMetadata(base)
+	for key, overlayValue := range overlay {
+		if baseMap, ok := formulaMetadataMap(result[key]); ok {
+			if overlayMap, ok := formulaMetadataMap(overlayValue); ok {
+				result[key] = mergeFormulaMetadata(baseMap, overlayMap)
+				continue
+			}
+		}
+		result[key] = cloneFormulaMetadataValue(overlayValue)
+	}
+	return result
+}
+
+func cloneFormulaMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	clone := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		clone[key] = cloneFormulaMetadataValue(value)
+	}
+	return clone
+}
+
+func cloneFormulaMetadataValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneFormulaMetadata(v)
+	case map[string]string:
+		clone := make(map[string]any, len(v))
+		for key, value := range v {
+			clone[key] = value
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(v))
+		for i, item := range v {
+			clone[i] = cloneFormulaMetadataValue(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), v...)
+	case []int64:
+		return append([]int64(nil), v...)
+	case []float64:
+		return append([]float64(nil), v...)
+	case []bool:
+		return append([]bool(nil), v...)
+	default:
+		return value
+	}
+}
+
+func formulaMetadataMap(value any) (map[string]any, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		return v, true
+	case map[string]string:
+		out := make(map[string]any, len(v))
+		for key, value := range v {
+			out[key] = value
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // mergeComposeRules merges two compose rule sets.
@@ -371,10 +578,29 @@ func ExtractVariables(formula *Formula) []string {
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
+		for _, l := range step.Labels {
+			extract(l)
+		}
+		for k, v := range step.Metadata {
+			extract(k)
+			extract(v)
+		}
+		if step.Drain != nil {
+			extract(step.Drain.Formula)
+			extract(step.Drain.ContinuationGroup)
+			extract(step.Drain.MemberAccess)
+			extract(step.Drain.OnItemFailure)
+		}
 		for _, child := range step.Children {
 			extractFromStep(child)
+		}
+		if step.Loop != nil {
+			for _, child := range step.Loop.Body {
+				extractFromStep(child)
+			}
 		}
 	}
 
@@ -397,17 +623,111 @@ func Substitute(s string, vars map[string]string) string {
 	})
 }
 
+// CheckResidualVars returns the names of any {{...}} placeholders remaining
+// in s after substitution. A non-empty return indicates a var name typo or
+// a missing or misspelled --var flag.
+func CheckResidualVars(s string) []string {
+	matches := varPattern.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// CheckResidualTimeoutVars returns unresolved {{var}} and {var} placeholders
+// in timeout strings after all available substitutions have been applied.
+func CheckResidualTimeoutVars(s string) []string {
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+
+	for _, name := range CheckResidualVars(s) {
+		add(name)
+	}
+	for _, match := range rangeVarPattern.FindAllStringSubmatchIndex(s, -1) {
+		start, end := match[0], match[1]
+		if start > 0 && s[start-1] == '{' {
+			continue
+		}
+		if end < len(s) && s[end] == '}' {
+			continue
+		}
+		add(s[match[2]:match[3]])
+	}
+	return names
+}
+
 // ValidateVars checks that all required variables are provided
 // and all values pass their constraints.
 func ValidateVars(formula *Formula, values map[string]string) error {
-	var errs []string
+	errs, _ := CollectVarValidationErrors(formula.Vars, values)
+	return formatVarValidationErrors(errs)
+}
 
-	for name, def := range formula.Vars {
+// ValidateVarDefs validates explicit var definitions against provided values.
+// This is the recipe-level equivalent of ValidateVars, used after formula
+// compilation when only the remaining VarDef map is available.
+func ValidateVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	errs, _ := CollectVarValidationErrors(defs, values)
+	return formatVarValidationErrors(errs)
+}
+
+// ValidateProvidedVarDefs validates constraints for values the caller supplied
+// without requiring every required variable to be present.
+func ValidateProvidedVarDefs(defs map[string]*VarDef, values map[string]string) error {
+	providedDefs := make(map[string]*VarDef)
+	for name := range values {
+		if def, ok := defs[name]; ok {
+			providedDefs[name] = def
+		}
+	}
+	errs, _ := collectVarValidationErrors(providedDefs, values, false)
+	return formatVarValidationErrors(errs)
+}
+
+// CollectVarValidationErrors validates explicit var definitions against the
+// provided values and returns raw error strings plus the set of missing
+// required vars. Callers that need the historical wrapped error can pass the
+// returned error strings through formatVarValidationErrors.
+func CollectVarValidationErrors(defs map[string]*VarDef, values map[string]string) ([]string, map[string]bool) {
+	return collectVarValidationErrors(defs, values, true)
+}
+
+func collectVarValidationErrors(defs map[string]*VarDef, values map[string]string, requireMissing bool) ([]string, map[string]bool) {
+	var errs []string
+	missingRequired := make(map[string]bool)
+	names := make([]string, 0, len(defs))
+	for name := range defs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	for _, name := range names {
+		def := defs[name]
+		if def == nil {
+			continue
+		}
 		val, provided := values[name]
 
 		// Check required
-		if def.Required && !provided {
+		if requireMissing && def.Required && !provided {
 			errs = append(errs, fmt.Sprintf("variable %q is required", name))
+			missingRequired[name] = true
 			continue
 		}
 
@@ -446,11 +766,17 @@ func ValidateVars(formula *Formula, values map[string]string) error {
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	if len(missingRequired) == 0 {
+		missingRequired = nil
 	}
+	return errs, missingRequired
+}
 
-	return nil
+func formatVarValidationErrors(errs []string) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
 }
 
 // ApplyDefaults returns a new map with default values filled in.
@@ -472,31 +798,245 @@ func ApplyDefaults(formula *Formula, values map[string]string) map[string]string
 	return result
 }
 
-// SetSourceInfo sets SourceFormula and SourceLocation on all steps in a formula.
-// Called after parsing to enable source tracing during cooking (gt-8tmz.18).
 // resolveDescriptionFiles walks all steps and replaces DescriptionFile
-// with the file's contents. Paths are resolved relative to baseDir
-// (the formula file's directory).
-func resolveDescriptionFiles(steps []*Step, baseDir string) {
+// with the file's contents. Non-asset paths are resolved relative to baseDir
+// (the formula file's directory). Paths using the documented ../assets/ form
+// are resolved through formula layer order so city assets can shadow pack
+// assets while the formula itself remains inherited from a lower-priority pack.
+func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict bool, vars map[string]*VarDef) error {
 	for _, step := range steps {
-		if step == nil || step.DescriptionFile == "" {
+		if step == nil {
 			continue
 		}
-		path := step.DescriptionFile
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, path)
+		if step.DescriptionFile != "" {
+			data, path, err := p.readDescriptionFile(step.DescriptionFile, baseDir)
+			if err != nil {
+				if strict {
+					return fmt.Errorf("%s: %w", step.DescriptionFile, err)
+				}
+			} else {
+				if len(data) > descriptionFileInlineMaxBytes {
+					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+					// Record the resolved path out-of-band so a later
+					// substitution pass over Description (expansion
+					// templates, loop bodies) can recognize this stub and
+					// leave its embedded path untouched (gastownhall/gascity#4860).
+					step.DescriptionFileResolvedPath = path
+				} else {
+					step.Description = string(data)
+					step.DescriptionFileResolvedPath = ""
+				}
+				step.DescriptionFile = "" // consumed; don't serialize
+			}
 		}
-		// #nosec G304 -- path comes from formula author, same trust as description
-		data, err := os.ReadFile(path)
-		if err == nil {
-			step.Description = string(data)
+		if err := p.resolveDescriptionFiles(step.Children, baseDir, strict, vars); err != nil {
+			return err
 		}
-		step.DescriptionFile = "" // consumed; don't serialize
-		if len(step.Children) > 0 {
-			resolveDescriptionFiles(step.Children, baseDir)
+		if step.Loop != nil {
+			if err := p.resolveDescriptionFiles(step.Loop.Body, baseDir, strict, vars); err != nil {
+				return err
+			}
 		}
 	}
-	// Also handle template steps (expansion formulas).
+	return nil
+}
+
+func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, error) {
+	if winner, ok := p.winningAssetPath(rawPath); ok {
+		data, err := p.source.ReadFile(winner)
+		return data, winner, err
+	}
+
+	path := rawPath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(baseDir, path)
+	}
+	data, err := p.source.ReadFile(path)
+	return data, path, err
+}
+
+// winningAssetPath resolves a documented "../assets/<rel>" reference to the
+// highest-priority formula layer that ships the asset. searchPaths are ordered
+// lowest→highest priority, so the last matching layer wins — the same
+// shadowing rule description_file assets use. Returns ("", false) when rawPath
+// is not in the ../assets/ form or no layer ships the asset.
+func (p *Parser) winningAssetPath(rawPath string) (string, bool) {
+	assetRel, ok := descriptionAssetRelPath(rawPath)
+	if !ok {
+		return "", false
+	}
+	var winner string
+	for _, layer := range p.searchPaths {
+		candidate := filepath.Join(filepath.Dir(layer), "assets", filepath.FromSlash(assetRel))
+		if p.source.Stat(candidate) {
+			winner = candidate
+		}
+	}
+	if winner == "" {
+		return "", false
+	}
+	return winner, true
+}
+
+// resolveCheckPaths walks steps (and their children and loop bodies) and
+// rewrites each ralph check path written in the documented
+// "../assets/scripts/checks/<name>" form to the absolute path of the
+// highest-priority formula layer that ships the script, mirroring how
+// description_file assets shadow. Legacy/non-asset paths (e.g. ".gc/..." or
+// an absolute path) are left untouched. In strict (graph.v2) mode an
+// ../assets/ check that resolves to nothing is a compile error, surfacing a
+// missing or misspelled check script at cook time instead of as a confusing
+// runtime "escapes trusted roots" failure.
+func (p *Parser) resolveCheckPaths(steps []*Step, baseDir string, strict bool) error {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if err := p.resolveStepCheckPath(step, baseDir, strict); err != nil {
+			return err
+		}
+		if err := p.resolveCheckPaths(step.Children, baseDir, strict); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := p.resolveCheckPaths(step.Loop.Body, baseDir, strict); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolveStepCheckPath rewrites a single step's "../assets/..." ralph check
+// path to its absolute layer asset. A path that still carries a template
+// placeholder (e.g. "../assets/scripts/checks/{target}.sh") is deferred: the
+// placeholder is substituted at expand time, so it cannot be matched against
+// on-disk files here. resolveExpandedCheckPaths re-runs this resolution once
+// expansion has substituted the placeholder. In strict (graph.v2) mode a
+// non-templated ../assets path that no formula layer ships is a compile error.
+func (p *Parser) resolveStepCheckPath(step *Step, baseDir string, strict bool) error {
+	if step.Ralph == nil || step.Ralph.Check == nil {
+		return nil
+	}
+	raw := step.Ralph.Check.Path
+	if strings.Contains(raw, "{") {
+		return nil
+	}
+	if resolved, ok := p.resolveCheckAssetPath(raw, baseDir); ok {
+		step.Ralph.Check.Path = resolved
+		return nil
+	}
+	if strict {
+		if _, isAsset := descriptionAssetRelPath(raw); isAsset {
+			return fmt.Errorf("step %q: check path %q not found in any formula layer", step.ID, raw)
+		}
+	}
+	return nil
+}
+
+// resolveExpandedCheckPaths re-resolves "../assets/..." ralph check paths after
+// expansion substitutes {target}/{{var}} placeholders into them. A templated
+// check path is deferred at parse time (see resolveStepCheckPath); once
+// expansion makes it concrete the path must be resolved to its absolute layer
+// asset before ApplyRalph stamps it into gc.check_path, otherwise the runtime
+// receives a relative "../assets/..." path, resolves it against the store/work
+// dir, and the check fails instead of running the shipped script. Idempotent
+// for paths that are already absolute, non-asset, or still templated.
+func (p *Parser) resolveExpandedCheckPaths(f *Formula) error {
+	return p.resolveCheckPaths(f.Steps, descriptionFileBaseDir(f.Source), UsesGraphCompiler(f))
+}
+
+// resolveCheckAssetPath resolves a "../assets/<rel>" check path to an absolute
+// script path: the highest-priority layer that ships it, falling back to the
+// formula's own pack asset (baseDir-relative) so a formula parsed outside its
+// layer set still resolves its shipped script. Returns ("", false) for
+// non-asset paths or when nothing ships the script.
+func (p *Parser) resolveCheckAssetPath(rawPath, baseDir string) (string, bool) {
+	if _, ok := descriptionAssetRelPath(rawPath); !ok {
+		return "", false
+	}
+	if winner, ok := p.winningAssetPath(rawPath); ok {
+		return winner, true
+	}
+	candidate := filepath.Clean(filepath.Join(baseDir, filepath.FromSlash(rawPath)))
+	if p.source.Stat(candidate) {
+		return candidate, true
+	}
+	return "", false
+}
+
+func descriptionAssetRelPath(rawPath string) (string, bool) {
+	path := filepath.ToSlash(filepath.Clean(rawPath))
+	const assetPrefix = "../assets/"
+	if !strings.HasPrefix(path, assetPrefix) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(path, assetPrefix)
+	if rel == "." || rel == "" || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, true
+}
+
+func descriptionFileReferenceDescription(rawPath, resolvedPath string, size int, vars map[string]*VarDef) string {
+	var b strings.Builder
+	b.WriteString("# External Prompt Required\n\n")
+	b.WriteString("This bead still follows the normal runtime and lifecycle protocol from your startup prompt and current agent prompt, including claiming work, honoring result contracts, checking for follow-on work, and draining only when appropriate.\n\n")
+	b.WriteString("In addition to that protocol, this bead's task-specific instructions come from a formula `description_file` that is too large to inline safely into bead storage.\n\n")
+	b.WriteString("Before you start the task-specific work, you MUST read the file below and treat it as the task prompt for this bead. Do not proceed from memory, ambient skills, or prior workflow knowledge until you have read it.\n\n")
+	fmt.Fprintf(&b, "- Resolved prompt file: `%s`\n", resolvedPath)
+	fmt.Fprintf(&b, "- Original formula description_file: `%s`\n", rawPath)
+	fmt.Fprintf(&b, "- Prompt file size: %d bytes\n\n", size)
+	b.WriteString("Treat the file contents as the authoritative task prompt for this bead. It augments the startup/runtime protocol; it does not replace the startup prompt, the current agent prompt, or any bead lifecycle/result-contract instructions already given to you.\n")
+	b.WriteString("Follow the section matching this bead's `gc.step_id` metadata and title, plus any result, closure, lifecycle, or post-close contract sections in that file.\n")
+
+	keys := make([]string, 0, len(vars))
+	for name := range vars {
+		keys = append(keys, name)
+	}
+	slices.Sort(keys)
+	if len(keys) > 0 {
+		b.WriteString("\n## Formula Variables\n\n")
+		b.WriteString("Use these resolved formula values when interpreting `{{...}}` placeholders in the prompt file:\n\n")
+		b.WriteString("```bash\n")
+		for _, name := range keys {
+			fmt.Fprintf(&b, "%s=\"{{%s}}\"\n", name, name)
+		}
+		b.WriteString("```\n")
+	}
+
+	return b.String()
+}
+
+func validateResolvedGraphV2DescriptionFiles(f *Formula) error {
+	if !UsesGraphCompiler(f) {
+		return nil
+	}
+	if err := rejectUnresolvedDescriptionFiles(f.Steps, "steps"); err != nil {
+		return err
+	}
+	return rejectUnresolvedDescriptionFiles(f.Template, "template")
+}
+
+func rejectUnresolvedDescriptionFiles(steps []*Step, prefix string) error {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d] (%s)", prefix, i, step.ID)
+		if path := strings.TrimSpace(step.DescriptionFile); path != "" {
+			return fmt.Errorf("%s.description_file %q was not resolved", stepPrefix, path)
+		}
+		if err := rejectUnresolvedDescriptionFiles(step.Children, stepPrefix+".children"); err != nil {
+			return err
+		}
+		if step.Loop != nil {
+			if err := rejectUnresolvedDescriptionFiles(step.Loop.Body, stepPrefix+".loop.body"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // SetSourceInfo populates the SourceFormula and SourcePath fields on each
@@ -524,4 +1064,16 @@ func setSourceInfoRecursive(steps []*Step, formulaName, pathPrefix string) {
 			setSourceInfoRecursive(step.Loop.Body, formulaName, bodyPath)
 		}
 	}
+}
+
+func contentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// ContentHash returns the SHA-256 hex digest of arbitrary bytes. Useful for
+// callers that need to compute a formula content hash from raw file data
+// outside the parser.
+func ContentHash(data []byte) string {
+	return contentHash(data)
 }

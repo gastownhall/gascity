@@ -1,0 +1,859 @@
+package packman
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+)
+
+func TestCheckInstalledNoRemoteImportsMissingLockOK(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: localPack},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+	if report.CheckedSources != 0 {
+		t.Fatalf("CheckedSources = %d, want 0", report.CheckedSources)
+	}
+}
+
+// TestCheckInstalledReportsMissingTransitiveLockEntryFromLocalPathSource is
+// the regression for #4525's sibling report (#4523): a local path-source
+// pack's own remote imports must still be walked and checked against the
+// lockfile, even though the local pack itself is never locked. Before the
+// fix, walkImport returned immediately for any non-remote source, so a
+// missing transitive remote import silently read as "Import state OK".
+func TestCheckInstalledReportsMissingTransitiveLockEntryFromLocalPathSource(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	localPack := writeLocalPack(t, `
+[pack]
+name = "local"
+schema = 1
+
+[imports.roles]
+source = "https://example.com/roles.git"
+version = "^1.0"
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: localPack},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lock-entry")
+}
+
+// TestCheckInstalledReportsMissingTransitiveLockEntryFromRelativeLocalPathSource
+// is the check-side regression for the relative-source half of #4523: a
+// non-git local pack stored as a city-relative path ("packs/local") must be
+// resolved against the city root, not the process working directory, so its
+// transitive remote imports are still checked against the lockfile. This runs
+// from a foreign cwd; before the fix a cwd-relative read found no pack.toml
+// and the missing transitive entry silently read as "Import state OK".
+func TestCheckInstalledReportsMissingTransitiveLockEntryFromRelativeLocalPathSource(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	// Run from a working directory different from the city so a cwd-relative
+	// read of the source would fail to find the pack.
+	t.Chdir(t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(city, "packs", "local"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "packs", "local", "pack.toml"), []byte(`
+[pack]
+name = "local"
+schema = 1
+
+[imports.roles]
+source = "https://example.com/roles.git"
+version = "^1.0"
+`), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: filepath.Join("packs", "local")},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lock-entry")
+}
+
+// TestCheckInstalledToleratesMissingLocalPathSourcePack is the check.go
+// sibling of TestSyncLockToleratesMissingLocalPathSourcePack: a local path
+// source that isn't materialized on disk has no transitive imports to
+// discover and must not report an issue -- only a pack.toml that exists but
+// fails to parse is a genuine "invalid-local-pack" problem.
+func TestCheckInstalledToleratesMissingLocalPathSourcePack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"local": {Source: filepath.Join(city, "does-not-exist")},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none for an unmaterialized local path source", report.Issues)
+	}
+}
+
+func TestCheckInstalledReportsMissingLockfile(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lockfile")
+}
+
+func TestSyncLockUsesBundledFallbackForPublicGastownWhenRemoteUnavailable(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	oldRunGit := runGit
+	t.Cleanup(func() { runGit = oldRunGit })
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+	oldRunNetworkGit := runNetworkGit
+	t.Cleanup(func() { runNetworkGit = oldRunNetworkGit })
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+
+	imports := map[string]config.Import{
+		"gastown": {
+			Source:  config.PublicGastownPackSource,
+			Version: config.PublicGastownPackVersion,
+		},
+	}
+	lock, err := SyncLock(city, imports, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack, ok := lock.Packs[config.PublicGastownPackSource]
+	if !ok {
+		t.Fatalf("lock packs = %#v, want public gastown source", lock.Packs)
+	}
+	if pack.Commit != strings.TrimPrefix(config.PublicGastownPackVersion, "sha:") {
+		t.Fatalf("lock commit = %q, want pinned public gastown commit", pack.Commit)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	if _, err := InstallLocked(city); err != nil {
+		t.Fatalf("InstallLocked: %v", err)
+	}
+	report, err := CheckInstalled(city, imports)
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+
+	cacheDir, err := RepoCachePath(config.PublicGastownPackSource, pack.Commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "pack.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing pack.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "agents", "dog", "agent.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing dog agent: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gastown", "formulas", "mol-shutdown-dance.toml")); err != nil {
+		t.Fatalf("public gastown synthetic cache missing shutdown formula: %v", err)
+	}
+}
+
+func TestSyncLockUsesBundledFallbackForPublicGascityWhenRemoteUnavailable(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	oldRunGit := runGit
+	t.Cleanup(func() { runGit = oldRunGit })
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+	oldRunNetworkGit := runNetworkGit
+	t.Cleanup(func() { runNetworkGit = oldRunNetworkGit })
+	runNetworkGit = func(_, _, _ string, args ...string) (string, error) {
+		return "", fmt.Errorf("network unavailable for git %s", strings.Join(args, " "))
+	}
+
+	imports := map[string]config.Import{
+		"gascity": {
+			Source:  config.PublicGascityPackSource,
+			Version: config.PublicGascityPackVersion,
+		},
+	}
+	lock, err := SyncLock(city, imports, InstallResolveIfNeeded)
+	if err != nil {
+		t.Fatalf("SyncLock: %v", err)
+	}
+	pack, ok := lock.Packs[config.PublicGascityPackSource]
+	if !ok {
+		t.Fatalf("lock packs = %#v, want public gascity source", lock.Packs)
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, lock); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	if _, err := InstallLocked(city); err != nil {
+		t.Fatalf("InstallLocked: %v", err)
+	}
+	cacheDir, err := RepoCachePath(config.PublicGascityPackSource, pack.Commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "pack.toml")); err != nil {
+		t.Fatalf("public gascity synthetic cache missing pack.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "gascity", "skills", "mayor", "SKILL.md")); err != nil {
+		t.Fatalf("public gascity synthetic cache missing mayor skill: %v", err)
+	}
+}
+
+func TestCheckInstalledReportsMissingCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+}
+
+func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	source := builtinpacks.MustSource("gastown")
+	commit := canonicalBundledCommit(source)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:gastown": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+	if report.CheckedSources != 1 {
+		t.Fatalf("CheckedSources = %d, want 1", report.CheckedSources)
+	}
+}
+
+func TestCheckInstalledFallsBackToGitCheckoutForBundledSource(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+
+	source := builtinpacks.MustSource("core")
+	commit := "abc123def456"
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cachePath, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	writeCachedPackCommit(t, cachePath, commit)
+	packToml := filepath.Join(cachePath, "internal", "bootstrap", "packs", "core", "pack.toml")
+	if err := os.MkdirAll(filepath.Dir(packToml), 0o755); err != nil {
+		t.Fatalf("MkdirAll(pack dir): %v", err)
+	}
+	if err := os.WriteFile(packToml, []byte("[pack]\nname = \"core\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:core": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+}
+
+func TestCheckInstalledReportsInvalidSyntheticCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("gastown")
+	commit := canonicalBundledCommit(source)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
+		t.Fatalf("MaterializeSyntheticRepo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "examples", "gastown", "packs", "gastown", "pack.toml"), []byte("tampered"), 0o644); err != nil {
+		t.Fatalf("WriteFile(tampered pack.toml): %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:gastown": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "invalid-synthetic-cache")
+}
+
+func TestCheckInstalledTreatsBundledGitENOTDIRAsInvalidSyntheticCache(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("gastown")
+	commit := canonicalBundledCommit(source)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(cache parent): %v", err)
+	}
+	if err := os.WriteFile(cachePath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cache path): %v", err)
+	}
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:gastown": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "invalid-synthetic-cache")
+	if strings.Contains(report.Issues[0].Message, "cannot inspect cached repository") {
+		t.Fatalf("message = %q, want ENOTDIR classified as non-checkout", report.Issues[0].Message)
+	}
+}
+
+func TestCheckInstalledFlagsMissingCacheForNonCanonicalBundledPin(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := builtinpacks.MustSource("gastown")
+	commit := "abc123def456"
+	if config.IsBundledSourceAtCanonicalPin(source, commit) {
+		t.Fatalf("commit %q is unexpectedly canonical for %q", commit, source)
+	}
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "sha:" + commit, Commit: commit},
+	})
+
+	prevGit := runGit
+	runGit = func(_ string, args ...string) (string, error) {
+		return "", fmt.Errorf("unexpected git call for check: %v", args)
+	}
+	t.Cleanup(func() { runGit = prevGit })
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:gastown": {Source: source, Version: "sha:" + commit},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+	if !strings.Contains(report.Issues[0].RepairHint, "gc import install") {
+		t.Fatalf("repair hint = %q, want gc import install", report.Issues[0].RepairHint)
+	}
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("repo cache entry stat err = %v, want not exist", err)
+	}
+}
+
+func TestCheckInstalledMissingCacheDoesNotCreateCacheEntry(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	source := "https://example.com/tools.git"
+	commit := "aaaa"
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "1.0.0", Commit: commit},
+	})
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: source, Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("repo cache entry stat err = %v, want not exist", err)
+	}
+}
+
+func TestCheckInstalledDeduplicatesRepeatedSourceIssues(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools":         {Source: "https://example.com/tools.git", Version: "^1.0"},
+		"rig:frontend:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+	if report.CheckedSources != 1 {
+		t.Fatalf("CheckedSources = %d, want 1", report.CheckedSources)
+	}
+}
+
+func TestCheckInstalledSkipsStaleLockEntriesWhenClosureIncomplete(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
+		"https://example.com/b.git": {Version: "1.0.0", Commit: "bbbb"},
+	})
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cache")
+}
+
+func TestCheckInstalledReportsConstraintMismatch(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^2.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "lock-constraint-mismatch")
+}
+
+func TestCheckInstalledWalksTransitiveClosureAndReportsStaleLockEntry(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/a.git":     {Version: "1.0.0", Commit: "aaaa"},
+		"https://example.com/b.git":     {Version: "1.0.0", Commit: "bbbb"},
+		"https://example.com/stale.git": {Version: "1.0.0", Commit: "cccc"},
+	})
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^1.0"
+`)
+	stageCachedPack(t, "https://example.com/b.git", "bbbb", `
+[pack]
+name = "b"
+schema = 1
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "stale-lock-entry")
+	if report.CheckedSources != 2 {
+		t.Fatalf("CheckedSources = %d, want 2", report.CheckedSources)
+	}
+}
+
+func TestCheckInstalledReportsMissingTransitiveLockEntry(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/a.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPack(t, "https://example.com/a.git", "aaaa", `
+[pack]
+name = "a"
+schema = 1
+
+[imports.b]
+source = "https://example.com/b.git"
+version = "^1.0"
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:a": {Source: "https://example.com/a.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-lock-entry")
+}
+
+func TestCheckInstalledExpandsRepeatedSourceWhenAnyImportIsTransitive(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/shared.git": {Version: "1.0.0", Commit: "aaaa"},
+		"https://example.com/inner.git":  {Version: "1.0.0", Commit: "bbbb"},
+	})
+	stageCachedPack(t, "https://example.com/shared.git", "aaaa", `
+[pack]
+name = "shared"
+schema = 1
+
+[imports.inner]
+source = "https://example.com/inner.git"
+version = "^1.0"
+`)
+	stageCachedPack(t, "https://example.com/inner.git", "bbbb", `
+[pack]
+name = "inner"
+schema = 1
+`)
+
+	transitiveFalse := false
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:a": {Source: "https://example.com/shared.git", Version: "^1.0", Transitive: &transitiveFalse},
+		"pack:z": {Source: "https://example.com/shared.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if report.HasIssues() {
+		t.Fatalf("issues = %#v, want none", report.Issues)
+	}
+	if report.CheckedSources != 2 {
+		t.Fatalf("CheckedSources = %d, want 2", report.CheckedSources)
+	}
+}
+
+func TestCheckInstalledParsesNonTransitiveCachedPack(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPack(t, "https://example.com/tools.git", "aaaa", `
+[pack
+name = "tools"
+schema = 1
+`)
+
+	transitiveFalse := false
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0", Transitive: &transitiveFalse},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "invalid-cached-pack")
+}
+
+func TestCheckInstalledReportsCacheCheckoutMismatch(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPackAtCommit(t, "https://example.com/tools.git", "aaaa", "bbbb", `
+[pack]
+name = "tools"
+schema = 1
+`)
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "cache-checkout-mismatch")
+}
+
+func TestCheckInstalledReportsDirtyCacheWorktree(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	writeTestLockfile(t, city, map[string]LockedPack{
+		"https://example.com/tools.git": {Version: "1.0.0", Commit: "aaaa"},
+	})
+	stageCachedPackAtCommit(t, "https://example.com/tools.git", "aaaa", "aaaa", `
+[pack]
+name = "tools"
+schema = 1
+`)
+	markCachedPackDirty(t, "https://example.com/tools.git", "aaaa")
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: "https://example.com/tools.git", Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "cache-worktree-dirty")
+}
+
+func TestCheckInstalledUsesRemoteSubpath(t *testing.T) {
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCachedPackGit(t)
+	source := "file:///tmp/repo.git//packs/base"
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "1.0.0", Commit: "aaaa"},
+	})
+	path, err := RepoCachePath(source, "aaaa")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git): %v", err)
+	}
+	writeCachedPackCommit(t, path, "aaaa")
+
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:base": {Source: source, Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	assertSingleIssue(t, report, "missing-cached-pack")
+}
+
+func assertSingleIssue(t *testing.T, report *CheckReport, code string) {
+	t.Helper()
+	if report == nil {
+		t.Fatal("report is nil")
+	}
+	if len(report.Issues) != 1 {
+		t.Fatalf("len(Issues) = %d, want 1: %#v", len(report.Issues), report.Issues)
+	}
+	if report.Issues[0].Code != code {
+		t.Fatalf("issue code = %q, want %q; issue=%#v", report.Issues[0].Code, code, report.Issues[0])
+	}
+	if report.Issues[0].Severity != CheckSeverityError {
+		t.Fatalf("issue severity = %q, want error", report.Issues[0].Severity)
+	}
+	if report.ErrorCount() != 1 {
+		t.Fatalf("ErrorCount = %d, want 1", report.ErrorCount())
+	}
+}
+
+// writeLocalPack writes packToml to a fresh temp dir's pack.toml and
+// returns the dir's absolute path — standing in for the already-resolved
+// absolute path `gc import add` writes into city.toml for a local
+// path-source import (resolveImportAddPath in cmd/gc/cmd_import.go).
+func writeLocalPack(t *testing.T, packToml string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatalf("writing local pack.toml: %v", err)
+	}
+	return dir
+}
+
+func writeTestLockfile(t *testing.T, city string, packs map[string]LockedPack) {
+	t.Helper()
+	for source, pack := range packs {
+		if pack.Fetched.IsZero() {
+			pack.Fetched = time.Unix(10, 0).UTC()
+			packs[source] = pack
+		}
+	}
+	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
+		Schema: LockfileSchema,
+		Packs:  packs,
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+}
+
+func stubCachedPackGit(t *testing.T) {
+	t.Helper()
+	prev := runGit
+	runGit = func(dir string, args ...string) (string, error) {
+		if len(args) >= 2 && args[0] == "rev-parse" && args[1] == "HEAD" {
+			data, err := os.ReadFile(filepath.Join(dir, ".packman-test-commit"))
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		}
+		if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+			if _, err := os.Stat(filepath.Join(dir, ".packman-test-dirty")); err == nil {
+				return " M pack.toml", nil
+			} else if err != nil && !os.IsNotExist(err) {
+				return "", err
+			}
+			return "", nil
+		}
+		if len(args) >= 1 && args[0] == "checkout" {
+			if dir == "" {
+				return "", fmt.Errorf("checkout requires dir")
+			}
+			writeCachedPackCommit(t, dir, args[len(args)-1])
+			return "", nil
+		}
+		return prev(dir, args...)
+	}
+	t.Cleanup(func() { runGit = prev })
+}
+
+func stageCachedPackAtCommit(t *testing.T, source, cacheCommit, headCommit, packToml string) {
+	t.Helper()
+	path, err := RepoCachePath(source, cacheCommit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(path, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeCachedPackCommit(t, path, headCommit)
+	if err := os.WriteFile(filepath.Join(path, "pack.toml"), []byte(packToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(pack.toml): %v", err)
+	}
+}
+
+func writeCachedPackCommit(t *testing.T, cachePath, commit string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(cachePath, ".packman-test-commit"), []byte(commit), 0o644); err != nil {
+		t.Fatalf("WriteFile(.packman-test-commit): %v", err)
+	}
+}
+
+func markCachedPackDirty(t *testing.T, source, commit string) {
+	t.Helper()
+	path, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, ".packman-test-dirty"), []byte("dirty"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.packman-test-dirty): %v", err)
+	}
+}

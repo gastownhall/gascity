@@ -7,19 +7,20 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 var errTemplateTargetNotFound = errors.New("template target not found")
 
 type ensureSessionForTemplateOptions struct {
-	forceFresh bool
+	forceFresh          bool
+	materializeMetadata map[string]string
 }
 
 func ensureSessionForTemplate(
@@ -74,7 +75,7 @@ func materializeSessionForTemplateWithOptions(
 	)
 	if !opts.forceFresh {
 		var err error
-		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, store, templateName)
+		spec, hasNamed, err = findNamedSessionSpecForTarget(cfg, cityName, templateName)
 		if err != nil {
 			return "", err
 		}
@@ -94,8 +95,8 @@ func materializeSessionForTemplateWithOptions(
 
 	if hasNamed {
 		if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-			if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-				if sn := bead.Metadata["session_name"]; sn != "" {
+			if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+				if sn := info.SessionNameMetadata; sn != "" {
 					return sn, nil
 				}
 			}
@@ -103,13 +104,13 @@ func materializeSessionForTemplateWithOptions(
 			// identity and reopen it rather than creating a new one.
 			// This preserves the bead ID so existing references (slings,
 			// convoys, messages) continue to work. Supersedes PR #204.
-			if bead, ok := reopenClosedConfiguredNamedSessionBead(
-				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), stderr,
-			); ok {
-				if sn := strings.TrimSpace(bead.Metadata["session_name"]); sn != "" {
-					snapshot.add(bead)
-					return sn, nil
-				}
+			// (The reopened bead was formerly added back to `snapshot` here, but
+			// that snapshot is discarded on the next-line return — a no-op — so the
+			// dead add is dropped with the raw sessionBeadSnapshot.add in W-pool.)
+			if _, sn, ok := reopenClosedConfiguredNamedSessionBead(
+				cityPath, store, cfg, cityName, spec.Identity, spec.SessionName, "stopped", time.Now().UTC(), opts.materializeMetadata, stderr,
+			); ok && sn != "" {
+				return sn, nil
 			}
 		}
 
@@ -117,27 +118,69 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		workDir, err := resolveWorkDir(cityPath, cfg, spec.Agent)
+		sessionTransport := config.ResolveSessionCreateTransport(spec.Agent.Session, resolved)
+		sp, err := newSessionProvider()
+		if err != nil {
+			return "", err
+		}
+		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+			return "", err
+		}
+		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
+		if err != nil {
+			return "", err
+		}
+		workDirQualifiedName := workdirutil.SessionQualifiedName(cityPath, *spec.Agent, cfg.Rigs, spec.Identity, "")
+		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
 		if err != nil {
 			return "", err
 		}
 
-		sp := newSessionProvider()
-		mgr := newSessionManager(store, sp)
 		title := spec.Identity
+		templateIdentity := namedSessionBackingTemplate(spec)
 		extraMeta := map[string]string{
 			namedSessionMetadataKey:      boolMetadata(true),
 			namedSessionIdentityMetadata: spec.Identity,
 			namedSessionModeMetadata:     spec.Mode,
+			"session_origin":             "named",
 		}
-		if resolved.Kind != "" && resolved.Kind != resolved.Name {
-			extraMeta["provider_kind"] = resolved.Kind
+		for k, v := range opts.materializeMetadata {
+			extraMeta[k] = v
 		}
-		resume := session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+			extraMeta["provider_kind"] = family
+		}
+		// Stamp BuiltinAncestor so downstream family branches
+		// (idle-wait-after-interrupt, soft-escape, default submit) can
+		// resolve the wrapped custom alias to its claude/codex/gemini
+		// family via session.providerKind without re-deriving. See
+		// engdocs/design/provider-inheritance.md §Kind/provider-family
+		// propagation.
+		if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+			extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
+		}
+		providerName := ""
+		if spec.Agent != nil {
+			providerName = spec.Agent.Provider
+		}
+		handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+			cityPath,
+			store,
+			sp,
+			cfg,
+			spec.Identity,
+			spec.SessionName,
+			templateIdentity,
+			title,
+			sessionCommand,
+			providerName,
+			workDir,
+			sessionTransport,
+			resolved,
+			extraMeta,
+		)
+		if err != nil {
+			return "", err
 		}
 
 		if cityUsesManagedReconciler(cityPath) {
@@ -150,28 +193,17 @@ func materializeSessionForTemplateWithOptions(
 					if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
 						return err
 					}
-					var err error
-					info, err = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
-						spec.Identity,
-						spec.SessionName,
-						spec.Identity,
-						title,
-						resolved.CommandString(),
-						workDir,
-						resolved.Name,
-						spec.Agent.Session,
-						resume,
-						extraMeta,
-					)
-					return err
+					var createErr error
+					info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+					return createErr
 				})
 				if createErr == nil {
 					_ = pokeController(cityPath)
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
-					if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-						if sn := bead.Metadata["session_name"]; sn != "" {
+					if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+						if sn := info.SessionNameMetadata; sn != "" {
 							return sn, nil
 						}
 					}
@@ -182,12 +214,6 @@ func materializeSessionForTemplateWithOptions(
 			}
 		}
 
-		hints := runtime.Config{
-			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-			ReadyDelayMs:           resolved.ReadyDelayMs,
-			ProcessNames:           resolved.ProcessNames,
-			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		}
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
 			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
@@ -197,29 +223,15 @@ func materializeSessionForTemplateWithOptions(
 				return err
 			}
 			var createErr error
-			info, createErr = mgr.CreateAliasedNamedWithTransportAndMetadata(
-				context.Background(),
-				spec.Identity,
-				spec.SessionName,
-				spec.Identity,
-				title,
-				resolved.CommandString(),
-				workDir,
-				resolved.Name,
-				spec.Agent.Session,
-				resolved.Env,
-				resume,
-				hints,
-				extraMeta,
-			)
+			info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
 			return createErr
 		})
 		if err == nil {
 			return info.SessionName, nil
 		}
 		if snapshot, snapErr := loadSessionBeadSnapshot(store); snapErr == nil {
-			if bead, ok := findCanonicalNamedSessionBead(snapshot, spec); ok {
-				if sn := bead.Metadata["session_name"]; sn != "" {
+			if info, ok := findCanonicalNamedSessionInfo(snapshot, spec); ok {
+				if sn := info.SessionNameMetadata; sn != "" {
 					return sn, nil
 				}
 			}
@@ -230,16 +242,6 @@ func materializeSessionForTemplateWithOptions(
 	}
 
 	return materializeSessionForAgentConfig(cityPath, cfg, store, &found)
-}
-
-func ensureSessionIDForTemplate(
-	cityPath string,
-	cfg *config.City,
-	store beads.Store,
-	templateName string,
-	stderr io.Writer,
-) (string, error) {
-	return ensureSessionIDForTemplateWithOptions(cityPath, cfg, store, templateName, stderr, ensureSessionForTemplateOptions{})
 }
 
 func ensureSessionIDForTemplateWithOptions(
@@ -276,33 +278,80 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	workDir, err := resolveWorkDir(cityPath, cfg, agentCfg)
+	sessionTransport := config.ResolveSessionCreateTransport(agentCfg.Session, resolved)
+	sp, err := newSessionProvider()
+	if err != nil {
+		return "", err
+	}
+	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+		return "", err
+	}
+	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
+	if err != nil {
+		return "", err
+	}
+	cityName := config.EffectiveCityName(cfg, filepath.Base(cityPath))
+	explicitName, err := sessionExplicitNameForNewSession(cityPath, cityName, cfg.Rigs, agentCfg, "")
+	if err != nil {
+		return "", err
+	}
+	sessionQualifiedName := workdirutil.SessionQualifiedName(cityPath, *agentCfg, cfg.Rigs, "", explicitName)
+	workDir, err := resolveWorkDirForQualifiedName(
+		cityPath,
+		cfg,
+		agentCfg,
+		sessionQualifiedName,
+	)
 	if err != nil {
 		return "", err
 	}
 
-	sp := newSessionProvider()
-	mgr := newSessionManager(store, sp)
 	title := agentCfg.QualifiedName()
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+	extraMeta := map[string]string{
+		"agent_name":     sessionQualifiedName,
+		"session_origin": "manual",
 	}
+	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
+		extraMeta["provider_kind"] = family
+	}
+	if resolved.BuiltinAncestor != "" && resolved.BuiltinAncestor != resolved.Name {
+		extraMeta["builtin_ancestor"] = resolved.BuiltinAncestor
+	}
+	handle, err := newWorkerSessionHandleForResolvedRuntimeWithConfig(
+		cityPath,
+		store,
+		sp,
+		cfg,
+		"",
+		explicitName,
+		agentCfg.QualifiedName(),
+		title,
+		sessionCommand,
+		agentCfg.Provider,
+		workDir,
+		sessionTransport,
+		resolved,
+		extraMeta,
+	)
+	if err != nil {
+		return "", err
+	}
+	reservationIDs := []string{explicitName, sessionQualifiedName}
 
 	if cityUsesManagedReconciler(cityPath) {
 		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			info, createErr := mgr.CreateBeadOnly(
-				agentCfg.QualifiedName(),
-				title,
-				resolved.CommandString(),
-				workDir,
-				resolved.Name,
-				agentCfg.Session,
-				resolved.Env,
-				resume,
-			)
+			var info session.Info
+			createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+				if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+					return err
+				}
+				if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+					return err
+				}
+				var createErr error
+				info, createErr = handle.Create(context.Background(), worker.CreateModeDeferred)
+				return createErr
+			})
 			if createErr == nil {
 				_ = pokeController(cityPath)
 				return info.SessionName, nil
@@ -311,24 +360,18 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		}
 	}
 
-	hints := runtime.Config{
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-	}
-	info, err := mgr.CreateWithTransport(
-		context.Background(),
-		agentCfg.QualifiedName(),
-		title,
-		resolved.CommandString(),
-		workDir,
-		resolved.Name,
-		agentCfg.Session,
-		resolved.Env,
-		resume,
-		hints,
-	)
+	var info session.Info
+	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+			return err
+		}
+		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+			return err
+		}
+		var createErr error
+		info, createErr = handle.Create(context.Background(), worker.CreateModeStarted)
+		return createErr
+	})
 	if err == nil {
 		return info.SessionName, nil
 	}

@@ -1,437 +1,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
+	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
-func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
-	bp := parseBlockingParams(r)
-	if bp.isBlocking() {
-		waitForChange(r.Context(), s.state.EventProvider(), bp)
-	}
-
-	q := r.URL.Query()
-	agent := q.Get("agent")
-	status := q.Get("status")
-	rig := q.Get("rig")
-
-	switch status {
-	case "", "unread":
-		pp := parsePagination(r, 50)
-
-		// Aggregate across all rigs when rig is omitted (matching count semantics).
-		if rig != "" {
-			mp := s.state.MailProvider(rig)
-			if mp == nil {
-				writeListJSON(w, s.latestIndex(), []any{}, 0)
-				return
-			}
-			msgs, err := mp.Inbox(agent)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
-			}
-			if msgs == nil {
-				msgs = []mail.Message{}
-			}
-			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				writeListJSON(w, s.latestIndex(), msgs, total)
-				return
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-			return
-		}
-
-		providers := s.state.MailProviders()
-		var allMsgs []mail.Message
-		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].Inbox(agent)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-				return
-			}
-			allMsgs = append(allMsgs, tagRig(msgs, name)...)
-		}
-		if allMsgs == nil {
-			allMsgs = []mail.Message{}
-		}
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			writeListJSON(w, s.latestIndex(), allMsgs, total)
-			break
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-	case "all":
-		pp := parsePagination(r, 50)
-
-		if rig != "" {
-			mp := s.state.MailProvider(rig)
-			if mp == nil {
-				writeListJSON(w, s.latestIndex(), []any{}, 0)
-				return
-			}
-			msgs, err := mp.All(agent)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
-			}
-			if msgs == nil {
-				msgs = []mail.Message{}
-			}
-			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				writeListJSON(w, s.latestIndex(), msgs, total)
-				return
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-			return
-		}
-
-		providers := s.state.MailProviders()
-		var allMsgs []mail.Message
-		for _, name := range sortedProviderNames(providers) {
-			msgs, err := providers[name].All(agent)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-				return
-			}
-			allMsgs = append(allMsgs, tagRig(msgs, name)...)
-		}
-		if allMsgs == nil {
-			allMsgs = []mail.Message{}
-		}
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			writeListJSON(w, s.latestIndex(), allMsgs, total)
-			break
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-	default:
-		writeError(w, http.StatusBadRequest, "invalid", "unsupported status filter: "+status+"; supported: unread, all")
-	}
-}
-
-func (s *Server) handleMailGet(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-
-	msg, err := mp.Get(id)
-	if err != nil {
-		if errors.Is(err, mail.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-		} else {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		}
-		return
-	}
-	msg.Rig = resolvedRig
-	writeIndexJSON(w, s.latestIndex(), msg)
-}
-
-func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Rig     string `json:"rig"`
-		From    string `json:"from"`
-		To      string `json:"to"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	var errs []FieldError
-	if body.To == "" {
-		errs = append(errs, FieldError{Field: "to", Message: "required"})
-	}
-	if body.Subject == "" {
-		errs = append(errs, FieldError{Field: "subject", Message: "required"})
-	}
-	if len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, Error{
-			Code:    "invalid",
-			Message: "invalid mail request",
-			Details: errs,
-		})
-		return
-	}
-
-	// Resolve recipient against configured agents.
-	resolved, resolveErr := mail.ResolveRecipient(body.To, agentEntries(s.state.Config()))
-	if resolveErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid", resolveErr.Error())
-		return
-	}
-
-	mp := s.findMailProvider(body.Rig)
-	if mp == nil {
-		writeError(w, http.StatusBadRequest, "invalid", "no mail provider available")
-		return
-	}
-
-	// Idempotency check — key is scoped by method+path to prevent cross-endpoint collisions.
-	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
-	var bodyHash string
-	if idemKey != "" {
-		bodyHash = hashBody(body)
-		if s.idem.handleIdempotent(w, idemKey, bodyHash) {
-			return
-		}
-	}
-
-	msg, err := mp.Send(body.From, resolved, body.Subject, body.Body)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	msg.Rig = body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, msg)
-	s.recordMailEvent(events.MailSent, body.From, msg.ID, body.Rig, &msg)
-	writeJSON(w, http.StatusCreated, msg)
-}
-
-func (s *Server) handleMailRead(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.MarkRead(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailMarkedRead, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
-}
-
-func (s *Server) handleMailMarkUnread(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.MarkUnread(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailMarkedUnread, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "unread"})
-}
-
-func (s *Server) handleMailArchive(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.Archive(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "archived"})
-}
-
-func (s *Server) handleMailReply(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	var body struct {
-		From    string `json:"from"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-	}
-	if err := decodeBody(r, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
-	if mpErr != nil {
-		writeError(w, http.StatusInternalServerError, "internal", mpErr.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-
-	msg, err := mp.Reply(id, body.From, body.Subject, body.Body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	msg.Rig = resolvedRig
-	s.recordMailEvent(events.MailReplied, body.From, msg.ID, resolvedRig, &msg)
-	writeJSON(w, http.StatusCreated, msg)
-}
-
-func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.Delete(id); err != nil {
-		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-func (s *Server) handleMailThread(w http.ResponseWriter, r *http.Request) {
-	threadID := r.PathValue("id")
-	rig := r.URL.Query().Get("rig")
-
-	// When rig is specified, query only that provider.
-	if rig != "" {
-		mp := s.state.MailProvider(rig)
-		if mp == nil {
-			writeError(w, http.StatusNotFound, "not_found", "rig "+rig+" not found")
-			return
-		}
-		msgs, err := mp.Thread(threadID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		if msgs == nil {
-			msgs = []mail.Message{}
-		}
-		msgs = tagRig(msgs, rig)
-		writeListJSON(w, s.latestIndex(), msgs, len(msgs))
-		return
-	}
-
-	// Aggregate thread messages across all providers.
-	providers := s.state.MailProviders()
-	var allMsgs []mail.Message
-	for _, name := range sortedProviderNames(providers) {
-		msgs, err := providers[name].Thread(threadID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-			return
-		}
-		allMsgs = append(allMsgs, tagRig(msgs, name)...)
-	}
-	if allMsgs == nil {
-		allMsgs = []mail.Message{}
-	}
-	writeListJSON(w, s.latestIndex(), allMsgs, len(allMsgs))
-}
-
-func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
-	agentName := r.URL.Query().Get("agent")
-	rig := r.URL.Query().Get("rig")
-
-	// If rig specified, count only that rig.
-	if rig != "" {
-		mp := s.state.MailProvider(rig)
-		if mp == nil {
-			writeJSON(w, http.StatusOK, map[string]int{"total": 0, "unread": 0})
-			return
-		}
-		total, unread, err := mp.Count(agentName)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]int{"total": total, "unread": unread})
-		return
-	}
-
-	// Aggregate across all rigs (deduplicated by provider identity).
-	providers := s.state.MailProviders()
-	var totalAll, unreadAll int
-	for _, name := range sortedProviderNames(providers) {
-		total, unread, err := providers[name].Count(agentName)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-			return
-		}
-		totalAll += total
-		unreadAll += unread
-	}
-	writeJSON(w, http.StatusOK, map[string]int{"total": totalAll, "unread": unreadAll})
-}
+var errMailNoBeadStore = errors.New("no bead store available")
 
 // findMailProvider returns the mail provider for a rig, or the first available
 // (deterministically by sorted rig name).
@@ -485,6 +69,323 @@ func (s *Server) findMailProviderByID(id string) (mail.Provider, string, error) 
 	return nil, "", firstErr
 }
 
+func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipient string) (string, error) {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "human" {
+		return recipient, nil
+	}
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
+		if err != nil {
+			return "", errMailNoBeadStore
+		}
+		return resolved, nil
+	}
+	if target, matched, err := s.resolveLiveConfiguredNamedMailTarget(store, recipient); err != nil {
+		return "", err
+	} else if matched {
+		return target.display, nil
+	}
+	if id, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{}); err == nil {
+		bead, getErr := store.Get(id)
+		if getErr != nil {
+			return "", getErr
+		}
+		address := session.MailboxAddress(bead)
+		if address == "" {
+			return "", fmt.Errorf("session %q has no mailbox identity", recipient)
+		}
+		return address, nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return "", err
+	}
+	if address, ok, err := s.configuredMailRecipientAddress(store, recipient); err != nil {
+		return "", err
+	} else if ok {
+		return address, nil
+	}
+	return "", apiSessionTargetNotFound(recipient)
+}
+
+func (s *Server) resolveMailQueryRecipientsWithContext(ctx context.Context, recipient string) []string {
+	recipient = strings.TrimSpace(recipient)
+	if recipient == "" {
+		return []string{""}
+	}
+	if recipient == "human" {
+		return []string{"human"}
+	}
+	store := s.state.SessionsBeadStore().Store
+	if store == nil {
+		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
+			if resolved == recipient {
+				return []string{resolved}
+			}
+			// Compatibility: older tests and direct provider callers may have
+			// persisted mail under the raw bare name while API sends now
+			// canonicalize to the qualified recipient.
+			return []string{resolved, recipient}
+		}
+		return []string{recipient}
+	}
+	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
+		if recipients, listErr := s.mailRecipientsForNamedSession(store, spec); listErr == nil {
+			recipients = uniqueNonEmptyMailRecipients(append(recipients, recipient))
+			if len(recipients) > 0 {
+				return recipients
+			}
+		}
+	}
+	resolved, err := s.resolveSessionTargetIDWithContext(ctx, store, recipient, apiSessionResolveOptions{})
+	if err != nil {
+		return []string{recipient}
+	}
+	if bead, getErr := store.Get(resolved); getErr == nil {
+		if recipients := session.MailboxAddressesIncludingRuntimeName(bead); len(recipients) > 0 {
+			return recipients
+		}
+	}
+	return []string{resolved}
+}
+
+func (s *Server) mailRecipientsForNamedSession(store beads.Store, spec apiNamedSessionSpec) ([]string, error) {
+	identity := apiNormalizeSessionTarget(spec.Identity)
+	if identity == "" {
+		return nil, nil
+	}
+	candidates, err := store.List(beads.ListQuery{
+		Metadata: map[string]string{
+			session.NamedSessionIdentityMetadata: identity,
+		},
+		IncludeClosed: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing named session mail recipients: %w", err)
+	}
+	// The configured identity is a durable mailbox address even after a
+	// materialized session bead adds aliases, IDs, or runtime session names.
+	recipients := []string{identity}
+	seen := make(map[string]bool)
+	for _, b := range candidates {
+		if !session.IsSessionBeadOrRepairable(b) ||
+			!session.IsNamedSessionBead(b) ||
+			session.NamedSessionIdentity(b) != spec.Identity {
+			continue
+		}
+		if b.ID == "" || seen[b.ID] {
+			continue
+		}
+		seen[b.ID] = true
+		recipients = append(recipients, session.MailboxAddressesIncludingRuntimeName(b)...)
+	}
+	recipients = uniqueNonEmptyMailRecipients(recipients)
+	sort.Strings(recipients)
+	return recipients, nil
+}
+
+func (s *Server) configuredNamedMailIdentities(identifier string) []string {
+	identifier = apiNormalizeSessionTarget(identifier)
+	seen := make(map[string]bool)
+	identities := make([]string, 0, 2)
+	add := func(identity string) {
+		identity = apiNormalizeSessionTarget(identity)
+		if identity == "" || seen[identity] {
+			return
+		}
+		seen[identity] = true
+		identities = append(identities, identity)
+	}
+	add(identifier)
+	cfg := s.state.Config()
+	if cfg == nil {
+		return identities
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if session.TargetBasename(identity) == identifier {
+			add(identity)
+		}
+	}
+	return identities
+}
+
+type apiResolvedMailTarget struct {
+	display    string
+	recipients []string
+}
+
+// WI-6 residual: this resolver stays on raw store.List + the bead-form mailbox
+// accessors (MailboxAddressesIncludingRuntimeName / MailboxAddress). Its per-
+// identity read is a METADATA-filtered ListQuery (configured_named_identity ==
+// identity), which the session front door's ListAll(opts) does not model — ListAll
+// carries only IncludeClosed/Sort/Live/Limit, not a metadata predicate. Converting
+// it needs an Info-taking mailbox twin fed by a metadata-filtered store list (the
+// HasOpenSessionNamed precedent), deferred to the WI-2 mail residual; until then the
+// codec stays confined to the bead-form accessors here.
+func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (apiResolvedMailTarget, bool, error) {
+	identifier = apiNormalizeSessionTarget(identifier)
+	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
+		return apiResolvedMailTarget{}, false, nil
+	}
+	identities := s.configuredNamedMailIdentities(identifier)
+	all := make([]beads.Bead, 0, len(identities))
+	seenBeads := make(map[string]bool)
+	for _, identity := range identities {
+		items, err := store.List(beads.ListQuery{
+			Metadata: map[string]string{
+				session.NamedSessionIdentityMetadata: identity,
+			},
+		})
+		if err != nil {
+			return apiResolvedMailTarget{}, false, err
+		}
+		for _, b := range items {
+			if b.ID != "" && seenBeads[b.ID] {
+				continue
+			}
+			seenBeads[b.ID] = true
+			all = append(all, b)
+		}
+	}
+
+	matches := make(map[string]apiResolvedMailTarget)
+	order := make([]string, 0, 2)
+	for _, b := range all {
+		if !session.IsSessionBeadOrRepairable(b) || b.Status == "closed" {
+			continue
+		}
+		identity := strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey])
+		if identity == "" || session.TargetBasename(identity) != identifier {
+			continue
+		}
+		addresses := session.MailboxAddressesIncludingRuntimeName(b)
+		if len(addresses) == 0 {
+			continue
+		}
+		display := session.MailboxAddress(b)
+		if display == "" {
+			display = addresses[0]
+		}
+		if _, ok := matches[display]; ok {
+			continue
+		}
+		matches[display] = apiResolvedMailTarget{
+			display:    display,
+			recipients: addresses,
+		}
+		order = append(order, display)
+	}
+
+	switch len(order) {
+	case 0:
+		return apiResolvedMailTarget{}, false, nil
+	case 1:
+		return matches[order[0]], true, nil
+	default:
+		sort.Strings(order)
+		return apiResolvedMailTarget{}, false, fmt.Errorf("%w: %q matches multiple configured named session mailboxes: %s", session.ErrAmbiguous, identifier, strings.Join(order, ", "))
+	}
+}
+
+func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier string) (string, bool, error) {
+	identifier = apiNormalizeSessionTarget(identifier)
+	if identifier == "" || identifier == "human" {
+		return "", false, nil
+	}
+	spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	return spec.Identity, true, nil
+}
+
+func mailInboxForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	if inboxer, ok := mp.(mail.MultiRecipientInboxer); ok {
+		return inboxer.InboxRecipients(recipients)
+	}
+	return mailMessagesForRecipients(mp.Inbox, recipients)
+}
+
+func mailAllForRecipients(mp mail.Provider, recipients []string) ([]mail.Message, error) {
+	return mailMessagesForRecipients(mp.All, recipients)
+}
+
+func mailMessagesForRecipients(fetch func(string) ([]mail.Message, error), recipients []string) ([]mail.Message, error) {
+	recipients = uniqueMailRecipients(recipients)
+	var all []mail.Message
+	seen := make(map[string]bool)
+	for _, recipient := range recipients {
+		msgs, err := fetch(recipient)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range msgs {
+			if msg.ID != "" {
+				if seen[msg.ID] {
+					continue
+				}
+				seen[msg.ID] = true
+			}
+			all = append(all, msg)
+		}
+	}
+	return all, nil
+}
+
+func mailCountForRecipients(mp mail.Provider, recipients []string) (int, int, error) {
+	recipients = uniqueMailRecipients(recipients)
+	if counter, ok := mp.(interface {
+		CountRecipients([]string) (int, int, error)
+	}); ok {
+		return counter.CountRecipients(recipients)
+	}
+	var totalAll, unreadAll int
+	for _, recipient := range recipients {
+		total, unread, err := mp.Count(recipient)
+		if err != nil {
+			return 0, 0, err
+		}
+		totalAll += total
+		unreadAll += unread
+	}
+	return totalAll, unreadAll, nil
+}
+
+func uniqueMailRecipients(recipients []string) []string {
+	if len(recipients) == 0 {
+		return []string{""}
+	}
+	seen := make(map[string]bool, len(recipients))
+	unique := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		if seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		unique = append(unique, recipient)
+	}
+	if len(unique) == 0 {
+		return []string{""}
+	}
+	return unique
+}
+
+func uniqueNonEmptyMailRecipients(recipients []string) []string {
+	seen := make(map[string]bool, len(recipients))
+	unique := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		recipient = strings.TrimSpace(recipient)
+		if recipient == "" || seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		unique = append(unique, recipient)
+	}
+	return unique
+}
+
 // agentEntries converts city config agents to mail.AgentEntry for recipient resolution.
 func agentEntries(cfg *config.City) []mail.AgentEntry {
 	if cfg == nil {
@@ -492,7 +393,7 @@ func agentEntries(cfg *config.City) []mail.AgentEntry {
 	}
 	entries := make([]mail.AgentEntry, len(cfg.Agents))
 	for i, a := range cfg.Agents {
-		entries[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name}
+		entries[i] = mail.AgentEntry{Dir: a.Dir, Name: a.Name, BindingName: a.BindingName}
 	}
 	return entries
 }
@@ -518,19 +419,18 @@ func sortedProviderNames(providers map[string]mail.Provider) []string {
 	return deduped
 }
 
-// recordMailEvent emits a mail SSE event so WebSocket/SSE consumers receive
-// real-time updates for API-initiated operations (not just CLI-initiated ones).
-// Best-effort: silently skips if no event provider is configured.
+// recordMailEvent emits a mail SSE event so SSE consumers receive
+// real-time updates for API-initiated operations (not just CLI-initiated
+// ones). Best-effort: silently skips if no event provider is configured.
+// The input payload is typed (MailEventPayload); the json.Marshal below
+// is the internal bus serialization permitted by the Principle 4 edge
+// case for event-bus []byte payloads.
 func (s *Server) recordMailEvent(eventType, actor, subject, rig string, msg *mail.Message) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return
 	}
-	payload := map[string]any{"rig": rig}
-	if msg != nil {
-		payload["message"] = msg
-	}
-	b, _ := json.Marshal(payload)
+	b, _ := json.Marshal(MailEventPayload{Rig: rig, Message: msg})
 	ep.Record(events.Event{
 		Type:    eventType,
 		Actor:   actor,

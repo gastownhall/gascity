@@ -1,0 +1,948 @@
+package session
+
+import (
+	"strings"
+	"time"
+)
+
+// BaseState is the lifecycle state projected from persisted session metadata.
+// It intentionally includes compatibility states observed in historical beads
+// so callers can reason about them without scattering raw string checks.
+type BaseState string
+
+const (
+	// BaseStateNone means the bead has no persisted lifecycle state yet.
+	BaseStateNone BaseState = ""
+	// BaseStateCreating means the session is being started.
+	BaseStateCreating BaseState = "creating"
+	// BaseStateStartPending means a start is desired but no provider Start
+	// call has been committed yet.
+	BaseStateStartPending BaseState = "start-pending"
+	// BaseStateActive means the session is running and available.
+	BaseStateActive BaseState = "active"
+	// BaseStateAsleep means the session is intentionally stopped but resumable.
+	BaseStateAsleep BaseState = "asleep"
+	// BaseStateSuspended means config or policy has suspended the session.
+	BaseStateSuspended BaseState = "suspended"
+	// BaseStateFailedCreate means create rollback metadata landed but close did not.
+	// Runtime projection preserves it so pending create metadata cannot retry
+	// the rolled-back identity as a normal creating session.
+	BaseStateFailedCreate BaseState = "failed-create"
+	// BaseStateDraining means the session is waiting to stop cleanly.
+	BaseStateDraining BaseState = "draining"
+	// BaseStateDrained means the session completed its drain and is stopped.
+	BaseStateDrained BaseState = "drained"
+	// BaseStateArchived means the session is retained only for continuity.
+	BaseStateArchived BaseState = "archived"
+	// BaseStateOrphaned means the bead no longer maps to a desired identity.
+	BaseStateOrphaned BaseState = "orphaned"
+	// BaseStateClosed means the session bead is terminal and closed.
+	BaseStateClosed BaseState = "closed"
+	// BaseStateClosing means the bead is transitioning toward closed.
+	BaseStateClosing BaseState = "closing"
+	// BaseStateQuarantined means the session is blocked by churn protection.
+	BaseStateQuarantined BaseState = "quarantined"
+	// BaseStateStopped means the runtime stopped outside normal sleep semantics.
+	BaseStateStopped BaseState = "stopped"
+)
+
+// DesiredState describes what the controller should want for an identity,
+// separate from the persisted bead state.
+type DesiredState string
+
+const (
+	// DesiredStateUndesired means the controller should not keep this identity alive.
+	DesiredStateUndesired DesiredState = "undesired"
+	// DesiredStateAsleep means the identity should exist but remain asleep.
+	DesiredStateAsleep DesiredState = "desired-asleep"
+	// DesiredStateRunning means the identity should be running now.
+	DesiredStateRunning DesiredState = "desired-running"
+	// DesiredStateBlocked means the identity should run, but a blocker prevents it.
+	DesiredStateBlocked DesiredState = "desired-blocked"
+)
+
+// RuntimeProjection describes what observed runtime liveness means for the
+// persisted advisory state.
+type RuntimeProjection string
+
+const (
+	// RuntimeProjectionUnknown means runtime facts were not observed.
+	RuntimeProjectionUnknown RuntimeProjection = ""
+	// RuntimeProjectionAlive means the runtime session is present and alive.
+	RuntimeProjectionAlive RuntimeProjection = "alive"
+	// RuntimeProjectionMissing means no matching runtime session was found.
+	RuntimeProjectionMissing RuntimeProjection = "missing"
+	// RuntimeProjectionFreshCreating means a create is in progress within the grace window.
+	RuntimeProjectionFreshCreating RuntimeProjection = "fresh-creating"
+	// RuntimeProjectionStaleCreating means a create is in progress but looks stuck.
+	RuntimeProjectionStaleCreating RuntimeProjection = "stale-creating"
+	// RuntimeProjectionStartRequested means a wake has been requested but not observed yet.
+	RuntimeProjectionStartRequested RuntimeProjection = "start-requested"
+)
+
+// IdentityProjection describes whether a configured or concrete session
+// identity is currently materialized and usable.
+type IdentityProjection string
+
+const (
+	// IdentityNone means no concrete or reserved identity is currently projected.
+	IdentityNone IdentityProjection = ""
+	// IdentityConcrete means a concrete session bead exists for the identity.
+	IdentityConcrete IdentityProjection = "concrete"
+	// IdentityCanonical means the concrete bead is the canonical owner.
+	IdentityCanonical IdentityProjection = "canonical"
+	// IdentityHistorical means the bead is only a historical continuity artifact.
+	IdentityHistorical IdentityProjection = "historical"
+	// IdentityReservedUnmaterialized means config reserves the identity without a bead yet.
+	IdentityReservedUnmaterialized IdentityProjection = "reserved-unmaterialized"
+	// IdentityConflict means more than one bead or claimant conflicts on the identity.
+	IdentityConflict IdentityProjection = "conflict"
+)
+
+// LifecycleBlocker is a hard condition that suppresses an otherwise runnable
+// desired state.
+type LifecycleBlocker string
+
+const (
+	// BlockerHeld means an explicit user hold prevents wake.
+	BlockerHeld LifecycleBlocker = "held"
+	// BlockerQuarantined means churn protection prevents wake.
+	BlockerQuarantined LifecycleBlocker = "quarantined"
+	// BlockerMissingConfig means the backing config target no longer exists.
+	BlockerMissingConfig LifecycleBlocker = "missing-config"
+	// BlockerIdentityConflict means another bead conflicts with the desired identity.
+	BlockerIdentityConflict LifecycleBlocker = "identity-conflict"
+	// BlockerDuplicateCanonical means more than one canonical bead exists.
+	BlockerDuplicateCanonical LifecycleBlocker = "duplicate-canonical"
+)
+
+// WakeCause is a durable or one-shot reason a session identity should run.
+type WakeCause string
+
+const (
+	// WakeCausePendingCreate means a creation is already pending for the identity.
+	WakeCausePendingCreate WakeCause = "pending-create"
+	// WakeCausePinned means explicit pinning should keep the session alive.
+	WakeCausePinned WakeCause = "pin"
+	// WakeCauseAttached means a live attachment should preserve continuity.
+	WakeCauseAttached WakeCause = "attached"
+	// WakeCausePending means pending work or interaction should keep it alive.
+	WakeCausePending WakeCause = "pending"
+	// WakeCauseNamedAlways means named-session policy requires it to run.
+	WakeCauseNamedAlways WakeCause = "named-always"
+	// WakeCauseWork means queued work directly targets the identity.
+	WakeCauseWork WakeCause = "work"
+	// WakeCauseScaleDemand means generic scale demand requires an ephemeral session.
+	WakeCauseScaleDemand WakeCause = "scale-demand"
+	// WakeCauseExplicit means an explicit wake surface requested the session.
+	WakeCauseExplicit WakeCause = "explicit"
+)
+
+// RuntimeFacts contains already-observed runtime facts. ProjectLifecycle does
+// not perform runtime I/O.
+type RuntimeFacts struct {
+	Observed bool
+	Alive    bool
+	Attached bool
+	Pending  bool
+}
+
+// NamedIdentityInput describes a configured named identity even when no bead
+// has been materialized for it yet.
+type NamedIdentityInput struct {
+	Identity           string
+	Configured         bool
+	HasCanonicalBead   bool
+	Conflict           bool
+	DuplicateCanonical bool
+}
+
+// LifecycleInput is the read-only fact set for projecting lifecycle state. The
+// thirteen metadata-derived fields below are the only persisted session-bead
+// keys ProjectLifecycle reads; build them with LifecycleInputFromMetadata (from
+// a raw metadata map) or LifecycleInputFromInfo (from a projected session.Info)
+// so the metadata-key literals stay below the codec edge.
+type LifecycleInput struct {
+	Status string
+
+	// Persisted metadata fields — the thirteen keys ProjectLifecycle reads.
+	StoredState             string // "state"
+	SleepReason             string // "sleep_reason"
+	ContinuityEligible      string // "continuity_eligible" (raw; projected to bool)
+	ConfiguredNamedIdentity string // NamedSessionIdentityMetadata
+	HeldUntil               string // "held_until"
+	QuarantinedUntil        string // "quarantined_until"
+	PendingCreateClaim      bool   // "pending_create_claim" == "true"
+	LastWokeAt              string // "last_woke_at"
+	SessionKey              string // "session_key"
+	StartedConfigHash       string // "started_config_hash"
+	PendingCreateStartedAt  string // "pending_create_started_at"
+	PinAwake                string // "pin_awake"
+	WakeRequest             string // "wake_request"
+
+	// External facts — not derived from persisted metadata.
+	Runtime            RuntimeFacts
+	NamedIdentity      NamedIdentityInput
+	WakeCauses         []WakeCause
+	PreserveIdentity   bool
+	ConfigMissing      bool
+	CreatedAt          time.Time
+	StaleCreatingAfter time.Duration
+	Now                time.Time
+}
+
+// LifecycleInputFromMetadata builds the status plus the thirteen
+// metadata-derived fields ProjectLifecycle reads from a raw session-bead
+// metadata map, keeping the metadata-key literals below the codec edge. Callers
+// set the remaining external-fact fields (Now, Runtime, NamedIdentity,
+// CreatedAt, StaleCreatingAfter, WakeCauses, PreserveIdentity, ConfigMissing)
+// afterward.
+func LifecycleInputFromMetadata(status string, meta map[string]string) LifecycleInput {
+	return LifecycleInput{
+		Status:                  status,
+		StoredState:             meta["state"],
+		SleepReason:             meta["sleep_reason"],
+		ContinuityEligible:      meta["continuity_eligible"],
+		ConfiguredNamedIdentity: meta[NamedSessionIdentityMetadata],
+		HeldUntil:               meta["held_until"],
+		QuarantinedUntil:        meta["quarantined_until"],
+		PendingCreateClaim:      strings.TrimSpace(meta["pending_create_claim"]) == "true",
+		LastWokeAt:              meta["last_woke_at"],
+		SessionKey:              meta["session_key"],
+		StartedConfigHash:       meta["started_config_hash"],
+		PendingCreateStartedAt:  meta["pending_create_started_at"],
+		PinAwake:                meta["pin_awake"],
+		WakeRequest:             meta["wake_request"],
+	}
+}
+
+// LifecycleInputFromInfo builds the status plus the thirteen metadata-derived
+// fields ProjectLifecycle reads from an already-projected session.Info, so the
+// reconciler can feed the lifecycle projection off its typed snapshot without
+// re-cracking the raw metadata map. Status is reconstructed from Info.Closed —
+// the only status fact the projection consumes (projectBaseState special-cases
+// only "closed"). Callers set the remaining external-fact fields afterward.
+func LifecycleInputFromInfo(info Info) LifecycleInput {
+	status := ""
+	if info.Closed {
+		status = "closed"
+	}
+	return LifecycleInput{
+		Status:                  status,
+		StoredState:             info.MetadataState,
+		SleepReason:             info.SleepReason,
+		ContinuityEligible:      info.ContinuityEligible,
+		ConfiguredNamedIdentity: info.ConfiguredNamedIdentity,
+		HeldUntil:               info.HeldUntil,
+		QuarantinedUntil:        info.QuarantinedUntil,
+		PendingCreateClaim:      info.PendingCreateClaim,
+		LastWokeAt:              info.LastWokeAt,
+		SessionKey:              info.SessionKey,
+		StartedConfigHash:       info.StartedConfigHash,
+		PendingCreateStartedAt:  info.PendingCreateStartedAt,
+		PinAwake:                info.PinAwake,
+		WakeRequest:             info.WakeRequest,
+	}
+}
+
+// LifecycleView is the typed lifecycle interpretation of stored metadata and
+// runtime/config facts.
+type LifecycleView struct {
+	BaseState          BaseState
+	CompatState        State
+	StoredState        string
+	DesiredState       DesiredState
+	RuntimeProjection  RuntimeProjection
+	Identity           IdentityProjection
+	NamedIdentity      string
+	Blockers           []LifecycleBlocker
+	WakeCauses         []WakeCause
+	HeldUntil          time.Time
+	QuarantinedUntil   time.Time
+	ContinuityEligible bool
+	Terminal           bool
+	CountsAgainstCap   bool
+	RuntimeAlive       bool
+	RuntimeAttached    bool
+	ReconciledState    State
+	ResetContinuation  bool
+}
+
+// HasBlocker reports whether the view contains the blocker.
+func (v LifecycleView) HasBlocker(blocker LifecycleBlocker) bool {
+	for _, got := range v.Blockers {
+		if got == blocker {
+			return true
+		}
+	}
+	return false
+}
+
+// HasWakeCause reports whether the view contains the wake cause.
+func (v LifecycleView) HasWakeCause(cause WakeCause) bool {
+	for _, got := range v.WakeCauses {
+		if got == cause {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	// LifecycleReasonResetPending is the shared display reason for a live reset request.
+	LifecycleReasonResetPending = "reset-pending"
+	// LifecycleReasonCircuitOpen is the shared display reason for an open session circuit breaker.
+	LifecycleReasonCircuitOpen = "circuit-open"
+	// LifecycleReasonRuntimeMissing is the display reason for a session the
+	// reconciler put asleep because its runtime/process vanished. It is the
+	// durable sleep_reason written by session reconciliation.
+	LifecycleReasonRuntimeMissing = "runtime-missing"
+	// SessionCircuitStateMetadataKey is the durable metadata key for session circuit breaker state.
+	SessionCircuitStateMetadataKey = "session_circuit_state"
+	// SessionCircuitStateOpen is the durable metadata value for an open session circuit breaker.
+	SessionCircuitStateOpen = "CIRCUIT_OPEN"
+	// SessionCircuitStateClosed is the durable metadata value for a closed session circuit breaker.
+	SessionCircuitStateClosed = "CIRCUIT_CLOSED"
+	// SessionCircuitResetGenerationMetadataKey is the durable metadata key for
+	// the session circuit breaker reset generation. The controller persists a
+	// monotonically increasing generation here so a later reconciler metadata
+	// snapshot can be rejected as stale after an operator-driven reset.
+	SessionCircuitResetGenerationMetadataKey = "session_circuit_reset_generation"
+)
+
+// LifecycleDisplayReason returns the user-facing reason for a non-closed
+// session's current lifecycle posture.
+func LifecycleDisplayReason(status string, metadata map[string]string, now time.Time) string {
+	if metadata == nil {
+		return ""
+	}
+	input := LifecycleInputFromMetadata(status, metadata)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	return lifecycleDisplayReasonFromView(view, metadata)
+}
+
+// LifecycleDisplayReasonWithLiveness returns the lifecycle display reason,
+// preferring reset-pending while a reset marker is still live in the runtime.
+func LifecycleDisplayReasonWithLiveness(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) string {
+	if metadata == nil {
+		return ""
+	}
+	input := LifecycleInputFromMetadata(status, metadata)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	if lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning) {
+		return LifecycleReasonResetPending
+	}
+	return lifecycleDisplayReasonFromView(view, metadata)
+}
+
+// LifecycleDisplayReasonWithLivenessInfo is the session.Info twin of
+// LifecycleDisplayReasonWithLiveness: it reads the same status + metadata facts
+// off an already-projected session.Info instead of a raw metadata map, so
+// display callers holding a typed snapshot need not re-crack the bead. For any
+// info == infoFromPersistedBead(bead) it is byte-identical to
+// LifecycleDisplayReasonWithLiveness(bead.Status, bead.Metadata, now,
+// info.SessionName, isRunning) — the sessionName the display path supplies is the
+// projected Info.SessionName. TestLifecycleDisplayReasonWithLivenessInfoEquivalence
+// pins that equivalence and asserts the circuit-open / reset-pending branches
+// directly so a mutation of either fails.
+func LifecycleDisplayReasonWithLivenessInfo(info Info, now time.Time, isRunning func(string) bool) string {
+	input := LifecycleInputFromInfo(info)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	if lifecycleResetPendingReasonVisibleInfo(view, info, isRunning) {
+		return LifecycleReasonResetPending
+	}
+	return lifecycleDisplayReasonFromViewInfo(view, info)
+}
+
+// LifecycleResetPendingReasonVisible reports whether reset-pending should
+// replace other display reasons for an in-flight requested or continuation reset.
+func LifecycleResetPendingReasonVisible(status string, metadata map[string]string, now time.Time, sessionName string, isRunning func(string) bool) bool {
+	if metadata == nil {
+		return false
+	}
+	input := LifecycleInputFromMetadata(status, metadata)
+	input.Now = now
+	view := ProjectLifecycle(input)
+	return lifecycleResetPendingReasonVisible(view, metadata, sessionName, isRunning)
+}
+
+func lifecycleDisplayReasonFromView(view LifecycleView, metadata map[string]string) string {
+	if view.Terminal {
+		return ""
+	}
+	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
+		return ""
+	}
+	if strings.TrimSpace(metadata[SessionCircuitStateMetadataKey]) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
+	}
+	if raw := strings.TrimSpace(metadata["sleep_reason"]); raw != "" {
+		reason := SleepReason(raw)
+		staleTimedQuarantine := (reason == SleepReasonQuarantine || reason == SleepReasonContextChurn || reason == SleepReasonRateLimit) &&
+			strings.TrimSpace(metadata["quarantined_until"]) != "" &&
+			!view.HasBlocker(BlockerQuarantined)
+		staleTimedHold := reason == SleepReasonUserHold &&
+			strings.TrimSpace(metadata["held_until"]) != "" &&
+			!view.HasBlocker(BlockerHeld)
+		if !staleTimedQuarantine && !staleTimedHold {
+			return raw
+		}
+	}
+	if view.HasBlocker(BlockerQuarantined) {
+		return string(SleepReasonQuarantine)
+	}
+	if strings.TrimSpace(metadata["wait_hold"]) != "" {
+		return string(SleepReasonWaitHold)
+	}
+	if view.HasBlocker(BlockerHeld) {
+		return string(SleepReasonUserHold)
+	}
+	return ""
+}
+
+// lifecycleDisplayReasonFromViewInfo is the session.Info twin of
+// lifecycleDisplayReasonFromView: same branch order, reading the circuit /
+// sleep-reason / quarantine / hold / wait-hold facts off the projected Info
+// (SessionCircuitState, SleepReason, QuarantinedUntil, HeldUntil, WaitHold)
+// instead of the raw metadata map.
+func lifecycleDisplayReasonFromViewInfo(view LifecycleView, info Info) string {
+	if view.Terminal {
+		return ""
+	}
+	if view.BaseState == BaseStateArchived && !view.ContinuityEligible {
+		return ""
+	}
+	if strings.TrimSpace(info.SessionCircuitState) == SessionCircuitStateOpen {
+		return LifecycleReasonCircuitOpen
+	}
+	if raw := strings.TrimSpace(info.SleepReason); raw != "" {
+		reason := SleepReason(raw)
+		staleTimedQuarantine := (reason == SleepReasonQuarantine || reason == SleepReasonContextChurn || reason == SleepReasonRateLimit) &&
+			strings.TrimSpace(info.QuarantinedUntil) != "" &&
+			!view.HasBlocker(BlockerQuarantined)
+		staleTimedHold := reason == SleepReasonUserHold &&
+			strings.TrimSpace(info.HeldUntil) != "" &&
+			!view.HasBlocker(BlockerHeld)
+		if !staleTimedQuarantine && !staleTimedHold {
+			return raw
+		}
+	}
+	if view.HasBlocker(BlockerQuarantined) {
+		return string(SleepReasonQuarantine)
+	}
+	if strings.TrimSpace(info.WaitHold) != "" {
+		return string(SleepReasonWaitHold)
+	}
+	if view.HasBlocker(BlockerHeld) {
+		return string(SleepReasonUserHold)
+	}
+	return ""
+}
+
+func lifecycleResetPendingReasonVisible(view LifecycleView, metadata map[string]string, sessionName string, isRunning func(string) bool) bool {
+	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
+		return false
+	}
+	if isRunning == nil {
+		return false
+	}
+	if strings.TrimSpace(metadata["restart_requested"]) != "true" &&
+		strings.TrimSpace(metadata["continuation_reset_pending"]) != "true" {
+		return false
+	}
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(metadata["session_name"])
+	}
+	return sessionName != "" && isRunning(sessionName)
+}
+
+// lifecycleResetPendingReasonVisibleInfo is the session.Info twin of
+// lifecycleResetPendingReasonVisible: it reads the restart_requested /
+// continuation_reset_pending markers and the resolved session name off the
+// projected Info (RestartRequested, ContinuationResetPending, SessionName with
+// the SessionNameMetadata fallback) instead of the raw metadata map. The display
+// path passes Info.SessionName as its sessionName, so the primary read here
+// mirrors that; the SessionNameMetadata fallback mirrors the raw form's
+// metadata["session_name"] fallback.
+func lifecycleResetPendingReasonVisibleInfo(view LifecycleView, info Info, isRunning func(string) bool) bool {
+	if view.Terminal || (view.BaseState == BaseStateArchived && !view.ContinuityEligible) {
+		return false
+	}
+	if isRunning == nil {
+		return false
+	}
+	if strings.TrimSpace(info.RestartRequested) != "true" &&
+		strings.TrimSpace(info.ContinuationResetPending) != "true" {
+		return false
+	}
+	sessionName := strings.TrimSpace(info.SessionName)
+	if sessionName == "" {
+		sessionName = strings.TrimSpace(info.SessionNameMetadata)
+	}
+	return sessionName != "" && isRunning(sessionName)
+}
+
+// LifecycleWakeConflictState reports terminal lifecycle states that should
+// reject explicit wake requests.
+func LifecycleWakeConflictState(status string, metadata map[string]string) (string, bool) {
+	return lifecycleWakeConflictState(ProjectLifecycle(LifecycleInputFromMetadata(status, metadata)))
+}
+
+func lifecycleWakeConflictState(view LifecycleView) (string, bool) {
+	switch view.BaseState {
+	case BaseStateClosed:
+		return string(BaseStateClosed), true
+	case BaseStateClosing:
+		if view.StoredState != "" {
+			return view.StoredState, true
+		}
+		return string(view.BaseState), true
+	case BaseStateArchived:
+		if !view.ContinuityEligible {
+			return string(BaseStateArchived), true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+// LifecycleIdentityReleased reports whether a bead no longer owns its
+// user-facing session identity and should not be treated as an active owner.
+func LifecycleIdentityReleased(status string, metadata map[string]string) bool {
+	view := ProjectLifecycle(LifecycleInputFromMetadata(status, metadata))
+	return !view.ContinuityEligible && LifecycleIdentifiersReleased(metadata)
+}
+
+// LifecycleIdentifiersReleased reports whether user-facing identity metadata
+// has been cleared from a retired session bead.
+func LifecycleIdentifiersReleased(metadata map[string]string) bool {
+	return strings.TrimSpace(metadata["alias"]) == "" &&
+		strings.TrimSpace(metadata["session_name"]) == "" &&
+		strings.TrimSpace(metadata["session_name_explicit"]) == ""
+}
+
+// LifecycleIdentityReleasedInfo is the session.Info twin of
+// LifecycleIdentityReleased: it projects the lifecycle off an already-projected
+// session.Info (via LifecycleInputFromInfo) and reads the identifier markers off
+// Info, so the retire lane can run over the typed candidate feed without
+// re-cracking the raw bead. For any info == infoFromPersistedBead(b) it equals
+// LifecycleIdentityReleased(b.Status, b.Metadata) — LifecycleInputFromInfo
+// reconstructs the only status fact the projection consumes (closed) from
+// Info.Closed, and LifecycleIdentifiersReleasedInfo mirrors the three identifier
+// keys. TestLifecycleIdentityReleasedInfoEquivalence pins that equivalence and
+// asserts both gates directly so a mutation of either fails.
+func LifecycleIdentityReleasedInfo(info Info) bool {
+	view := ProjectLifecycle(LifecycleInputFromInfo(info))
+	return !view.ContinuityEligible && LifecycleIdentifiersReleasedInfo(info)
+}
+
+// LifecycleIdentifiersReleasedInfo is the session.Info twin of
+// LifecycleIdentifiersReleased: it reads the same three user-facing identity
+// markers (alias, session_name, session_name_explicit) off Info (Info.Alias,
+// Info.SessionNameMetadata, Info.SessionNameExplicit) instead of a raw metadata
+// map. TestLifecycleIdentifiersReleasedInfoEquivalence pins the byte-identity.
+func LifecycleIdentifiersReleasedInfo(info Info) bool {
+	return strings.TrimSpace(info.Alias) == "" &&
+		strings.TrimSpace(info.SessionNameMetadata) == "" &&
+		strings.TrimSpace(info.SessionNameExplicit) == ""
+}
+
+// ProjectLifecycle projects raw session metadata plus external facts into the
+// lifecycle vocabulary from the session model design.
+func ProjectLifecycle(input LifecycleInput) LifecycleView {
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	storedState := strings.TrimSpace(input.StoredState)
+	sleepReason := strings.TrimSpace(input.SleepReason)
+	baseState := projectBaseState(input.Status, storedState, sleepReason)
+	compatState := compatStateForBase(baseState)
+	terminal := baseState == BaseStateClosed || baseState == BaseStateClosing
+	continuityEligible := projectContinuityEligibility(baseState, strings.TrimSpace(input.ContinuityEligible))
+
+	namedIdentity := strings.TrimSpace(input.NamedIdentity.Identity)
+	if namedIdentity == "" {
+		namedIdentity = strings.TrimSpace(input.ConfiguredNamedIdentity)
+	}
+	identity := projectIdentity(input, namedIdentity, baseState, continuityEligible)
+
+	wakeCauses := projectWakeCauses(input)
+	runtimeProjection, reconciledState, resetContinuation := projectRuntimeProjection(input, baseState, compatState, sleepReason, wakeCauses)
+	blockers, heldUntil, quarantinedUntil := projectBlockers(input, now, baseState, identity)
+	desired := projectDesiredState(input, terminal, blockers, wakeCauses)
+
+	return LifecycleView{
+		BaseState:          baseState,
+		CompatState:        compatState,
+		StoredState:        storedState,
+		DesiredState:       desired,
+		RuntimeProjection:  runtimeProjection,
+		Identity:           identity,
+		NamedIdentity:      namedIdentity,
+		Blockers:           blockers,
+		WakeCauses:         wakeCauses,
+		HeldUntil:          heldUntil,
+		QuarantinedUntil:   quarantinedUntil,
+		ContinuityEligible: continuityEligible,
+		Terminal:           terminal,
+		CountsAgainstCap:   countsAgainstCapacity(baseState),
+		RuntimeAlive:       input.Runtime.Alive,
+		RuntimeAttached:    input.Runtime.Attached,
+		ReconciledState:    reconciledState,
+		ResetContinuation:  resetContinuation,
+	}
+}
+
+func projectBaseState(status, storedState, sleepReason string) BaseState {
+	if strings.TrimSpace(status) == "closed" {
+		return BaseStateClosed
+	}
+	switch strings.TrimSpace(storedState) {
+	case "":
+		return BaseStateNone
+	case string(StateStartPending):
+		return BaseStateStartPending
+	case string(StateCreating):
+		return BaseStateCreating
+	case string(StateActive), string(StateAwake):
+		return BaseStateActive
+	case string(StateAsleep):
+		if sleepReason == "drained" {
+			return BaseStateDrained
+		}
+		return BaseStateAsleep
+	case string(StateSuspended):
+		return BaseStateSuspended
+	case string(StateFailedCreate):
+		return BaseStateFailedCreate
+	case string(StateDraining):
+		return BaseStateDraining
+	case "drained":
+		return BaseStateDrained
+	case string(StateArchived):
+		return BaseStateArchived
+	case "orphaned":
+		return BaseStateOrphaned
+	case "closed":
+		return BaseStateClosed
+	case "closing":
+		return BaseStateClosing
+	case string(StateQuarantined):
+		return BaseStateQuarantined
+	case "stopped":
+		return BaseStateStopped
+	default:
+		return BaseState(strings.TrimSpace(storedState))
+	}
+}
+
+func compatStateForBase(base BaseState) State {
+	switch base {
+	case BaseStateStartPending:
+		return StateStartPending
+	case BaseStateCreating:
+		return StateCreating
+	case BaseStateActive:
+		return StateActive
+	case BaseStateAsleep, BaseStateDrained, BaseStateStopped:
+		return StateAsleep
+	case BaseStateSuspended:
+		return StateSuspended
+	case BaseStateFailedCreate:
+		return StateFailedCreate
+	case BaseStateDraining:
+		return StateDraining
+	case BaseStateArchived:
+		return StateArchived
+	case BaseStateQuarantined:
+		return StateQuarantined
+	case BaseStateClosed:
+		return State("closed")
+	case BaseStateClosing:
+		return State("closing")
+	case BaseStateOrphaned:
+		return State("orphaned")
+	default:
+		return State(base)
+	}
+}
+
+func projectContinuityEligibility(base BaseState, raw string) bool {
+	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
+		return false
+	}
+	if raw == "false" {
+		return false
+	}
+	if base == BaseStateArchived {
+		return raw == "true"
+	}
+	// The accepted session model keeps orphaned beads continuity-eligible
+	// while missing config is the only blocker.
+	return true
+}
+
+func projectIdentity(input LifecycleInput, namedIdentity string, base BaseState, continuityEligible bool) IdentityProjection {
+	hasBead := base != BaseStateNone
+	if namedIdentity != "" && hasBead {
+		if continuityEligible {
+			return IdentityCanonical
+		}
+		return IdentityHistorical
+	}
+	if input.NamedIdentity.Configured && input.NamedIdentity.Conflict && !input.NamedIdentity.HasCanonicalBead {
+		return IdentityConflict
+	}
+	if input.NamedIdentity.Configured && !input.NamedIdentity.HasCanonicalBead {
+		return IdentityReservedUnmaterialized
+	}
+	if hasBead {
+		return IdentityConcrete
+	}
+	return IdentityNone
+}
+
+func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identity IdentityProjection) ([]LifecycleBlocker, time.Time, time.Time) {
+	var blockers []LifecycleBlocker
+	if input.ConfigMissing || base == BaseStateOrphaned {
+		blockers = appendUniqueBlocker(blockers, BlockerMissingConfig)
+	}
+	if identity == IdentityConflict || (input.NamedIdentity.Configured && input.NamedIdentity.Conflict) {
+		blockers = appendUniqueBlocker(blockers, BlockerIdentityConflict)
+	}
+	if input.NamedIdentity.DuplicateCanonical {
+		blockers = appendUniqueBlocker(blockers, BlockerDuplicateCanonical)
+	}
+
+	var heldUntil time.Time
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(input.HeldUntil)); err == nil && !t.IsZero() {
+		heldUntil = t
+		if now.Before(t) {
+			blockers = appendUniqueBlocker(blockers, BlockerHeld)
+		}
+	}
+
+	var quarantinedUntil time.Time
+	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(input.QuarantinedUntil)); err == nil && !t.IsZero() {
+		quarantinedUntil = t
+		if now.Before(t) {
+			blockers = appendUniqueBlocker(blockers, BlockerQuarantined)
+		}
+	}
+
+	return blockers, heldUntil, quarantinedUntil
+}
+
+// unobservedCreatingTimeout bounds how long a creating bead may sit when the
+// runtime could not be observed at all. Deliberately much longer than
+// StaleCreatingAfter: an unobserved runtime may simply be a transient probe
+// failure over a live session, so this must not fire on a normal hiccup —
+// only on a create that is definitively abandoned (ga-pofwv9).
+//
+// Reachability at this head: Runtime.Observed == false is entered in production
+// via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
+// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go), but the only
+// consumer of the fields this branch sets (RuntimeProjection, ReconciledState,
+// ResetContinuation) is cmd/gc/session_reconcile.go, which sets Observed: true.
+// So the branch is inert here rather than unreachable — defense in depth for a
+// future consumer that reads a projection built without runtime facts.
+const unobservedCreatingTimeout = 15 * time.Minute
+
+func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
+	if !input.Runtime.Observed {
+		if base == BaseStateCreating && creatingUnobservedExpired(input) {
+			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+		}
+		return RuntimeProjectionUnknown, compat, false
+	}
+	if input.Runtime.Alive {
+		return RuntimeProjectionAlive, StateAwake, false
+	}
+	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
+		return RuntimeProjectionMissing, compat, false
+	}
+	if base == BaseStateStartPending {
+		return RuntimeProjectionStartRequested, StateStartPending, false
+	}
+	// #1460: A creating bead with last_woke_at represents an in-flight provider
+	// Start attempt and must age out through the stale-creating path. Legacy
+	// rows that never reached the start boundary have no last_woke_at; project
+	// those back to start-pending so the controller can safely start them.
+	if base == BaseStateCreating {
+		if input.PendingCreateClaim &&
+			strings.TrimSpace(input.LastWokeAt) == "" {
+			return RuntimeProjectionStartRequested, StateStartPending, false
+		}
+		if !creatingStateIsStale(input) {
+			if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
+				return RuntimeProjectionStartRequested, StateCreating, false
+			}
+			return RuntimeProjectionFreshCreating, StateCreating, false
+		}
+		return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+	}
+	if base == BaseStateFailedCreate {
+		return RuntimeProjectionMissing, StateFailedCreate, false
+	}
+	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
+		return RuntimeProjectionStartRequested, StateStartPending, false
+	}
+	return RuntimeProjectionMissing, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+}
+
+func creatingStateIsStale(input LifecycleInput) bool {
+	if input.StaleCreatingAfter <= 0 {
+		// StaleCreatingAfter is assigned in exactly one construction path
+		// (cmd/gc/session_reconcile.go). Every other path — including
+		// LifecycleInputFromMetadata, used by the wake path — leaves it
+		// unset, which must not mean "never stale" (ga-pofwv9, second gap).
+		// Fall back to the same bound used when the runtime is unobservable.
+		return creatingUnobservedExpired(input)
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	startedAt := input.CreatedAt
+	if v := strings.TrimSpace(input.PendingCreateStartedAt); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+			startedAt = t
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(input.StaleCreatingAfter))
+}
+
+// creatingUnobservedExpired reports whether a creating bead has aged past
+// unobservedCreatingTimeout, independent of StaleCreatingAfter. It anchors on
+// PendingCreateStartedAt, then CreatedAt, matching creatingStateIsStale.
+//
+// A zero input.Now means the caller has no clock at all (e.g.
+// healStatePatchWithRollbackInfo with clk == nil) — that must mean "cannot
+// assess staleness," not "assume the current wall-clock time," or a
+// deliberately clockless caller would see old-but-otherwise-fine creating
+// beads reported as expired against whatever moment the test happens to run.
+func creatingUnobservedExpired(input LifecycleInput) bool {
+	if input.Now.IsZero() {
+		return false
+	}
+	now := input.Now
+	startedAt := input.CreatedAt
+	if v := strings.TrimSpace(input.PendingCreateStartedAt); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+			startedAt = t
+		}
+	}
+	if startedAt.IsZero() {
+		return true
+	}
+	return !now.Before(startedAt.Add(unobservedCreatingTimeout))
+}
+
+func shouldResetContinuation(base BaseState, input LifecycleInput, sleepReason string) bool {
+	if strings.TrimSpace(input.SessionKey) == "" && strings.TrimSpace(input.StartedConfigHash) == "" {
+		return false
+	}
+	// This list deliberately diverges from IsDeliberateSleepReason's near-identical
+	// list (this one has "runtime-missing" and lacks "failed-create"): that one
+	// decides churn suppression, this one decides continuation reset on wake — do
+	// not merge the lists.
+	switch SleepReason(strings.TrimSpace(sleepReason)) {
+	case SleepReasonIdle, SleepReasonIdleTimeout, SleepReasonNoWakeReason,
+		SleepReasonConfigDrift, SleepReasonDrained, SleepReasonCityStop,
+		SleepReasonUserHold, SleepReasonWaitHold, SleepReasonRateLimit,
+		SleepReasonRuntimeMissing:
+		return false
+	}
+	return base == BaseStateActive || base == BaseStateCreating
+}
+
+func projectWakeCauses(input LifecycleInput) []WakeCause {
+	var causes []WakeCause
+	for _, cause := range input.WakeCauses {
+		causes = appendUniqueWakeCause(causes, cause)
+	}
+	if input.PendingCreateClaim {
+		causes = appendUniqueWakeCause(causes, WakeCausePendingCreate)
+	}
+	if strings.TrimSpace(input.WakeRequest) == string(WakeCauseExplicit) {
+		causes = appendUniqueWakeCause(causes, WakeCauseExplicit)
+	}
+	if strings.TrimSpace(input.PinAwake) == "true" {
+		causes = appendUniqueWakeCause(causes, WakeCausePinned)
+	}
+	if input.Runtime.Attached {
+		causes = appendUniqueWakeCause(causes, WakeCauseAttached)
+	}
+	if input.Runtime.Pending {
+		causes = appendUniqueWakeCause(causes, WakeCausePending)
+	}
+	return causes
+}
+
+func projectDesiredState(input LifecycleInput, terminal bool, blockers []LifecycleBlocker, wakeCauses []WakeCause) DesiredState {
+	if terminal {
+		return DesiredStateUndesired
+	}
+	if len(wakeCauses) > 0 {
+		if len(blockers) > 0 {
+			return DesiredStateBlocked
+		}
+		return DesiredStateRunning
+	}
+	if input.PreserveIdentity {
+		return DesiredStateAsleep
+	}
+	return DesiredStateUndesired
+}
+
+func countsAgainstCapacity(base BaseState) bool {
+	switch base {
+	case BaseStateStartPending, BaseStateCreating, BaseStateActive, BaseStateDraining, BaseStateQuarantined:
+		return true
+	default:
+		return false
+	}
+}
+
+func appendUniqueBlocker(blockers []LifecycleBlocker, blocker LifecycleBlocker) []LifecycleBlocker {
+	if blocker == "" {
+		return blockers
+	}
+	for _, existing := range blockers {
+		if existing == blocker {
+			return blockers
+		}
+	}
+	return append(blockers, blocker)
+}
+
+func appendUniqueWakeCause(causes []WakeCause, cause WakeCause) []WakeCause {
+	if cause == "" {
+		return causes
+	}
+	for _, existing := range causes {
+		if existing == cause {
+			return causes
+		}
+	}
+	return append(causes, cause)
+}
+
+func hasWakeCause(causes []WakeCause, cause WakeCause) bool {
+	for _, existing := range causes {
+		if existing == cause {
+			return true
+		}
+	}
+	return false
+}

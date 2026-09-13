@@ -2,6 +2,8 @@ package main
 
 import (
 	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -107,5 +109,118 @@ func TestEnsureSessionForTemplate_ReopensClosedNamedSessionWithCleanMetadata(t *
 	}
 	if reopened.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("pending_create_claim = %q, want true", reopened.Metadata["pending_create_claim"])
+	}
+}
+
+func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "ant",
+			Dir:               "demo",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/ants/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+	store := beads.NewMemStore()
+
+	firstName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/ant", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate(first) = %v", err)
+	}
+	secondName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/ant", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate(second) = %v", err)
+	}
+	if firstName == secondName {
+		t.Fatalf("session names should be unique, got %q for both", firstName)
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("session bead count = %d, want 2", len(all))
+	}
+	seenWorkDir := make(map[string]bool, len(all))
+	for _, bead := range all {
+		sessionName := bead.Metadata["session_name"]
+		if sessionName == "" {
+			t.Fatal("session_name should be populated")
+		}
+		if got := bead.Metadata["session_name_explicit"]; got != boolMetadata(true) {
+			t.Fatalf("session_name_explicit = %q, want %q", got, boolMetadata(true))
+		}
+		if !strings.HasPrefix(sessionName, "ant-adhoc-") {
+			t.Fatalf("session_name = %q, want ant-adhoc-*", sessionName)
+		}
+		workDir := bead.Metadata["work_dir"]
+		if filepath.Dir(workDir) != filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants") {
+			t.Fatalf("work_dir(%q) parent = %q, want %q", sessionName, filepath.Dir(workDir), filepath.Join(cityPath, ".gc", "worktrees", "demo", "ants"))
+		}
+		base := filepath.Base(workDir)
+		if base == "ant" {
+			t.Fatalf("work_dir(%q) base = %q, want unique generated identity", sessionName, base)
+		}
+		if !strings.HasPrefix(base, "ant-adhoc-") {
+			t.Fatalf("work_dir(%q) base = %q, want ant-adhoc-*", sessionName, base)
+		}
+		if seenWorkDir[workDir] {
+			t.Fatalf("duplicate work_dir %q for aliasless pooled sessions", workDir)
+		}
+		seenWorkDir[workDir] = true
+		if got := bead.Metadata["agent_name"]; got != "demo/"+sessionName {
+			t.Fatalf("agent_name(%q) = %q, want %q", sessionName, got, "demo/"+sessionName)
+		}
+	}
+}
+
+func TestEnsureSessionForTemplate_RebrandedSingletonKeepsTemplateWorkDirIdentity(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
+		Agents: []config.Agent{{
+			Name:              "witness",
+			Dir:               "demo",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/{{.AgentBase}}",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "boot",
+			Template: "witness",
+			Dir:      "demo",
+		}},
+	}
+	store := beads.NewMemStore()
+
+	sessionName, err := ensureSessionForTemplate(cityPath, cfg, store, "demo/boot", io.Discard)
+	if err != nil {
+		t.Fatalf("ensureSessionForTemplate = %v", err)
+	}
+	if sessionName == "" {
+		t.Fatal("session name should be populated")
+	}
+
+	all, err := store.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("session bead count = %d, want 1", len(all))
+	}
+	wantWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "witness")
+	if got := all[0].Metadata["work_dir"]; got != wantWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
 	}
 }

@@ -8,23 +8,21 @@ import (
 
 func TestScan(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/layer1/orders/digest"] = true
-	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
-	fs.Dirs["/layer1/orders/cleanup"] = true
-	fs.Files["/layer1/orders/cleanup/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/cleanup.toml"] = []byte(`
 [order]
 formula = "mol-cleanup"
-gate = "cron"
+trigger = "cron"
 schedule = "0 3 * * *"
 `)
 
-	orders, err := Scan(fs, []string{"/layer1"}, nil)
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -43,9 +41,9 @@ schedule = "0 3 * * *"
 
 func TestScanEmpty(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/layer1"] = true
+	fs.Dirs["/layer1/formulas"] = true
 
-	orders, err := Scan(fs, []string{"/layer1"}, nil)
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -57,25 +55,23 @@ func TestScanEmpty(t *testing.T) {
 func TestScanLayerOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	// Layer 1 (lower priority): digest with 24h.
-	fs.Dirs["/layer1/orders/digest"] = true
-	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "dog"
 `)
 	// Layer 2 (higher priority): digest with 8h.
-	fs.Dirs["/layer2/orders/digest"] = true
-	fs.Files["/layer2/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer2/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "8h"
 pool = "dog"
 `)
 
-	orders, err := Scan(fs, []string{"/layer1", "/layer2"}, nil)
+	orders, err := Scan(fs, []string{"/layer1/formulas", "/layer2/formulas"}, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -89,21 +85,46 @@ pool = "dog"
 
 func TestScanSkip(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/layer1/orders/digest"] = true
-	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 `)
-	fs.Dirs["/layer1/orders/cleanup"] = true
-	fs.Files["/layer1/orders/cleanup/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/cleanup.toml"] = []byte(`
 [order]
 formula = "mol-cleanup"
-gate = "manual"
+trigger = "manual"
 `)
 
-	orders, err := Scan(fs, []string{"/layer1"}, []string{"digest"})
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, []string{"digest"})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("got %d orders, want 1", len(orders))
+	}
+	if orders[0].Name != "cleanup" {
+		t.Errorf("Name = %q, want %q", orders[0].Name, "cleanup")
+	}
+}
+
+func TestScanSkipAliases(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/layer1/orders/maintenance-export.toml"] = []byte(`
+[order]
+exec = "scripts/export.sh"
+trigger = "cooldown"
+interval = "15m"
+skip_aliases = ["old-export"]
+`)
+	fs.Files["/layer1/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+`)
+
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, []string{"old-export"})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -117,16 +138,15 @@ gate = "manual"
 
 func TestScanDisabled(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/layer1/orders/digest"] = true
-	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 enabled = false
 `)
 
-	orders, err := Scan(fs, []string{"/layer1"}, nil)
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -137,11 +157,10 @@ enabled = false
 
 func TestScanFormulaLayer(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/pack/formulas/orders/health"] = true
-	fs.Files["/pack/formulas/orders/health/order.toml"] = []byte(`
+	fs.Files["/pack/orders/health.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1m"
 `)
 
@@ -160,19 +179,17 @@ interval = "1m"
 func TestScanFormulaLayerOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	// Layer 1: lower priority.
-	fs.Dirs["/base/formulas/orders/health"] = true
-	fs.Files["/base/formulas/orders/health/order.toml"] = []byte(`
+	fs.Files["/base/orders/health.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"
 `)
 	// Layer 2: higher priority overrides.
-	fs.Dirs["/pack/formulas/orders/health"] = true
-	fs.Files["/pack/formulas/orders/health/order.toml"] = []byte(`
+	fs.Files["/pack/orders/health.toml"] = []byte(`
 [order]
 exec = "$PACK_DIR/scripts/health.sh"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 `)
 
@@ -191,21 +208,20 @@ interval = "5m"
 
 func TestScanSourcePath(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Dirs["/layer1/orders/digest"] = true
-	fs.Files["/layer1/orders/digest/order.toml"] = []byte(`
+	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
 formula = "mol-digest"
-gate = "manual"
+trigger = "manual"
 `)
 
-	orders, err := Scan(fs, []string{"/layer1"}, nil)
+	orders, err := Scan(fs, []string{"/layer1/formulas"}, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 	if len(orders) != 1 {
 		t.Fatalf("got %d orders, want 1", len(orders))
 	}
-	if orders[0].Source != "/layer1/orders/digest/order.toml" {
-		t.Errorf("Source = %q, want %q", orders[0].Source, "/layer1/orders/digest/order.toml")
+	if orders[0].Source != "/layer1/orders/digest.toml" {
+		t.Errorf("Source = %q, want %q", orders[0].Source, "/layer1/orders/digest.toml")
 	}
 }
