@@ -792,6 +792,88 @@ func TestWispAutocloseFailsClosedOnRefusedGraphBinding(t *testing.T) {
 	}
 }
 
+// partialGraphViewStore refuses only the tracking-convoy probe for one bead,
+// serving every other read from the embedded graph store. Unlike
+// refusedClassStore (which refuses ListByMetadata too, so the root lookup
+// blocks the decoy independently) and the package's blanket
+// depListFailingStore, this is the shape that can tell a fail-closed
+// implementation apart from one that narrows to the work leg.
+type partialGraphViewStore struct {
+	beads.Store
+	failID string
+}
+
+func (s partialGraphViewStore) DepList(id, dir string) ([]beads.Dep, error) {
+	if id == s.failID {
+		return nil, fmt.Errorf("graph leg unavailable for %s", id)
+	}
+	return s.Store.DepList(id, dir)
+}
+
+// TestWispAutocloseFailsClosedOnPartialGraphView is the discriminator the
+// refused-binding arm cannot be: only the graph leg's tracking-convoy probe
+// fails, so every other graph read still serves. The work leg finds the
+// tracking convoy and the graph store holds a reapable open graph.v2 root
+// bound to it — so an implementation that narrowed a failed graph probe to the
+// work leg would resolve that root through the still-serving ListByMetadata
+// and force-close it. Failing closed instead leaves the root for a later
+// close, which is the recoverable direction on a partial view.
+func TestWispAutocloseFailsClosedOnPartialGraphView(t *testing.T) {
+	workStore := beads.NewMemStore()
+	graph := beads.NewMemStore()
+	// Distinct mint prefixes so the two stores cannot alias ids: the graph
+	// root must be reachable only through the convoy binding under test.
+	graph.IDPrefix = "gx"
+
+	issue, err := workStore.Create(beads.Bead{Title: "work issue", Type: "task"})
+	if err != nil {
+		t.Fatalf("create work issue: %v", err)
+	}
+	convoy, err := workStore.Create(beads.Bead{
+		Title:    "synthetic input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatalf("create synthetic input convoy in the work store: %v", err)
+	}
+	if err := workStore.DepAdd(convoy.ID, issue.ID, "tracks"); err != nil {
+		t.Fatalf("DepAdd(tracks) in the work store: %v", err)
+	}
+	root, err := graph.Create(beads.Bead{
+		Title: "mol-focus-review",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   convoy.ID,
+			beadmeta.RoutedToMetadataKey:        "review-pool/worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create graph-resident workflow root: %v", err)
+	}
+	if err := workStore.Close(issue.ID); err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+
+	graphDouble := partialGraphViewStore{Store: graph, failID: issue.ID}
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(workStore, issue.ID, &stdout, beads.GraphStore{Store: graphDouble})
+
+	rootAfter, err := graph.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" {
+		t.Fatalf("root status = %q, want open; the reap narrowed the failed graph probe to the work leg and force-closed a root it could not fully see", rootAfter.Status)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no auto-close output on a partial graph view", stdout.String())
+	}
+}
+
 func TestWispAutoclosePreservesOrchestratedWorkflowViaInputConvoyWhenStepsOpen(t *testing.T) {
 	// The input-convoy reap must not steamroll an orchestrated graph.v2 workflow
 	// whose step beads are still in flight: those roots close via their

@@ -182,14 +182,17 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 	if graphStore != workStore {
 		graphConvoys, gerr := convoycore.TrackingConvoysForItem(graphStore, parent.ID)
 		if gerr != nil {
-			// Fail closed, matching the workStore posture above: a partial view
-			// must not decide "no wisp to reap" and leak an open root. This is
-			// also the refused-binding arm — a city whose split this build must
-			// not serve delivers the refusal AS the graph store
-			// (cli_storage_routes.go), so every probe errors here. The refusal
-			// itself was printed once when the verdict was taken; narrowing this
-			// read to the work leg would be the looks-like-success answer that
-			// file exists to close.
+			// Fail closed, matching the workStore posture above: on a partial
+			// view we decline to force-close anything. Leaving the root for a
+			// later close is the recoverable direction — the redundant close
+			// paths reap it once the view is whole again — while silently
+			// narrowing this read to the work leg would force-close a root we
+			// could not fully see. This is also the refused-binding arm: a city
+			// whose split this build must not serve delivers the refusal AS the
+			// graph store (cli_storage_routes.go), so every probe errors here.
+			// The refusal itself was printed once when the verdict was taken;
+			// narrowing to the work leg would be exactly the
+			// looks-like-success answer that file exists to close.
 			return nil
 		}
 		convoys = dedupeConvoysByID(convoys, graphConvoys)
