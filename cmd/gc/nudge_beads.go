@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -26,9 +27,19 @@ type nudgeReference = nudgequeue.Reference
 // strongly-typed beads.NudgesStore so the nudges class is statically visible to
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
-var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
-	store, _ := openNudgeBeadStoreErr(cityPath)
+//
+// It takes the city config so a caller that already loaded it (the drain path
+// resolves its target from the same config) does not pay the full city+pack
+// TOML load again inside the store open; nil keeps the loading behavior.
+var openNudgeBeadStoreWithConfig = func(cityPath string, cfg *config.City) beads.NudgesStore {
+	store, _ := openNudgeBeadStoreErrWithConfig(cityPath, cfg)
 	return store
+}
+
+// openNudgeBeadStore is openNudgeBeadStoreWithConfig for callers with no
+// config in hand.
+func openNudgeBeadStore(cityPath string) beads.NudgesStore {
+	return openNudgeBeadStoreWithConfig(cityPath, nil)
 }
 
 // openNudgeBeadStoreErr is openNudgeBeadStore with the open failure kept instead
@@ -41,7 +52,13 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
 func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	return openNudgeBeadStoreErrWithConfig(cityPath, nil)
+}
+
+// openNudgeBeadStoreErrWithConfig is openNudgeBeadStoreErr reusing an
+// already-loaded city config (nil loads it).
+func openNudgeBeadStoreErrWithConfig(cityPath string, cfg *config.City) (beads.NudgesStore, error) {
+	store, err := openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
