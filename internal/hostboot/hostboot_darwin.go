@@ -18,5 +18,5 @@ func bootTime() (time.Time, error) {
 	if tv.Sec <= 0 {
 		return time.Time{}, fmt.Errorf("hostboot: implausible kern.boottime seconds %d", tv.Sec)
 	}
-	return time.Unix(int64(tv.Sec), int64(tv.Usec)*1000), nil
+	return time.Unix(tv.Sec, int64(tv.Usec)*1000), nil
 }

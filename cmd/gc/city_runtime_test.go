@@ -52,6 +52,14 @@ func (p *sweepIsRunningFalseNegativeProvider) IsRunning(name string) bool {
 	return false
 }
 
+type sweepUnavailableLivenessProvider struct {
+	*runtime.Fake
+}
+
+func (p *sweepUnavailableLivenessProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLiveness(p.Fake, name, processNames), fmt.Errorf("pool sweep: %w", runtime.ErrRuntimeUnavailable)
+}
+
 func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
@@ -97,6 +105,49 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 	}
 	if got.Status == "closed" {
 		t.Fatalf("running pool bead was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_DefersWhenLivenessUnavailable(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-unavailable",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		"",
+		beads.SessionStore{Store: store},
+		nil,
+		newSessionBeadSnapshot([]beads.Bead{bead}),
+		nil,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		&sweepUnavailableLivenessProvider{Fake: runtime.NewFake()},
+		false,
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0 while runtime liveness is unavailable", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("pool bead was closed despite runtime uncertainty: %+v", got)
 	}
 }
 

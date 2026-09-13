@@ -1303,6 +1303,11 @@ func clearRetryEphemera(meta map[string]string) {
 		beadmeta.DurationMsMetadataKey,
 		beadmeta.TruncatedMetadataKey,
 		beadmeta.TerminalMetadataKey,
+		// A retry attempt clones the previous attempt's metadata, so it must not
+		// inherit the projector's per-step step_defined marker: a born-marked
+		// clone would be skipped by EmitCurrent and never get its own
+		// step_defined (ga-rd8le). Every clone path here strips it via this list.
+		beadmeta.StepDefinedEmittedMetadataKey,
 		beadmeta.FailedAttemptMetadataKey,
 		beadmeta.FanoutStateMetadataKey,
 		beadmeta.SpawnedCountMetadataKey,

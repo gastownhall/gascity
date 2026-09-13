@@ -77,6 +77,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A closed binding row now supersedes its retained frozen twin in the
+  one-live-workflow-per-source-bead guard, so a converged city stops refusing a
+  sling whose only live root is gone.** A storage migration copies rows into the
+  class binding with ids preserved and deletes nothing, so a workflow root
+  relocated into the binding and later closed there still exists as an OPEN copy
+  in the retained work ledger. The guard unioned every leg's live roots, reported
+  that copy as live, named it in `blocking_workflow_ids`, and refused. The
+  collector now lets the binding's row win on a shared root id — live or closed —
+  asking the binding directly about the ids the work legs reported, with a
+  bounded per-id probe rather than a full closed scan. Only a row that is really
+  the same root supersedes: ids are unique within a store and store-prefixed ids
+  collide across stores, so the binding's row must be a workflow root, for the
+  same source bead, naming the same source store whenever both sides name one. A
+  probe that faults refuses the sling: a binding fault is an error, never
+  absence. A binding row that predates the `gc.source_store_ref` stamp
+  supersedes its twin only once it is closed, because a live one is invisible to
+  the guard's own scan and dropping its twin would leave the sling unguarded. A
+  city that relocates nothing has no binding leg, runs no probe, and enumerates
+  exactly what it did before.
+
+- **The one-live-workflow-per-source-bead guard reads the graph binding, so a
+  split city stops admitting a second live workflow.** A workflow root is graph
+  class, so on a city that relocates the graph class every live root is in the
+  binding — and neither sling door enumerated it. The API walked the city store
+  plus each rig store; the CLI walked the city and rig *directories*, which a
+  binding is not. Both then answered "no conflict" out of stores that
+  structurally could not hold the answer, and a second launch was admitted for a
+  source bead that already had one (the batch path instead rolled its launch
+  back, because the same blindness hid the root it had just created). Both
+  enumerators now lead with the relocated binding, under the same
+  `graph:<city>` store ref the workflow snapshot scan already mints and parses,
+  and the CLI gets it from the one class-binding front door rather than a second
+  enumerator. A scan fault on that leg refuses the sling instead of degrading to
+  the tolerated non-source-store warning: a binding fault is an error, never
+  absence. A city that relocates nothing enumerates exactly what it did before,
+  and one root reached through two legs is named once.
+
 - **The work-record close gate asks the repository the bead's OWNER points at,
   not the store it was read through.** A rig's work step that a relocated class
   binding holds has its commits on the rig's checkout, and both close doors
@@ -111,6 +148,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. See "If this city cut over before edge payloads were carried" in
   `docs/runbooks/split-storage-classes.md` for what is affected, what is not
   lost, and the destructive re-converge procedure.
+- **`gc workflow delete-source` and `gc workflow reopen-source` write the copy
+  of the source bead the residency contract owns, not the one the selector
+  named.** An explicit `--rig` / `--store-ref` pins the store the sweep works
+  in, and both commands were writing the source bead's metadata through that
+  same store. On a converged city — infrastructure classes relocated into the
+  class binding with ids preserved, the pre-migration copies retained and
+  frozen at cutover — an operator naming the city cleared `workflow_id` on the
+  frozen twin while the binding's live row went on pointing at the workflow
+  that had just been swept. The next resolve answers from the binding, still
+  sees a workflow, and refuses the re-sling as already-running against a tree
+  that no longer exists; `reopen-source` had the same defect one verb over,
+  reopening the twin and leaving the row the city actually reads closed and
+  still bound. Both now resolve the owning copy through the by-id residency
+  walk (binding-first, a binding fault is an error and never absence), then
+  clear any other resident copy's stale `workflow_id` best-effort so the two
+  cannot disagree. A city that relocates nothing, and any `--rig` run, writes
+  exactly the store it wrote before.
 
 - **A control bead served by a relocated class binding is routed to the
   dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
@@ -130,6 +184,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positional argument is split into individual IDs before single-versus-batch
   dispatch, so shell variables containing multiple IDs no longer look like one
   already-handled message.
+- **graphv2 retry re-attempts for rig-scoped `lifecycle=one_shot` steps now
+  keep their rig qualifier and drop stale session pinning.** A retry
+  control that is nested/runtime-minted (as opposed to one decorated at
+  compile time by graphroute) never gets `gc.execution_routed_to` stamped,
+  only `gc.execution_rig_context` backfilled. `spawnNextAttempt`'s
+  `qualifyAttemptTargetWithSourceRoute` derived a rig prefix only from
+  `gc.execution_routed_to`, so a re-attempt for a step whose
+  `gc.run_target` was a bare rig-template agent name lost its rig
+  qualifier — `gc.routed_to` landed unscoped and no pool ever claimed the
+  re-attempt. Separately, `applyAttemptStepRoute`'s metadata-only pool
+  branch never cleared `gc.session_affinity`/`gc.continuation_group` the
+  way `graphroute.ApplyGraphRouteBinding`'s pool-branch affinity clear
+  does, so a re-attempt for a one_shot lifecycle agent stayed pinned to
+  session affinity for a runtime that had already exited after its
+  bounded invocation. Both are fixed: the target qualifier now falls back
+  to the step's own execution rig context, and metadata-only pool
+  attempts for one_shot agents now clear the stale continuation/affinity
+  keys, mirroring `graphroute.ApplyGraphRouteBinding`'s pool branch.
+
+- **A `lifecycle=one_shot` pool session that exits into a freeable sleep
+  reason no longer blocks its own runtime name forever.** The session's
+  bounded-work exit lands its bead in `state=asleep` via the generic heal
+  path, same as any other dead session, but `reusablePoolSessionInfo`
+  excluded every asleep session from reuse on the assumption that "the
+  reconciler closes orphaned asleep beads" — no such closing exists. The
+  bead stayed open holding the identity's `session_name`, and the next
+  tick's fresh create failed closed on that same name ("pool session name
+  unavailable ... session name already exists") until an operator ran
+  `gc session close` by hand. The asleep exclusion is now scoped: a
+  `one_shot` session whose sleep reason is already in the freeable
+  allow-list (idle, idle-timeout, city-stop, failed-create, runtime-missing,
+  provider-terminal-error, max-session-age) is reused through the ordinary
+  wake path instead. A `one_shot` exit that still holds an open or
+  in-progress assigned work bead under any of its identities is not treated
+  as a clean exit — it falls through to fresh-identity creation rather than
+  being reused, so the unfinished step is claimed properly instead of being
+  pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
+  are unaffected — a genuine crash still gets a fresh identity.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -318,6 +410,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only for gc-managed Dolt endpoints, whose lifecycle gc owns; externally
   bound or explicitly configured endpoints keep bd's own output unchanged
   (gastownhall/gascity#1374).
+
+- **`gc init` provider readiness now finds Nix-installed CLIs.** Provider
+  readiness probes (`gc init --default-provider gemini` and friends) search a
+  deterministic, user-aware set of install directories rather than the
+  ambient `$PATH`, so a CLI installed via Nix (`~/.nix-profile/bin` for
+  classic `nix-env`, `~/.local/state/nix/profiles/profile/bin` for the newer
+  `nix profile install`) was reported as "not installed" even when it was on
+  the shell's `PATH`. Both locations are now included, matching the existing
+  npm/pnpm/yarn/cargo/nvm handling in `internal/searchpath`. Fixes #3962.
 
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced

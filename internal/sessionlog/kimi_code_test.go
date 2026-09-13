@@ -23,13 +23,13 @@ func TestKimiCodeDiscovery(t *testing.T) {
 	}
 	path := writeKimiContext(t, filepath.Join(root, "sessions", "wd_kimi-probe-ws_87061d3d7a56", "session_native", "agents", "main", "wire.jsonl"), []string{`{"type":"metadata","protocol_version":"1.5","created_at":1787252689149}`})
 	for _, search := range []string{root, filepath.Join(root, "sessions")} {
-		if got := FindKimiSessionFile([]string{search}, workDir); got != path {
+		if got := FindKimiSessionFile([]string{search}, workDir); !samePath(got, path) {
 			t.Errorf("newest = %q, want %q", got, path)
 		}
-		if got := FindKimiSessionFileIfUnambiguous([]string{search}, workDir); got != path {
+		if got := FindKimiSessionFileIfUnambiguous([]string{search}, workDir); !samePath(got, path) {
 			t.Errorf("unambiguous = %q, want %q", got, path)
 		}
-		if got := FindKimiSessionFileByID([]string{search}, workDir, "session_native"); got != path {
+		if got := FindKimiSessionFileByID([]string{search}, workDir, "session_native"); !samePath(got, path) {
 			t.Errorf("keyed = %q, want %q", got, path)
 		}
 	}
@@ -49,7 +49,7 @@ func TestKimiCodeDiscovery(t *testing.T) {
 	if got := FindKimiSessionFileIfUnambiguous([]string{root}, workDir); got != "" {
 		t.Fatalf("mixed layouts are ambiguous, got %q", got)
 	}
-	if got := FindKimiSessionFile([]string{root}, workDir); got != path {
+	if got := FindKimiSessionFile([]string{root}, workDir); !samePath(got, path) {
 		t.Fatalf("newest mixed layout = %q", got)
 	}
 }
@@ -164,7 +164,7 @@ func TestKimiCodeRootsAndWorkspaceIdentity(t *testing.T) {
 	}
 	path := writeKimiContext(t, filepath.Join(root, "sessions", kimiCodeWorkDirKey(workDir), "session_main", "agents", "main", "wire.jsonl"), []string{`{"type":"metadata","protocol_version":"1.5"}`})
 	writeKimiContext(t, filepath.Join(root, "sessions", kimiCodeWorkDirKey(workDir), "session_main", "agents", "agent-0", "wire.jsonl"), []string{`{"type":"metadata","protocol_version":"1.5"}`})
-	if got := FindKimiSessionFileByID(nil, alias, "session_main"); got != path {
+	if got := FindKimiSessionFileByID(nil, alias, "session_main"); !samePath(got, path) {
 		t.Fatalf("custom home / canonical workspace = %q", got)
 	}
 	rootAlias := filepath.Join(t.TempDir(), "account")
@@ -178,7 +178,7 @@ func TestKimiCodeRootsAndWorkspaceIdentity(t *testing.T) {
 	if got := FindKimiSessionFileIfUnambiguous(nil, workDir); got != "" {
 		t.Fatalf("ambiguous native sessions matched %q", got)
 	}
-	if got := FindKimiSessionFileByID(nil, workDir, "session_main"); got != path {
+	if got := FindKimiSessionFileByID(nil, workDir, "session_main"); !samePath(got, path) {
 		t.Fatalf("exact native key = %q", got)
 	}
 	for _, wd := range []string{"", " "} {
@@ -247,10 +247,10 @@ func TestKimiCodeSuccessfulLookupDoesNotWarnAboutLegacyLayout(t *testing.T) {
 	old := log.Writer()
 	log.SetOutput(&logs)
 	defer log.SetOutput(old)
-	if got := FindKimiSessionFile([]string{root}, workDir); got != path {
+	if got := FindKimiSessionFile([]string{root}, workDir); !samePath(got, path) {
 		t.Fatalf("lookup=%q", got)
 	}
-	if got := FindKimiSessionFileByID([]string{root}, workDir, "session_native"); got != path {
+	if got := FindKimiSessionFileByID([]string{root}, workDir, "session_native"); !samePath(got, path) {
 		t.Fatalf("keyed lookup=%q", got)
 	}
 	if logs.Len() != 0 {

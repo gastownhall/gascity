@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,76 @@ timeout = "120s"
 	}
 	if off.NoWorkGate {
 		t.Error("NoWorkGate = true, want false (default) for probe without the flag")
+	}
+}
+
+// TestOrderReservedDispatchParsed covers ga-xxyzgq: a pack author declares an
+// order eligible for the dispatcher's bounded reserved-dispatch lane via
+// reserved_dispatch, in TOML, with no name-based logic in Go. Every order is
+// opted out by default; only the 3 bundled core-health orders (beads-health,
+// gate-sweep, dolt-health) set the flag. This test pins their deployed shape by
+// parsing the shipped TOML files themselves, the same way
+// TestProviderHealthProbeOrderOptsOutOfWorkGate pins provider-health-probe's —
+// the actual capped-budget dispatch behavior that consumes this flag is
+// separate (gastownhall/gascity ga-1ocm3f).
+func TestOrderReservedDispatchParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nreserved_dispatch = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.ReservedDispatch {
+		t.Error("ReservedDispatch = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "30s", ReservedDispatch: true}); err != nil {
+		t.Errorf("Validate with ReservedDispatch: %v", err)
+	}
+
+	// Pin the deployed shape of the 3 bundled core-health orders by reading the
+	// files themselves — an embedded copy would stay green if a shipped pack
+	// dropped the flag.
+	bundled := []struct {
+		name string
+		path string
+	}{
+		{"beads-health", "../bootstrap/packs/core/orders/beads-health.toml"},
+		{"gate-sweep", "../bootstrap/packs/core/orders/gate-sweep.toml"},
+		{"dolt-health", "../../examples/bd/dolt/orders/dolt-health.toml"},
+	}
+	for _, b := range bundled {
+		data, err := os.ReadFile(b.path)
+		if err != nil {
+			t.Fatalf("%s: ReadFile %s: %v", b.name, b.path, err)
+		}
+		a, err := Parse(data)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", b.name, err)
+		}
+		if !a.ReservedDispatch {
+			t.Errorf("%s: ReservedDispatch = false, want true", b.name)
+		}
+	}
+
+	// An ordinary order outside the bundle stays opted out with no explicit
+	// flag — the default, not a name-based check in Go.
+	ordinary, err := Parse([]byte(`[order]
+description = "Generate daily digest"
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ordinary.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default) for an ordinary order")
 	}
 }
 

@@ -956,6 +956,59 @@ func IsPartialResult(err error) bool {
 	return errors.As(err, &partial)
 }
 
+// IsTimeoutError reports whether err was caused by a store/bd query exceeding
+// its time budget — a per-command bd exec timeout (bdExecTimeoutError, "timed
+// out after ...") or a context deadline. It deliberately excludes cancellation
+// (context.Canceled) and genuine store-read failures (parse errors, connection
+// resets, "read failed"): those are not contention signals. Callers use it to
+// tell a query that merely ran out of time under store contention — safe to
+// relax for idempotent work — apart from an error that must be treated as a
+// hard failure. Message matching is required because bd exec timeouts are
+// formatted strings that do not wrap the context.DeadlineExceeded sentinel
+// (bdExecTimeoutError, and the second formatter in execPurge).
+//
+// SCOPE WARNING — substring-based, and safe only where a false positive is
+// harmless. The current caller (isGateContentionTimeout) relaxes a gate for
+// orders whose re-run is a no-op by contract, so a wrong "yes" costs a
+// duplicate dispatch and nothing more. On any path where timeout-versus-hard-
+// failure carries real weight, do not use this: a genuine outage whose message
+// happens to embed "deadline exceeded" would be misread as contention, and a
+// parse failure carries up to 200 bytes of raw bd output (bead titles) that the
+// caller does not control.
+//
+// It also matches on the flattened text of an errors.Join, so a chain mixing a
+// timeout with a hard failure reports true. That is deliberate for this caller:
+// the only join that reaches the gate carrying a timeout leaf is
+// mergeListTierResults, which fires only when BOTH list tiers fail — maximal
+// contention, where relaxing an idempotent gate is exactly the intended
+// behavior. Do not generalize that reasoning to another call site. Tightening
+// this to "every leaf must be timeout-shaped" would fail an idempotent gate
+// CLOSED under the worst contention there is, restoring the vp-gprv starvation;
+// TestIsTimeoutError and TestGateFailClosed pin the mixed-chain outcome in both
+// directions so that regression cannot land silently.
+//
+// This is the fourth transient-error classifier in the tree, each with an
+// overlapping but deliberately different needle set. Keep them in sync only
+// where the semantics genuinely match:
+//   - isBdAmbiguousWriteError (this file) — write-path ambiguity; a broader
+//     connection-error set, because a half-applied write must be retried on
+//     transport faults this function ignores.
+//   - isTransientWorkQueryFailure (internal/dispatch/control.go) and
+//     isTransientGraphApplyError (internal/molecule/graph_apply.go) — both gate
+//     on an operation marker before matching needles, which bounds the text
+//     they can misread. This function has no such gate.
+func IsTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "deadline exceeded")
+}
+
 // parseIssuesTolerant unmarshals bd list output, skipping any entries that
 // fail to parse (e.g. corrupt metadata with non-string values). bd 1.0.4 emits
 // a top-level array; bd 1.0.5 may emit an object envelope with an issues array.
@@ -1450,13 +1503,13 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // It prefers bd's native conditional-release verb, which evaluates both
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
-// fallback for any bd predating the flags (beads#5008) — which today is the LIVE
-// path, not a floor nobody runs: the only release carrying them is a prerelease
-// (v1.2.1), below the published bar this pin holds, so the installable default
-// (deps.env BD_VERSION) lands here, and that is what every CI job and every
-// operator install obtains. The contract-tested minimum (BD_PREV_VERSION, 1.0.4)
-// lands here too, but it is not what makes the fallback
-// load-bearing. On that path the sqlite backend refuses raw DB access, so that
+// fallback for any bd predating the flags (beads#5008) — which means the
+// contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
+// installable default: deps.env BD_VERSION is v1.3.0-rc.2, cut past
+// beads#5008, so a stock install takes the verb. This path is the floor's, not
+// the live one, and it stays reachable only because deps.env holds
+// BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
+// raw DB access, so that
 // rejection — and embedded dolt WITHOUT a configured dolt directory — surface
 // ErrConditionalReleaseUnsupported (the latter via the
 // releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
@@ -3258,6 +3311,35 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool) []string {
 	return args
 }
 
+// crossStoreDependencyError reports a non-nil error when issueID and
+// dependsOnID carry different, well-formed bead-ID prefixes -- i.e. they
+// belong to different stores. gc bd dep add has no cross-store dependency
+// model: such a pair must fail loudly instead of silently no-oping.
+//
+// The parent-child short-circuit immediately below in DepAdd must stay ABOVE
+// this guard: internal/molecule/molecule.go sets a step bead's ParentID to the
+// foreign parent at create time, so the cross-store attaches in that file
+// short-circuit on an already-matching ParentID and never reach here.
+// Reordering the two blocks would refuse every cross-store molecule attach.
+//
+// This guard covers the DepAdd path only. Create still forwards b.Needs to
+// bd create --deps without a prefix check, so the same logical cross-prefix
+// edge is refused on one path and accepted on the other.
+func (s *BdStore) crossStoreDependencyError(issueID, dependsOnID string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(dependsOnID)), "external:") {
+		return nil
+	}
+	sourcePrefix := beadIDPrefix(issueID)
+	if sourcePrefix == "" {
+		sourcePrefix = normalizeIDPrefix(s.idPrefix)
+	}
+	targetPrefix := beadIDPrefix(dependsOnID)
+	if sourcePrefix == "" || targetPrefix == "" || sourcePrefix == targetPrefix {
+		return nil
+	}
+	return fmt.Errorf("cross-store dependency: %s (store %q) cannot depend on %s (store %q): cross-store dependencies are not supported", issueID, sourcePrefix, dependsOnID, targetPrefix)
+}
+
 // DepAdd records a dependency via bd dep add.
 func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if depType == "parent-child" {
@@ -3265,6 +3347,9 @@ func (s *BdStore) DepAdd(issueID, dependsOnID, depType string) error {
 		if err == nil && bead.ParentID == dependsOnID {
 			return nil
 		}
+	}
+	if err := s.crossStoreDependencyError(issueID, dependsOnID); err != nil {
+		return err
 	}
 	err := s.runBDTransientWrite("dep", "add", issueID, dependsOnID, "--type", depType)
 	if err != nil {

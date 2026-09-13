@@ -2239,14 +2239,22 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// the input box, and this paste concatenates on top of it instead of
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
-	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
-		return err
+	//
+	// Skip the clear when a client is attached: a human may be mid-keystroke,
+	// and silently wiping their in-progress input is worse than the
+	// concatenation this clear otherwise prevents (#5192).
+	if !t.IsSessionAttached(session) {
+		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). The composer is empty at this point -- the C-u
-	// above guarantees that, and it matters: the survey's onDigit handler
+	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
+	// the composer; on an attached session it deliberately did not, so a
+	// human draft may still be on the line. That matters: the survey's
+	// onDigit handler
 	// only fires on a single-character input value, so a digit landing on
 	// top of other content silently corrupts the draft instead of
 	// dismissing anything. A parked survey reads idle to WaitForIdle (no

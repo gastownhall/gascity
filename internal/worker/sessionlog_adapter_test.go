@@ -1699,7 +1699,7 @@ func TestSessionLogAdapterKimiCodeNativeSession(t *testing.T) {
 		`{"type":"turn.ended","reason":"completed","time":1787252689002}`,
 	)
 	adapter := SessionLogAdapter{SearchPaths: []string{t.TempDir()}}
-	if got := adapter.DiscoverTranscript("kimi/tmux-cli", "/tmp/kimi-probe-ws", "session_native"); got != path {
+	if got := adapter.DiscoverTranscript("kimi/tmux-cli", "/tmp/kimi-probe-ws", "session_native"); !samePath(got, path) {
 		t.Fatalf("discovery=%q", got)
 	}
 	snapshot, err := adapter.LoadHistory(LoadRequest{Provider: "kimi/tmux-cli", TranscriptPath: path})
@@ -1716,4 +1716,13 @@ func TestSessionLogAdapterKimiCodeNativeSession(t *testing.T) {
 	if activity != TailActivityIdle {
 		t.Fatalf("activity=%q", activity)
 	}
+}
+
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	resolvedA, errA := filepath.EvalSymlinks(a)
+	resolvedB, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && resolvedA == resolvedB
 }

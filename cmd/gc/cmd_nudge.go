@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -831,7 +832,9 @@ func nudgePollTargetHasDueWork(target nudgeTarget, now time.Time) bool {
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
-	pending, inFlight, _, err := listQueuedNudgesForTarget(target.cityPath, target, now)
+	// Lock-free read (ga-2kzci3 FR5): this is a liveness check, not a
+	// maintenance operation, and must not wait on the queue's writer lock.
+	pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
 	if err != nil || (len(pending) == 0 && len(inFlight) == 0) {
 		return false
 	}
@@ -1988,7 +1991,7 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2028,7 +2031,7 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2058,7 +2061,79 @@ func listQueuedNudges(cityPath, agentName string, now time.Time) ([]queuedNudge,
 	return pending, inFlight, dead, err
 }
 
+// listQueuedNudgesForTargetSnapshot returns target's queue buckets from a
+// lock-free read of the persisted state (ga-2kzci3 FR5, ported from the
+// unmerged ga-cn8dkj fix for the sibling cmdNudgeStatus regression). It is
+// the read-only peer of listQueuedNudgesForTarget: it runs no maintenance
+// pass, opens no bead store, takes no flock, and never writes.
+//
+// A liveness check like shouldKeepNudgePollerAlive must not wait on the
+// queue's writer lock. Reading without the lock is safe because WithState
+// rewrites state.json atomically (temp file + rename), so a reader always
+// observes one whole snapshot, never a torn one.
+//
+// The bucketing below mirrors the in-memory effect of the recover/prune
+// passes so the result matches what a maintaining caller would report,
+// while mutating nothing. Dead-letter retention pruning is deliberately NOT
+// mirrored: it depends on the bead store, and treating a not-yet-swept dead
+// letter as still dead is harmless for a liveness check.
+func listQueuedNudgesForTargetSnapshot(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var pending, inFlight, dead []queuedNudge
+	add := func(bucket *[]queuedNudge, item queuedNudge) {
+		if target.matchesQueueAgent(item.Agent) {
+			*bucket = append(*bucket, item)
+		}
+	}
+	expired := func(item queuedNudge) bool {
+		return !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now)
+	}
+	// Mirrors recoverExpiredInFlightNudges: expired in-flight items read as
+	// dead, and lease-expired ones read as pending again.
+	for _, item := range state.InFlight {
+		switch {
+		case expired(item):
+			if item.LastError == "" {
+				item.LastError = "expired"
+			}
+			add(&dead, item)
+		case item.LeaseUntil.IsZero() || !item.LeaseUntil.After(now):
+			add(&pending, item)
+		default:
+			add(&inFlight, item)
+		}
+	}
+	// Mirrors pruneExpiredQueuedNudges: expired pending items read as dead.
+	for _, item := range state.Pending {
+		if expired(item) {
+			if item.LastError == "" {
+				item.LastError = "expired"
+			}
+			add(&dead, item)
+			continue
+		}
+		add(&pending, item)
+	}
+	for _, item := range state.Dead {
+		add(&dead, item)
+	}
+	return pending, inFlight, dead, nil
+}
+
 func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
+	return listQueuedNudgesForTargetWithClock(cityPath, target, now, clock.Real{})
+}
+
+// listQueuedNudgesForTargetWithClock is the clock-injectable core of
+// listQueuedNudgesForTarget (mirrors enqueueQueuedNudgeWithStoreAndClock's
+// seam). Tests can pass a clock.Fake so the maintenance pass's
+// now.Add(nudgeEnqueueMaintenanceBudget) deadline check is evaluated against
+// a controlled clock instead of real wall-clock time, which otherwise races
+// against this pass's own file I/O under -race.
+func listQueuedNudgesForTargetWithClock(cityPath string, target nudgeTarget, now time.Time, clk clock.Clock) ([]queuedNudge, []queuedNudge, []queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var pending []queuedNudge
@@ -2066,14 +2141,14 @@ func listQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Tim
 	var dead []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
+		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		for _, item := range state.Pending {
@@ -2274,7 +2349,7 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2328,7 +2403,7 @@ func releaseQueuedNudgeClaims(cityPath string, ids []string) error {
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2393,7 +2468,7 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 	var deadLettered []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		deadLettered = deadLettered[:0]
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -2487,9 +2562,15 @@ func terminalStateForDeadQueuedNudge(item queuedNudge) string {
 }
 
 // noMaintenanceDeadline returns a deadline far enough in the future that a
-// nudge-queue maintenance pass never stops early. Callers outside the
-// latency-sensitive foreground enqueue path (poller, doctor, list/ack/release)
-// want the full backlog drained every time, matching pre-budget behavior.
+// nudge-queue maintenance pass never stops early. Used by tests that
+// exercise the recover/prune primitives' own full-drain behavior directly.
+// Every production call site is bounded instead -- nudgeEnqueueMaintenanceBudget
+// for per-call maintenance (claim, list, ack, release, record-failure),
+// nudgeMaintenanceSweepBudget for the supervisor's whole-queue sweep -- per
+// ga-2kzci3: an unconditional full-backlog drain on every call does
+// unbounded O(backlog) work under the queue's exclusive flock, and the
+// recover/prune passes already bail out cleanly on deadline, leaving the
+// remainder for the next bounded pass to pick up.
 func noMaintenanceDeadline() time.Time {
 	return time.Now().Add(24 * time.Hour)
 }
@@ -2514,6 +2595,58 @@ func recordNudgeDispatchSkips(cityPath string, counts map[string]int64) error {
 	})
 }
 
+// nudgeMaintenanceSweepBudget bounds how long a single
+// runNudgeQueueMaintenanceSweep pass is allowed to consider itself current
+// for, relative to the caller's own now (ga-2kzci3 FR3). Unlike
+// noMaintenanceDeadline (real-wall-clock + 24h, used by the latency-
+// insensitive callers that must always drain the full backlog), this
+// deadline is derived from the passed-in now so a stale now -- one whose
+// budget has already elapsed relative to the real clock -- causes the
+// per-item bail check in recoverExpiredInFlightNudgesWithClock /
+// pruneExpiredQueuedNudgesWithClock / pruneDeadQueuedNudgesWithClock to stop
+// before mutating anything, rather than silently draining the whole backlog
+// against a wall-clock deadline that ignores how stale now actually is.
+// Comfortably above a realistic single-pass sweep duration and comfortably
+// below the staleness a caller is expected to catch.
+const nudgeMaintenanceSweepBudget = 5 * time.Minute
+
+// nudgeMaintenanceDebounceWindow bounds how close together two
+// runNudgeQueueMaintenanceSweep calls for the same city can be, in terms of
+// their own now, before the second is treated as a redundant same-tick
+// sweep and skipped (ga-2kzci3 FR4). The sweep has one production caller,
+// dispatchAllQueuedNudges (nudge_dispatcher.go), which runs it once per
+// dispatch pass, before the per-session loop -- so the bursts come from how
+// often a pass fires, not from the session count. nudgeDispatchTick fires
+// on every wake-socket signal plus once at the end of each patrol tick, so
+// a busy city can invoke this many times in quick succession for the same
+// queue.
+const nudgeMaintenanceDebounceWindow = time.Second
+
+var (
+	nudgeMaintenanceDebounceMu  sync.Mutex
+	nudgeMaintenanceLastSweepAt = map[string]time.Time{}
+)
+
+// nudgeMaintenanceSweepDebounced reports whether a sweep for cityPath at now
+// falls within nudgeMaintenanceDebounceWindow of the now of the last sweep
+// that actually ran for that city, and if not, records now as that marker.
+// A debounced call leaves the marker untouched.
+func nudgeMaintenanceSweepDebounced(cityPath string, now time.Time) bool {
+	nudgeMaintenanceDebounceMu.Lock()
+	defer nudgeMaintenanceDebounceMu.Unlock()
+	if last, ok := nudgeMaintenanceLastSweepAt[cityPath]; ok {
+		elapsed := now.Sub(last)
+		if elapsed < 0 {
+			elapsed = -elapsed
+		}
+		if elapsed < nudgeMaintenanceDebounceWindow {
+			return true
+		}
+	}
+	nudgeMaintenanceLastSweepAt[cityPath] = now
+	return false
+}
+
 // runNudgeQueueMaintenanceSweep runs the queue's recover/TTL-expiry/dead-
 // letter-retention passes over the whole queue, independent of whether any
 // pending item currently matches an open session. Every other maintenance
@@ -2524,11 +2657,14 @@ func recordNudgeDispatchSkips(cityPath string, counts map[string]int64) error {
 // tick is the one path that iterates the whole queue every cycle regardless
 // of match outcome, so it owns running this sweep unconditionally.
 func runNudgeQueueMaintenanceSweep(cityPath string, now time.Time) error {
+	if nudgeMaintenanceSweepDebounced(cityPath, now) {
+		return nil
+	}
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	return withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
+		deadline := now.Add(nudgeMaintenanceSweepBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
