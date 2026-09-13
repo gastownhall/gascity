@@ -77,8 +77,10 @@ func newSessionEventPump(parent context.Context, pokeCh chan<- struct{}, stderr 
 
 // restart re-points the pump at sp's session-event stream, canceling any
 // prior subscription. Providers that do not implement
-// runtime.SessionEventProvider deactivate the pump. Callers serialize
-// restarts (startup and config reload both run on the reconciler goroutine).
+// runtime.SessionEventProvider deactivate the pump and log the same
+// patrol-polling fallback line a subscribe error would, so the degradation
+// is never silent. Callers serialize restarts (startup and config reload
+// both run on the reconciler goroutine).
 func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -90,6 +92,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
+		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 		return
 	}
 	ctx, cancel := context.WithCancel(p.parent)

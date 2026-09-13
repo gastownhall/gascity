@@ -34,6 +34,7 @@ var (
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider          = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -415,4 +416,29 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 		return scp.SleepCapability(name)
 	}
 	return runtime.SessionSleepCapabilityDisabled
+}
+
+// SubscribeSessionEvents forwards the session-event stream of whichever
+// backend(s) implement runtime.SessionEventProvider. Today only herdr does,
+// so in practice this forwards a single backend's stream — but without this
+// method, wrapping an event-capable default backend (e.g. herdr) behind auto
+// for ACP routing would fail the runtime.SessionEventProvider type assertion
+// in cmd/gc's sessionEventPump.restart and silently drop the whole
+// event-driven reconcile poke, falling back to patrol polling with no
+// underlying capability loss to explain it. If both backends happen to
+// implement it, their streams are merged rather than one being chosen
+// arbitrarily.
+func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
+	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
+	switch {
+	case dok && aok:
+		return runtime.MergeSessionEvents(ctx, dSEP, aSEP)
+	case dok:
+		return dSEP.SubscribeSessionEvents(ctx)
+	case aok:
+		return aSEP.SubscribeSessionEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+	}
 }

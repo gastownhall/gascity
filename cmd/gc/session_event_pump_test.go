@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
 // Every test in this file runs inside a testing/synctest bubble, so its timers
@@ -120,6 +122,54 @@ func TestSessionEventPumpNoStreamProviderStaysInactive(t *testing.T) {
 			t.Fatal("streaming() = true for a provider without an event stream")
 		}
 		assertNoPoke(t, pokeCh)
+	})
+}
+
+// TestSessionEventPumpNonImplementingProviderLogsFallback covers the failed
+// type-assertion path in restart: a provider that does not implement
+// runtime.SessionEventProvider at all (the common case for any non-herdr
+// provider) must announce the patrol-polling fallback exactly as the
+// subscribe-error path does, instead of returning silently. Before this, a
+// mixed city got zero benefit from the event-driven poke and zero signal
+// that it hadn't.
+func TestSessionEventPumpNonImplementingProviderLogsFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var stderr bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pokeCh := make(chan struct{}, 1)
+		pump := newSessionEventPump(ctx, pokeCh, &stderr, "test")
+		pump.restart(runtime.NewFake()) // plain fake: no SessionEventProvider
+		if pump.streaming() {
+			t.Fatal("streaming() = true for a provider without an event stream")
+		}
+		if got := stderr.String(); !strings.Contains(got, "patrol polling") {
+			t.Fatalf("restart onto a non-implementing provider logged %q, want a patrol-polling fallback line", got)
+		}
+	})
+}
+
+// TestSessionEventPumpDeliversThroughAutoProvider covers the composite-
+// provider gap: resolveSessionTransportProvider wraps herdr (or any
+// event-capable backend) in sessionauto.New whenever a city needs ACP
+// routing for some agents, and before auto.Provider implemented
+// runtime.SessionEventProvider itself, the pump's type assertion on the
+// wrapper failed even though the wrapped backend supported events — silently
+// losing the whole event-driven poke in exactly the configuration the
+// feature was built for. This asserts an event delivered by the wrapped
+// backend still reaches the pump through the auto composite.
+func TestSessionEventPumpDeliversThroughAutoProvider(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, pokeCh, cancel := newTestPump(t)
+		defer cancel()
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		wrapped := sessionauto.New(fp, runtime.NewFake()) // fp is the default backend; acp backend has no events
+		pump.restart(wrapped)
+		if !pump.streaming() {
+			t.Fatal("streaming() = false after subscribing through an auto.Provider wrapping an event-capable backend")
+		}
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+		waitPoke(t, pokeCh)
 	})
 }
 
