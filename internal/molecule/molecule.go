@@ -1722,33 +1722,70 @@ func activateAttachCandidate(store beads.Store, rootID string, idMapping map[str
 	return nil
 }
 
-// markFailedReporting is markFailed with the first metadata-write error
-// surfaced instead of swallowed: the fence loser path must know when its
-// candidate was NOT neutralized, because an unmarked candidate could
-// otherwise be selected by idempotency recovery.
+// markFailedReporting is markFailed with every id whose stamp still failed
+// after the retry pass surfaced instead of swallowed: the fence loser path
+// must know when its candidate was NOT neutralized, because an unmarked
+// candidate could otherwise be selected by idempotency recovery.
 func markFailedReporting(store beads.Store, ids []string) error {
-	var firstErr error
+	stillFailed := stampMoleculeFailedTwoPass(store, ids)
+	if len(stillFailed) == 0 {
+		return nil
+	}
+	errs := make([]error, 0, len(stillFailed))
+	for _, f := range stillFailed {
+		errs = append(errs, fmt.Errorf("marking %s molecule_failed: %w", f.id, f.err))
+	}
+	return errors.Join(errs...)
+}
+
+// markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
+// Best-effort: any id still unmarked after the retry pass is silently left
+// as-is since we're already in an error path.
+func markFailed(store beads.Store, ids []string) {
+	stampMoleculeFailedTwoPass(store, ids)
+}
+
+// stampFailure pairs an id with the error its stamp attempt returned.
+type stampFailure struct {
+	id  string
+	err error
+}
+
+// stampMoleculeFailedTwoPass stamps molecule_failed on every id, in order.
+// A single attempt can lose exactly the id whose row is hottest at the
+// moment of the fault this whole call exists to report — often the root,
+// activated first and so the first row any conflicting writer contends
+// on — while every other id, never touched by that fault, succeeds. A
+// bead skipped this way stays fenced and unmarked, invisible to every
+// sweep and dispatch gate that filters on molecule_failed. The retry pass
+// gives that correlated fault the time the rest of the loop already took
+// to clear before giving up on an id. Returns the ids (with their retry
+// error) still unmarked after both passes.
+func stampMoleculeFailedTwoPass(store beads.Store, ids []string) []stampFailure {
+	failed := stampMoleculeFailedOnce(store, ids)
+	if len(failed) == 0 {
+		return nil
+	}
+	retryIDs := make([]string, 0, len(failed))
+	for _, f := range failed {
+		retryIDs = append(retryIDs, f.id)
+	}
+	return stampMoleculeFailedOnce(store, retryIDs)
+}
+
+// stampMoleculeFailedOnce attempts to stamp molecule_failed on every id
+// once, returning the ids whose write failed alongside the error.
+func stampMoleculeFailedOnce(store beads.Store, ids []string) []stampFailure {
+	var failed []stampFailure
 	for _, id := range ids {
 		if err := store.SetMetadataBatch(id, map[string]string{
 			beadmeta.MoleculeFailedMetadataKey: "true",
 			InstantiatingMetadataKey:           "",
-		}); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("marking %s molecule_failed: %w", id, err)
+		}); err != nil {
+			failed = append(failed, stampFailure{id: id, err: err})
 		}
 	}
-	return firstErr
-}
-
-// markFailed sets beadmeta.MoleculeFailedMetadataKey on all created beads.
-// Best-effort: errors are silently ignored since we're already in an
-// error path.
-func markFailed(store beads.Store, ids []string) {
-	for _, id := range ids {
-		_ = store.SetMetadataBatch(id, map[string]string{
-			beadmeta.MoleculeFailedMetadataKey: "true",
-			InstantiatingMetadataKey:           "",
-		})
-	}
+	return failed
 }
 
 func logicalRecipeStepID(step formula.RecipeStep) (string, bool) {
