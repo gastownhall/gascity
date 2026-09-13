@@ -366,7 +366,7 @@ func issueT3WebSocketTicket(wsURL, bearerToken string) (string, error) {
 		Ticket string `json:"ticket"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("%w: decode websocket ticket: %v", errWebSocketTicketUnsupported, err)
+		return "", fmt.Errorf("%w: decode websocket ticket: %w", errWebSocketTicketUnsupported, err)
 	}
 	payload.Ticket = strings.TrimSpace(payload.Ticket)
 	if payload.Ticket == "" {
@@ -1170,7 +1170,7 @@ func (p *Provider) rpcHTTPSnapshot(bearerToken string) (map[string]interface{}, 
 		err = json.NewDecoder(resp.Body).Decode(&snapshot)
 		_ = resp.Body.Close()
 		if err != nil {
-			unsupportedErr = fmt.Errorf("%w: %s: decode orchestration snapshot: %v", errHTTPSnapshotUnsupported, candidate, err)
+			unsupportedErr = fmt.Errorf("%w: %s: decode orchestration snapshot: %w", errHTTPSnapshotUnsupported, candidate, err)
 			failures = append(failures, unsupportedErr.Error())
 			continue
 		}
