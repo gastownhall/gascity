@@ -199,6 +199,40 @@ func TestFindZCodeSessionFileByIDIsExact(t *testing.T) {
 	}
 }
 
+// FindZCodeSessionFileByID compares cleanOpenCodeWorkDir(mirror directory)
+// against workDir by raw string equality, and neither side is symlink-
+// resolved -- the same /var vs /private/var shape documented on
+// TestFindZCodeSessionFileByScopeResolvesSymlinkedWorkDir below applies here
+// too, since both lookups share the same comparison bug. Reproduced here on
+// Linux with a manufactured symlink so the fix is verified without a macOS
+// runner.
+func TestFindZCodeSessionFileByIDResolvesSymlinkedWorkDir(t *testing.T) {
+	root := t.TempDir()
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workdir-alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+	scoped := filepath.Join(root, "worker#1")
+	if err := os.MkdirAll(scoped, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// The mirror records the physical, symlink-resolved directory the adapter
+	// shelled out for...
+	path := filepath.Join(scoped, "sess_wanted.json")
+	body := `{"info":{"id":"sess_wanted","directory":"` + filepath.ToSlash(physical) + `"},"messages":[]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+
+	// ...but the caller (a session bead's work_dir, unresolved) passes the
+	// alias -- exactly the /var vs /private/var shape.
+	if got := FindZCodeSessionFileByID([]string{root}, alias, "sess_wanted"); got != path {
+		t.Fatalf("FindZCodeSessionFileByID() = %q, want %q (symlinked work dir must resolve to the same mirror as its physical target)", got, path)
+	}
+}
+
 // gc never learns zcode's provider session id, so the mirror has to be
 // resolvable from the identity the session bead does hold.
 func TestFindZCodeSessionFileByScopeSeparatesSameWorkDirSessions(t *testing.T) {
@@ -466,5 +500,45 @@ func TestZCodeScopeSanitizesByteWiseLikeTheAdapter(t *testing.T) {
 	}
 	if got := ZCodeSeatMirrorScope("wörker", "gcg-sessïon", "2"); got != "w__rker@gcg-sess__on#2" {
 		t.Errorf("ZCodeSeatMirrorScope = %q, want w__rker@gcg-sess__on#2", got)
+	}
+}
+
+// findZCodeMirrorInScope used to compare cleanOpenCodeWorkDir(mirror
+// directory) against workDir by raw string equality, with neither side
+// symlink-resolved. On macOS that broke in practice: t.TempDir() (and any
+// real work dir under /tmp) returns the /var alias, while the zcode adapter
+// shells out for its cwd and records the physical /private/var path in the
+// mirror's info.directory -- same directory, two strings, so the comparison
+// always missed and the scope read as empty. Reproduced here on Linux with a
+// manufactured symlink so the fix is verified without a macOS runner.
+func TestFindZCodeSessionFileByScopeResolvesSymlinkedWorkDir(t *testing.T) {
+	root := t.TempDir()
+	physical := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "workdir-alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	write := func(scope, id, directory string) string {
+		dir := filepath.Join(root, scope)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		path := filepath.Join(dir, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(directory) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	// The mirror records the physical, symlink-resolved directory the adapter
+	// shelled out for...
+	mirror := write("worker#1", "sess_mirror", physical)
+
+	// ...but the caller (a session bead's work_dir, unresolved) passes the
+	// alias -- exactly the /var vs /private/var shape.
+	if got := FindZCodeSessionFileByScope([]string{root}, alias, "worker", "", "1"); got != mirror {
+		t.Fatalf("FindZCodeSessionFileByScope() = %q, want %q (symlinked work dir must resolve to the same mirror as its physical target)", got, mirror)
 	}
 }
