@@ -12,7 +12,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	execerr "k8s.io/client-go/util/exec"
+
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestProviderImplementsInterface(_ *testing.T) {
@@ -780,10 +783,14 @@ func TestStartDeletesOldPodWithDeadTmux(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	// tmux dead — genuinely stale.
+	// tmux dead — genuinely stale. `tmux has-session` RAN in the container and
+	// exited 1, which is what makes this a stale pod rather than an
+	// unreachable one; the real execInPod surfaces that as a client-go
+	// ExitError wrapping tmux's stderr, and Start now requires that
+	// distinction before it will delete a Running pod (ga-vcjr9).
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "",
-		fmt.Errorf("no server running on /tmp/tmux-1000/default"))
+		execerr.CodeExitError{Err: fmt.Errorf("no server running on /tmp/tmux-1000/default"), Code: 1})
 
 	// Block createPod so Start() stops after deletion — we only need to
 	// verify the stale pod was cleaned up, not the full startup.
@@ -857,10 +864,16 @@ func TestPodManifestCompatibility(t *testing.T) {
 		}
 	}
 
-	// Verify working directory is pod-mapped.
-	if pod.Spec.Containers[0].WorkingDir != "/workspace/demo-rig" {
-		t.Errorf("workingDir = %q, want /workspace/demo-rig",
-			pod.Spec.Containers[0].WorkingDir)
+	// The manifest's workingDir is the workspace root, which always exists —
+	// the kubelet chdirs there before the entrypoint runs. The pod-mapped agent
+	// directory is entered by the entrypoint instead. gc-session-k8s builds its
+	// manifest the same way, so the two providers stay interchangeable.
+	if pod.Spec.Containers[0].WorkingDir != podWorkspaceRoot {
+		t.Errorf("workingDir = %q, want %q",
+			pod.Spec.Containers[0].WorkingDir, podWorkspaceRoot)
+	}
+	if args := strings.Join(pod.Spec.Containers[0].Args, " "); !strings.Contains(args, "cd "+shellquote.Quote("/workspace/demo-rig")) {
+		t.Errorf("entrypoint should enter the pod-mapped agent dir; got: %s", args)
 	}
 }
 
@@ -2280,5 +2293,22 @@ func TestInitCityInPodSkipsDolt(t *testing.T) {
 	}
 	if !hasSkip {
 		t.Errorf("gc init should run with GC_DOLT=skip; got cmd=%v", gcInitCmd)
+	}
+
+	// Pod-local init only scaffolds a session filesystem; it must not register
+	// or start a city, and must not run provider login/readiness probes (a
+	// gateway-backed provider cannot satisfy a first-party-login probe, and the
+	// controller owns readiness). Assert both flags are present.
+	for _, flag := range []string{"--no-start", "--skip-provider-readiness"} {
+		found := false
+		for _, arg := range gcInitCmd {
+			if arg == flag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("gc init should run with %s; got cmd=%v", flag, gcInitCmd)
+		}
 	}
 }

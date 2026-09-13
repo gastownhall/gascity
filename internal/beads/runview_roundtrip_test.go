@@ -90,17 +90,18 @@ func recordThroughNotifyChange(t *testing.T, seeds ...beadSeed) []events.Event {
 	t.Helper()
 	var out []events.Event
 	seq := uint64(0)
-	cs := beads.NewCachingStore(beads.NewMemStore(), func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage) {
+	cs := beads.NewCachingStore(beads.NewMemStore(), func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
 		seq++
 		out = append(out, events.Event{
-			Seq:       seq,
-			Type:      eventType,
-			Actor:     "cache-reconcile",
-			Subject:   beadID,
-			RunID:     runID,
-			SessionID: sessionID,
-			StepID:    stepID,
-			Payload:   payload,
+			Seq:              seq,
+			Type:             eventType,
+			Actor:            "cache-reconcile",
+			Subject:          beadID,
+			RunID:            runID,
+			SessionID:        sessionID,
+			StepID:           stepID,
+			DependsOnStepIDs: dependsOnStepIDs,
+			Payload:          payload,
 		})
 	})
 	for _, s := range seeds {

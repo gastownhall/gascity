@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# waiver-clock-audit
+#
+# Runs the two checked ledgers that carry dated waivers -- the runtime provider
+# ledger (internal/testutil/providerledger) and the resource census
+# (internal/testpolicy/resourcecensus) -- with the waiver clock in strict mode,
+# so a lapsed date fails here instead of on somebody else's push.
+#
+# Strict is the whole point. The fleet's push path runs the same tests in grace
+# mode (internal/testpolicy/waiverclock), which warns for 14 days before a lapse
+# blocks anyone. This is the lane that is supposed to spend those 14 days
+# getting the owner's attention. Nothing on the commit or push path may set
+# GC_WAIVER_CLOCK, or a calendar rollover blocks pushes carrying no code change
+# all over again -- which is the 2026-08-12 and 2026-08-26 incidents.
+#
+# Two callers, one artifact:
+#
+#   scripts/waiver-clock-audit                 the nightly waiver-clock job.
+#                                              Reports, exits with the test
+#                                              status. No bd required.
+#   scripts/waiver-clock-audit --file-beads    the maintainer-city audit order.
+#                                              Also files one deduped bead per
+#                                              distinct waiver owner. Requires
+#                                              bd and jq.
+#
+# Beads are filed for warnings too, not just lapses. That is what makes the
+# 14-day warn-ahead window real: the owner's bead exists before anything is red
+# anywhere, and per-owner dedupe means the lapse two weeks later does not file a
+# second one.
+#
+# Detection only: this script never edits a ledger, never re-dates a waiver, and
+# never closes a bead. Deciding between "land the proof" and "re-date it" is the
+# owner's call, not a script's.
+#
+# Security note: owner ids and ledger text parsed out of test output are
+# untrusted data, not trusted shell fragments. Every bd/jq invocation passes
+# them as a quoted argv element or through `jq -n --arg` / a heredoc, never
+# through `sh -c` or `eval`.
+
+set -euo pipefail
+
+file_beads=0
+for arg in "$@"; do
+    case "$arg" in
+        --file-beads) file_beads=1 ;;
+        -h|--help)
+            sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "waiver-clock-audit: unknown argument: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
+
+repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+cd "$repo_root"
+
+routed_to="${WAIVER_CLOCK_ROUTED_TO:-gascity/architect}"
+alert_label="source:waiver-clock-audit"
+
+if [ "$file_beads" = "1" ]; then
+    for tool in bd jq; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "waiver-clock-audit: --file-beads needs $tool on PATH" >&2
+            exit 1
+        fi
+    done
+fi
+
+# GC_WAIVER_CLOCK is set on the child process only. Exporting it would leak
+# strict into anything else this shell goes on to run.
+#
+# -v is required, not cosmetic: the warn-window findings arrive as t.Logf lines,
+# which go test hides on a passing run. Without them this audit could only ever
+# see a lapse that is already fatal, which is 14 days too late to be useful.
+set +e
+output=$(env GC_WAIVER_CLOCK=strict go test -count=1 -v \
+    ./internal/testutil/providerledger \
+    ./internal/testpolicy/resourcecensus 2>&1)
+test_status=$?
+set -e
+
+findings=$(printf '%s\n' "$output" | grep -o 'waiver owned by .*' | sort -u || true)
+
+if [ -n "$findings" ]; then
+    echo "waiver-clock-audit: $(printf '%s\n' "$findings" | wc -l | tr -d ' ') waiver finding(s)"
+    printf '%s\n' "$findings"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+            echo "### Waiver clock findings"
+            echo
+            printf '%s\n' "$findings" | sed 's/^/- /'
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+else
+    echo "waiver-clock-audit: no waiver findings"
+fi
+
+if [ "$test_status" -ne 0 ] && [ -z "$findings" ]; then
+    # Structural drift, a horizon violation, or an ordinary broken test: fatal in
+    # every mode, belongs to whoever changed the code, and needs no bead
+    # machinery. Show the failure rather than swallowing it behind a clean report.
+    echo "waiver-clock-audit: ledger tests failed with no waiver finding; this is not a clock problem" >&2
+    printf '%s\n' "$output" | grep -E '^(---|\s+---) FAIL|^FAIL' >&2 || true
+fi
+
+if [ "$file_beads" != "1" ]; then
+    exit "$test_status"
+fi
+
+owners=$(printf '%s\n' "$findings" | sed -n 's/^waiver owned by \([^ ]*\) .*/\1/p' | sort -u)
+
+created=0
+while IFS= read -r owner; do
+    [ -z "$owner" ] && continue
+
+    existing_count=$(bd list --json --label "$alert_label" --status open \
+        --metadata-field "waiver.owner=${owner}" | jq 'length')
+
+    if [ "${existing_count:-0}" -gt 0 ]; then
+        echo "waiver-clock-audit: owner=$owner already has an open alert (${existing_count}), skipping"
+        continue
+    fi
+
+    matching=$(printf '%s\n' "$findings" | grep -F "waiver owned by ${owner} ")
+
+    metadata=$(jq -n --arg routed_to "$routed_to" --arg owner "$owner" \
+        '{"gc.routed_to": $routed_to, "waiver.owner": $owner}')
+
+    description=$(cat <<EOF
+Dated waivers owned by ${owner} have lapsed or are about to.
+
+${matching}
+
+The fleet's push path runs these same ledgers in grace mode, so a lapse
+warns for 14 days before it blocks anyone. This bead exists so that window
+gets used.
+
+Two resolutions, both yours:
+
+  1. Land the replacement proof and delete the waiver row.
+  2. Re-date it as an explicit policy change, reviewed like any other
+     ledger edit, citing this bead.
+
+Doing neither is bounded, not stable: past the fleet-fatal day above, the
+lapse is fatal in every mode and blocks every Go-touching push.
+
+Filed by scripts/waiver-clock-audit. Detection only -- nothing was
+re-dated or repaired. See TESTING.md, "Waiver expiry clocks".
+EOF
+)
+
+    new_id=$(bd create \
+        --title "waiver clock: dated waivers owned by ${owner} need an answer" \
+        --type task \
+        --label "$alert_label" \
+        --metadata "$metadata" \
+        --description "$description" \
+        --silent)
+
+    created=$((created + 1))
+    echo "waiver-clock-audit: filed ${new_id} for owner=${owner}"
+done <<< "$owners"
+
+echo "waiver-clock-audit: done (${created} alert(s) created)"
+exit "$test_status"

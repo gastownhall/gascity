@@ -7,6 +7,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/modelwindow"
 )
 
 // Context-usage injection — the context-pressure sibling of clock_inject.go.
@@ -123,11 +125,14 @@ func lastTranscriptUsage(path string) (tokens int, models []string, ok bool) {
 }
 
 // contextWindowTokens resolves the session's context window as the MAX window
-// of any model it ran (they share one context), so a 200k-window sidecar or
-// compaction call (e.g. a bare claude-opus-4-8 entry inside a Fable session)
-// can't flip a 1M session to the 200k default and fire the urgent tier at
-// ~20% of real usage. GC_CONTEXT_WINDOW_TOKENS overrides — gc-managed
-// deployments that know the launch model should pin it for determinism.
+// of any model it ran (they share one context), so a smaller-window sidecar or
+// compaction call (e.g. a 200k-window Haiku entry inside a 1M Fable session)
+// can't flip the session to the 200k default and fire the urgent tier at ~20%
+// of real usage. Per-model windows come from the shared modelwindow package so
+// this agrees with the API/session-log path; an unrecognized model (window 0)
+// floors to the conservative default. GC_CONTEXT_WINDOW_TOKENS overrides —
+// gc-managed deployments that know the launch model should pin it for
+// determinism.
 func contextWindowTokens(models []string) int {
 	if v := strings.TrimSpace(os.Getenv("GC_CONTEXT_WINDOW_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -136,30 +141,14 @@ func contextWindowTokens(models []string) int {
 	}
 	best := 0
 	for _, m := range models {
-		if w := classifyWindow(m); w > best {
+		if w := modelwindow.Window(m); w > best {
 			best = w
 		}
 	}
 	if best == 0 {
-		return 200_000
+		return modelwindow.Default
 	}
 	return best
-}
-
-// classifyWindow maps one model string to its context window. 1M families:
-// Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos, and an explicit [1m] launch
-// suffix; everything else (Haiku, older models, unrecognized) is a
-// conservative 200k. Kept simple/substring rather than a strict table so a
-// dated-suffix variant still matches; pin GC_CONTEXT_WINDOW_TOKENS when a new
-// model's window isn't yet recognized here.
-func classifyWindow(model string) int {
-	ml := strings.ToLower(model)
-	for _, s := range []string{"[1m]", "fable", "mythos", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6"} {
-		if strings.Contains(ml, s) {
-			return 1_000_000
-		}
-	}
-	return 200_000
 }
 
 // contextUsageMessage renders the guidance line for tokens used of window, or

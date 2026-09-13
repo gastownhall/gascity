@@ -9,16 +9,16 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 
-	// Blank import: pgauth's init() registers PostgresCredentialResolvedPayload
-	// in the events registry. The api package never references pgauth's types
-	// directly (the payload bytes flow through events.Event.Payload as JSON),
-	// so the import exists solely to fire the registration before the registry-
-	// coverage tests run.
-	_ "github.com/gastownhall/gascity/internal/pgauth"
-
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"
+
+	// Blank import: storebinding's init() registers one payload for the four
+	// storage.binding.* outcomes. The api package never names the type — the
+	// payload travels as JSON through events.Event.Payload — so the import
+	// exists solely to fire the registration before the registry-coverage
+	// tests run.
+	_ "github.com/gastownhall/gascity/internal/storebinding"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
@@ -599,6 +599,34 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
+// durable explicit wake request refused before the session reached a live
+// runtime (held, quarantined, or asleep past its idle-sleep window).
+type SessionWakeRefusedPayload struct {
+	SessionID   string `json:"session_id" doc:"Session bead ID."`
+	SessionName string `json:"session_name,omitempty" doc:"Session display name, if known."`
+	Template    string `json:"template,omitempty" doc:"Resolved session template."`
+	Reason      string `json:"reason" doc:"Refusal reason: held, quarantined, or idle-sleep."`
+	WakeRequest string `json:"wake_request" doc:"The wake_request metadata value that triggered this check (explicit)."`
+	Attempts    int    `json:"attempts" doc:"wake_attempts recorded after this refusal."`
+}
+
+// IsEventPayload marks SessionWakeRefusedPayload as an events.Payload variant.
+func (SessionWakeRefusedPayload) IsEventPayload() {}
+
+// SessionWakeRefusedPayloadJSON builds the session.wake_refused payload.
+func SessionWakeRefusedPayloadJSON(sessionID, sessionName, template, reason, wakeRequest string, attempts int) json.RawMessage {
+	b, _ := json.Marshal(SessionWakeRefusedPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Reason:      reason,
+		WakeRequest: wakeRequest,
+		Attempts:    attempts,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -635,8 +663,10 @@ func init() {
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})

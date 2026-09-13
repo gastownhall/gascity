@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestParse_BasicFormula(t *testing.T) {
@@ -3605,5 +3607,37 @@ title = "Do work"
 	}
 	if !strings.Contains(err.Error(), "1..{n}") {
 		t.Errorf("error missing '1..{n}' (single-brace form, guards against double-brace regression): %v", err)
+	}
+}
+
+// TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf pins the
+// ga-iawy13.6 canonical-path-at-ingest fix: descriptionFileBaseDir must
+// resolve through a symlinked parent directory even when the path itself
+// (e.g. a ParseTOMLAt source path whose bytes were never written to disk)
+// does not exist. Today it only attempts to resolve the full path and
+// falls back to the unresolved parent on failure, with no walk-up at all.
+func TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	missing := filepath.Join(aliasDir, "not-yet-created.toml")
+	got := descriptionFileBaseDir(missing)
+
+	// Canonicalize the expectation the same way the code under test does.
+	// Bare EvalSymlinks is a different canonical form than the production
+	// normalizer on macOS, where it reports /private/var/... while
+	// pathutil collapses the equivalent /var alias — see pathutil's
+	// TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias. The
+	// assertion stays exact, so failing to resolve the alias still fails.
+	want := testutil.CanonicalPath(aliasDir)
+	if got != want {
+		t.Errorf("descriptionFileBaseDir(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
 	}
 }

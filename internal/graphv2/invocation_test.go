@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
 
@@ -1110,5 +1111,42 @@ title = "Inspect {{issue}}"
 	}
 	if len(open) != 0 {
 		t.Fatalf("open synthetic convoys after failed pour = %d, want 0 (ids: %v)", len(open), open)
+	}
+}
+
+// TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget pins the
+// creation path against the classification.
+//
+// A synthetic input convoy is a WORK bead, and that is not a filing preference:
+// the convoy's whole content is a `tracks` edge to its target, and TrackItemIn
+// refuses an edge whose member is owned by another class store. So the two have
+// to agree — the classification says work, and the mint has to land where the
+// target is. NormalizeInputConvoy makes that structural by resolving the target
+// from the same handle it mints through; this test is what fails if a future
+// caller splits them.
+func TestSyntheticInputConvoyIsWorkClassAndCoResidentWithItsTarget(t *testing.T) {
+	work := beads.NewMemStore()
+	target, err := work.Create(beads.Bead{Title: "a work bead", Type: "task"})
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	convoyID, err := NormalizeInputConvoy(work, target.ID)
+	if err != nil {
+		t.Fatalf("NormalizeInputConvoy: %v", err)
+	}
+	convoy, err := work.Get(convoyID)
+	if err != nil {
+		t.Fatalf("the input convoy is not in the target's store: %v", err)
+	}
+	if got := coordclass.Classify(convoy); got != coordclass.ClassWork {
+		t.Fatalf("Classify(input convoy) = %s, want work; a convoy owned by any other class cannot hold a tracks edge to its work target", got)
+	}
+	tracked, err := convoycore.HasTrack(work, convoyID, target.ID)
+	if err != nil {
+		t.Fatalf("HasTrack: %v", err)
+	}
+	if !tracked {
+		t.Fatalf("input convoy %s does not track target %s", convoyID, target.ID)
 	}
 }

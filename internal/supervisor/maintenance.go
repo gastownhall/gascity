@@ -397,15 +397,20 @@ func (m *StoreMaintenanceLoop) executeCycleLocked(ctx context.Context) Maintenan
 	m.runStartedAt.Store(&started)
 	defer m.runStartedAt.Store(nil)
 
+	if m.checkDiskPreflight() {
+		// Disk is critically low — skip both the snapshot and CALL DOLT_GC.
+		// Snapshotting the store needs roughly as much free space as the
+		// store itself, so a critically-low store would fail the backup and
+		// still leave no room for GC. Running the pre-flight before the
+		// snapshot means a CRITICAL disk skips both stages rather than
+		// attempting a doomed backup that only consumes the last of the disk.
+		// The StoreDiskCritical event informs operators; C1
+		// (hold-on-store-unreachable) handles downstream safety.
+		return m.finishCycleLocked(started, "", nil)
+	}
 	snapshotPath, err := m.runSnapshot(ctx)
 	if err != nil {
 		return m.finishCycleLocked(started, snapshotPath, err)
-	}
-	if m.checkDiskPreflight() {
-		// Disk is critically low — skip CALL DOLT_GC to avoid growing the
-		// store further. The StoreDiskCritical event informs operators.
-		// C1 (hold-on-store-unreachable) handles downstream safety.
-		return m.finishCycleLocked(started, snapshotPath, nil)
 	}
 	if err := m.runDoltGC(ctx); err != nil {
 		return m.finishCycleLocked(started, snapshotPath, err)
@@ -484,9 +489,10 @@ func (m *StoreMaintenanceLoop) emitRunEvent(run MaintenanceRun) {
 	}
 }
 
-// checkDiskPreflight checks free space in cityPath's filesystem before a
-// disk-growing operation (CALL DOLT_GC). Returns true when the GC should be
-// skipped (CRITICAL), false when it may proceed. Side-effects: emits
+// checkDiskPreflight checks free space in cityPath's filesystem before the
+// disk-growing stages of a maintenance cycle (snapshot, then CALL DOLT_GC).
+// Returns true when both stages should be skipped (CRITICAL), false when the
+// cycle may proceed. Side-effects: emits
 // StoreDiskWarn or StoreDiskCritical events and logs to stderr.
 // Fails open: a probe error or a nil DiskFreeBytes always returns false.
 func (m *StoreMaintenanceLoop) checkDiskPreflight() bool {
@@ -502,7 +508,7 @@ func (m *StoreMaintenanceLoop) checkDiskPreflight() bool {
 	if free < m.diskMinFreeBytes {
 		m.emitDiskEvent(events.StoreDiskCritical, free)
 		fmt.Fprintf(m.stderr, //nolint:errcheck
-			"store-maintenance: disk CRITICAL — %.1f GiB free (floor %.1f GiB) on %s; skipping CALL DOLT_GC\n",
+			"store-maintenance: disk CRITICAL — %.1f GiB free (floor %.1f GiB) on %s; skipping snapshot and CALL DOLT_GC\n",
 			float64(free)/gib, float64(m.diskMinFreeBytes)/gib, m.cityPath)
 		return true
 	}

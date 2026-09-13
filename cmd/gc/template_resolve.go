@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path"
@@ -105,6 +106,12 @@ type TemplateParams struct {
 	// EffectiveSessionProvider is the actual session provider after applying
 	// city-level defaults.
 	EffectiveSessionProvider string
+	// CityRuntimes is the city's pack-declared runtime registry
+	// (config.City.Runtimes), keyed by selection name. Consulted by
+	// promptDelivery's oversized-prompt guard so a pack-declared runtime
+	// (EffectiveSessionProvider naming one not in the builtin switch) can opt
+	// into nudge-fallback delivery. Nil when no city is bound (p.city == nil).
+	CityRuntimes map[string]config.DiscoveredRuntime
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
@@ -117,6 +124,13 @@ type TemplateParams struct {
 	// pool_slot metadata without reverse-engineering the slot from the name
 	// (which fails for namepool-themed instances like "fenrir").
 	PoolSlot int
+	// BoundStepID is the work-step bead ID bound to this named/direct
+	// session, resolved during buildDesiredState from the assigned-work-bead
+	// match (namedWorkBeadID). Empty when a named session has no concrete
+	// bound step (e.g. always-mode sessions awake on default demand alone).
+	// syncSessionBeads uses this to seed gc.bound_step_id and the startup
+	// kickoff progress-binding metadata.
+	BoundStepID string
 	// EnvIdentityStamped reports whether setTemplateEnvIdentity has written
 	// an authoritative GC_ALIAS/GC_AGENT identity into Env. resolveTemplate
 	// always seeds GC_ALIAS=qualifiedName, so "Env has GC_ALIAS" is not a
@@ -281,7 +295,6 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_ORIGIN":   "ephemeral",
 		"GC_AGENT":            sessName,
 		"GC_ALIAS":            qualifiedName,
-		"BEADS_ACTOR":         sessName,
 		"GC_DIR":              workDir,
 		"GC_BEADS_SCOPE_ROOT": p.cityPath,
 		// Explicit empty values matter here. tmux session creation uses `env -u`
@@ -329,6 +342,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
+	// configDir is the directory agent config-relative paths (pre-start
+	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
+	// resolve against. Computed once, ahead of Step 9's prompt render, so
+	// the PromptContext and Step 11's SessionSetupContext agree (#5315).
+	configDir := resolveConfigDir(p.cityPath, cfgAgent.SourceDir)
+
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
@@ -346,10 +365,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		packDirs = p.city.PackDirsForRig(rigName)
 	}
-	beadsCfg := config.BeadsConfig{}
+	topo := config.QueryTopology{}
 	if p.city != nil {
-		beadsCfg = p.city.Beads
+		topo.Beads = p.city.Beads
 	}
+	// Controller-owned: config.QueryTopology{Beads: ...} and NOT
+	// cityQueryTopology. Resolving the federation fact means asking the
+	// storage routes, and the one-shot funnel that answers for a CLI command
+	// (cliStorageRoutes) is explicitly for the half of the program that
+	// "never builds a CityRuntime" — a controller reaching it would open the
+	// city's binding a second time in a process that already holds it open.
+	// The controller's own routes are the right source; threading them into
+	// this plumbing is a change to controller wiring, not part of swapping
+	// the reader, so it stays with the claim-routing slice (ga-601v2).
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -361,19 +389,26 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
+		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryFor(topo), p.stderr),
+		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryFor(topo), p.stderr),
+		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryFor(topo), p.stderr),
+		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryFor(topo), p.stderr),
 		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
 		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
-	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	// The prime instruction tells a non-hook agent to go fetch its context.
+	// That is only meaningful when the beacon ships alone (the default branch
+	// below): when the rendered prompt is inlined under the beacon, the agent
+	// already holds the exact bytes `gc prime` would hand back, so the
+	// instruction costs a turn and duplicates the context it just received.
+	includePrimeInstruction := !hasHooks && prompt == ""
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
 		prompt = ""
@@ -444,7 +479,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
-	// ScrubTokenEnv so its credential refs survive. The env-ref values ($VAR)
+	// ScrubTokenEnv so its credential refs survive — which is exactly why the
+	// controller-only re-pin below has to come after this block. The env-ref
+	// values ($VAR)
 	// resolve from the controller environment via expandEnvMap; the resolved
 	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
 	// them), only the selected NAME — carried to runtime.Config.Upstream
@@ -485,7 +522,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				if envName == "" {
 					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
 				}
-				env[envName] = os.ExpandEnv(r.value)
+				env[envName] = processenv.ExpandSessionEnvValue(r.value)
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
@@ -499,21 +536,32 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// re-enable product metrics; Beads telemetry remains independent.
 	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
 
-	// Step 11: Expand session setup templates.
-	configDir := p.cityPath
-	if cfgAgent.SourceDir != "" {
-		configDir = cfgAgent.SourceDir
+	// Same placement, same reason, for the controller-only keys: every layer
+	// above is config-authored, so a literal [workspace.env] GC_CONTROLLER_TOKEN
+	// — or an upstream whose api_key_env names it — would otherwise overwrite the
+	// empty value passthroughEnv() pinned, and the upstream block writes after
+	// the ScrubTokenEnv call. Re-pinning after the last writer makes the merge
+	// order irrelevant. Empty, not deleted: the session inherits an environment
+	// that already carries the controller's value, so only an explicit empty
+	// assignment overrides it.
+	for key, val := range processenv.ControllerOnlyEnvOverlay() {
+		env[key] = val
 	}
+
+	// Step 11: Expand session setup templates. configDir was resolved ahead
+	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
+	// agree (#5315).
 	setupCtx := SessionSetupContext{
-		Session:   sessName,
-		Agent:     qualifiedName,
-		AgentBase: agentBase,
-		Rig:       rigName,
-		RigRoot:   rigRoot,
-		CityRoot:  p.cityPath,
-		CityName:  p.cityName,
-		WorkDir:   workDir,
-		ConfigDir: configDir,
+		Session:       sessName,
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
+		CityRoot:      p.cityPath,
+		CityName:      p.cityName,
+		WorkDir:       workDir,
+		ConfigDir:     configDir,
+		DefaultBranch: dirCtx.DefaultBranch,
 	}
 	if strings.Contains(command, "{{") {
 		expanded := expandSessionSetup([]string{command}, setupCtx)
@@ -690,6 +738,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
+	if p.city != nil {
+		params.CityRuntimes = p.city.Runtimes
+	}
 	return params, nil
 }
 
@@ -762,46 +813,47 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 	// Explicit empty values let tmux unset stale Dolt vars inherited from
 	// the server environment when the current city/rig does not use them.
 	setProjectedDoltEnvEmpty(env)
-	ensureProjectedPostgresEnvExplicit(env)
 
 	// Session env projection must not trigger provider recovery. Session setup
 	// only publishes the currently resolved target; store operations use the
 	// bd runtime env when recovery is allowed.
 	if rigRoot == "" {
 		if cityUsesBdStoreContract(cityPath) {
-			if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
-				// On PG projection errors, keep explicit empty keys so tmux
+			if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+				return env, err
+			}
+			if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
+				// On projection errors, keep explicit empty keys so tmux
 				// clears stale inherited backend variables for the session.
 				clearProjectedDoltEnv(env)
-				clearProjectedPostgresEnv(env)
 				mirrorBeadsDoltEnv(env)
 				ensureProjectedDoltEnvExplicit(env)
-				ensureProjectedPostgresEnvExplicit(env)
 				return env, err
-			} else if usedPostgres {
+			} else if bound {
 				ensureProjectedDoltEnvExplicit(env)
 				return env, nil
 			}
 		}
 		if err := applyResolvedCityDoltEnv(env, cityPath, false); err != nil {
 			mirrorBeadsDoltEnv(env)
-			ensureProjectedPostgresEnvExplicit(env)
 			if !isRecoverableManagedDoltEnvError(err) {
 				return env, err
 			}
 		}
-		ensureProjectedPostgresEnvExplicit(env)
 		return env, nil
 	}
 
+	if cityUsesBdStoreContract(cityPath) {
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return env, err
+		}
+	}
 	if err := applyResolvedRigDoltEnv(env, cityPath, rigRoot, rigConfigForScopeRoot(cityPath, rigRoot, rigs), false); err != nil {
 		mirrorBeadsDoltEnv(env)
-		ensureProjectedPostgresEnvExplicit(env)
 		if !isRecoverableManagedDoltEnvError(err) {
 			return env, err
 		}
 	}
-	ensureProjectedPostgresEnvExplicit(env)
 	return env, nil
 }
 
@@ -810,7 +862,7 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
-	cfg, _ := templateParamsToConfigWithDelivery(tp)
+	cfg, _, _ := templateParamsToConfigWithDelivery(tp)
 	return cfg
 }
 
@@ -821,13 +873,37 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // buildPreparedStartWithWorkDirResolver re-sets that env marker to "1" for hook
 // consumption even when nothing is delivered that incarnation. Threading the
 // result avoids that trap. templateParamsToConfig is the wrapper that discards
-// the second value; all other call sites are unchanged.
-func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult) {
+// the second and third values; all other call sites are unchanged.
+//
+// The error return is non-nil only when the rendered prompt is oversized (see
+// maxPromptSuffixRawBytes / maxPromptSuffixQuotedBytes in prompt_delivery.go)
+// and its effective runtime has no confirmed post-start delivery path — the
+// caller must not construct a runtime.Config or call Provider.Start in that
+// case (gastownhall/gascity ga-q8wgom.1.1).
+func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
 	// in the pure promptDelivery derivation.
-	delivery := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge)
+	delivery, err := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge, tp.EffectiveSessionProvider, tp.CityRuntimes)
+	configuredMode := "arg"
+	switch {
+	case tp.IsACP:
+		configuredMode = "acp"
+	case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode != "":
+		configuredMode = tp.ResolvedProvider.PromptMode
+	}
+	if err != nil {
+		logOversizedPromptDelivery(slog.Default().Error,
+			"startup prompt exceeds argv-safety threshold; no fallback delivery available",
+			tp, configuredMode, "hard-fail")
+		return runtime.Config{}, promptDeliveryResult{}, fmt.Errorf("template %q (session %q): %w", tp.TemplateName, tp.SessionName, err)
+	}
+	if delivery.OversizedFallback {
+		logOversizedPromptDelivery(slog.Default().Warn,
+			"startup prompt exceeds argv-safety threshold; falling back to nudge delivery",
+			tp, configuredMode, "nudge-fallback")
+	}
 	promptSuffix := delivery.PromptSuffix
 	promptFlag := delivery.PromptFlag
 	nudge := delivery.Nudge
@@ -869,7 +945,29 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
 	cfg.MouseOn = tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual"
 	applyT3BridgeRuntimeConfig(tp, env)
-	return cfg, delivery
+	return cfg, delivery, nil
+}
+
+// logOversizedPromptDelivery emits the one structured launch-log record
+// required for every automatic oversized-prompt fallback or hard failure
+// (gastownhall/gascity ga-q8wgom.1.1 exit criterion 5): agent/session
+// identity, configured and effective delivery mode, effective runtime, raw
+// and argv-encoded byte counts, and the threshold values — never prompt
+// content. log is *slog.Logger's Warn or Error method, passed as a value so
+// the fallback (Warn) and hard-fail (Error) call sites can share one record
+// shape.
+func logOversizedPromptDelivery(log func(msg string, args ...any), msg string, tp TemplateParams, configuredMode, effectiveMode string) {
+	log(msg,
+		slog.String("session", tp.SessionName),
+		slog.String("agent", tp.InstanceName),
+		slog.String("configured_mode", configuredMode),
+		slog.String("effective_mode", effectiveMode),
+		slog.String("runtime", tp.EffectiveSessionProvider),
+		slog.Int("raw_bytes", len(tp.Prompt)),
+		slog.Int("argv_bytes", len(shellquote.Quote(tp.Prompt))),
+		slog.Int("raw_threshold", maxPromptSuffixRawBytes),
+		slog.Int("argv_threshold", maxPromptSuffixQuotedBytes),
+	)
 }
 
 func prependStartupPromptToNudge(prompt, nudge string) string {

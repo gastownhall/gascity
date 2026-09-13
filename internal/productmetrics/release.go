@@ -136,6 +136,15 @@ func classifyBuild(tag string, dirty bool) (BuildKind, string) {
 // tree. Only an explicit vcs.modified=true stamp counts as dirty; absent VCS
 // metadata (e.g. -buildvcs=false) is treated as clean so release artifacts
 // classify correctly. A dirty tree can never classify as release or canary.
+//
+// The stamp is trusted here without cross-checking the repository it describes,
+// which is safe only because dirtiness cannot change the classification unless
+// compiledReleaseTag is set, and that is injected solely by the GoReleaser
+// workflows. Those build from an ordinary CI checkout, and
+// scripts/verify-release-binary-metadata.sh asserts vcs.modified=false on the
+// resulting binary. Local builds — where the toolchain can stamp an enclosing
+// repository's dirtiness instead of ours (ga-u7fb) — carry no release tag and
+// classify as development either way.
 func buildIsDirty() bool {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {

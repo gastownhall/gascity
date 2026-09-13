@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,9 +99,36 @@ type LoadOptions struct {
 	// AllowMissingProviderReferences leaves provider-reference catalog errors
 	// non-fatal for repair tools that need to inspect broken configs.
 	AllowMissingProviderReferences bool
-	deferRigPatches                bool
-	deferredRigPatches             *[]deferredRigPatches
-	allowLegacyOrderLayouts        bool
+	// SkipRevisionSnapshot declines the load-time revision snapshot, which
+	// content-hashes every pack directory so that a later Revision() call can
+	// compare against the config as it was loaded.
+	//
+	// Only long-running processes ever compute a Revision; a one-shot command
+	// loads config, uses it and exits. Set this on those callers to skip work
+	// nothing will read.
+	//
+	// Declining the snapshot cannot change a revision VALUE: every read of it
+	// already falls back to reading from disk (writeRevisionDirHash,
+	// revisionSnapshotFile, revisionConventionDirs), so it is a prefetch, not
+	// an input. What it does give up is load-time faithfulness — a revision
+	// computed without it reflects the tree at Revision() time rather than at
+	// load time. That only matters to a caller holding a Provenance across a
+	// window in which the config may change, which is exactly the long-running
+	// case that should leave this false.
+	SkipRevisionSnapshot bool
+	// RepoCacheNonBlocking makes every repo-cache lock this load takes fail
+	// fast with ErrRepoCacheBusy instead of waiting for the holder.
+	//
+	// The repo-cache lock is machine-wide and a writer holds it for as long as
+	// its git clone takes, so a blocking load can stall for minutes on work
+	// that has nothing to do with the caller. Advisory loads — command
+	// discovery, shell completion — set this and degrade to "no pack state
+	// right now"; a load whose result the caller acts on must leave it false
+	// and wait, because a busy cache would otherwise read as an empty one.
+	RepoCacheNonBlocking    bool
+	deferRigPatches         bool
+	deferredRigPatches      *[]deferredRigPatches
+	allowLegacyOrderLayouts bool
 }
 
 // LoadWithIncludes loads a city.toml and merges all included fragments.
@@ -380,7 +408,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	for _, inc := range includes {
 		var fragPath string
 		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot)
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 			if err != nil {
 				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
 			}
@@ -420,9 +448,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
 
 		// Merge fragment into root.
-		mergeFragment(root, frag, fragMeta, fragPath, prov)
+		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
+			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
+		}
 		prov.Sources = append(prov.Sources, fragPath)
 		prov.recordSource(fragPath, fragData)
+	}
+	if err := ValidateStorageConfig(root); err != nil {
+		return nil, nil, err
 	}
 
 	// Append caller-supplied extra pack includes to Workspace.Includes,
@@ -440,7 +473,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	resolveNamedPacks(root, cityRoot)
 	rootIncludes = root.Workspace.LegacyIncludes()
 
-	existingPacks := resolvedConfigPackNames(root, fs, cityRoot)
+	existingPacks, err := resolvedConfigPackNames(root, fs, cityRoot, opts.RepoCacheNonBlocking)
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, inc := range packIncludes {
 		name := readPackNameFromDir(inc)
 		if name != "" && existingPacks[name] {
@@ -521,9 +557,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if len(root.LoadWarnings) > 0 {
 		prov.Warnings = appendUnique(prov.Warnings, root.LoadWarnings...)
 	}
-	// Track city pack agents in provenance.
+	// Track city pack agents in provenance. The resolve error is discarded
+	// deliberately: this only builds an attribution string for a diagnostic,
+	// and an unresolvable ref yields a useless path rather than a wrong config.
+	// Anything that would change what composes has already been resolved and
+	// hard-failed upstream by then.
 	for _, ref := range root.Workspace.LegacyIncludes() {
-		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)
+		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
 		topoPath := filepath.Join(topoDir, packFile)
 		for _, a := range root.Agents {
 			if a.Dir == "" {
@@ -565,9 +605,42 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	var deferredAgentPatches []AgentPatch
 	if len(root.Patches.Agents) > 0 {
 		implicitIDs := implicitAgentIdentities(root)
+		// Derive the implicit-name set once from implicitIDs so the wildcard
+		// and non-wildcard deferral branches share a single scan of
+		// agents+providers rather than recomputing it per wildcard patch.
+		implicitNames := make(map[string]bool, len(implicitIDs))
+		for key := range implicitIDs {
+			implicitNames[key.name] = true
+		}
 		var nowPatches []AgentPatch
 		for _, p := range root.Patches.Agents {
-			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
+			if p.Rig == "*" {
+				// A wildcard patch can touch both already-present agents and
+				// not-yet-injected implicit agents. Apply it to existing
+				// matches in the normal city patch phase so it keeps the
+				// documented city-before-rig precedence (a rig patch applied
+				// below still wins); ALSO defer a second, tail-scoped pass for
+				// any implicit agent injected later. A wildcard that matches
+				// neither still routes through the normal pass so ApplyPatches
+				// hard-errors on the typo (a wildcard matching nothing is an
+				// error, not a silent no-op).
+				matchesExisting := wildcardPatchMatchesExisting(root, p.Name)
+				deferForImplicit := implicitNames[p.Name]
+				if matchesExisting || !deferForImplicit {
+					nowPatches = append(nowPatches, p)
+				}
+				if deferForImplicit {
+					deferredAgentPatches = append(deferredAgentPatches, p)
+				}
+				continue
+			}
+			deferPatch := false
+			if !agentPatchMatchesExisting(root, &p) {
+				if targetDir, err := agentPatchTargetDir(&p); err == nil {
+					deferPatch = implicitIDs[agentKey{targetDir, p.Name}]
+				}
+			}
+			if deferPatch {
 				deferredAgentPatches = append(deferredAgentPatches, p)
 			} else {
 				nowPatches = append(nowPatches, p)
@@ -626,13 +699,24 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
 	// explicit agents always take precedence.
+	injectedFrom := len(root.Agents)
 	InjectImplicitAgents(root)
 
 	// Apply patches that targeted provider-derived implicit agents, now
 	// present after injection. A patch that still cannot be resolved is a
 	// genuine typo — surface it with the same error framing as ApplyPatches.
+	//
+	// Scope the application to ONLY the agents InjectImplicitAgents just
+	// appended (the tail). A wildcard city patch was already applied to
+	// already-present agents above, where a deferred rig patch may have
+	// overridden it (city-before-rig precedence); re-applying the wildcard
+	// against the full agent list here would clobber that higher-precedence
+	// rig patch. The tail reslice shares root.Agents' backing array and
+	// applyAgentPatch mutates matched agents in place (it never appends), so
+	// the injected agents are updated through the shared array.
 	if len(deferredAgentPatches) > 0 {
-		if err := ApplyPatches(root, Patches{Agents: deferredAgentPatches}); err != nil {
+		tail := City{Agents: root.Agents[injectedFrom:]}
+		if err := ApplyPatches(&tail, Patches{Agents: deferredAgentPatches}); err != nil {
 			return nil, nil, fmt.Errorf("applying patches: %w", err)
 		}
 	}
@@ -773,8 +857,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
-	// mutable files from disk.
-	prov.captureRevisionSnapshot(fs, root, cityRoot)
+	// mutable files from disk. Callers that never compute a Revision opt out
+	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
+	// the value is the same either way.
+	if !opts.SkipRevisionSnapshot {
+		prov.captureRevisionSnapshot(fs, root, cityRoot)
+	}
 
 	return root, prov, nil
 }
@@ -977,7 +1065,11 @@ func validateCityRequirements(reqs []PackRequirement, agents []Agent) error {
 
 // mergeFragment merges a fragment into the base config in-place.
 // Arrays concatenate, providers deep-merge, workspace per-field merges.
-func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) {
+func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string, prov *Provenance) error {
+	if err := mergeStorageConfig(base, fragment, fragMeta, fragPath); err != nil {
+		return err
+	}
+
 	// Agents and named sessions: concatenate.
 	trackAgents(prov, fragment.Agents, fragPath)
 	base.Agents = append(base.Agents, fragment.Agents...)
@@ -1088,6 +1180,39 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	if fragMeta.IsDefined("agent_defaults") || fragMeta.IsDefined("agents") {
 		mergeAgentDefaults(&base.AgentDefaults, fragment.AgentDefaults, fragPath, prov)
 	}
+	return nil
+}
+
+func mergeStorageConfig(base, fragment *City, fragMeta toml.MetaData, fragPath string) error {
+	if !fragMeta.IsDefined("storage") || fragment.Storage == nil {
+		return nil
+	}
+	if base.Storage == nil {
+		base.Storage = &StorageConfig{}
+	}
+
+	for _, class := range storageConfigClassOrder() {
+		if fragMeta.IsDefined("storage", "classes", class.String()) {
+			base.Storage.Classes.setBinding(class, fragment.Storage.Classes.BindingFor(class))
+		}
+	}
+
+	names := sortedStorageBindingNames(fragment.Storage.Bindings)
+	for _, name := range names {
+		if _, exists := base.Storage.Bindings[name]; exists {
+			return fmt.Errorf("storage binding %q is defined more than once (again in %q)", name, fragPath)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	if base.Storage.Bindings == nil {
+		base.Storage.Bindings = make(map[string]StorageBindingConfig, len(names))
+	}
+	for _, name := range names {
+		base.Storage.Bindings[name] = fragment.Storage.Bindings[name]
+	}
+	return nil
 }
 
 type sessionSleepField struct {
@@ -1608,7 +1733,7 @@ func LoadPackGraphDirsForDoctor(fs fsys.FS, cityTomlPath string) ([]string, erro
 }
 
 func loadImportPackGraphDirsForDoctor(fs fsys.FS, imp Import, declDir, cityRoot string, cache *packLoadCache) ([]string, error) {
-	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot)
+	impDir, err := resolveImportPackRef(imp.Source, imp.Version, declDir, cityRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1724,10 +1849,17 @@ func trackWorkspace(prov *Provenance, meta toml.MetaData, source string) {
 // [imports] according to each import's transitive setting so builtin system-pack
 // injection can be skipped when a user pack already brings the same pack into
 // the city closure.
-func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string) map[string]bool {
+// A ref that fails to resolve is skipped, since an unresolvable pack brings
+// nothing into the closure. ErrRepoCacheBusy is the exception: there the pack
+// may well be in the closure and the walk simply could not look. Returning a
+// short set would inject a builtin the city already has, so it is reported
+// instead — this set decides what gets injected, and a busy cache must never
+// quietly change that.
+func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
 	names := make(map[string]bool, len(includes)+len(imports))
 	seenShallowDirs := make(map[string]bool)
 	expandedDirs := make(map[string]bool)
+	var busyErr error
 
 	var visitDir func(dir string, transitive bool)
 	var visitInclude func(ref, declDir string, transitive bool)
@@ -1779,17 +1911,25 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 		}
 	}
 
+	noteResolveErr := func(err error) {
+		if busyErr == nil && errors.Is(err, ErrRepoCacheBusy) {
+			busyErr = err
+		}
+	}
+
 	visitInclude = func(ref, declDir string, transitive bool) {
-		dir, err := resolvePackRef(ref, declDir, cityRoot)
+		dir, err := resolvePackRef(ref, declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
 	}
 
 	visitImport = func(ref, declDir string, transitive bool) {
-		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot)
+		dir, err := resolveImportPackRef(ref, "", declDir, cityRoot, nonBlocking)
 		if err != nil {
+			noteResolveErr(err)
 			return
 		}
 		visitDir(dir, transitive)
@@ -1801,7 +1941,10 @@ func resolvedPackNames(includes []string, imports map[string]Import, sysFS fsys.
 	for _, imp := range imports {
 		visitImport(imp.Source, cityRoot, imp.ImportIsTransitive())
 	}
-	return names
+	if busyErr != nil {
+		return nil, busyErr
+	}
+	return names, nil
 }
 
 // PackDirByName returns the composed pack directory whose pack.toml
@@ -1819,28 +1962,46 @@ func (c *City) PackDirByName(name string) string {
 // explicit includes, imports, rig pack graphs, and default-rig pack graphs.
 // The gc binary uses it after composition to verify that required builtin
 // packs (core, and bd for bd-provider cities) are explicitly included.
+// A blocking walk waits out any contention, so the error can only be a busy
+// cache and only a non-blocking caller can see one.
 func ReachablePackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	return resolvedConfigPackNames(cfg, sysFS, cityRoot)
+	names, _ := resolvedConfigPackNames(cfg, sysFS, cityRoot, false)
+	return names
 }
 
 // resolvedConfigPackNames collects all pack names reachable from the city,
 // rig, and default-rig pack graphs before builtin extra includes are injected.
-func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string) map[string]bool {
-	names := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot)
-	add := func(more map[string]bool) {
+// It returns ErrRepoCacheBusy if any graph could not be walked because another
+// process held the repo-cache lock.
+func resolvedConfigPackNames(cfg *City, sysFS fsys.FS, cityRoot string, nonBlocking bool) (map[string]bool, error) {
+	names, err := resolvedPackNames(cfg.Workspace.LegacyIncludes(), cfg.Imports, sysFS, cityRoot, nonBlocking)
+	if err != nil {
+		return nil, err
+	}
+	add := func(more map[string]bool, err error) error {
+		if err != nil {
+			return err
+		}
 		for name := range more {
 			names[name] = true
 		}
+		return nil
 	}
 
 	for _, rig := range cfg.Rigs {
-		add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot))
+		if err := add(resolvedPackNames(rig.Includes, rig.Imports, sysFS, cityRoot, nonBlocking)); err != nil {
+			return nil, err
+		}
 	}
 
-	add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot))
-	add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot))
+	if err := add(resolvedPackNames(cfg.Workspace.LegacyDefaultRigIncludes(), nil, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
+	if err := add(resolvedPackNames(nil, cfg.DefaultRigImports, sysFS, cityRoot, nonBlocking)); err != nil {
+		return nil, err
+	}
 
-	return names
+	return names, nil
 }
 
 // readPackNameFromDir reads [pack].name from pack.toml in the given directory.
@@ -1862,14 +2023,38 @@ func readPackNameFromDir(dir string) string {
 
 // agentPatchMatchesExisting reports whether patch targets an agent already
 // present in cfg.Agents, using the same matching logic as applyAgentPatch.
+// Callers handle the "*" wildcard separately (its deferral keys on the
+// implicit-name set, and its application lives in applyAgentPatch), so this
+// helper only resolves the single-target dir/rig case.
 func agentPatchMatchesExisting(cfg *City, patch *AgentPatch) bool {
-	target := qualifiedNameFromPatch(patch.Dir, patch.Name)
+	targetDir, err := agentPatchTargetDir(patch)
+	if err != nil {
+		return false
+	}
+	target := qualifiedNameFromPatch(targetDir, patch.Name)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if AgentMatchesIdentity(a, target) {
 			return true
 		}
-		if a.Dir == patch.Dir && a.Name == patch.Name {
+		if a.Dir == targetDir && a.Name == patch.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcardPatchMatchesExisting reports whether a rig="*" patch for the given
+// agent name matches at least one agent already present in cfg.Agents, using
+// the same name/binding match as applyAgentPatch's wildcard branch. compose
+// uses it to keep a wildcard city patch in the normal (pre-injection) patch
+// pass for already-present agents — preserving city-before-rig precedence —
+// while still deferring a second, tail-scoped pass for implicit agents that
+// InjectImplicitAgents appends later.
+func wildcardPatchMatchesExisting(cfg *City, name string) bool {
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name == name || a.BindingQualifiedName() == name {
 			return true
 		}
 	}

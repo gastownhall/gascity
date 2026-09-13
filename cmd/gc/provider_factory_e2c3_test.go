@@ -210,7 +210,7 @@ func assertE2c3ControlDispatchFailures(t *testing.T, cityPath string) {
 			t.Fatalf("create %s control bead: %v", kind, err)
 		}
 		before := control
-		err = runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control, control.ID, cfg, io.Discard, io.Discard)
+		err = runControlDispatcherWithStoreAndConfig(cityPath, cityPath, store, control.ID, cfg, io.Discard, io.Discard)
 		if err == nil || err.Error() != e2c3ProviderConstructionFailure {
 			t.Fatalf("%s control dispatch error = %v, want %q", kind, err, e2c3ProviderConstructionFailure)
 		}

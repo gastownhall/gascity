@@ -113,6 +113,40 @@ func TestReadCursorFileConvertsStreamJSON(t *testing.T) {
 	}
 }
 
+func TestReadCursorFileConvertsNativeAgentTranscript(t *testing.T) {
+	const sessionID = "61c2205b-4b56-4006-b4a0-d47d0abd0cc7"
+	path := filepath.Join(t.TempDir(), sessionID+".jsonl")
+	writeFile(t, path, strings.Join([]string{
+		`{"role":"user","message":{"content":[{"type":"text","text":"create the requested file"}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"Creating it now."},{"type":"tool_use","name":"Write","input":{"path":"result.txt","contents":"done"}}]}}`,
+		`{"role":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}`,
+		`{"type":"turn_ended","status":"success"}`,
+	}, "\n")+"\n")
+
+	session, err := ReadCursorFile(path, 0)
+	if err != nil {
+		t.Fatalf("ReadCursorFile() error = %v", err)
+	}
+	if session.ID != sessionID {
+		t.Fatalf("Session.ID = %q, want native transcript basename %q", session.ID, sessionID)
+	}
+	if got := len(session.Messages); got != 3 {
+		t.Fatalf("len(Messages) = %d, want user and two assistant messages", got)
+	}
+	userBlocks := session.Messages[0].ContentBlocks()
+	if len(userBlocks) != 1 || userBlocks[0].Text != "create the requested file" {
+		t.Fatalf("user blocks = %+v, want native prompt", userBlocks)
+	}
+	assistantBlocks := session.Messages[1].ContentBlocks()
+	if len(assistantBlocks) != 2 || assistantBlocks[0].Text != "Creating it now." || assistantBlocks[1].Type != "tool_use" {
+		t.Fatalf("assistant blocks = %+v, want native text and tool use", assistantBlocks)
+	}
+	finalBlocks := session.Messages[2].ContentBlocks()
+	if len(finalBlocks) != 1 || finalBlocks[0].Text != "Done." {
+		t.Fatalf("final assistant blocks = %+v, want Done.", finalBlocks)
+	}
+}
+
 func TestReadCursorFileSkipsPartialAssistantFlushes(t *testing.T) {
 	path := writeCursorJSONL(t,
 		`{"type":"system","subtype":"init","cwd":"/work/project","session_id":"partial-session"}`,
@@ -288,6 +322,21 @@ func TestFindCursorSessionFileByIDAndWorkDir(t *testing.T) {
 	}
 	if got := FindCursorSessionFile([]string{root}, filepath.Join(t.TempDir(), "other")); got != "" {
 		t.Fatalf("FindCursorSessionFile() wrong workdir = %q, want empty", got)
+	}
+}
+
+func TestFindCursorNativeSessionFileByID(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "project")
+	const sessionID = "native-session-123"
+	path := filepath.Join(root, "project-slug", "agent-transcripts", sessionID, sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir native transcript dir: %v", err)
+	}
+	writeFile(t, path, `{"role":"user","message":{"content":[{"type":"text","text":"hello"}]}}`+"\n")
+
+	if got := FindCursorSessionFileByID([]string{root}, workDir, sessionID); got != path {
+		t.Fatalf("FindCursorSessionFileByID() = %q, want native transcript %q", got, path)
 	}
 }
 

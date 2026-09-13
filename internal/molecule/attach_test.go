@@ -182,7 +182,7 @@ func TestAttachToWorkflowRoot(t *testing.T) {
 // gc.root_bead_id. The old Attach fallback checked only gc.root_bead_id and
 // then defaulted to the parent's own id, stamping the whole sub-DAG (attempt
 // container, scope-check, every child) with the WRONG root. Downstream
-// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong root>),
+// reconciliation then enumerated siblings via beads.DirectMembers(<wrong root>),
 // found the wrong set, and burned ralph attempts until abort_scope fired on
 // green work. Attach must resolve the root through the canonical run chain
 // (beadmeta.ResolveRunID), never the parent's own id.

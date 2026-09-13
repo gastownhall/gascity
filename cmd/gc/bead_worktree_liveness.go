@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -32,10 +34,16 @@ type liveWorktreeState struct {
 	// directories of live processes. Deduplicated.
 	cwds []string
 	// scanned reports whether the process table was enumerated at all. False
-	// means liveness is indeterminate — the host has no /proc, or the
-	// top-level walk failed — and the reaper must fail closed by protecting
-	// every candidate worktree.
+	// means liveness is indeterminate — no enumeration mechanism was available,
+	// or every one of them failed — and the reaper must fail closed by
+	// protecting every candidate worktree.
 	scanned bool
+	// source names the mechanism that produced this scan (liveScanSourceProc,
+	// liveScanSourceLsof), empty when scanned is false. Recorded so the choice
+	// of mechanism is observable rather than inferred from the host: a fallback
+	// that silently substitutes itself is hard to debug when the gate later
+	// behaves unexpectedly.
+	source string
 }
 
 // collectLiveWorktreeStateFn is the seam the reaper calls to gather live
@@ -45,9 +53,21 @@ type liveWorktreeState struct {
 var collectLiveWorktreeStateFn = collectLiveWorktreeState
 
 // collectLiveWorktreeState walks /proc/<pid>/cwd for every process on the host
-// and records their canonical working directories. On a host without /proc (or
-// when the top-level /proc walk fails outright) it returns scanned=false so the
-// caller fails closed and reaps nothing.
+// and records their canonical working directories. On a host without /proc it
+// falls back to a portable process-table enumeration
+// (bead_worktree_liveness_fallback.go); when no mechanism succeeds it returns
+// scanned=false so the caller fails closed and reaps nothing.
+//
+// The fallback matters because /proc is Linux-only, and returning
+// scanned=false for its absence does not merely make the reaper cautious on
+// other platforms — it disables the feature outright and permanently, while the
+// operator sees only "liveness scan unavailable". Darwin binaries are a
+// published release target, and CI runs on Linux, so nothing here fails on the
+// platform where the gate never worked.
+//
+// The check is at runtime rather than behind a build tag deliberately: /proc can
+// also be absent on Linux (a container without it mounted), and the same
+// fallback covers that case.
 //
 // Per-process readlink failures are skipped, not fatal: a process may exit
 // mid-walk, and a process owned by another user may have a cwd this process
@@ -59,7 +79,7 @@ var collectLiveWorktreeStateFn = collectLiveWorktreeState
 func collectLiveWorktreeState() liveWorktreeState {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return liveWorktreeState{scanned: false}
+		return collectLiveWorktreeStateFallback()
 	}
 	seen := make(map[string]struct{})
 	var cwds []string
@@ -93,7 +113,7 @@ func collectLiveWorktreeState() liveWorktreeState {
 		seen[canon] = struct{}{}
 		cwds = append(cwds, canon)
 	}
-	return liveWorktreeState{cwds: cwds, scanned: true}
+	return liveWorktreeState{cwds: cwds, scanned: true, source: liveScanSourceProc}
 }
 
 // worktreeIsLive reports whether any live signal sits at or beneath
@@ -182,4 +202,51 @@ func liveSessionWorktreeDirs(snapshot *sessionBeadSnapshot) []string {
 		add(info.WorkerDir)
 	}
 	return dirs
+}
+
+// worktreeLiveness pairs one Git worktree with whether a live process or
+// active session is working in it. It is the stable, reusable output of
+// discoverWorktreeLiveness: the single shared boundary between "which
+// worktrees does git know about, and which of them are live" and any caller
+// that acts on that fact. The reaper is one such caller — it additionally
+// restricts itself to gc-owned paths before ever considering removal — and
+// reconciler capacity accounting (ga-1xaqgo.3) is another; both read this
+// same result instead of each running their own git-worktree-list plus
+// liveness cross-product.
+type worktreeLiveness struct {
+	Path   string
+	Branch string
+	Live   bool
+	Reason string
+}
+
+// discoverWorktreeLiveness reports liveness for every worktree git knows
+// about in rigRoot's repository — including the main checkout — independent
+// of which directory created or owns each one. It applies no root
+// convention (.gc/worktrees, .claude/worktrees, or anywhere else) and no
+// bead or reap-eligibility filtering: scope decisions belong entirely to the
+// caller.
+//
+// live must already have been gathered by the caller via
+// collectLiveWorktreeStateFn, matching worktreeIsLive's own contract: when
+// live.scanned is false the scan is indeterminate, and every result here
+// reports Live=false with an empty Reason rather than a guessed answer. The
+// caller is responsible for treating that indeterminate case as fail-closed,
+// exactly as it already must before calling worktreeIsLive directly —
+// discoverWorktreeLiveness does not itself decide what an unknown liveness
+// state should protect.
+func discoverWorktreeLiveness(rigRoot string, live liveWorktreeState, sessionDirs []string) ([]worktreeLiveness, error) {
+	worktrees, err := git.New(rigRoot).WorktreeList()
+	if err != nil {
+		return nil, fmt.Errorf("listing worktrees for %s: %w", rigRoot, err)
+	}
+	results := make([]worktreeLiveness, 0, len(worktrees))
+	for _, wt := range worktrees {
+		wl := worktreeLiveness{Path: wt.Path, Branch: wt.Branch}
+		if live.scanned {
+			wl.Live, wl.Reason = worktreeIsLive(wt.Path, live, sessionDirs)
+		}
+		results = append(results, wl)
+	}
+	return results, nil
 }

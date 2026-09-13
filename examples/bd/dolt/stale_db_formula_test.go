@@ -13,6 +13,8 @@ import (
 
 func staleDBFilteredEnv(keys ...string) []string {
 	keys = append(keys,
+		"GC_BEAD_ID",
+		"GC_TRIGGER_BEAD_ID",
 		"GC_ESCALATE_SCRIPT",
 		"GC_ESCALATE_SEARCH_PACKS",
 		"GC_ESCALATION_RECIPIENT",
@@ -36,7 +38,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 	desc := f.Steps[0].Description
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required`,
+		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
 		`TMP_DIR=$(mktemp -d`,
 		`trap cleanup EXIT`,
 		`drain_ack_once()`,
@@ -67,6 +69,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`gc nudge deacon`,
 		`gc session nudge deacon`,
 		`GC_BEAD_ID:-<work-bead>`,
+		`GC_BEAD_ID:?`,
 		`Dolt orphan(s) detected`,
 	} {
 		if strings.Contains(desc, bad) {
@@ -83,7 +86,7 @@ func TestStaleDBFormulaRenderedShellIsStrictAndValid(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
 	for _, want := range []string{
 		`set -euo pipefail`,
-		`WORK_BEAD="${GC_BEAD_ID:?GC_BEAD_ID required`,
+		`WORK_BEAD="${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)}}"`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("rendered script missing %q", want)
@@ -428,6 +431,148 @@ esac
 	}
 	if strings.Contains(log, "mol-dog-stale-db.escalate") {
 		t.Fatalf("rendered script escalated at dropped.count == max_orphans_for_sql; want apply because threshold is >\nlog:\n%s\noutput:\n%s", log, out)
+	}
+}
+
+// TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain proves the formula
+// runs in a real pool shell, where neither GC_BEAD_ID nor GC_TRIGGER_BEAD_ID
+// is guaranteed: the bead-id chain must fall through to
+// `gc hook current --id-only`, the back-channel stamped by `gc hook --claim`.
+// Before this chain the formula required GC_BEAD_ID — an env var no session
+// shell has ever received — so even a correctly claiming dog aborted at the
+// WORK_BEAD guard (ga-2q2r0).
+func TestStaleDBFormulaResolvesWorkBeadViaHookCurrentChain(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "commands.log")
+	scanPath := filepath.Join(dir, "scan.json")
+	applyPath := filepath.Join(dir, "apply.json")
+	writeTestFile(t, scanPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":100},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":100,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, applyPath, `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":1,"failed":[]},"purge":{"bytes_reclaimed":100},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":100,"bytes_freed_rss":0,"errors_total":0}}`)
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-} ${2:-}" in
+  "hook current")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    echo "bead-hook-1"
+    ;;
+  "dolt-cleanup "*)
+    echo "gc $*" >> "$GC_TEST_LOG"
+    case " $* " in
+      *" --force "*) cat "$GC_TEST_APPLY_JSON" ;;
+      *) cat "$GC_TEST_SCAN_JSON" ;;
+    esac
+    ;;
+  "event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+    echo "gc $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected gc command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+	writeTestFile(t, filepath.Join(binDir, "bd"), `#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  update|close)
+    echo "bd $*" >> "$GC_TEST_LOG"
+    ;;
+  *)
+    echo "unexpected bd command: $*" >&2
+    exit 64
+    ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_APPLY_JSON"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+		"GC_TEST_SCAN_JSON="+scanPath,
+		"GC_TEST_APPLY_JSON="+applyPath,
+	)
+	out, err := cmd.CombinedOutput()
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	log := string(logData)
+	if err != nil {
+		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	for _, want := range []string{
+		"gc hook current --id-only",
+		"bd close bead-hook-1",
+		"gc runtime drain-ack",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q\nlog:\n%s\noutput:\n%s", want, log, out)
+		}
+	}
+}
+
+// TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable pins the chain's
+// failure mode: a shell that cannot name its bead through any chain element
+// must abort before touching Dolt, not run the cleanup and silently skip the
+// close it owes.
+func TestStaleDBFormulaFailsLoudlyWhenNoWorkBeadIDResolvable(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+
+	script := renderStaleDBFormulaShell(t)
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	logPath := filepath.Join(dir, "commands.log")
+	writeTestFile(t, logPath, "")
+	writeTestFile(t, filepath.Join(binDir, "gc"), `#!/usr/bin/env bash
+set -euo pipefail
+echo "gc $*" >> "$GC_TEST_LOG"
+case "${1:-} ${2:-}" in
+  "hook current")
+    echo "gc hook current: session has no current claim" >&2
+    exit 1
+    ;;
+esac
+`, 0o755)
+
+	cmd := exec.Command("bash", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	cmd.Env = append(staleDBFilteredEnv("PATH", "TMPDIR", "GC_TEST_LOG"),
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TMPDIR="+dir,
+		"GC_TEST_LOG="+logPath,
+	)
+	out, err := cmd.CombinedOutput()
+	logData, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%s): %v\noutput:\n%s", logPath, readErr, out)
+	}
+	log := string(logData)
+	if err == nil {
+		t.Fatalf("rendered script succeeded with no resolvable work bead id\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	if strings.Contains(log, "dolt-cleanup") {
+		t.Fatalf("script must abort before running cleanup when it cannot name its bead\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
 

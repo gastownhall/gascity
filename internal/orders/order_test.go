@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +89,148 @@ func TestParseIdempotent(t *testing.T) {
 	}
 	if off.Idempotent {
 		t.Error("Idempotent = true, want false (default)")
+	}
+}
+
+// TestOrderNoWorkGateParsed covers vp-cixi.6: an order can opt out of the
+// dispatcher's open-work gates via no_work_gate. Pure cooldown probes that
+// track no beads (provider-health-probe) set this so a slow Dolt store can't
+// time the gate out and skip the probe every cycle (#2893 dispatch starvation).
+func TestOrderNoWorkGateParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\nno_work_gate = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.NoWorkGate {
+		t.Error("NoWorkGate = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.NoWorkGate {
+		t.Error("NoWorkGate = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "10m", NoWorkGate: true}); err != nil {
+		t.Errorf("Validate with NoWorkGate: %v", err)
+	}
+}
+
+// TestProviderHealthProbeOrderOptsOutOfWorkGate covers the deployed shape of
+// provider-health-probe (vp-cixi.6 GAP D): a cooldown-triggered exec probe on
+// a 10m interval with a real 120s timeout. The shipped pack will flip
+// no_work_gate = true (sling S-1) so the dispatcher skips its open-work gates
+// and a slow Dolt store can no longer time them out and skip the probe every
+// cycle (#2893 dispatch starvation). This test pins the parse shape so the
+// pack flip is mechanically known to be valid: WITH the flag the order opts
+// out and passes Validate; WITHOUT it the order parses as a plain cooldown
+// probe (NoWorkGate == false, the pre-S-1 default).
+func TestProviderHealthProbeOrderOptsOutOfWorkGate(t *testing.T) {
+	base := `[order]
+description = "Probe provider health"
+exec = "$ORDER_DIR/scripts/provider-health-probe.sh"
+trigger = "cooldown"
+interval = "10m"
+timeout = "120s"
+`
+	on, err := Parse([]byte(base + "no_work_gate = true\n"))
+	if err != nil {
+		t.Fatalf("Parse (with flag): %v", err)
+	}
+	if !on.NoWorkGate {
+		t.Error("NoWorkGate = false, want true for opted-out probe")
+	}
+	if on.Trigger != "cooldown" || on.Interval != "10m" || on.Timeout != "120s" {
+		t.Errorf("probe shape mismatch: trigger=%q interval=%q timeout=%q", on.Trigger, on.Interval, on.Timeout)
+	}
+	if err := Validate(Order{
+		Name:       "provider-health-probe",
+		Exec:       "$ORDER_DIR/scripts/provider-health-probe.sh",
+		Trigger:    "cooldown",
+		Interval:   "10m",
+		Timeout:    "120s",
+		NoWorkGate: true,
+	}); err != nil {
+		t.Errorf("Validate provider-health-probe with NoWorkGate: %v", err)
+	}
+
+	off, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatalf("Parse (without flag): %v", err)
+	}
+	if off.NoWorkGate {
+		t.Error("NoWorkGate = true, want false (default) for probe without the flag")
+	}
+}
+
+// TestOrderReservedDispatchParsed covers ga-xxyzgq: a pack author declares an
+// order eligible for the dispatcher's bounded reserved-dispatch lane via
+// reserved_dispatch, in TOML, with no name-based logic in Go. Every order is
+// opted out by default; only the 3 bundled core-health orders (beads-health,
+// gate-sweep, dolt-health) set the flag. This test pins their deployed shape by
+// parsing the shipped TOML files themselves, the same way
+// TestProviderHealthProbeOrderOptsOutOfWorkGate pins provider-health-probe's —
+// the actual capped-budget dispatch behavior that consumes this flag is
+// separate (gastownhall/gascity ga-1ocm3f).
+func TestOrderReservedDispatchParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nreserved_dispatch = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.ReservedDispatch {
+		t.Error("ReservedDispatch = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "30s", ReservedDispatch: true}); err != nil {
+		t.Errorf("Validate with ReservedDispatch: %v", err)
+	}
+
+	// Pin the deployed shape of the 3 bundled core-health orders by reading the
+	// files themselves — an embedded copy would stay green if a shipped pack
+	// dropped the flag.
+	bundled := []struct {
+		name string
+		path string
+	}{
+		{"beads-health", "../bootstrap/packs/core/orders/beads-health.toml"},
+		{"gate-sweep", "../bootstrap/packs/core/orders/gate-sweep.toml"},
+		{"dolt-health", "../../examples/bd/dolt/orders/dolt-health.toml"},
+	}
+	for _, b := range bundled {
+		data, err := os.ReadFile(b.path)
+		if err != nil {
+			t.Fatalf("%s: ReadFile %s: %v", b.name, b.path, err)
+		}
+		a, err := Parse(data)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", b.name, err)
+		}
+		if !a.ReservedDispatch {
+			t.Errorf("%s: ReservedDispatch = false, want true", b.name)
+		}
+	}
+
+	// An ordinary order outside the bundle stays opted out with no explicit
+	// flag — the default, not a name-based check in Go.
+	ordinary, err := Parse([]byte(`[order]
+description = "Generate daily digest"
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ordinary.ReservedDispatch {
+		t.Error("ReservedDispatch = true, want false (default) for an ordinary order")
 	}
 }
 

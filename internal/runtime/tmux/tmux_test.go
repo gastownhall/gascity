@@ -32,6 +32,19 @@ func hasTmux() bool {
 	return err == nil
 }
 
+// privateSocketName returns a short, unique, gctest-prefixed socket name for a
+// test that needs its own tmux SERVER — one forked from THIS process, so the
+// server's global environment is the test's own. The package socket hands back a
+// server started by whichever test ran first, which never saw the test's env.
+//
+// Short on purpose: the full socket path must fit a unix sun_path (~107 bytes),
+// and suffixing testSocketName (already ~34 chars under a per-run temp root)
+// overflows it — which tmux reports as the thoroughly misleading "no server
+// running" from new-session.
+func privateSocketName(tag string) string {
+	return fmt.Sprintf("gctest-%d-%s%d", os.Getpid(), tag, time.Now().UnixNano()%1e9)
+}
+
 // testTmux returns a Tmux instance that uses an isolated test socket.
 func testTmux() *Tmux {
 	cfg := DefaultConfig()
@@ -2359,7 +2372,10 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// codex is submit-verify eligible, and the fake pane here is `cat -v`, which
+	// can never show a busy indicator — so ErrNudgeSubmitUnconfirmed is the
+	// correct outcome, exactly as it is for claude below.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2368,9 +2384,7 @@ func TestNudgeSessionSkipsEscapeForCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	if strings.Contains(out, "^[") {
-		t.Fatalf("CapturePaneAll contained Escape for codex nudge:\n%s", out)
-	}
+	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
 }
 
 func TestNudgeSessionSkipsEscapeForCodexWithoutProviderEnv(t *testing.T) {
@@ -2420,7 +2434,7 @@ func main() {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -2429,8 +2443,32 @@ func main() {
 	if err != nil {
 		t.Fatalf("CapturePaneAll: %v", err)
 	}
-	if strings.Contains(out, "^[") {
-		t.Fatalf("CapturePaneAll contained Escape for codex nudge without provider env:\n%s", out)
+	assertCodexEscapeIsPartOfTheSubmitSequence(t, out)
+}
+
+// assertCodexEscapeIsPartOfTheSubmitSequence is what these two rows guard now
+// that codex has a declared submit sequence.
+//
+// They used to assert that NO Escape reached a codex pane. That was true when
+// codex's submit was a lone Enter and the only Escape on offer was the
+// pre-submit one at step 3 of NudgeSession, which codex skips. It is false by
+// design since upstream #4706: codex buffers a send-keys burst as a paste, so a
+// lone trailing Enter is swallowed as a composer newline, and codex's actual
+// submit is Escape then Enter (nudgeSubmitKeySequences).
+//
+// What still matters, and what these rows now pin against a real pane, is that
+// codex never receives Escape-Escape — the step-3 Escape plus the submit
+// sequence's would be exactly that, and codex binds it to backtrack rather than
+// submit. The COUNT is deliberately not pinned: a never-busy fake pane makes
+// submitEnterAndConfirm re-send, so the pane legitimately sees one Escape per
+// attempt. Adjacency is the invariant.
+func assertCodexEscapeIsPartOfTheSubmitSequence(t *testing.T, out string) {
+	t.Helper()
+	if !strings.Contains(out, "^[") {
+		t.Fatalf("codex pane saw no Escape; its submit sequence is Escape then Enter (#4706):\n%s", out)
+	}
+	if strings.Contains(out, "^[^[") {
+		t.Fatalf("codex pane saw Escape-Escape, which codex reads as backtrack rather than submit:\n%s", out)
 	}
 }
 
@@ -2451,7 +2489,14 @@ func TestNudgeSessionSkipsEscapeForClaude(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 	time.Sleep(300 * time.Millisecond)
 
-	if err := tm.NudgeSession(sessionName, "hello"); err != nil {
+	// The "claude" provider is submit-verify-eligible, so NudgeSession waits to
+	// observe a busy indicator before reporting success — but the fake command
+	// here is plain `cat -v`, which can never produce one. That makes
+	// ErrNudgeSubmitUnconfirmed the correct, expected outcome (see
+	// ra-3x46cy/finding 1: NudgeSession must no longer swallow this into a
+	// false "delivered" nil). This test only cares whether Escape was sent
+	// before the paste, which is unaffected by the confirm outcome.
+	if err := tm.NudgeSession(sessionName, "hello"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("NudgeSession: %v", err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -3088,7 +3133,8 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 		"display-message custom-user-cmd")
 
 	// Record the binding after first configuration
-	firstRaw, _ := tm.run("list-keys", "-T", "prefix", "F11")
+	rawTable, _ := tm.run("list-keys", "-T", "prefix")
+	firstRaw := selectBindingLine(rawTable, "F11")
 
 	// isGTBinding should return true, causing Set*Binding to skip
 	if !tm.isGTBinding("prefix", "F11") {
@@ -3369,4 +3415,56 @@ func processAlive(pid string) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil || err == syscall.EPERM
+}
+
+// TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild is the
+// child-level proof behind convergence.ScrubTokenEnv and
+// processenv.ControllerOnlyEnvKeys: the controller token is withheld from agent
+// panes by an EMPTY value, not by dropping the key.
+//
+// A pane's shell inherits the tmux SERVER's global environment, which holds
+// whatever the controller exported when the server started. A key merely absent
+// from the -e set therefore arrives in the child carrying the controller's real
+// value — asserting on the env map alone cannot see that. Only the empty value
+// produces the `env -u` prefix that makes the var genuinely absent from the
+// child process.
+func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	const (
+		tokenVar = "GC_CONTROLLER_TOKEN"
+		token    = "super-secret-controller-token"
+	)
+	t.Setenv(tokenVar, token)
+
+	// A socket unique to this test, so the server it starts forks from THIS
+	// process and its global environment carries the token. The package socket
+	// would hand back a server started by an earlier test, which never saw it.
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("tp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "child-token")
+	sessionName := "gc-test-token-pin"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	command := fmt.Sprintf(`sh -c 'printf %%s "[${%s-ABSENT}]" > %s; sleep 30'`, tokenVar, report)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, command, map[string]string{tokenVar: ""}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	// Bounded poll on the pane's own report — the condition this test is about —
+	// rather than elapsed wall time. A leak shows up as a timeout whose message
+	// carries what the pane actually saw.
+	waitForMarker(t, report, "[ABSENT]")
+
+	got, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("reading pane report: %v", err)
+	}
+	if strings.Contains(string(got), token) {
+		t.Fatalf("pane child received the controller token: %s", got)
+	}
 }

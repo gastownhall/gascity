@@ -50,4 +50,8 @@ func TestDoltVersionPins(t *testing.T) {
 	// using the same shared scanner as the bd pin guard so neither analog can
 	// false-pass on partial drift or a .yaml workflow.
 	assertWorkflowPins(t, repoRoot, "DOLT_VERSION", doltPin)
+
+	// The devcontainer README restates this pin on the line above the bd one and
+	// was equally unread; guard both or the next bump half-applies here instead.
+	assertDocPinAnchor(t, repoRoot, ".devcontainer/README.md", "DOLT_VERSION", doltPin)
 }

@@ -45,7 +45,7 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 // If srcDir does not exist, returns nil (no-op).
 // Individual file copy failures are logged to stderr but don't abort.
 func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
-	return copyDir(srcDir, dstDir, stderr, nil)
+	return copyDir(srcDir, dstDir, stderr, nil, nil)
 }
 
 type preserveExistingFunc func(relPath string) bool
@@ -61,12 +61,15 @@ type preserveExistingFunc func(relPath string) bool
 // legitimately needs to copy a tree containing a top-level `.gc/` would need a
 // variant that does not carry this guard. Names merely prefixed with ".gc"
 // (e.g. ".gcignore") are not matched.
+//
+// It is unconditional: a caller-supplied SkipFunc can only skip more, never
+// re-enable staging of the runtime mirror.
 func skipRuntimeMirror(relPath string) bool {
 	clean := filepath.Clean(relPath)
 	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
 }
 
-func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil // Missing source dir is a no-op (like Gas Town).
@@ -77,11 +80,14 @@ func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveE
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
-	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting)
+	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting, skip)
 }
 
-// copyDirRecursive walks srcBase/rel and copies files into dstBase/rel.
-func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+// copyDirRecursive walks srcBase/rel and copies files into dstBase/rel. The
+// runtime `.gc` mirror is always skipped. When skip is non-nil, entries for
+// which it returns true are additionally omitted (files and whole subtrees),
+// matching CopyDirWithSkip semantics on the best-effort path.
+func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc, skip SkipFunc) error {
 	srcPath := srcBase
 	if rel != "" {
 		srcPath = filepath.Join(srcBase, rel)
@@ -98,7 +104,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 			entryRel = filepath.Join(rel, entry.Name())
 		}
 
-		if skipRuntimeMirror(entryRel) {
+		if skipRuntimeMirror(entryRel) || (skip != nil && skip(entryRel, entry.IsDir())) {
 			continue
 		}
 
@@ -109,7 +115,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				fmt.Fprintf(stderr, "overlay: mkdir %q: %v\n", dstSubDir, err) //nolint:errcheck
 				continue
 			}
-			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting); err != nil {
+			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting, skip); err != nil {
 				fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 			}
 			continue
@@ -216,6 +222,29 @@ func HasProviderDir(srcDir, providerName string) bool {
 	return err == nil && info.IsDir()
 }
 
+// isPerProviderPath reports whether relPath is the per-provider/ directory
+// itself or any entry beneath it. Universal overlay copies skip this subtree so
+// per-provider files are staged only for the resolved provider slots.
+func isPerProviderPath(relPath string) bool {
+	return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
+		len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
+}
+
+// universalOverlaySkip composes the skips for the universal (non per-provider)
+// copy phase. That phase runs through CopyDirWithSkip, which does not carry
+// copyDirRecursive's unconditional runtime-mirror guard, so the guard is
+// applied here explicitly: the runtime `.gc` mirror is never staged, the
+// per-provider/ subtree is deferred to the resolved provider slots, and the
+// caller's optional skip may only skip more.
+func universalOverlaySkip(skip SkipFunc) SkipFunc {
+	return func(relPath string, isDir bool) bool {
+		if skipRuntimeMirror(relPath) || isPerProviderPath(relPath) {
+			return true
+		}
+		return skip != nil && skip(relPath, isDir)
+	}
+}
+
 // CopyDirForProvider copies overlay files with provider awareness:
 //  1. Copies everything EXCEPT the per-provider/ subtree (universal files).
 //  2. If per-provider/<providerName>/ exists, copies its contents into dst
@@ -234,23 +263,15 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
 
-	// Step 1: copy universal files (skip per-provider/).
-	skip := func(relPath string, _ bool) bool {
-		if skipRuntimeMirror(relPath) {
-			return true
-		}
-		// Skip the per-provider directory itself and all its contents.
-		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
-			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
-	}
-	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+	// Step 1: copy universal files (skip per-provider/ and the runtime mirror).
+	if err := CopyDirWithSkip(srcDir, dstDir, universalOverlaySkip(nil), stderr); err != nil {
 		return err
 	}
 
 	// Step 2: copy provider-specific files (flattened into dst).
 	if providerName != "" {
 		providerDir := filepath.Join(srcDir, PerProviderDir, providerName)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName)); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName), nil); err != nil {
 			return err
 		}
 	}
@@ -270,6 +291,26 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 // wins when two providers ship the same rel path (last-writer-wins via
 // overwrite or JSON merge).
 func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer) error {
+	return CopyDirForProvidersWithSkip(srcDir, dstDir, providers, nil, stderr)
+}
+
+// CopyDirForProvidersWithSkip behaves like CopyDirForProviders but additionally
+// omits any file for which skip returns true, in BOTH the universal and the
+// per-provider copy phases.
+//
+// It exists for the build_desired_state home-dir staging path: that
+// path stages provider overlays and then runs hooks.Install on the SAME
+// directory. Reconciler-owned mergeable files (overlay.IsMergeablePath —
+// .codex/hooks.json et al.) must be skipped here so hooks.Install is the sole
+// writer on that reconcile tick and the two writers cannot leave a permanent
+// hybrid hook document. The runtime task-worktree staging path passes a nil
+// skip and keeps staging those files, because there hooks.Install never runs
+// and staging is the sole writer.
+//
+// The skip does not make hooks.Install the only writer everywhere: for a
+// persistent agent, session-start staging writes the same paths via the
+// nil-skip path, so a hybrid can reappear until the next tick converges it.
+func CopyDirForProvidersWithSkip(srcDir, dstDir string, providers []string, skip SkipFunc, stderr io.Writer) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -281,19 +322,14 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
 
-	// Step 1: copy universal files (skip per-provider/).
-	skip := func(relPath string, _ bool) bool {
-		if skipRuntimeMirror(relPath) {
-			return true
-		}
-		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
-			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
-	}
-	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+	// Step 1: copy universal files (skip per-provider/, the runtime mirror, and
+	// caller-skipped paths).
+	if err := CopyDirWithSkip(srcDir, dstDir, universalOverlaySkip(skip), stderr); err != nil {
 		return err
 	}
 
-	// Step 2: copy per-provider slots in order, deduped.
+	// Step 2: copy per-provider slots in order, deduped. The caller skip is
+	// applied to the flattened per-provider rel paths (e.g. .codex/hooks.json).
 	seen := make(map[string]bool, len(providers))
 	for _, p := range providers {
 		if p == "" || seen[p] {
@@ -301,7 +337,7 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		}
 		seen[p] = true
 		providerDir := filepath.Join(srcDir, PerProviderDir, p)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p)); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p), skip); err != nil {
 			return err
 		}
 	}

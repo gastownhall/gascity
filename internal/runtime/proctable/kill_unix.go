@@ -24,9 +24,10 @@ func KillByPID(pid int) error {
 	// post-SIGKILL reap wait the PID can be reaped and recycled to an unrelated
 	// process; without this, a recycled PID reads as "still alive" and we would
 	// wrongly report a target that is actually gone as not-confirmed-dead,
-	// spuriously refusing a legitimate Start. StartTime is empty on hosts
-	// without /proc (darwin) or when the record is unreadable, in which case
-	// runLive falls back to plain liveness — current behavior preserved.
+	// spuriously refusing a legitimate Start. StartTime reads /proc where it
+	// exists and falls back to ps elsewhere, so it is empty only when neither
+	// mechanism can answer, in which case runLive falls back to plain liveness
+	// — current behavior preserved.
 	startTime, _ := pidutil.StartTime(pid)
 	return killByPID(
 		pid,

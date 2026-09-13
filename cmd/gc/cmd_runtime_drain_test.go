@@ -74,6 +74,36 @@ func newFakeDrainOps() *fakeDrainOps {
 	}
 }
 
+func TestProviderDrainOpsClearRestartRequestedUsesCityTmuxSocket(t *testing.T) {
+	const socket = "bright-lights"
+	argsFile := filepath.Join(t.TempDir(), "args")
+	installFakeTmux(t, `printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`)
+	t.Setenv("FAKE_TMUX_ARGS", argsFile)
+
+	sp, err := newSessionProviderForCityByName(
+		nil,
+		"tmux",
+		config.SessionConfig{Socket: socket},
+		"city",
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	if err := newDrainOps(sp).clearRestartRequested("worker"); err != nil {
+		t.Fatalf("clearRestartRequested: %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake tmux args: %v", err)
+	}
+	want := "-u\n-L\n" + socket + "\nset-environment\n-t\nworker\n-u\nGC_RESTART_REQUESTED\n"
+	if string(got) != want {
+		t.Fatalf("tmux args = %q, want %q", got, want)
+	}
+}
+
 func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
 	if cityPath, sessionID, markerPath, ok := e2b2ProviderFailureHelperArgs(os.Args); ok {
 		runE2b2ProviderFailureHelper(t, cityPath, sessionID, markerPath)
@@ -1378,6 +1408,14 @@ func TestDrainAckNoArgsFallsBackToCityPathEnv(t *testing.T) {
 	old := drainAckPokeController
 	drainAckPokeController = func(string) error { return nil }
 	t.Cleanup(func() { drainAckPokeController = old })
+
+	// drain-ack now reads the city store to release any in_progress claim the
+	// session is still holding, so this bare temp city needs the same store
+	// guards its siblings in this file use — otherwise the read provisions a
+	// managed Dolt server the test never tears down.
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

@@ -42,7 +42,7 @@ func TestBuildOrderDispatcherOverrideDisablesOrder(t *testing.T) {
 	cityDir, cfg := newOrderEnabledFilterCity(t)
 
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
 	if ad == nil {
 		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
 	}

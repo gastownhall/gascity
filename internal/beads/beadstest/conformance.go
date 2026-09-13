@@ -6,9 +6,11 @@ package beadstest
 import (
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -497,6 +499,89 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// UpdateRoundTripsEveryDocumentedField pins the whole update wire, not just
+	// the description. Each field is written on its own so a backend that drops
+	// exactly one of them fails on that field rather than hiding behind the
+	// others. Update{Type} in particular had no coverage anywhere in the suite,
+	// which is how a store could silently ignore it.
+	t.Run("UpdateRoundTripsEveryDocumentedField", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{Title: "parent"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := s.Create(beads.Bead{Title: "original", Type: "task", Labels: []string{"keep", "drop"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		title, status, typ, desc, assignee := "renamed", "in_progress", "gate", "new description", "worker-1"
+		// Not 2: backends normalize the default priority back to "unset".
+		priority := 1
+		// A slice, not a map: update order is part of what is being pinned, so
+		// a future field whose result depends on a prior one fails
+		// deterministically instead of flaking on map iteration order.
+		for _, u := range []struct {
+			name string
+			opts beads.UpdateOpts
+		}{
+			{"title", beads.UpdateOpts{Title: &title}},
+			{"status", beads.UpdateOpts{Status: &status}},
+			{"type", beads.UpdateOpts{Type: &typ}},
+			{"priority", beads.UpdateOpts{Priority: &priority}},
+			{"description", beads.UpdateOpts{Description: &desc}},
+			{"assignee", beads.UpdateOpts{Assignee: &assignee}},
+			{"parent_id", beads.UpdateOpts{ParentID: &parent.ID}},
+			{"labels", beads.UpdateOpts{Labels: []string{"added"}}},
+			{"metadata", beads.UpdateOpts{Metadata: map[string]string{"note": "x"}}},
+		} {
+			if err := s.Update(b.ID, u.opts); err != nil {
+				t.Fatalf("Update(%s): %v", u.name, err)
+			}
+		}
+
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ field, got, want string }{
+			{"Title", got.Title, title},
+			{"Status", got.Status, status},
+			{"Type", got.Type, typ},
+			{"Description", got.Description, desc},
+			{"Assignee", got.Assignee, assignee},
+			{"ParentID", got.ParentID, parent.ID},
+		} {
+			if tc.got != tc.want {
+				t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+			}
+		}
+		if got.Priority == nil || *got.Priority != priority {
+			t.Errorf("Priority = %v, want %d", got.Priority, priority)
+		}
+		if got.Metadata["note"] != "x" {
+			t.Errorf("Metadata[note] = %q, want %q", got.Metadata["note"], "x")
+		}
+		if !hasLabel(got.Labels, "added") {
+			t.Errorf("Labels = %v, want to contain %q (labels append)", got.Labels, "added")
+		}
+
+		// remove_labels is the one field that needs a second read to observe.
+		if err := s.Update(b.ID, beads.UpdateOpts{RemoveLabels: []string{"drop"}}); err != nil {
+			t.Fatalf("Update(remove_labels): %v", err)
+		}
+		got, err = s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasLabel(got.Labels, "drop") {
+			t.Errorf("Labels = %v, want %q removed", got.Labels, "drop")
+		}
+		if !hasLabel(got.Labels, "keep") {
+			t.Errorf("Labels = %v, want %q preserved", got.Labels, "keep")
+		}
+	})
+
 	t.Run("UpdateNotFound", func(t *testing.T) {
 		s := newStore()
 		desc := "whatever"
@@ -596,6 +681,100 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ParentID is a WEAK, CITY-SCOPED reference (see beads.Bead.ParentID), and
+	// on a split city the parent routinely lives in another store: a graph-class
+	// molecule in the binding hangs its steps off a work-class bead in a rig
+	// ledger, and vice versa. Every backend has to behave the same way about an
+	// id it cannot see, because the alternatives are silent — a store that
+	// validated would refuse the create with an error that reads like a bad
+	// request, and a store that filtered on resolvability would return an empty
+	// step list for a molecule that exists.
+	t.Run("ParentIDNamesARowThisStoreDoesNotHave", func(t *testing.T) {
+		s := newStore()
+		// Not merely absent: an id in a reserved namespace this store could not
+		// have minted, which is the actual cross-store shape.
+		foreign := "gcg-70b1e5f2-a"
+
+		// The control for the placement assertion below: what an id minted by
+		// this store looks like when no parent is named at all.
+		control, err := s.Create(beads.Bead{Title: "control"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The premise the comment above asserts, asserted. A store that mints
+		// into the foreign id's own namespace turns this row into a
+		// same-namespace dangling-parent test, which the contract says a store
+		// is entitled to refuse — the row would then pass or fail for reasons
+		// that have nothing to do with the cross-store shape it exists to pin.
+		if beadIDNamespace(foreign) == beadIDNamespace(control.ID) {
+			t.Fatalf("this store mints %q-shaped ids, the same namespace as the %q used as the foreign parent; the cross-store shape this row exists to pin is not being exercised", control.ID, foreign)
+		}
+
+		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
+		if err != nil {
+			t.Fatalf("Create with an unresolvable parent was refused: %v — a store must not validate ParentID, and this breaks every cross-store molecule", err)
+		}
+		// Placement is by class, never by parent. A store that minted the child
+		// into the parent's namespace to keep the pair together would satisfy
+		// every other assertion here and still be wrong in the one way that
+		// cannot be undone: an id is fixed at create, so no later copy moves the
+		// bead back to the ledger its class routes to.
+		//
+		// The vacuity guard is a hard failure, not a skip, and that is the
+		// intent: a store minting ids with no namespace segment cannot state
+		// which ledger a bead belongs to, so it has no placement claim for this
+		// row to check and no fence for invariant 16 to hold. Every store in the
+		// tree mints "<prefix>-N". A provider that legitimately mints otherwise
+		// needs this row rewritten against whatever it uses to express residency,
+		// not exempted from it.
+		if beadIDNamespace(control.ID) == "" {
+			t.Fatalf("this store mints ids like %q, with no namespace segment; the placement assertion below would compare nothing", control.ID)
+		}
+		if beadIDNamespace(child.ID) != beadIDNamespace(control.ID) {
+			t.Errorf("a child naming a %q parent was minted as %q, but this store mints %q-shaped ids; placement followed ParentID instead of class", foreign, child.ID, control.ID)
+		}
+
+		got, err := s.Get(child.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ParentID != foreign {
+			t.Errorf("ParentID round-tripped as %q, want %q verbatim — a store must not rewrite or namespace it", got.ParentID, foreign)
+		}
+
+		children, err := s.Children(foreign)
+		if err != nil {
+			t.Fatalf("Children on an unresolvable parent errored: %v — the match is against this store's rows, not the parent's", err)
+		}
+		if len(children) != 1 || children[0].ID != child.ID {
+			t.Errorf("Children(%q) returned %d beads, want the one child stored here; a molecule's steps would read as missing", foreign, len(children))
+		}
+
+		listed, err := s.List(beads.ListQuery{ParentID: foreign})
+		if err != nil {
+			t.Fatalf("List{ParentID} on an unresolvable parent errored: %v", err)
+		}
+		if len(listed) != 1 || listed[0].ID != child.ID {
+			t.Errorf("List{ParentID: %q} returned %d beads, want 1 — it must agree with Children", foreign, len(listed))
+		}
+
+		// Update has to agree with Create. A store that admits a foreign parent
+		// at create and then refuses to write the same value back fails only on
+		// the reparent — long after the shape was accepted, and on a path
+		// (convoy re-anchor, molecule restore) whose caller has no reason to
+		// expect a not-found for a bead it just read from the other ledger.
+		if err := s.Update(control.ID, beads.UpdateOpts{ParentID: &foreign}); err != nil {
+			t.Fatalf("Update reparenting onto an unresolvable parent was refused: %v — Create admitted the same value", err)
+		}
+		reparented, err := s.Get(control.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reparented.ParentID != foreign {
+			t.Errorf("after reparenting, ParentID is %q, want %q verbatim", reparented.ParentID, foreign)
+		}
+	})
+
 	t.Run("ReadyEmptyStore", func(t *testing.T) {
 		s := newStore()
 		got, err := s.Ready()
@@ -648,6 +827,63 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got[0].Title != "task" {
 			t.Errorf("Ready()[0].Title = %q, want %q", got[0].Title, "task")
+		}
+	})
+
+	t.Run("ReadyExcludesDependentWhenBlockerClosedAsWorkOutcomeBlocked", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetMetadataBatch(blocker.ID, map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("Ready() = %v, want empty: a blocker closed with gc.work_outcome=blocked must not satisfy the dependent's blocking dependency", titlesOf(got))
+		}
+	})
+
+	t.Run("ReadyIncludesDependentWhenBlockerClosedWithNoWorkOutcome", func(t *testing.T) {
+		s := newStore()
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Type: "task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		// Close with no gc.work_outcome metadata at all: the legacy/pre-ADR-0009
+		// shape. This must keep satisfying the dependency — it is the explicit
+		// backward-compat guarantee, not merely an absence of the new behavior.
+		if err := s.Close(blocker.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Ready()
+		if err != nil {
+			t.Fatal(err)
+		}
+		titles := titlesOf(got)
+		if !hasExactly(titles, "dependent") {
+			t.Fatalf("Ready() titles = %v, want [dependent]: a blocker closed with no gc.work_outcome must still satisfy the dependency (backward-compat)", titles)
 		}
 	})
 
@@ -1225,6 +1461,17 @@ func RunDepTests(t *testing.T, newStore func() beads.Store) {
 	})
 }
 
+// beadIDNamespace returns the leading namespace segment of a bead id — what a
+// store's mint prefix looks like from the outside. An id with no separator has
+// no namespace, which compares equal only to another such id.
+func beadIDNamespace(id string) string {
+	before, _, ok := strings.Cut(id, "-")
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(before)
+}
+
 // titlesOf extracts titles from a slice of beads.
 func titlesOf(bs []beads.Bead) []string {
 	titles := make([]string, len(bs))
@@ -1253,4 +1500,14 @@ func hasExactly(sorted []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// hasLabel reports whether labels contains want.
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }

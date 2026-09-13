@@ -33,6 +33,67 @@ func TestAliveTreatsZombieAsDead(t *testing.T) {
 	t.Fatalf("Alive(%d) stayed true for exited child", cmd.Process.Pid)
 }
 
+func TestProcStatState(t *testing.T) {
+	tests := []struct {
+		name string
+		stat string
+		want string
+		ok   bool
+	}{
+		{
+			name: "ordinary sleeping process",
+			stat: "123 (gc) S 1 2 3",
+			want: "S",
+			ok:   true,
+		},
+		{
+			name: "spaced zombie comm",
+			stat: "123 (gc worker) Z 1 2 3",
+			want: "Z",
+			ok:   true,
+		},
+		{
+			name: "embedded parentheses in running comm",
+			stat: "123 (gc (worker) name) R 1 2 3",
+			want: "R",
+			ok:   true,
+		},
+		{
+			name: "missing closing parenthesis",
+			stat: "123 (gc worker Z 1 2 3",
+		},
+		{
+			name: "missing state",
+			stat: "123 (gc worker)",
+		},
+		{
+			name: "invalid pid prefix",
+			stat: "not-a-pid (gc worker) Z 1 2 3",
+		},
+		{
+			name: "invalid multi-character state",
+			stat: "123 (gc worker) ZZ 1 2 3",
+		},
+		{
+			name: "missing separator before comm",
+			stat: "123(gc worker) Z 1 2 3",
+		},
+		{
+			name: "missing separator after comm",
+			stat: "123 (gc worker)Z 1 2 3",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := procStatState(tc.stat)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("procStatState(%q) = (%q, %v), want (%q, %v)", tc.stat, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 	binDir := t.TempDir()
 	psPath := filepath.Join(binDir, "ps")
@@ -40,20 +101,18 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_PIDUTIL_PS_TIMEOUT", "1s")
 
 	start := time.Now()
 	if got := psReportsZombie(os.Getpid()); got {
 		t.Fatalf("psReportsZombie() = true, want false when ps hangs")
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("psReportsZombie took %s, want bounded timeout", elapsed)
 	}
 }
 
 func TestStartTimeStableForLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time reads /proc/<pid>/stat on linux")
-	}
 	first, err := StartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
@@ -81,9 +140,6 @@ func TestStartTimeRejectsInvalidPID(t *testing.T) {
 // one (the recycled-PID case) reports dead even though the PID is live, and an
 // empty start time falls back to plain liveness.
 func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time identity uses /proc on linux")
-	}
 	self := os.Getpid()
 	st, err := StartTime(self)
 	if err != nil {
@@ -116,10 +172,6 @@ func TestAliveWithStartTimeDeadPID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
 		return false
 	}) {
@@ -128,10 +180,6 @@ func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
 		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
 	}) {
@@ -140,10 +188,6 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 }
 
 func TestCmdlineReturnsOwnArgv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	argv, err := Cmdline(os.Getpid())
 	if err != nil {
 		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)
@@ -232,9 +276,13 @@ func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	t.Setenv("GC_PIDUTIL_PS_TIMEOUT", "1s")
 
+	// Target a pid with no /proc entry so the fast path reports "cannot
+	// answer" and the ps fallback — the path under test — actually runs.
+	// A live pid would be answered from /proc and never reach ps.
 	start := time.Now()
-	pids, err := ChildPIDs(os.Getpid())
+	pids, err := ChildPIDs(1 << 30)
 	if err == nil {
 		t.Fatalf("ChildPIDs with a hanging ps: got pids=%v err=nil, want a non-nil error", pids)
 	}
@@ -293,5 +341,61 @@ func TestArgvHasFlagValue(t *testing.T) {
 				t.Fatalf("ArgvHasFlagValue(%v, %q, %q) = %v, want %v", argv, tc.flag, tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+// The /proc children path is what keeps enumeration proportional to the pids
+// asked about; ps costs the whole process table even when scoped with -p.
+func TestProcChildPIDsFindsLiveChildWithoutPS(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procChildPIDs needs /proc")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	children, ok := procChildPIDs(os.Getpid())
+	if !ok {
+		t.Skip("/proc/<pid>/task/<tid>/children unavailable (CONFIG_PROC_CHILDREN off)")
+	}
+	for _, pid := range children {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Fatalf("procChildPIDs(%d) = %v, missing live child %d", os.Getpid(), children, cmd.Process.Pid)
+}
+
+func TestProcChildPIDsReportsUnavailableForMissingProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procChildPIDs needs /proc")
+	}
+	// A pid with no /proc entry cannot be answered, so the caller must fall
+	// back to ps rather than read the empty result as "no children".
+	if _, ok := procChildPIDs(1 << 30); ok {
+		t.Fatal("procChildPIDs claimed an answer for a nonexistent pid")
+	}
+}
+
+// The deadline is a wedge guard, not a latency budget: a floor stops a
+// misconfiguration from reintroducing the truncation this replaced.
+func TestPSTimeoutHonorsOverrideAndFloor(t *testing.T) {
+	if got := psTimeout(); got != defaultPSTimeout {
+		t.Fatalf("psTimeout() = %s, want the default %s", got, defaultPSTimeout)
+	}
+	t.Setenv("GC_PIDUTIL_PS_TIMEOUT", "45s")
+	if got := psTimeout(); got != 45*time.Second {
+		t.Fatalf("psTimeout() = %s, want the 45s override", got)
+	}
+	for _, bad := range []string{"not-a-duration", "10ms", "0s", "-5s"} {
+		t.Setenv("GC_PIDUTIL_PS_TIMEOUT", bad)
+		if got := psTimeout(); got != defaultPSTimeout {
+			t.Fatalf("psTimeout() with %q = %s, want the default floor-protected %s", bad, got, defaultPSTimeout)
+		}
 	}
 }

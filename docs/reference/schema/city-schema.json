@@ -84,7 +84,7 @@
         },
         "tmux_alias": {
           "type": "string",
-          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName),\nsanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
+          "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
         },
         "scope": {
           "type": "string",
@@ -111,7 +111,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's tmux session after startup.\nUsed for CLI agents that don't accept command-line prompts."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
         },
         "session": {
           "type": "string",
@@ -204,7 +204,7 @@
         },
         "scale_check": {
           "type": "string",
-          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName)\nbefore running the command."
+          "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
         },
         "drain_timeout": {
           "type": "string",
@@ -213,11 +213,11 @@
         },
         "on_boot": {
           "type": "string",
-          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName) before running\nthe command."
+          "description": "OnBoot is a shell command template run once at controller startup for\nthis agent. If it contains Go template placeholders, gc expands them\nusing the same PathContext fields as work_dir and session_setup\n(Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch)\nbefore running the command."
         },
         "on_death": {
           "type": "string",
-          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before running the command."
+          "description": "OnDeath is a shell command template run when a session dies unexpectedly.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before running the\ncommand."
         },
         "namepool": {
           "type": "string",
@@ -225,11 +225,11 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName) before probe, hook, and\nprompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
         },
         "sling_query": {
           "type": "string",
-          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName) before replacing {} with the bead\nID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
+          "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
         },
         "idle_timeout": {
           "type": "string",
@@ -281,7 +281,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.DefaultBranch}}.\n{{.DefaultBranch}} is the rig's configured default_branch (empty for\ncity-scoped agents and rigs that record none); it is never probed from\ngit, so scripts should keep their own origin/HEAD fallback.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
         },
         "session_setup_script": {
           "type": "string",
@@ -714,7 +714,11 @@
       "properties": {
         "dir": {
           "type": "string",
-          "description": "Dir is the targeting key (required with Name). Identifies the agent's\nworking directory scope. Empty for city-scoped agents."
+          "description": "Dir is the legacy targeting key for rig identity. Empty means\ncity-scoped. New configs should set Rig instead; Dir remains the\ncanonical resolved identity that both keys feed into."
+        },
+        "rig": {
+          "type": "string",
+          "description": "Rig is new targeting key for rig identity (replaces Dir).\n\"*\" matches all rigs + city. Empty means city-scoped unless Dir is set."
         },
         "name": {
           "type": "string",
@@ -991,10 +995,9 @@
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "dir",
         "name"
       ],
-      "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
+      "description": "AgentPatch modifies existing agents identified by rig scope and Name."
     },
     "BeadPolicyConfig": {
       "properties": {
@@ -1147,6 +1150,10 @@
         "patches": {
           "$ref": "#/$defs/Patches",
           "description": "Patches holds targeted modifications applied after fragment merge."
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig",
+          "description": "Storage assigns the six semantic storage classes to immutable named\nbindings. Nil preserves the existing all-Work storage topology."
         },
         "beads": {
           "$ref": "#/$defs/BeadsConfig",
@@ -1375,12 +1382,12 @@
         },
         "auto_reap_closed_bead_worktrees": {
           "type": "boolean",
-          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no unpushed commits, and no stashes are removed; unsafe worktrees\nare logged as warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
+          "description": "AutoReapClosedBeadWorktrees controls whether the reconciler patrol\nautomatically removes per-bead git worktrees once their associated\nwork bead reaches closed status. Only worktrees with a clean working\ntree, no stashes, and no commits that removal would orphan — commits\nreachable from no branch, tag, or remote-tracking ref — are removed;\npush state is deliberately not the test, since `git worktree remove`\ndeletes the checkout and not refs/heads. Unsafe worktrees are logged\nas warnings and left in place for operator review. Session\nhome directories (agent template directories) are never touched.\nDefaults to false. Set to true to enable automated worktree cleanup.",
           "default": false
         },
         "auto_reap_closed_bead_worktrees_dry_run": {
           "type": "boolean",
-          "description": "AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the\nfull worktree-reap classification each tick — discovery, closed-bead\nmatch, liveness gate, and git-safety probes — but emit\nbead.worktree.reap_skipped events describing what it WOULD reap and\nwhat it protected, without removing anything. This is the safe\nstaged-rollout surface: an operator enables dry-run first, confirms via\n`gc events` that no live worktree appears in the would-reap set, then\nenables AutoReapClosedBeadWorktrees for real removal. Dry-run has no\neffect when AutoReapClosedBeadWorktrees is already true (real removal\nsupersedes it). Defaults to false.",
+          "description": "AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the\nfull worktree-reap classification each tick — discovery, closed-bead\nmatch, liveness gate, and git-safety probes — but emit\nbead.worktree.reap_skipped events describing what it WOULD reap and\nwhat it protected, without removing anything. This is the safe\nstaged-rollout surface: an operator enables dry-run first, confirms via\n`gc events` that no live worktree appears in the would-reap set, then\nenables AutoReapClosedBeadWorktrees for real removal. Those events are\nedge-triggered: each worktree is reported when the patrol first\nclassifies it and again whenever its verdict changes, not once per\ntick, so the would-reap set is complete right after dry-run is enabled\nrather than reprinted every sweep. Dry-run has no effect when\nAutoReapClosedBeadWorktrees is already true (real removal supersedes\nit). Defaults to false.",
           "default": false
         },
         "auto_reap_closed_bead_worktrees_min_age_minutes": {
@@ -1466,12 +1473,17 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 15000
+          "default": 120000
         },
         "write_timeout_millis": {
           "type": "integer",
           "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
           "default": 300000
+        },
+        "wait_timeout_seconds": {
+          "type": "integer",
+          "description": "WaitTimeoutSeconds overrides the managed server's wait_timeout system\nvariable. Despite the name, wait_timeout does not currently reap idle\nconnections -- measured inert on dolt 2.2.3 for #5383 (see\nDefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The\nknob is kept and still emitted regardless: it is harmless, and becomes\ncorrect the moment dolt implements it. Before this field existed the\nonly way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process\nenvironment, which no city.toml could express and no shell-invoked\nrestart inherited — so a restart from an operator shell silently\nrewrote the value. 0 (omitted) means use the managed default.",
+          "default": 30
         },
         "dolt_lock_release_timeout": {
           "type": "string",
@@ -2090,6 +2102,10 @@
           "type": "string",
           "description": "MaxTimeout is an operator hard cap on the per-order dispatch timeout: no\norder's dispatched exec/formula runs longer than this. Go duration string\n(e.g., \"60s\"). Empty means uncapped (no override). This bounds the dispatch\ntimeout only; a condition trigger's check_timeout is a separate probe\ndeadline and is not capped here."
         },
+        "max_dispatches_per_tick": {
+          "type": "integer",
+          "description": "MaxDispatchesPerTick caps how many orders the supervisor dispatches\nper tick. Unset keeps the built-in default of 4; set to 1 to drain\noverdue cooldown orders one-per-tick at cold start instead of firing\nseveral concurrent goroutines at once."
+        },
         "overrides": {
           "items": {
             "$ref": "#/$defs/OrderOverride"
@@ -2132,7 +2148,7 @@
             "$ref": "#/$defs/AgentPatch"
           },
           "type": "array",
-          "description": "Agents targets agents by (dir, name)."
+          "description": "Agents targets agents by rig scope + name."
         },
         "named_session": {
           "items": {
@@ -2838,6 +2854,97 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "StorageBindingConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider is the exact ID of a provider compiled into this gc binary."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path is the SQLite binding root, relative to the city unless absolute.\nEmpty defaults to \".gc/store\".",
+          "default": ".gc/store"
+        },
+        "config_ref": {
+          "type": "string",
+          "description": "ConfigRef is an opaque, secret-free reference resolved by the provider\nthat owns the binding, within the city that declares it."
+        },
+        "url": {
+          "type": "string",
+          "description": "URL is the http or https endpoint a remote beads workspace is served\nfrom, for a binding whose workspace backend does not live on this disk.\nIt carries no credentials, query, or fragment; a path prefix is allowed\nbecause an edge may mount the service below the root. Empty means the\nworkspace named by config_ref is local, which is the default."
+        },
+        "auth": {
+          "type": "string",
+          "description": "Auth is a reference to the credential for URL, never the credential\nitself: \"gasworks\" mints one through the configured credential-provider\ncommand, and \"env:NAME\" reads one from an environment variable."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "provider"
+      ],
+      "description": "StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; the SQLite provider accepts `path` (default `.gc/store`), while every other provider accepts an opaque `config_ref` that provider resolves."
+    },
+    "StorageClasses": {
+      "properties": {
+        "work": {
+          "type": "string",
+          "description": "Work selects the binding for the shareable work ledger."
+        },
+        "graph": {
+          "type": "string",
+          "description": "Graph selects the binding for formula graph state."
+        },
+        "sessions": {
+          "type": "string",
+          "description": "Sessions selects the binding for session lifecycle and durable waits."
+        },
+        "messaging": {
+          "type": "string",
+          "description": "Messaging selects the binding for mail and external-message state."
+        },
+        "orders": {
+          "type": "string",
+          "description": "Orders selects the binding for order-run state."
+        },
+        "nudges": {
+          "type": "string",
+          "description": "Nudges selects the binding for the durable nudge queue."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "work",
+        "graph",
+        "sessions",
+        "messaging",
+        "orders",
+        "nudges"
+      ],
+      "description": "StorageClasses is the closed set of semantic storage assignments; when `[storage]` is authored, all six fields are required after fragment layering, while omission assigns every class to `work`."
+    },
+    "StorageConfig": {
+      "properties": {
+        "classes": {
+          "$ref": "#/$defs/StorageClasses",
+          "description": "Classes contains the complete class-to-binding assignment."
+        },
+        "bindings": {
+          "additionalProperties": {
+            "$ref": "#/$defs/StorageBindingConfig"
+          },
+          "type": "object",
+          "description": "Bindings defines named provider-backed bindings. The reserved work\nbinding is synthesized and must not appear here."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "classes"
+      ],
+      "description": "StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding."
     },
     "Tier": {
       "properties": {

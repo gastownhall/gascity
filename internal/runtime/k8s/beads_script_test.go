@@ -34,6 +34,29 @@ func TestBeadsScriptEnsureReadyDoesNotAutoInitSharedWorkspace(t *testing.T) {
 	assertCallNotContains(t, result.callLog, "config set issue_prefix")
 }
 
+// TestBeadsScriptEnsureReadyRunsAsBakedGcagentUID pins the beads-runner pod to
+// the uid the agent image actually bakes. contrib/k8s/Dockerfile.base:138 runs
+// `useradd -m -s /bin/bash gcagent` with no `-u` on `ubuntu:24.04`, which
+// already ships a default `ubuntu` user at 1000 — so `gcagent` lands at 1001.
+// A pod pinned to 1000 runs as that unrelated `ubuntu` user, and /workspace
+// (owned by gcagent) becomes unwritable.
+func TestBeadsScriptEnsureReadyRunsAsBakedGcagentUID(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op: "ensure-ready",
+		Env: map[string]string{
+			"GC_K8S_IMAGE": "gc-beads:latest",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s ensure-ready error = %v\noutput:\n%s", result.err, result.output)
+	}
+	const wantUID = 1001
+	got := result.podSecurityContext
+	if got.RunAsUser != wantUID || got.RunAsGroup != wantUID || got.FSGroup != wantUID {
+		t.Fatalf("pod securityContext = %+v, want runAsUser/runAsGroup/fsGroup all %d", got, wantUID)
+	}
+}
+
 func TestBeadsScriptInitUsesScopeRootAndCanonicalDoltTarget(t *testing.T) {
 	result := runBeadsScript(t, beadsScriptOptions{
 		Op:   "init",
@@ -274,13 +297,23 @@ type beadsScriptOptions struct {
 	PodPhase    string
 	ListOutput  string
 	ReadyOutput string
+	Stdin       string
+}
+
+// podSecurityContext is the subset of a pod's `spec.securityContext` the
+// script tests assert on.
+type podSecurityContext struct {
+	RunAsUser  int `json:"runAsUser"`
+	RunAsGroup int `json:"runAsGroup"`
+	FSGroup    int `json:"fsGroup"`
 }
 
 type beadsScriptResult struct {
-	manifestEnv map[string]string
-	callLog     string
-	output      string
-	err         error
+	manifestEnv        map[string]string
+	podSecurityContext podSecurityContext
+	callLog            string
+	output             string
+	err                error
 }
 
 func runBeadsScript(t *testing.T, opts beadsScriptOptions) beadsScriptResult {
@@ -328,7 +361,7 @@ if [[ "$joined" == *" wait --for=condition=Ready pod/gc-beads-runner "* ]]; then
   exit 0
 fi
 if [[ "$joined" == *" exec gc-beads-runner -- sh -c "* ]]; then
-  if [[ "$*" == *"bd list --json --limit 0 --all"* ]]; then
+  if [[ "$*" == *" list --json --limit 0 --all"* ]]; then
     printf '%%s' "$list_output"
     exit 0
   fi
@@ -355,6 +388,9 @@ exit 1
 	for key, value := range opts.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+	if opts.Stdin != "" {
+		cmd.Stdin = strings.NewReader(opts.Stdin)
+	}
 	out, err := cmd.CombinedOutput()
 
 	callLogBytes, readCallErr := os.ReadFile(callLogPath)
@@ -362,11 +398,13 @@ exit 1
 		t.Fatalf("read call log: %v", readCallErr)
 	}
 	manifestEnv := map[string]string{}
+	var podSecCtx podSecurityContext
 	manifestBytes, readManifestErr := os.ReadFile(manifestPath)
 	if readManifestErr == nil && len(manifestBytes) > 0 {
 		var manifest struct {
 			Spec struct {
-				Containers []struct {
+				SecurityContext podSecurityContext `json:"securityContext"`
+				Containers      []struct {
 					Env []struct {
 						Name  string `json:"name"`
 						Value string `json:"value"`
@@ -377,6 +415,7 @@ exit 1
 		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 			t.Fatalf("parse manifest json: %v\n%s", err, string(manifestBytes))
 		}
+		podSecCtx = manifest.Spec.SecurityContext
 		if len(manifest.Spec.Containers) > 0 {
 			for _, item := range manifest.Spec.Containers[0].Env {
 				manifestEnv[item.Name] = item.Value
@@ -387,10 +426,11 @@ exit 1
 	}
 
 	return beadsScriptResult{
-		manifestEnv: manifestEnv,
-		callLog:     string(callLogBytes),
-		output:      string(out),
-		err:         err,
+		manifestEnv:        manifestEnv,
+		podSecurityContext: podSecCtx,
+		callLog:            string(callLogBytes),
+		output:             string(out),
+		err:                err,
 	}
 }
 
@@ -401,4 +441,122 @@ func beadsScriptPath(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "contrib", "beads-scripts", "gc-beads-k8s"))
+}
+
+// beadsScriptUpdateEnv is the projected scope env an update runs under.
+var beadsScriptUpdateEnv = map[string]string{
+	"GC_CITY_PATH": "/city", "GC_STORE_ROOT": "/city/rigs/testrig", "GC_BEADS_PREFIX": "tr",
+}
+
+// TestBeadsScriptUpdateForwardsEveryDocumentedField pins the generated `bd
+// update` argv for every field the update request may carry (see
+// docs/reference/exec-beads-provider.md). A dropped field makes the write
+// silently succeed while the change is lost: dropping `type`, for instance,
+// leaves a graph.v2 step at type=gate forever — ready-excluded, so never
+// dispatched — even though activation reported success.
+func TestBeadsScriptUpdateForwardsEveryDocumentedField(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "update",
+		Args: []string{"tr-abc"},
+		Stdin: `{"title":"renamed","status":"in_progress","type":"task","priority":1,` +
+			`"description":"note","assignee":"worker-1","parent_id":"tr-parent",` +
+			`"labels":["added"],"remove_labels":["dropped"]}`,
+		Env: beadsScriptUpdateEnv,
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s update error = %v\noutput:\n%s", result.err, result.output)
+	}
+	for _, want := range []string{
+		"--title renamed",
+		"--status in_progress",
+		"--type task",
+		"--priority 1",
+		"--description note",
+		"--assignee worker-1",
+		"--parent tr-parent",
+		"--add-label added",
+		"--remove-label dropped",
+	} {
+		assertCallContains(t, result.callLog, want)
+	}
+}
+
+// TestBeadsScriptUpdateOmitsAbsentFields pins that fields absent from the wire
+// are not spuriously passed to bd as empty flags, so updating one field cannot
+// clobber the others.
+func TestBeadsScriptUpdateOmitsAbsentFields(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:    "update",
+		Args:  []string{"tr-abc"},
+		Stdin: `{"description":"just a note"}`,
+		Env:   beadsScriptUpdateEnv,
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s update error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, "--description just a note")
+	for _, absent := range []string{
+		"--title", "--status", "--type", "--priority",
+		"--assignee", "--parent", "--add-label", "--remove-label",
+	} {
+		assertCallNotContains(t, result.callLog, absent)
+	}
+}
+
+// TestBeadsScriptListProjectsParentAndPriority pins the read half of the write
+// path above. The update op writes the parent natively via `bd --parent` and
+// forwards `--priority`, so a projection that reconstructs parent_id from
+// `parent:` labels alone — or omits priority entirely — turns a successful
+// re-parent into a silently lost write on the next read.
+func TestBeadsScriptListProjectsParentAndPriority(t *testing.T) {
+	tests := []struct {
+		name       string
+		listOutput string
+		wantParent string
+	}{
+		{
+			// Native .parent wins over a stale parent: label, which is what a
+			// re-parent leaves behind.
+			name:       "native parent wins over legacy label",
+			listOutput: `[{"id":"tr-a","title":"t","labels":["parent:tr-old"],"parent":"tr-new","priority":1}]`,
+			wantParent: "tr-new",
+		},
+		{
+			// Beads written before --parent carry only the label.
+			name:       "legacy label when no native parent",
+			listOutput: `[{"id":"tr-a","title":"t","labels":["parent:tr-old"],"priority":1}]`,
+			wantParent: "tr-old",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := runBeadsScript(t, beadsScriptOptions{
+				Op: "list",
+				Env: map[string]string{
+					"GC_CITY_PATH": "/city", "GC_STORE_ROOT": "/city/rigs/testrig", "GC_BEADS_PREFIX": "tr",
+				},
+				ListOutput: tc.listOutput,
+			})
+			if result.err != nil {
+				t.Fatalf("gc-beads-k8s list error = %v\noutput:\n%s", result.err, result.output)
+			}
+			var got []struct {
+				ID       string `json:"id"`
+				ParentID string `json:"parent_id"`
+				Priority *int   `json:"priority"`
+			}
+			if err := json.Unmarshal([]byte(result.output), &got); err != nil {
+				t.Fatalf("parse list output: %v\noutput:\n%s", err, result.output)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d beads, want 1\noutput:\n%s", len(got), result.output)
+			}
+			if got[0].ParentID != tc.wantParent {
+				t.Errorf("parent_id = %q, want %q", got[0].ParentID, tc.wantParent)
+			}
+			if got[0].Priority == nil || *got[0].Priority != 1 {
+				t.Errorf("priority = %v, want 1", got[0].Priority)
+			}
+		})
+	}
 }

@@ -67,6 +67,108 @@ func makeAttemptBead(t *testing.T, store beads.Store, rootID, stepRef string, at
 	return b
 }
 
+// TestSpawnNextAttemptPreservesTopLevelStepContract guards the frozen-spec to
+// molecule.Attach boundary used by both retry and Ralph controls. A regenerated
+// top-level attempt must carry the same worker task and formula-owned contract
+// metadata as the source step; otherwise the worker is launched with no task.
+func TestSpawnNextAttemptPreservesTopLevelStepContract(t *testing.T) {
+	t.Parallel()
+
+	const (
+		description = "Read the prior failure, repair the canonical artifact, and report the result."
+		resultPath  = ".gc/artifacts/run/delivery/requirements.md"
+	)
+
+	tests := []struct {
+		name      string
+		kind      string
+		stepRef   string
+		attemptID func(int) string
+		configure func(*formula.Step)
+	}{
+		{
+			name:    "retry",
+			kind:    beadmeta.KindRetry,
+			stepRef: "mol-test.requirements",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements.attempt." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Retry = &formula.RetrySpec{MaxAttempts: 3}
+			},
+		},
+		{
+			name:    "ralph",
+			kind:    beadmeta.KindRalph,
+			stepRef: "mol-test.requirements-loop",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements-loop.iteration." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Ralph = &formula.RalphSpec{MaxAttempts: 3}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, attempt := range []int{2, 3} {
+				t.Run("attempt_"+strconv.Itoa(attempt), func(t *testing.T) {
+					t.Parallel()
+					store := beads.NewMemStore()
+					step := &formula.Step{
+						ID:          "requirements",
+						Title:       "Write requirements",
+						Description: description,
+						Type:        "task",
+						Metadata: map[string]string{
+							"gc.result_contract":   "gc.build.requirements.v1",
+							"gc.requirements_path": resultPath,
+						},
+					}
+					tc.configure(step)
+
+					specJSON, err := json.Marshal(step)
+					if err != nil {
+						t.Fatalf("marshal frozen step spec: %v", err)
+					}
+					root := mustCreate(t, store, beads.Bead{
+						Title:    "workflow",
+						Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+					})
+					control := mustCreate(t, store, beads.Bead{
+						Title: "requirements control",
+						Metadata: map[string]string{
+							beadmeta.KindMetadataKey:           tc.kind,
+							beadmeta.RootBeadIDMetadataKey:     root.ID,
+							beadmeta.StepRefMetadataKey:        tc.stepRef,
+							beadmeta.StepIDMetadataKey:         step.ID,
+							beadmeta.SourceStepSpecMetadataKey: string(specJSON),
+							beadmeta.ControlEpochMetadataKey:   "1",
+						},
+					})
+
+					if err := spawnNextAttempt(t.Context(), store, control, attempt, ProcessOptions{}); err != nil {
+						t.Fatalf("spawnNextAttempt: %v", err)
+					}
+
+					got := findAttemptByRef(t, store, root.ID, tc.attemptID(attempt))
+					if got.Description != description {
+						t.Fatalf("description = %q, want frozen task %q", got.Description, description)
+					}
+					if got.Metadata["gc.result_contract"] != "gc.build.requirements.v1" {
+						t.Fatalf("gc.result_contract = %q, want preserved", got.Metadata["gc.result_contract"])
+					}
+					if got.Metadata["gc.requirements_path"] != resultPath {
+						t.Fatalf("gc.requirements_path = %q, want %q", got.Metadata["gc.requirements_path"], resultPath)
+					}
+				})
+			}
+		})
+	}
+}
+
 // TestRetryLifecycleTransientThenPass exercises the full lifecycle:
 // attempt 1 fails transient → processRetryControl spawns attempt 2 via Attach →
 // attempt 2 passes → processRetryControl closes control as pass.
@@ -630,6 +732,121 @@ func TestSpawnNextAttemptPropagatesRoutingMetadata(t *testing.T) {
 		if l == "pool:polecat" {
 			t.Errorf("attempt 2 labels = %v, should not contain legacy pool label", attempt2.Labels)
 		}
+	}
+}
+
+// TestSpawnNextAttemptRigScopedOneShotRetryPreservesRouteAndIndependence
+// reproduces the production defect where a graphv2 retry-controlled step's
+// re-attempt loses its rig qualifier and stays pinned to session affinity.
+//
+// A nested/runtime-created retry control bead (unlike a top-level control
+// decorated at compile time by graphroute) never gets gc.execution_routed_to
+// stamped — only gc.execution_rig_context is backfilled onto it. When such a
+// control spawns a re-attempt for a step whose gc.run_target is a bare
+// (unscoped) rig-template agent name, applyAttemptStepRoute has no execution
+// route to qualify against and never falls back to the rig context it does
+// have, so the re-attempt's gc.routed_to is stamped unscoped — invisible to
+// the rig-scoped pool. The same re-attempt also carries stale
+// gc.session_affinity/gc.continuation_group from the frozen step spec, which
+// pins it to a session that a one-shot runtime already exited.
+func TestSpawnNextAttemptRigScopedOneShotRetryPreservesRouteAndIndependence(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fable-nomad"
+path = "/tmp/fable-nomad"
+
+[[agent]]
+name = "claude-sonnet-one-shot"
+dir = "fable-nomad"
+lifecycle = "one_shot"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fable-nomad"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Metadata: map[string]string{
+			// A one-shot runtime does not survive between attempts, so any
+			// prior session-pinning metadata baked into the frozen spec is
+			// stale by the time a re-attempt is minted.
+			"gc.session_affinity":   "require",
+			"gc.continuation_group": "main",
+			"gc.run_target":         "claude-sonnet-one-shot",
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+			// No gc.execution_routed_to: this models a nested retry control
+			// minted at runtime by buildAttemptRecipe, which never stamps
+			// this key (only compile-time graphroute decoration does).
+			"gc.execution_rig_context": "fable-nomad",
+		},
+	})
+
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath}); err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 not created")
+	}
+
+	if got, want := attempt2.Metadata["gc.routed_to"], "fable-nomad/claude-sonnet-one-shot"; got != want {
+		t.Errorf("attempt 2 gc.routed_to = %q, want %q (rig qualifier lost)", got, want)
+	}
+	if got := attempt2.Metadata["gc.session_affinity"]; got != "" {
+		t.Errorf("attempt 2 gc.session_affinity = %q, want unset for one_shot lifecycle target", got)
+	}
+	if got := attempt2.Metadata["gc.continuation_group"]; got != "" {
+		t.Errorf("attempt 2 gc.continuation_group = %q, want unset for one_shot lifecycle target", got)
 	}
 }
 

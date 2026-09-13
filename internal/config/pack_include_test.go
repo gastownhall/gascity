@@ -286,7 +286,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	t.Cleanup(func() { runRepoCacheGit = orig })
 
 	const source = "git@github.com:example/pack"
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("first validate: %v", err)
 	}
 	first := calls
@@ -294,7 +294,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 		t.Fatal("first validation should run git (rev-parse + status)")
 	}
 
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("second validate: %v", err)
 	}
 	if calls != first {
@@ -309,7 +309,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index.lock"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("post-.git-touch validate: %v", err)
 	}
 	if calls != first {
@@ -328,7 +328,7 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cacheDir, ".git", "index"), []byte("idx2-longer"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit, false); err != nil {
 		t.Fatalf("third validate: %v", err)
 	}
 	if calls == first {
@@ -336,10 +336,16 @@ func TestValidateInstalledRemoteCacheLockedMemoizesSuccess(t *testing.T) {
 	}
 }
 
+// lockedPackRefCommit is the stubbed HEAD every setupLockedPackRefTest city
+// pins. Its value is arbitrary; only that the lock file, the cache key and the
+// stubbed rev-parse all agree on it matters.
+const lockedPackRefCommit = "abcdef1234567890abcdef1234567890abcdef12"
+
 // setupLockedPackRefTest fabricates a city with a packs.lock entry for ref and
 // a valid installed repo cache for it under a temp HOME, with git stubbed out.
-func setupLockedPackRefTest(t *testing.T, ref, commit string) (cityDir, cacheDir string) {
+func setupLockedPackRefTest(t *testing.T, ref string) (cityDir, cacheDir string) {
 	t.Helper()
+	const commit = lockedPackRefCommit
 	ResetRemoteCacheValidationCache()
 	t.Cleanup(ResetRemoteCacheValidationCache)
 
@@ -377,10 +383,9 @@ fetched = "2026-06-06T00:00:00Z"
 
 func TestResolvePackRefUsesLockedImportForGitHubTreeURL(t *testing.T) {
 	const ref = "https://github.com/example/packs/tree/main/gastown"
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
-	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref)
 
-	got, err := resolvePackRef(ref, cityDir, cityDir)
+	got, err := resolvePackRef(ref, cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolvePackRef: %v", err)
 	}
@@ -392,10 +397,9 @@ func TestResolvePackRefUsesLockedImportForGitHubTreeURL(t *testing.T) {
 
 func TestResolvePackRefUsesLockedImportForRefRemoteInclude(t *testing.T) {
 	const ref = "git@github.com:example/packs//gastown#main"
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
-	cityDir, cacheDir := setupLockedPackRefTest(t, ref, commit)
+	cityDir, cacheDir := setupLockedPackRefTest(t, ref)
 
-	got, err := resolvePackRef(ref, cityDir, cityDir)
+	got, err := resolvePackRef(ref, cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolvePackRef: %v", err)
 	}
@@ -414,7 +418,7 @@ func TestResolvePackRefFallsBackToIncludeCacheWhenUnlocked(t *testing.T) {
 	mustMkdirAll(t, cityDir, 0o755)
 
 	const ref = "https://github.com/example/packs/tree/main/gastown"
-	_, err := resolvePackRef(ref, cityDir, cityDir)
+	_, err := resolvePackRef(ref, cityDir, cityDir, false)
 	if err == nil {
 		t.Fatal("expected uncached include error for unlocked remote ref")
 	}
@@ -452,11 +456,11 @@ func TestResolveBundledSourceWithoutLockHitsFastPathOnPreMaterializedCache(t *te
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 
-	got, ok, err := resolveBundledSourceWithoutLock(source, "")
+	got, ok, err := resolveBundledSourceWithoutLock(source, "", false)
 	if err != nil {
 		t.Fatalf("resolveBundledSourceWithoutLock: %v", err)
 	}
@@ -487,7 +491,7 @@ func TestValidateInstalledRemoteCacheAcceptsBundledCanonicalPinFast(t *testing.T
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 

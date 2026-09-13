@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -221,7 +222,6 @@ func orderExecEnvWithError(cityPath string, cfg *config.City, target execStoreTa
 	}
 	applyOrderExecCanonicalDoltEnv(cityPath, target.ScopeRoot, env)
 	ensureProjectedDoltEnvExplicit(env)
-	ensureProjectedPostgresEnvExplicit(env)
 	// Carry the controller's GitHub CLI auth token into the exec order so its
 	// `gh` calls authenticate. Projected before the [order.env] loop below so an
 	// order can still scope its own GH_TOKEN; see projectGitHubTokenExecEnv.
@@ -284,7 +284,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
 	}
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot) {
 		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
@@ -310,7 +310,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
@@ -553,6 +553,7 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 		stores[key] = store
 		return store, nil
 	}
+	ordersStore := relocatedOrdersClassStore(cityPath, cfg)
 	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
@@ -570,7 +571,7 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 			}
 			out = append(out, beads.OrdersStore{Store: legacy})
 		}
-		return out, nil
+		return appendOrdersClassStore(out, ordersStore), nil
 	}
 }
 
@@ -599,7 +600,16 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	return targets
 }
 
-func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, error) {
+// orderTrackingSweepStoresForConfigTargets returns the per-scope ORDER stores a
+// sweep closes tracking beads in, together with the store its wisp-subtree half
+// has to run against when that is a different database.
+//
+// The two are returned together on purpose. `gc order sweep-tracking
+// --include-wisps` sweeps two coordination classes, and a caller that resolves
+// the tracking stores and forgets the wisp store gets a sweep that reports
+// wispClosed: 0 on a split city and exits 0 — the silent no-op this pairing
+// exists to make un-writable.
+func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, beads.Store, error) {
 	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
 	if len(requiredTargets) > 0 {
 		filtered := targets[:0]
@@ -610,9 +620,125 @@ func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City,
 		}
 		targets = filtered
 	}
-	return orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
+	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		return openStoreAtForCity(sweepTarget.target.ScopeRoot, cityPath)
 	})
+	stores = appendOrdersSweepStore(stores, relocatedOrdersClassStore(cityPath, cfg))
+	return stores, orderWispSweepStore(cityPath, cfg), err
+}
+
+// orderWispSweepStore returns the store that owns this city's order wisp roots
+// when it is NOT one of the stores orderTrackingSweepStoresForConfigTargets
+// opens — that is, when [storage] serves the graph class from its own binding.
+//
+// nil is the answer for every city that relocates nothing, and it is the signal
+// to keep sweeping wisp subtrees in the same store as the tracking beads. That
+// makes the single-store path byte-identical: resolveGraphStore returns the
+// workStore it is handed when nothing is relocated, and the workStore handed in
+// here is nil.
+//
+// The split-city case is the one this exists for. dispatchWisp creates the wisp
+// root in the graph store and the single-flight gate reads it there, so
+// `gc order sweep-tracking --include-wisps` — the only gc-level force-close for
+// a stalled wisp, and the recovery the docs name — has to look there too.
+func orderWispSweepStore(cityPath string, cfg *config.City) beads.Store {
+	return resolveGraphStore(cliStorageRoutes(cityPath), nil, cfg, cityPath, nil)
+}
+
+// relocatedOrdersClassStore returns the store this city serves the ORDERS class
+// from when [storage] relocates it, and nil when it does not.
+//
+// nil is the answer for every city that relocates nothing, and it is the signal
+// to leave a federation exactly as it was: passing a nil workStore to
+// resolveOrderStore makes the identity branch return nil rather than smuggling
+// a second copy of the work store into the list. That is what keeps the
+// single-store path byte-identical — the same shape orderWispSweepStore uses for
+// the graph class.
+//
+// Every one-shot order command needs it, because a relocated tracking bead is
+// invisible to a reader that only opens the order's target scope: `gc order
+// check` would report an order that just fired as never run, `gc order history`
+// would print nothing, and `gc order sweep-tracking` would report zero and exit
+// zero on a city whose tracking beads are all in the binding.
+func relocatedOrdersClassStore(cityPath string, cfg *config.City) beads.Store {
+	return resolveOrderStore(cliStorageRoutes(cityPath), nil, cfg, cityPath, nil)
+}
+
+// orderTrackingFrontDoor returns the front door a one-shot command writes its
+// order-tracking bead through, given the scope store it already opened.
+//
+// It is the CLI twin of memoryOrderDispatcher.orderFrontDoorFor: a manual
+// `gc order run` records the same orders-class bead a dispatched run does — the
+// one whose CreatedAt is the cooldown clock the next tick reads — so it has to
+// land in the same database, or the manual run advances a clock nothing consults
+// and the order re-fires immediately (#3294, with the stores swapped). The scope
+// store stays the caller's for everything else it does; only the tracking bead
+// routes here. On a city that relocates nothing this returns a front door over
+// the exact store value it was handed.
+func orderTrackingFrontDoor(cityPath string, cfg *config.City, scopeStore beads.OrdersStore) *orders.Store {
+	return orders.NewStore(beads.OrdersStore{
+		Store: resolveOrderStore(cliStorageRoutes(cityPath), scopeStore.Store, cfg, cityPath, nil),
+	})
+}
+
+// appendOrdersSweepStore adds the orders-class binding to a tracking sweep's
+// store list, labeled so the sweep's own diagnostics can name it.
+//
+// The scope stores stay in the list rather than being replaced. A converged
+// split city holds tracking beads in both: everything written before cutover
+// stayed in the work ledger, and the sweep is the mechanism that drains it.
+// Trading the work half for the binding half would leave those beads open
+// forever, suppressing their orders with exactly the wedge the sweep exists to
+// clear.
+func appendOrdersSweepStore(stores []beads.Store, ordersStore beads.Store) []beads.Store {
+	if ordersStore == nil {
+		return stores
+	}
+	for _, existing := range stores {
+		if unwrapOrderTrackingSweepStore(existing) == ordersStore {
+			return stores
+		}
+	}
+	return append(stores, orderTrackingSweepScopedStore{
+		Store: ordersStore,
+		label: "orders binding",
+		key:   ordersClassSweepStoreKey,
+	})
+}
+
+// ordersClassSweepStoreKey is the sweep dedup/reporting key for the orders
+// binding. It names the class rather than a scope root, because one binding
+// serves every scope; an execStoreTarget-shaped key would claim it is a city or
+// rig store, which it is not.
+const ordersClassSweepStoreKey = "orders\x00class"
+
+// unwrapOrderTrackingSweepStore returns the underlying store behind a sweep's
+// scope wrapper, so identity comparisons see the database rather than the label
+// that was attached to it.
+func unwrapOrderTrackingSweepStore(store beads.Store) beads.Store {
+	if scoped, ok := store.(orderTrackingSweepScopedStore); ok {
+		return scoped.Store
+	}
+	return store
+}
+
+// appendOrdersClassStore appends the orders-class binding to a typed federation
+// of order stores, unless the federation already reads it.
+//
+// The append is deduplicated on the underlying store value for the same reason
+// the dispatcher's gate federation is: a city that relocates nothing resolves no
+// binding at all (nil), and a city whose orders binding IS one of the scope
+// stores must read it once, not twice.
+func appendOrdersClassStore(stores []beads.OrdersStore, ordersStore beads.Store) []beads.OrdersStore {
+	if ordersStore == nil {
+		return stores
+	}
+	for _, existing := range stores {
+		if existing.Store == ordersStore {
+			return stores
+		}
+	}
+	return append(stores, beads.OrdersStore{Store: ordersStore})
 }
 
 func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, openStore func(orderTrackingSweepTarget) (beads.Store, error)) ([]beads.Store, error) {
@@ -639,10 +765,17 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 	return stores, errors.Join(errs...)
 }
 
+// cachedOrderHistoryStoresResolver returns a resolver that opens each scope's
+// store once and reuses it. The returned resolver is safe for concurrent use:
+// the order-firing doctor check fans its per-order lookups out across
+// goroutines, and an unguarded cache map would be a data race there.
 func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr io.Writer) orderStoresResolver {
+	var mu sync.Mutex
 	stores := make(map[string]beads.Store)
 	openCached := func(target execStoreTarget) (beads.Store, error) {
 		key := orderStoreTargetKey(target)
+		mu.Lock()
+		defer mu.Unlock()
 		if store, ok := stores[key]; ok {
 			return store, nil
 		}
@@ -653,6 +786,7 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		stores[key] = store
 		return store, nil
 	}
+	ordersStore := relocatedOrdersClassStore(cityPath, cfg)
 	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
@@ -667,11 +801,11 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
-				return out, nil
+				return appendOrdersClassStore(out, ordersStore), nil
 			}
 			out = append(out, beads.OrdersStore{Store: legacy})
 		}
-		return out, nil
+		return appendOrdersClassStore(out, ordersStore), nil
 	}
 }
 

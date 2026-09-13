@@ -306,6 +306,7 @@ func (c *CachingStore) runReconciliation() {
 				c.circuitTripped = true
 				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
 			}
+			c.advanceObservationLocked()
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)
@@ -318,13 +319,12 @@ func (c *CachingStore) runReconciliation() {
 		recordCacheScanLarge(context.Background(), c.idPrefix, len(fresh),
 			cacheReconcileScanWarnThreshold, time.Since(bdStart))
 	}
-	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
+	// The reconcile pass never marked the snapshot partial on an enrichment
+	// failure — the rows it just listed are whole either way — so it discards
+	// the completeness verdict applyReadyProjection returns and keeps only the
+	// problem-log entry it already recorded.
+	fresh, _ = c.applyReadyProjection("reconcile ready projection", fresh)
 	bdLatency := time.Since(bdStart)
-	if enrichErr != nil {
-		c.recordProblem("reconcile ready projection", enrichErr)
-	} else {
-		fresh = enriched
-	}
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {
@@ -553,9 +553,15 @@ func (c *CachingStore) mergeSnapshotLocked(
 			})
 		}
 		c.absorbFreshLocked(id, freshBead, now, absorbOpts{
-			depsMode:   depsExplicit,
-			deps:       freshDeps,
-			seqMode:    seqClearGuarded,
+			depsMode: depsExplicit,
+			deps:     freshDeps,
+			seqMode:  seqClearGuarded,
+			// preserveCachedReadyProjectionLocked above already decided, per
+			// row, which cached verdicts survive this cycle — on the blocking
+			// targets' fresh statuses, which no single-row absorb can see. Its
+			// refusals are the rows whose verdict really may have changed, so
+			// they must land as unanswerable rather than be re-preserved here.
+			readyMode:  readyFromFresh,
 			clearDirty: true,
 		})
 	}
@@ -583,7 +589,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		res.removes++
 		if d.notification == "bead.closed" {
 			closed := cloneBead(cached)
-			closed.Status = "closed"
+			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
 			}
@@ -624,6 +630,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.syncFailures = 0
 	c.depsComplete = nextDepsComplete
 	c.primePartialErr = nil
+	c.advanceObservationLocked()
 	c.promoteLiveLocked()
 	c.stats.LastReconcileAt = now
 	c.stats.Adds += res.adds

@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -47,7 +48,12 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 
 		callStart := time.Now()
-		if err := tm.NudgeSession(sess, "# gc-nudge-neverbusy"); err != nil {
+		// A never-busy claude pane cannot confirm the submit, so
+		// ErrNudgeSubmitUnconfirmed is the correct, expected outcome (ra-3x46cy
+		// finding 1: this must no longer collapse to a false "delivered" nil).
+		// The keystrokes still reached tmux (delivered=true is set before this
+		// return), so the poke below must still be recorded.
+		if err := tm.NudgeSession(sess, "# gc-nudge-neverbusy"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("NudgeSession: %v", err)
 		}
 		callEnd := time.Now()

@@ -8,6 +8,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -57,6 +58,8 @@ type Options struct {
 	// DeferAssignees creates assignable beads without an assignee and stores
 	// the intended assignee in metadata for later activation.
 	DeferAssignees bool
+
+	nativeStepTopologyPrepared bool
 }
 
 const (
@@ -102,6 +105,8 @@ type FragmentOptions struct {
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, the existing workflow root's priority is inherited.
 	PriorityOverride *int
+
+	nativeStepTopologyPrepared bool
 }
 
 // ExternalDep binds a fragment step to an already-existing bead.
@@ -133,21 +138,70 @@ type FragmentResult struct {
 	Created   int
 }
 
+// StoreChooser picks the store a compiled recipe's molecule belongs in.
+//
+// It exists because the destination is a property of the COMPILED recipe, not
+// of the call site: on a city that has relocated its coordination classes, a
+// recipe whose root classifies as infrastructure belongs in the binding and one
+// that classifies as work belongs in the work store, and nothing before compile
+// can tell which. A caller with one store for every recipe passes a chooser that
+// ignores its argument.
+//
+// A chooser is a pure classification of the recipe. It must not mutate the
+// recipe, take locks, or do I/O — CookChoosingStore calls it once, between
+// validation and the first bead write, with no way to undo either side.
+type StoreChooser func(recipe *formula.Recipe) beads.Store
+
 // Cook compiles a formula by name and instantiates it as a molecule.
 // This is the convenience wrapper that most callers should use.
 func Cook(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, opts Options) (*Result, error) {
+	// Refused here rather than left to the chooser's nil check, so a Cook caller
+	// reads an error about the argument it passed instead of one naming a store
+	// chooser it never wrote.
+	if store == nil {
+		return nil, fmt.Errorf("cooking formula %q: nil store", formulaName)
+	}
+	result, _, err := CookChoosingStore(ctx, formulaName, searchPaths, opts, func(*formula.Recipe) beads.Store { return store })
+	return result, err
+}
+
+// CookChoosingStore is Cook for a caller that cannot name the store until the
+// recipe is compiled. It compiles, validates runtime vars, calls choose exactly
+// once, and instantiates into what choose returned — which it also returns, so a
+// caller that stamps metadata on the new root writes to the store that holds it
+// rather than to one that has never seen it. The store is nil when err is not,
+// and a nil chooser or a nil choice is an error before anything is written.
+//
+// The three capabilities this deliberately does NOT have, because each would
+// require reordering the steps above: deriving Options from the compiled recipe
+// (an idempotency key computed off the recipe), holding a lock past the return,
+// and decorating the recipe through the chosen store. One live call site needs
+// all three — the graph.v2 arm of `gc formula cook` — and it writes the sequence
+// out rather than calling this.
+func CookChoosingStore(ctx context.Context, formulaName string, searchPaths []string, opts Options, choose StoreChooser) (*Result, beads.Store, error) {
+	if choose == nil {
+		return nil, nil, errors.New("CookChoosingStore requires a StoreChooser")
+	}
 	compileVars := opts.Vars
 	if compileVars == nil {
 		compileVars = map[string]string{}
 	}
 	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, compileVars)
 	if err != nil {
-		return nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
+		return nil, nil, fmt.Errorf("compiling formula %q: %w", formulaName, err)
 	}
 	if err := ValidateRecipeRuntimeVars(recipe, opts); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return Instantiate(ctx, store, recipe, opts)
+	store := choose(recipe)
+	if store == nil {
+		return nil, nil, fmt.Errorf("choosing the store for formula %q: store chooser returned nil", formulaName)
+	}
+	result, err := Instantiate(ctx, store, recipe, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return result, store, nil
 }
 
 // CookOn compiles a formula and attaches it to an existing bead.
@@ -246,10 +300,11 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// gc.root_bead_id of its own; the old fallback ignored those keys and rooted
 	// the whole sub-DAG at the parent's own id, stamping a WRONG gc.root_bead_id
 	// onto the attempt container, scope-check, and every child. Downstream
-	// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong
-	// root>) and burned ralph attempts (maintainer-city incident,
-	// gcg-wisp-y785sz). A genuine top-level head with no run chain still
-	// self-roots via its own id (ResolveRunID's selfID fallback).
+	// reconciliation then enumerated siblings via
+	// beads.DirectMembers(<wrong root>) and burned ralph attempts
+	// (maintainer-city incident gcg-wisp-y785sz). A genuine top-level head
+	// with no run chain still self-roots via its own id (ResolveRunID's
+	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
@@ -328,12 +383,15 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		recipe.Steps[0].Metadata[beadmeta.AttachFencePendingMetadataKey] = "true"
 	}
 
+	recipe = recipeWithNativeStepDependencies(recipe)
+	preserveAttachedNativeStepTopology(parentBead, recipe)
 	result, err := Instantiate(ctx, store, recipe, Options{
-		Title:            opts.Title,
-		Vars:             opts.Vars,
-		PriorityOverride: clonePriority(parentBead.Priority),
-		PreserveRootType: true,
-		DeferAssignees:   fencedDeferred,
+		Title:                      opts.Title,
+		Vars:                       opts.Vars,
+		PriorityOverride:           clonePriority(parentBead.Priority),
+		PreserveRootType:           true,
+		DeferAssignees:             fencedDeferred,
+		nativeStepTopologyPrepared: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -759,6 +817,10 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 	if len(recipe.Steps) == 0 {
 		return nil, fmt.Errorf("recipe %q has no steps", recipe.Name)
 	}
+	if !opts.nativeStepTopologyPrepared {
+		recipe = recipeWithNativeStepDependencies(recipe)
+		opts.nativeStepTopologyPrepared = true
+	}
 	if !opts.DeferAssignees && IsGraphApplyEnabled() {
 		if applier, ok := beads.GraphApplyFor(store); ok {
 			result, err := instantiateViaGraphApply(ctx, applier, recipe, opts)
@@ -942,6 +1004,11 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
 		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
+		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
 			return nil, err
@@ -1060,6 +1127,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	if len(recipe.Steps) == 0 {
 		return &FragmentResult{IDMapping: map[string]string{}}, nil
 	}
+	recipe = fragmentRecipeWithNativeStepDependencies(recipe)
+	if err := applyExternalNativeStepDependencies(store, opts.RootID, recipe.Steps, opts.ExternalDeps); err != nil {
+		return nil, err
+	}
+	opts.nativeStepTopologyPrepared = true
 	priorityOverride := clonePriority(opts.PriorityOverride)
 	if priorityOverride == nil {
 		root, err := store.Get(opts.RootID)
@@ -1168,6 +1240,11 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				markFailed(store, createdIDs)
 				return nil, fmt.Errorf("step %q: bead title contains unresolved variable(s) %s — missing or misspelled --var(s)?", step.ID, strings.Join(residual, ", "))
 			}
+		}
+		// Same guard, extended to routing metadata — see #5060.
+		if err := validateResidualRoutingVars(step.ID, b.Metadata); err != nil {
+			markFailed(store, createdIDs)
+			return nil, err
 		}
 		if err := validateTimeoutMetadataVars(step.ID, b.Metadata); err != nil {
 			markFailed(store, createdIDs)
@@ -1309,7 +1386,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1328,6 +1405,22 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	// A source-spec description is serialized JSON. Runtime values must be
+	// escaped for their JSON string context before placeholder substitution;
+	// otherwise newlines, quotes, or backslashes corrupt the retry snapshot.
+	escaped := make(map[string]string, len(vars))
+	for name, value := range vars {
+		encoded, _ := json.Marshal(value) // strings are always JSON-marshalable
+		escaped[name] = string(encoded[1 : len(encoded)-1])
+	}
+	return formula.Substitute(step.Description, escaped)
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {

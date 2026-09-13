@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,28 @@ const muxRebuildInterval = 60 * time.Second
 // salt makes the actor hash brute-forceable, so eventexport.ProjectEvent drops
 // every event. Used only to warn loudly at startup.
 const minActorSaltLen = 16
+
+const supervisorTranscriptMetaEnv = "GC_TRANSCRIPT_META_ENABLED"
+
+// armSupervisorTranscriptMetaFromEnv enables transcript correlation for a
+// supervisor whose events are shipped by an external forwarder. Such a
+// deployment intentionally has no [events.export], so startEventExport cannot
+// arm the gate. The environment is scoped to the long-lived supervisor unit;
+// one-shot gc processes remain disabled by default.
+func armSupervisorTranscriptMetaFromEnv(stderr io.Writer) {
+	raw, configured := os.LookupEnv(supervisorTranscriptMetaEnv)
+	if !configured {
+		return
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: ignoring invalid %s=%q: %v\n", supervisorTranscriptMetaEnv, raw, err) //nolint:errcheck
+		return
+	}
+	if enabled {
+		transcriptmeta.SetEnabled(true)
+	}
+}
 
 // startEventExport launches the redacted event exporter when [events.export] is
 // configured. It is opt-in: with no endpoint the supervisor ships nothing.
@@ -82,10 +105,9 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 		TokenProvider: tokenProvider,
 		Salt:          salt,
 		ExportRef:     ec.ExportRefEnabled(),
-		// Events now carry typed run_id/session_id stamped at the record site, so
-		// emit the opaque correlation ids. They are safeRef-gated and remain
-		// within the v1 wire schema (the envelope already defines both as optional
-		// omitempty fields), so this does not bump SchemaVersion.
+		// Events carry typed run/session correlation and native step topology
+		// stamped at the record site. The projection validates that closed set
+		// before it leaves the city.
 		EmitCorrelation: true,
 		BatchMax:        ec.BatchMaxEvents,
 		BatchInterval:   ec.BatchIntervalDuration(),
@@ -111,7 +133,7 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 	// not leave sidecars writing .gcmeta files that imply an event stream exists.
 	transcriptmeta.SetEnabled(true)
 
-	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
+	src := eventfeed.NewMuxSource(exportProvidersForCities(providers, ec.Cities), exp.Cursors, muxRebuildInterval, logf)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); _ = exp.Run(ctx, src) }()
@@ -119,6 +141,33 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 
 	logf("enabled -> %s (envelope-only metadata; no payloads leave the box)", ec.Endpoint)
 	return &wg
+}
+
+// exportProvidersForCities restricts a dynamic provider source to the exact
+// configured city names. A nil city list preserves the existing all-city
+// behavior; every non-nil list is restrictive, including an empty list or one
+// containing only invalid names.
+func exportProvidersForCities(providers func() map[string]events.Provider, cities []string) func() map[string]events.Provider {
+	if cities == nil {
+		return providers
+	}
+
+	allowed := make(map[string]struct{}, len(cities))
+	for _, city := range cities {
+		if supervisor.IsValidCityName(city) {
+			allowed[city] = struct{}{}
+		}
+	}
+	return func() map[string]events.Provider {
+		available := providers()
+		filtered := make(map[string]events.Provider, len(allowed))
+		for city, provider := range available {
+			if _, ok := allowed[city]; ok {
+				filtered[city] = provider
+			}
+		}
+		return filtered
+	}
 }
 
 // persistExportCursors snapshots the exporter cursor to disk periodically and on

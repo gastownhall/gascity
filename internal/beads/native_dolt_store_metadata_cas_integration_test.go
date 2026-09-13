@@ -4,13 +4,87 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	beadslib "github.com/steveyegge/beads"
 )
+
+// TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt
+// retains one real-storage proof for the raw JSON metadata boundary. The fast
+// in-memory test owns the branch detail; this test proves the CAS preserves the
+// exact durable sibling representation exposed by upstream Dolt.
+func TestNativeDoltStoreMetadataCASPreservesMixedJSONSiblingTypesAgainstRealDolt(t *testing.T) {
+	ctx := context.Background()
+	store := openRealNativeDoltStoreForCAS(t, "cas-mixed-metadata")
+	created, err := store.Create(Bead{Title: "real Dolt mixed metadata CAS"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	seed := json.RawMessage(`{
+		"lease":"old",
+		"bool_sibling":true,
+		"number_sibling":42,
+		"large_number_sibling":9007199254740993123456789,
+		"null_sibling":null,
+		"object_sibling":{"nested":"value"},
+		"array_sibling":[1,"two",false],
+		"string_sibling":"preserved"
+	}`)
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		t.Fatalf("acquire storage for fixture: %v", err)
+	}
+	if err := storage.UpdateIssue(
+		ctx,
+		created.ID,
+		map[string]interface{}{"metadata": seed},
+		"mixed-metadata-fixture",
+	); err != nil {
+		release()
+		t.Fatalf("seed mixed metadata: %v", err)
+	}
+	release()
+	storage, release, err = store.acquireStorage()
+	if err != nil {
+		t.Fatalf("reacquire storage for pre-CAS read: %v", err)
+	}
+	preCAS, err := storage.GetIssue(ctx, created.ID)
+	release()
+	if err != nil {
+		t.Fatalf("GetIssue before CAS: %v", err)
+	}
+	var preRaw map[string]json.RawMessage
+	if err := json.Unmarshal(preCAS.Metadata, &preRaw); err != nil {
+		t.Fatalf("decode pre-CAS metadata: %v", err)
+	}
+	largeNumberBefore := string(preRaw["large_number_sibling"])
+	if largeNumberBefore == "" {
+		t.Fatal("pre-CAS metadata lacks the large numeric sibling")
+	}
+
+	swapped, err := store.CompareAndSetMetadataKey(created.ID, "lease", "old", "1")
+	if err != nil || !swapped {
+		t.Fatalf("CompareAndSetMetadataKey = (%v, %v), want (true, nil)", swapped, err)
+	}
+
+	storage, release, err = store.acquireStorage()
+	if err != nil {
+		t.Fatalf("reacquire storage for readback: %v", err)
+	}
+	issue, err := storage.GetIssue(ctx, created.ID)
+	release()
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	assertMixedMetadataCASResult(t, issue.Metadata, largeNumberBefore)
+}
 
 // openRealNativeDoltStoreForCAS opens a NativeDoltStore over REAL upstream
 // native storage. The narrow CAS contract is a claim about the backend's
@@ -23,7 +97,7 @@ func openRealNativeDoltStoreForCAS(t *testing.T, actor string) *NativeDoltStore 
 	ctx := context.Background()
 	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
 	if err != nil {
-		t.Skipf("upstream native beads storage unavailable: %v", err)
+		t.Fatalf("open upstream native beads storage: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := storage.Close(); err != nil {
@@ -34,6 +108,66 @@ func openRealNativeDoltStoreForCAS(t *testing.T, actor string) *NativeDoltStore 
 		t.Fatalf("set issue prefix: %v", err)
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+}
+
+// TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable
+// proves that the exact upstream production constructor resolves the required
+// conditional-write capability and executes all three revision-fenced verbs.
+func TestNativeDoltStoreConditionalWriterRequireAgainstRealOpenBestAvailable(t *testing.T) {
+	store := openRealNativeDoltStoreForCAS(t, "conditional-writer-require")
+	store.stampConditionalWritesMode(gate.Require, false)
+
+	writer, diagnostic, err := ResolveConditionalWriter(store)
+	if err != nil || diagnostic != nil || writer == nil {
+		t.Fatalf("ResolveConditionalWriter = (%T, %+v, %v), want writer, nil, nil", writer, diagnostic, err)
+	}
+
+	created, err := store.Create(Bead{Title: "conditional-writer-real"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	created, err = store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after create: %v", err)
+	}
+	if created.Revision == 0 {
+		t.Fatal("revision after create = 0, want a live token")
+	}
+	title := "conditional-writer-updated"
+	if err := writer.UpdateIfMatch(created.ID, created.Revision, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("UpdateIfMatch: %v", err)
+	}
+	updated, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if updated.Title != title {
+		t.Fatalf("title after update = %q, want %q", updated.Title, title)
+	}
+	if updated.Revision == created.Revision {
+		t.Fatalf("revision after update = %d, want a fresh token", updated.Revision)
+	}
+
+	if err := writer.CloseIfMatch(updated.ID, updated.Revision); err != nil {
+		t.Fatalf("CloseIfMatch: %v", err)
+	}
+	closed, err := store.Get(updated.ID)
+	if err != nil {
+		t.Fatalf("Get after close: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status after CloseIfMatch = %q, want closed", closed.Status)
+	}
+	if closed.Revision == updated.Revision {
+		t.Fatalf("revision after close = %d, want a fresh token", closed.Revision)
+	}
+
+	if err := writer.DeleteIfMatch(closed.ID, closed.Revision); err != nil {
+		t.Fatalf("DeleteIfMatch: %v", err)
+	}
+	if _, err := store.Get(closed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get after delete = %v, want ErrNotFound", err)
+	}
 }
 
 // TestNativeDoltStoreMetadataCASSequentialAgainstRealDolt exercises the
@@ -250,5 +384,106 @@ func TestNativeDoltStoreMetadataCASContentionAcrossIndependentHandles(t *testing
 		if got.Metadata["lease"] != winners[0] {
 			t.Fatalf("%s sees lease %q, want the sole winner %q", name, got.Metadata["lease"], winners[0])
 		}
+	}
+}
+
+// TestNativeDoltStoreAtomicConditionalCloseAcrossIndependentHandles proves
+// the atomic terminal-write fence against the actual OpenBestAvailable
+// backend. The fast native fixture owns retry branch coverage; this test owns
+// the database isolation and rollback boundary shared by independent handles.
+func TestNativeDoltStoreAtomicConditionalCloseAcrossIndependentHandles(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), ".beads")
+	openHandle := func(actor string) *NativeDoltStore {
+		t.Helper()
+		storage, err := beadslib.OpenBestAvailable(ctx, dir)
+		if err != nil {
+			t.Fatalf("open upstream native beads storage (%s): %v", actor, err)
+		}
+		t.Cleanup(func() {
+			if err := storage.Close(); err != nil {
+				t.Errorf("close upstream storage (%s): %v", actor, err)
+			}
+		})
+		if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+			t.Fatalf("set issue prefix (%s): %v", actor, err)
+		}
+		return newNativeDoltStoreWithStorageAndPrefix(storage, actor, "gc")
+	}
+
+	writerA := openHandle("atomic-close-A")
+	writerB := openHandle("atomic-close-B")
+	created, err := writerA.Create(Bead{Title: "real atomic conditional close"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	snapshot, err := writerA.Get(created.ID)
+	if err != nil {
+		t.Fatalf("writerA Get: %v", err)
+	}
+	if peer, err := writerB.Get(created.ID); err != nil || peer.Revision != snapshot.Revision {
+		t.Fatalf("writerB snapshot = (%#v, %v), want revision %d", peer, err, snapshot.Revision)
+	}
+
+	type result struct {
+		bead Bead
+		err  error
+	}
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	for _, writer := range []*NativeDoltStore{writerA, writerB} {
+		go func(store *NativeDoltStore) {
+			<-start
+			bead, err := store.CloseWithMetadataIfMatch(created.ID, snapshot.Revision, map[string]string{"winner": store.actor})
+			results <- result{bead: bead, err: err}
+		}(writer)
+	}
+	close(start)
+
+	var winner Bead
+	for range 2 {
+		result := <-results
+		switch {
+		case result.err == nil:
+			if winner.ID != "" {
+				t.Fatalf("multiple successful terminal writes: %#v and %#v", winner, result.bead)
+			}
+			winner = result.bead
+		case IsPreconditionFailed(result.err):
+			if result.bead.ID != "" {
+				t.Fatalf("losing close returned %#v, want zero bead", result.bead)
+			}
+		default:
+			t.Fatalf("contending close error = %v, want precondition failure", result.err)
+		}
+	}
+	if winner.ID == "" || winner.Status != "closed" || winner.Metadata["winner"] == "" {
+		t.Fatalf("winner = %#v, want exact closed row", winner)
+	}
+
+	staleCreated, err := writerA.Create(Bead{Title: "real atomic close stale rollback", Metadata: map[string]string{"before": "keep"}})
+	if err != nil {
+		t.Fatalf("Create stale bead: %v", err)
+	}
+	if err := writerB.SetMetadata(staleCreated.ID, "intervening", "write"); err != nil {
+		t.Fatalf("intervening SetMetadata: %v", err)
+	}
+	before, err := writerA.Get(staleCreated.ID)
+	if err != nil {
+		t.Fatalf("Get before stale close: %v", err)
+	}
+	closed, err := writerA.CloseWithMetadataIfMatch(staleCreated.ID, staleCreated.Revision, map[string]string{"state": "drained"})
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("stale CloseWithMetadataIfMatch error = %v, want precondition failure", err)
+	}
+	if closed.ID != "" {
+		t.Fatalf("stale close returned %#v, want zero bead", closed)
+	}
+	after, err := writerB.Get(staleCreated.ID)
+	if err != nil {
+		t.Fatalf("Get after stale close: %v", err)
+	}
+	if after.Status != before.Status || after.Metadata["before"] != "keep" || after.Metadata["intervening"] != "write" || after.Metadata["state"] != "" {
+		t.Fatalf("stale close mutated real row: before=%#v after=%#v", before, after)
 	}
 }

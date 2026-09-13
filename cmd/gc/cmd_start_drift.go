@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // driftFlags captures the operator-visible inputs that influence drift
@@ -526,7 +527,7 @@ var (
 
 // waitForPIDExit blocks until the process at pid is gone, escalating
 // to SIGKILL if SIGTERM did not take effect within timeout. Returns
-// nil once the kernel reports ESRCH on a signal-zero probe.
+// nil once the shared PID probe reports no live process.
 //
 // PID-recycling races are not addressed here — the window between
 // SIGTERM and SIGKILL is short enough (seconds) that a recycled PID
@@ -557,36 +558,8 @@ func waitForPIDExit(pid int, timeout, escalate time.Duration) error {
 	return fmt.Errorf("pid %d still alive after SIGKILL", pid)
 }
 
-// pidGone reports whether the given pid no longer represents a live
-// process — either the entry has been reaped (ESRCH on signal-zero)
-// or it has exited and is awaiting wait() from its parent (zombie).
-// Both cases mean the process can no longer hold ports or files, so
-// the supervisor restart can safely proceed.
-//
-// We probe via signal-zero first because it covers both "PID never
-// existed" and "PID was reaped" without an extra /proc syscall. The
-// /proc/<pid>/status fallback handles the zombie case that signal
-// zero reports as alive.
 func pidGone(pid int) bool {
-	if err := syscall.Kill(pid, syscall.Signal(0)); err == syscall.ESRCH {
-		return true
-	}
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
-	if err != nil {
-		// If /proc/<pid>/status is missing, the kernel has already
-		// torn down the entry — ESRCH-equivalent.
-		return os.IsNotExist(err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "State:") {
-			continue
-		}
-		// State lines look like "State:\tZ (zombie)" or "State:\tR
-		// (running)" — a zombie has already released its ports and
-		// FDs even though the parent has not reaped it.
-		return strings.Contains(line, "Z")
-	}
-	return false
+	return !pidutil.Alive(pid)
 }
 
 // humanizeReadyDuration formats a sub-minute duration as `0.7s`-style

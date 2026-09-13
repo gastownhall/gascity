@@ -326,7 +326,19 @@ func deletedDataInodeTargetsFromFormattedLsof(pid int) []string {
 }
 
 func lsofOutput(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), lsofCommandTimeout)
+	return lsofOutputWithTimeout(lsofCommandTimeout, args...)
+}
+
+// lsofOutputWithTimeout runs lsof under the given deadline with the hardening
+// every caller needs: a WaitDelay so a child holding the pipes open cannot
+// outlive the deadline, and a cancel that kills the whole process group rather
+// than the direct child alone.
+//
+// A deadline hit is reported as an error wrapping context.DeadlineExceeded so
+// callers can distinguish a truncated listing from a complete one; whatever lsof
+// buffered before the kill is still returned alongside it.
+func lsofOutputWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "lsof", args...)
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -340,7 +352,11 @@ func lsofOutput(args ...string) ([]byte, error) {
 		}
 		return nil
 	}
-	return cmd.Output()
+	out, err := cmd.Output()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, fmt.Errorf("lsof: %w", ctxErr)
+	}
+	return out, err
 }
 
 func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Duration) bool {
