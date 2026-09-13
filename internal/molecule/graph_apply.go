@@ -87,13 +87,7 @@ func isTransientGraphApplyError(err error) bool {
 	if !isGraphApplyErrorText(text) {
 		return false
 	}
-	return strings.Contains(text, "i/o timeout") ||
-		strings.Contains(text, "timed out after") ||
-		strings.Contains(text, "deadline exceeded") ||
-		strings.Contains(text, "invalid connection") ||
-		strings.Contains(text, "bad connection") ||
-		strings.Contains(text, "connection reset") ||
-		strings.Contains(text, "broken pipe")
+	return beads.IsTransientConnError(err)
 }
 
 func isGraphApplyErrorText(text string) bool {
