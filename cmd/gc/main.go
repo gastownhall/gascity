@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -1697,6 +1698,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		return beads.StoreOpenResult{}, err
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
+	result.Store = beads.WithRouteChangeClearing(result.Store, func(target string) string {
+		return agentutil.NormalizePoolRouteTarget(cfg, target)
+	})
 	return result, nil
 }
 

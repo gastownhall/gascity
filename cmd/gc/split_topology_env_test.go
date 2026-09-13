@@ -730,7 +730,7 @@ func TestSplitEnvClassStoreWrappingMatchesOpenStorageRoutes(t *testing.T) {
 		t.Fatalf("resolving the storage plan for a converged split city: %v", err)
 	}
 	target := mustResolveInfraTarget(t, root, cfg)
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg)
 	if err != nil {
 		t.Fatalf("openStorageRoutes: %v", err)
 	}

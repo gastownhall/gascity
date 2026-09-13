@@ -1244,7 +1244,7 @@ func TestControllerRoutesFromOpenStorageRoutesCarryNoEmitTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving the storage plan: %v", err)
 	}
-	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg))
+	routes, err := openStorageRoutes(plan, mustResolveInfraTarget(t, cityPath, cfg), cfg)
 	if err != nil {
 		t.Fatalf("opening the controller's storage routes: %v", err)
 	}
