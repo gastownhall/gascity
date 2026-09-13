@@ -1393,7 +1393,7 @@ func samePreparedWorkDirPath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	return samePath(a, b)
 }
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
