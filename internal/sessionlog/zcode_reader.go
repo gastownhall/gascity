@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ZCode (Z.ai's GLM harness) keeps its sessions in a sqlite database under
@@ -223,7 +225,13 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 			path := filepath.Join(dir, name)
 			// The placeholder embeds its work dir (written through load_export
 			// when a boot turn is canceled), so it is scoped like a real mirror.
-			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+			//
+			// Compared via pathutil.SamePath, not raw string inequality: on
+			// macOS a real work dir resolves through the /var alias while the
+			// adapter's shelled-out cwd lands on the physical /private/var
+			// path, so a plain != always misses even though it is the same
+			// directory.
+			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
 				continue
 			}
 			info, err := entry.Info()
