@@ -28,8 +28,13 @@ const (
 // conditionGCHome resolves the gc state directory for gate subprocesses. Gate
 // HOME is intentionally sandboxed to the city, so it cannot also be used for
 // gc's machine-level cache and registry state.
-func conditionGCHome() string {
-	return gchome.ResolveReadOnly().Path()
+func conditionGCHome() (string, error) {
+	path := gchome.ResolveReadOnly().Path()
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve GC_HOME %q: %w", path, err)
+	}
+	return absPath, nil
 }
 
 // conditionPATH resolves the tool directories gate scripts actually need.
@@ -84,7 +89,7 @@ type ConditionEnv struct {
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
 // vars, Dolt/Beads connection env, and GC_INTEGRATION_REAL_BD when present for
 // integration-test bd shims.
-func (ce ConditionEnv) Environ() []string {
+func (ce ConditionEnv) Environ() ([]string, error) {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
 	home := ce.CityPath
@@ -95,10 +100,14 @@ func (ce ConditionEnv) Environ() []string {
 	if storePath == "" {
 		storePath = ce.CityPath
 	}
+	gcHome, err := conditionGCHome()
+	if err != nil {
+		return nil, err
+	}
 	env := []string{
 		"PATH=" + conditionPATH(),
 		"HOME=" + home,
-		"GC_HOME=" + conditionGCHome(),
+		"GC_HOME=" + gcHome,
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,
@@ -155,7 +164,7 @@ func (ce ConditionEnv) Environ() []string {
 		}
 	}
 
-	return env
+	return env, nil
 }
 
 // containedIn reports whether absPath is the same as or nested under root.
@@ -353,7 +362,14 @@ func runOnceNoPreExecRetry(ctx context.Context, scriptPath string, env Condition
 	if env.WorkDir != "" {
 		cmd.Dir = env.WorkDir
 	}
-	cmd.Env = env.Environ()
+	cmdEnv, envErr := env.Environ()
+	if envErr != nil {
+		return GateResult{
+			Outcome: GateError,
+			Stderr:  fmt.Sprintf("build gate environment: %v", envErr),
+		}
+	}
+	cmd.Env = cmdEnv
 	// WaitDelay ensures cmd.Wait returns promptly after the context
 	// cancels and SIGKILL is sent, even if child I/O pipes are still open.
 	cmd.WaitDelay = time.Second
