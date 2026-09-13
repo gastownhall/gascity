@@ -155,9 +155,24 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
+	return p.sendWithExtraMetadata(from, to, subject, body, nil)
+}
+
+// sendWithExtraMetadata is the shared body of Send and SendDeduped: resolve
+// the sender route, derive title and thread label, merge extra metadata (the
+// dedup key), and create the message bead.
+func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra map[string]string) (mail.Message, error) {
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
+	if len(extra) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]string, len(extra))
+		}
+		for k, v := range extra {
+			metadata[k] = v
+		}
 	}
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
@@ -175,6 +190,52 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
 	return beadToMessage(b), nil
+}
+
+// SendDeduped implements the optional [mail.DedupSender] capability: it
+// creates the message unless a live (un-archived) message carrying the same
+// dedup key, addressed to the same mailbox, already exists. "Same mailbox" is
+// the inbox's own question, so the probe compares against every route that
+// resolves to the recipient rather than the literal string it was given: an
+// alias and the session id behind it are one mailbox to [Provider.Inbox], and a
+// stream that addresses it both ways must not get two live copies. The probe is
+// one metadata-keyed list; a probe error fails the send rather than risking a
+// silent duplicate. A route resolution that degrades (an ambiguous or
+// unresolvable address) falls back to the literal recipient, exactly as
+// [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
+// effect is a narrower match, which sends rather than suppresses, and a
+// duplicate notification beats a dropped one. The probe reads only open messages, and archiving closes
+// one, so an archived notification no longer matches: the dedup horizon is the
+// previous message's live lifetime by design (see [mail.DedupSender]).
+func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup key is required")
+	}
+	if to == "" {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
+	}
+	existing, err := p.store.List(beads.ListQuery{
+		Type:     "message",
+		Status:   "open",
+		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
+		TierMode: beads.TierBoth,
+		Live:     true,
+	})
+	if err != nil {
+		return mail.Message{}, false, fmt.Errorf("beadmail send: dedup probe for key %q: %w", key, err)
+	}
+	routes := p.recipientRoutes(to)
+	for _, b := range existing {
+		if matchesRecipientRoute(routes, b.Assignee) {
+			return beadToMessage(b), true, nil
+		}
+	}
+	msg, err := p.sendWithExtraMetadata(from, to, subject, body, map[string]string{mail.DedupKeyMetadataKey: key})
+	if err != nil {
+		return mail.Message{}, false, err
+	}
+	return msg, false, nil
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks

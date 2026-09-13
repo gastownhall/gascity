@@ -168,13 +168,12 @@ func TestRunDoltGC_SmokeSQLError_ReturnsStageSmokeTest(t *testing.T) {
 
 func TestRunDoltGC_SmokeDeadlineExceeded_ReturnsStageSmokeTest(t *testing.T) {
 	t.Parallel()
-	// Override the smoke timeout to something small; smoke takes longer.
-	orig := maintenanceSmokeTimeout
-	maintenanceSmokeTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { maintenanceSmokeTimeout = orig })
-
 	ops := &fakeDoltOps{smokeDelay: 100 * time.Millisecond}
 	loop := newGCTestLoop(t, config.DoltMaintenance{Enabled: true, GCTimeout: "1s"}, ops)
+	// Shorten this loop's smoke timeout to less than the fake's delay. On the
+	// loop, not the package var: the probe reads it from whichever loop is
+	// running, so a package-level write races every parallel test in here.
+	loop.smokeTimeout = 10 * time.Millisecond
 
 	err := loop.runDoltGC(context.Background())
 	var me *MaintenanceError
