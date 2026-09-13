@@ -71,6 +71,7 @@ backlog-depth
 order-tracking-retention
 session-model
 startup-health-episodes
+gate-sandbox-reads
 dolt-server
 fork-rate
 dolt-noms-size
