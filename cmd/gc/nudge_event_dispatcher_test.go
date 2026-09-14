@@ -1074,3 +1074,117 @@ func TestNudgeDispatchStoresDeriveBothClassesFromTheCityStore(t *testing.T) {
 		t.Errorf("session store resolved to %p, want the city store %p", sessStore, cityStore)
 	}
 }
+
+// TestNudgeEventDispatcherBoundsConcurrentPasses covers the cost the previous
+// commit uncovered. The sweep used to observe each matched session inline, and
+// that serial provider call was throttling the fan-out by accident. With the
+// observation gone the sweep hands off every due session at once, and each
+// handed-off pass re-reads the session beads, re-runs the queue's maintenance
+// sweep and rescans every open session, so a backlog of N sessions would be N
+// simultaneous store reads and 2N queue-flock acquisitions.
+func TestNudgeEventDispatcherBoundsConcurrentPasses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, t.TempDir(), testWriter(t), "test", nil)
+	d.passSlots = make(chan struct{}, 2)
+	d.passSlotGrace = time.Hour
+
+	var mu sync.Mutex
+	livePasses, peak := 0, 0
+	entered := make(chan struct{}, 8)
+	release := make(chan struct{})
+	d.mu.Lock()
+	d.passObserver = func(string) {
+		mu.Lock()
+		livePasses++
+		if livePasses > peak {
+			peak = livePasses
+		}
+		mu.Unlock()
+		entered <- struct{}{}
+		<-release
+		mu.Lock()
+		livePasses--
+		mu.Unlock()
+	}
+	d.mu.Unlock()
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+
+	for i := 0; i < 5; i++ {
+		d.spawnPass(fmt.Sprintf("s-gc-%d", i), 0)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d passes started; the slot bound must throttle the fan-out, never deadlock it", i)
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("a third pass ran while both slots were held: the fan-out is unbounded, so a backlog of N sessions costs N simultaneous store reads")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	releaseAll()
+	for i := 2; i < 5; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("pass %d never ran once the slots were freed", i)
+		}
+	}
+	mu.Lock()
+	got := peak
+	mu.Unlock()
+	if got > 2 {
+		t.Fatalf("peak concurrent passes = %d, want at most 2", got)
+	}
+}
+
+// TestNudgeEventDispatcherWedgedPassSurrendersItsSlot is the half that keeps
+// the throttle from becoming the defect it replaces. A plain semaphore would
+// let a pass wedged inside an uncancellable provider call hold its slot for the
+// life of the process, and enough of those would stall every other session
+// again, which is the head-of-line blocking the fan-out exists to end.
+func TestNudgeEventDispatcherWedgedPassSurrendersItsSlot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, t.TempDir(), testWriter(t), "test", nil)
+	d.passSlots = make(chan struct{}, 1)
+	d.passSlotGrace = 50 * time.Millisecond
+
+	wedge := make(chan struct{})
+	t.Cleanup(func() { close(wedge) })
+	entered := make(chan string, 4)
+	d.mu.Lock()
+	d.passObserver = func(filter string) {
+		entered <- filter
+		if filter == "s-gc-wedged" {
+			<-wedge
+		}
+	}
+	d.mu.Unlock()
+
+	d.spawnPass("s-gc-wedged", 0)
+	select {
+	case filter := <-entered:
+		if filter != "s-gc-wedged" {
+			t.Fatalf("first pass ran with filter %q, want the wedged one", filter)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wedged pass never started")
+	}
+
+	d.spawnPass("s-gc-healthy", 0)
+	select {
+	case filter := <-entered:
+		if filter != "s-gc-healthy" {
+			t.Fatalf("second pass ran with filter %q, want the healthy one", filter)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the healthy session never got a pass: a wedged pass is holding its slot for the life of the process, which is the head-of-line blocking the fan-out exists to end")
+	}
+}

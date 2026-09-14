@@ -126,6 +126,25 @@ type nudgeEventDispatcher struct {
 	inflight map[string]bool
 	delivery sync.WaitGroup
 
+	// passSlots throttles how many passes run at once. A sweep hands off one
+	// pass per session with due work, and each of those re-reads the session
+	// beads, re-runs the queue's maintenance sweep and rescans every open
+	// session, so an unthrottled fan-out turns a backlog of N sessions into N
+	// simultaneous store reads and 2N queue-flock acquisitions. The inline
+	// observation the sweep used to do bounded this by accident; removing it
+	// was the point of the previous commit, so the bound has to be stated.
+	//
+	// A slot is surrendered when the pass returns OR after passSlotGrace,
+	// whichever comes first, and that second half is what keeps this from
+	// being the defect it replaces. A plain semaphore would let a pass wedged
+	// inside an uncancellable provider call hold its slot forever, and enough
+	// of those would stall every other session again, which is precisely the
+	// head-of-line blocking the fan-out exists to end. Releasing on the grace
+	// means a wedged pass costs its goroutine, which is already true, and
+	// nothing else.
+	passSlots     chan struct{}
+	passSlotGrace time.Duration
+
 	// streamGen holds the generation of the currently-established stream, 0
 	// when none. Forward goroutines clear only their own generation, so a
 	// late close from a replaced subscription cannot mask a live one.
@@ -164,6 +183,9 @@ func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.
 		pending:      make(map[string]nudgeEventKick),
 		kicked:       make(chan struct{}, 1),
 		workerDone:   make(chan struct{}),
+
+		passSlots:     make(chan struct{}, nudgeEventPassConcurrency),
+		passSlotGrace: nudgeEventDeliveryDrainGrace,
 	}
 	go d.worker(parent)
 	return d
@@ -468,6 +490,38 @@ func (d *nudgeEventDispatcher) drainDeliveries() {
 	}
 }
 
+// nudgeEventPassConcurrency is how many delivery passes may run at once. It is
+// a throttle on the fan-out's cost, not a queue depth: a pass that does not get
+// a slot waits for one rather than being dropped, and the kick that spawned it
+// is already recorded in inflight.
+const nudgeEventPassConcurrency = 8
+
+// acquirePassSlot blocks until a pass slot is free and returns the function
+// that gives it back. The returned function is safe to call more than once;
+// the slot is also returned automatically once passSlotGrace elapses, so a
+// pass wedged in a provider call cannot hold capacity for the life of the
+// process. See the passSlots field for why both halves are load-bearing.
+func (d *nudgeEventDispatcher) acquirePassSlot() func() {
+	if d.passSlots == nil {
+		return func() {}
+	}
+	select {
+	case d.passSlots <- struct{}{}:
+	case <-d.parent.Done():
+		// Shutdown while waiting. Run the pass unthrottled rather than hold
+		// the delivery WaitGroup open: the drain already bounds how long
+		// shutdown waits on it.
+		return func() {}
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { <-d.passSlots }) }
+	timer := time.AfterFunc(d.passSlotGrace, release)
+	return func() {
+		timer.Stop()
+		release()
+	}
+}
+
 // spawnPass runs one pass on a goroutine of its own, unless a pass for the
 // same session is already running. It returns as soon as the goroutine is
 // started (or declined), so the scheduler loop never blocks on a delivery.
@@ -497,6 +551,7 @@ func (d *nudgeEventDispatcher) spawnPass(sessionFilter string, retriesLeft int) 
 			delete(d.inflight, sessionFilter)
 			d.mu.Unlock()
 		}()
+		defer d.acquirePassSlot()()
 		d.pass(sessionFilter, retriesLeft)
 	}()
 }
