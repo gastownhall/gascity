@@ -13,7 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestProductionStartOpsCarryRuntimeDir is the behavioural half of the
+// TestProductionStartOpsCarryRuntimeDir is the behavioral half of the
 // dr-6siig HIGH 2 regression: the start-ops a Provider hands to its session
 // entry points must carry the Provider's own runtime dir, because that field
 // is the only thing that makes the start-crash and startup-nudge-unconfirmed
@@ -40,7 +40,7 @@ func TestProductionStartOpsCarryRuntimeDir(t *testing.T) {
 // defect was not a wrong value, it was three hand-written argument lists where
 // two omitted the runtime dir and nothing noticed: Relaunch and RunLive passed
 // "" and so suppressed an unconfirmed startup nudge and then recorded it
-// nowhere. A test that only checks behaviour on the paths it happens to know
+// nowhere. A test that only checks behavior on the paths it happens to know
 // about cannot catch a FOURTH call site added later with the same omission.
 // This one can: it enumerates the package's non-test sources from the AST and
 // requires that (*Provider).startOps is the sole production constructor.
