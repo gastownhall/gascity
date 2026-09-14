@@ -36,15 +36,23 @@ func (s *claimingMemStoreDraft) Claim(id, assignee string) (beads.Bead, bool, er
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	// Mirrors the normative store contract so the handler can never be compensating
+	// for a double that disagrees with the real backend
+	// (internal/beads/sqlite_store_claim.go :10-14 vocabulary, :57-62 same-holder
+	// no-op): a non-claimable status and a foreign holder are ok=false, and a
+	// same-holder re-claim is ok=TRUE.
+	if cur.Status != "open" && cur.Status != "in_progress" {
+		return cur, false, nil
+	}
 	if cur.Assignee != "" && cur.Assignee != assignee {
 		return cur, false, nil
+	}
+	if cur.Assignee == assignee && cur.Status == "in_progress" {
+		return cur, true, nil
 	}
 	status := "in_progress"
 	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
 		return beads.Bead{}, false, err
-	}
-	if cur.Assignee == assignee && cur.Status == status {
-		return cur, false, nil // already held: idempotent, not a fresh acquisition
 	}
 	// cr-gdeav.5.4: the draft returned Get's two values from a three-value
 	// contract. The bead comes back with ok=true — this call acquired it.
@@ -181,6 +189,67 @@ func TestWorkerClaimIsIdempotentForTheSameHolder(t *testing.T) {
 	second := claim()
 	if second.Code != http.StatusOK {
 		t.Fatalf("repeated claim status = %d, want 200 (idempotent), body: %s", second.Code, second.Body.String())
+	}
+}
+
+// TestWorkerClaimRefusesARowThatRetainsTheHolderButIsNotClaimable is the
+// end-to-end regression the #6146 review named: a CLOSED bead keeps the name of
+// the worker that closed it, so the row ClaimFor hands back matches the
+// requester while the store itself refuses the claim (ok=false).
+//
+// The handler must refuse on the store's answer alone. Inferring an idempotent
+// success from the matching assignee — the pre-fix shape — fell through to
+// readWorkerFence, which checks the holder and not the status (workerOwnership,
+// handler_worker.go), and stamped the lease: a 200 "claimed" plus a fresh
+// gc.lease_owner on a bead that can never be worked again. Red before the fix
+// (200, lease written, revision moved), green after (409, nothing written).
+func TestWorkerClaimRefusesARowThatRetainsTheHolderButIsNotClaimable(t *testing.T) {
+	const holder = "worker-local-3-pool"
+	rigStore := &claimingMemStoreDraft{MemStore: beads.NewMemStore()}
+	created, err := rigStore.Create(beads.Bead{Title: "closed while held", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// The row a typed close leaves behind: terminal status, holder retained.
+	assignee, status := holder, "closed"
+	if err := rigStore.Update(created.ID, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
+		t.Fatalf("setting up the closed-while-held row: %v", err)
+	}
+	before, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get before: %v", err)
+	}
+	if before.Status != "closed" || before.Assignee != holder {
+		t.Fatalf("test premise broken: status=%q assignee=%q", before.Status, before.Assignee)
+	}
+
+	state := newFakeState(t)
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cityBeadStore = rigStore
+	h := newTestCityHandler(t, state)
+
+	body := `{"session_id":"gcg-session-closed","assignee":"` + holder + `","bead_id":"` + created.ID + `"}`
+	req := newPostRequest(cityURL(state, "/worker/claim"), strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("claim of a closed row that still names me: status=%d, want 409 — a 200 here tells a worker that no longer holds the bead that it does, and an off-host worker cannot notice being displaced. body=%s",
+			rec.Code, rec.Body.String())
+	}
+
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get after: %v", err)
+	}
+	if stored.Status != "closed" {
+		t.Errorf("status = %q, want closed — a refused claim must not resurrect a terminal bead", stored.Status)
+	}
+	if got := strings.TrimSpace(stored.Metadata[beadmeta.LeaseOwnerMetadataKey]); got != "" {
+		t.Errorf("%s = %q on a closed bead — the refusal writes no lease", beadmeta.LeaseOwnerMetadataKey, got)
+	}
+	if stored.Revision != before.Revision {
+		t.Errorf("revision moved %d -> %d: the refused claim wrote to the row anyway", before.Revision, stored.Revision)
 	}
 }
 
@@ -383,8 +452,14 @@ func (s *actorClaimingMemStore) ClaimAs(id, assignee string) (beads.Bead, bool, 
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	if cur.Status != "open" && cur.Status != "in_progress" {
+		return cur, false, nil
+	}
 	if cur.Assignee != "" && cur.Assignee != assignee {
 		return cur, false, nil
+	}
+	if cur.Assignee == assignee && cur.Status == "in_progress" {
+		return cur, true, nil
 	}
 	status := "in_progress"
 	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {

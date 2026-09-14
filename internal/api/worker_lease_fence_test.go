@@ -60,15 +60,23 @@ func (s *racingWorkerStoreDraft) Claim(id, assignee string) (beads.Bead, bool, e
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	// Mirrors the normative store contract so the handler can never be compensating
+	// for a double that disagrees with the real backend
+	// (internal/beads/sqlite_store_claim.go :10-14 vocabulary, :57-62 same-holder
+	// no-op): a non-claimable status and a foreign holder are ok=false, and a
+	// same-holder re-claim is ok=TRUE.
+	if cur.Status != "open" && cur.Status != "in_progress" {
+		return cur, false, nil
+	}
 	if cur.Assignee != "" && cur.Assignee != assignee {
 		return cur, false, nil
+	}
+	if cur.Assignee == assignee && cur.Status == "in_progress" {
+		return cur, true, nil
 	}
 	status := "in_progress"
 	if err := s.inner.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
 		return beads.Bead{}, false, err
-	}
-	if cur.Assignee == assignee && cur.Status == status {
-		return cur, false, nil
 	}
 	final, err := s.inner.Get(id)
 	return final, err == nil, err
@@ -281,15 +289,23 @@ func (s *unfenceableClaimStoreDraft) Claim(id, assignee string) (beads.Bead, boo
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
+	// Mirrors the normative store contract so the handler can never be compensating
+	// for a double that disagrees with the real backend
+	// (internal/beads/sqlite_store_claim.go :10-14 vocabulary, :57-62 same-holder
+	// no-op): a non-claimable status and a foreign holder are ok=false, and a
+	// same-holder re-claim is ok=TRUE.
+	if cur.Status != "open" && cur.Status != "in_progress" {
+		return cur, false, nil
+	}
 	if cur.Assignee != "" && cur.Assignee != assignee {
 		return cur, false, nil
+	}
+	if cur.Assignee == assignee && cur.Status == "in_progress" {
+		return cur, true, nil
 	}
 	status := "in_progress"
 	if err := s.Update(id, beads.UpdateOpts{Assignee: &assignee, Status: &status}); err != nil {
 		return beads.Bead{}, false, err
-	}
-	if cur.Assignee == assignee && cur.Status == status {
-		return cur, false, nil
 	}
 	final, err := s.Get(id)
 	return final, err == nil, err

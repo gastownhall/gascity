@@ -120,11 +120,20 @@ func (s *Server) humaHandleWorkerClaim(_ context.Context, input *WorkerClaimInpu
 		}
 		return nil, apierr.Internal.Msg("worker claim: " + err.Error())
 	}
-	// A same-holder re-claim reports "not freshly acquired" and is idempotent
-	// success — a retry after a dropped response must not conflict. Anything
-	// else that did not acquire the bead lost it to someone else.
-	if !acquired && strings.TrimSpace(claimed.Assignee) != assignee {
-		return nil, apierr.ConflictWrongState.Msg("worker claim: bead " + id + " is held by " + quotedOrEmpty(claimed.Assignee) + ", not " + quotedOrEmpty(assignee))
+	// ok=false is an unconditional refusal, and the returned row is used ONLY to
+	// explain it. The store's own contract names exactly two ways a claim is not
+	// acquired — a different assignee holds the bead, or the bead is not
+	// claimable — and it reports a same-holder re-claim as ok=TRUE, not as a
+	// conflict (internal/beads/sqlite_store_claim.go:10-14 for the vocabulary,
+	// :57-62 for the same-holder no-op). Inferring idempotence from a matching
+	// assignee instead is the hole the #6146 review named: a closed or blocked
+	// bead KEEPS the name of the worker that last held it, so a claim from that
+	// worker matched, fell through to the lease stamp, and answered 200
+	// "claimed" while re-stamping a lease on a bead that can never be worked
+	// again. readWorkerFence cannot catch it either — it checks the holder, not
+	// the status (see workerOwnership). Only the store's ok can decide.
+	if !acquired {
+		return nil, apierr.ConflictWrongState.Msg("worker claim: bead " + id + " was not claimed: the store refused it (holder " + quotedOrEmpty(claimed.Assignee) + ", status " + quotedOrEmpty(claimed.Status) + " is not claimable for " + quotedOrEmpty(assignee) + "); no lease was stamped")
 	}
 	// The stamp is fenced to the row this claim actually produced. claimed is
 	// not trusted for the revision: the two-argument claim's contract returns
