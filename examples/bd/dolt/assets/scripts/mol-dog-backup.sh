@@ -19,6 +19,7 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 SYSTEM_DBS="^(information_schema|mysql|dolt_cluster|__gc_probe|performance_schema|sys)$"
 MIN_DOLT_BACKUP_VERSION="2.1.0"
 BACKUP_LOCK_FILE="${GC_DOLT_BACKUP_LOCK_FILE:-$GC_CITY_PATH/.gc/runtime/packs/dolt/backup-sync.lock}"
+BACKUP_STATE_FILE="${GC_DOLT_BACKUP_STATE_FILE:-$GC_CITY_PATH/.beads/dolt-backup-state.json}"
 BACKUP_LOCK_WAIT_SECONDS="${GC_DOLT_BACKUP_LOCK_WAIT_SECONDS:-5}"
 # Wall-clock bound for one `dolt backup sync` attempt, and how many attempts a
 # database gets before it is reported failed.
@@ -107,6 +108,25 @@ append_failed_detail() {
     FAILED_DETAILS="$FAILED_DETAILS
   $detail_db: $detail_text"
 }
+sanitize_sync_stderr() {
+    tr '\n' ' ' <"$1" \
+        | sed -E \
+            -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[redacted]@#g' \
+            -e 's/(([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[=:][[:space:]]*)[^ ,;]+/\1[redacted]/g' \
+            -e 's/(--([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii]-[Kk][Ee][Yy])[[:space:]]+)[^ ,;]+/\1[redacted]/g' \
+        | cut -c1-2000
+}
+
+publish_backup_state() {
+    state_dir=$(dirname "$BACKUP_STATE_FILE")
+    state_tmp="$BACKUP_STATE_FILE.tmp.$$"
+    mkdir -p "$state_dir"
+    state_now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"last_sync":"%s","synced":%s,"total":%s}\n' \
+        "$state_now" "$SYNCED" "$TOTAL" >"$state_tmp"
+    mv "$state_tmp" "$BACKUP_STATE_FILE"
+}
+
 
 # classify_sync_failure <rc> <stderr-file> — one actionable line naming what
 # went wrong, for operators reading the escalation rather than the log.
@@ -122,7 +142,7 @@ classify_sync_failure() {
     classify_err_file="$2"
     classify_stderr=""
     if [ -s "$classify_err_file" ]; then
-        classify_stderr=$(tr '\n' ' ' <"$classify_err_file" | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
+        classify_stderr=$(sanitize_sync_stderr "$classify_err_file" | sed 's/[[:space:]]\{1,\}/ /g; s/^ //; s/ $//')
     fi
 
     if [ "$classify_rc" -eq 124 ]; then
@@ -159,6 +179,7 @@ sync_one_database() {
         return 1
     }
     sync_attempt=1
+    first_sync_detail=""
     while [ "$sync_attempt" -le "$BACKUP_SYNC_ATTEMPTS" ]; do
         sync_rc=0
         (cd "$sync_db_dir" && run_bounded "$BACKUP_SYNC_TIMEOUT_SECS" \
@@ -171,11 +192,14 @@ sync_one_database() {
             return 0
         fi
         sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
+        if [ -z "$first_sync_detail" ]; then
+            first_sync_detail="$sync_detail"
+        fi
         echo "backup: $sync_db: attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS failed — $sync_detail" >&2
         sync_attempt=$((sync_attempt + 1))
     done
     rm -f "$sync_err_tmp"
-    printf '%s' "$sync_detail"
+    printf '%s' "$first_sync_detail"
     return 1
 }
 
@@ -293,6 +317,9 @@ for db in $DATABASES; do
 done
 
 FAILED_COUNT=$FAILED
+if [ "$FAILED_COUNT" -eq 0 ]; then
+    publish_backup_state
+fi
 OFFSITE_STATUS="skipped"
 
 # --- Step 3: Rsync backup artifacts to offsite storage ---
@@ -336,9 +363,10 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
         "Dolt backup: $FAILED_COUNT/$TOTAL databases failed to sync [MEDIUM]" \
         "Failed databases:$FAILED_DBS
 
-Each database was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Diagnostic from the final attempt:$FAILED_DETAILS
+Each database was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP_SYNC_TIMEOUT_SECS}s bound per attempt. Sanitized diagnostic from the first failed attempt:$FAILED_DETAILS
 
 A database listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per database under $BACKUP_ARTIFACT_DIR rather than trusting this message alone." \
+        "dolt-backup:required-sync" "$FAILED_DBS|$FAILED_DETAILS" \
         2>/dev/null || true
 fi
 
@@ -367,3 +395,4 @@ esac
 SUMMARY="backup — synced: $SYNCED/$TOTAL, offsite: $OFFSITE_STATUS"
 dolt_notify_done "$SUMMARY"
 echo "backup: $SUMMARY"
+[ "$FAILED_COUNT" -eq 0 ] || exit 1

@@ -77,6 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dolt backup and reaper maintenance now share one freshness marker and one
+  incident per failure class.** A required database sync failure returns a
+  nonzero status, preserves its first sanitized diagnostic, and leaves the
+  freshness marker unchanged. A fully successful sync publishes
+  `.beads/dolt-backup-state.json`, which the reaper requires before bulk
+  pruning. Repeated identical alerts update their incident state without
+  notifying again until the failure changes or 24 hours pass.
+
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
   sling whose only live root is gone.** A storage migration copies rows into the
