@@ -519,6 +519,110 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	}
 }
 
+// A delivery cannot be canceled: runtime.Provider.Nudge takes no context and
+// the herdr client applies no default timeout, so a wedged pane holds whoever
+// called it. Before this dispatcher existed each session had its own sidecar
+// poller and a wedged pane stranded only that session's queue. Running every
+// delivery on the dispatcher's one scheduler goroutine would have widened that
+// to the whole city, which is why each due session gets a goroutine of its own.
+//
+// This pins the scheduler property directly: with one session's pass parked
+// inside the dispatcher, another session's pass still runs to completion.
+// Mutation: replace the two spawnPass calls in worker() with d.pass and this
+// test times out, because the scheduler never reaches the second session.
+func TestNudgeEventDispatcherOneParkedSessionDoesNotBlockAnother(t *testing.T) {
+	fake := newNudgeEventedFake()
+	_, d, _, _ := newNudgeDispatcherFixture(t, fake)
+
+	const parked = "parked-session"
+	const other = "other-session"
+
+	release := make(chan struct{})
+	completed := make(chan string, 8)
+	d.observePasses(func(sessionFilter string) {
+		if sessionFilter == parked {
+			<-release
+		}
+		select {
+		case completed <- sessionFilter:
+		default:
+		}
+	})
+
+	d.kickSessionAfter(parked, 0, 0)
+	d.kickSessionAfter(other, 0, 0)
+
+	select {
+	case got := <-completed:
+		if got != other {
+			t.Fatalf("first completed pass was %q, want %q: the parked session should not be able to complete while it is held", got, other)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no pass completed within 10s while one session was parked mid-pass: the scheduler is running deliveries serially, so one wedged pane strands every session's queue")
+	}
+
+	close(release)
+	select {
+	case got := <-completed:
+		if got != parked {
+			t.Fatalf("second completed pass was %q, want %q", got, parked)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parked session's pass never completed after release")
+	}
+}
+
+// A second kick for a session whose pass is already running is dropped rather
+// than queued behind it, so a burst of idle events for one session cannot pile
+// up goroutines. The running pass re-reads the queue and the observation, so
+// the dropped kick carries nothing the running pass will not see.
+func TestNudgeEventDispatcherCoalescesKicksForARunningSession(t *testing.T) {
+	fake := newNudgeEventedFake()
+	_, d, _, _ := newNudgeDispatcherFixture(t, fake)
+
+	const name = "busy-session"
+	release := make(chan struct{})
+	entered := make(chan struct{}, 8)
+	completed := make(chan string, 8)
+	d.observePasses(func(sessionFilter string) {
+		select {
+		case completed <- sessionFilter:
+		default:
+		}
+	})
+
+	d.mu.Lock()
+	if d.inflight == nil {
+		d.inflight = map[string]bool{}
+	}
+	d.inflight[name] = true
+	d.mu.Unlock()
+
+	d.spawnPass(name, 0)
+	select {
+	case <-entered:
+		t.Fatal("spawnPass started a second pass for a session already in flight")
+	case <-completed:
+		t.Fatal("spawnPass ran a pass for a session already in flight")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	d.mu.Lock()
+	delete(d.inflight, name)
+	d.mu.Unlock()
+	close(release)
+
+	d.spawnPass(name, 0)
+	select {
+	case got := <-completed:
+		if got != name {
+			t.Fatalf("completed pass was %q, want %q", got, name)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("spawnPass did not run once the session left the in-flight set")
+	}
+}
+
 func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
