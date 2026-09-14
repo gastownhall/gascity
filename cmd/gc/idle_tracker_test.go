@@ -307,3 +307,80 @@ func TestIdleTracker_NonClaudeUsesActivityClock(t *testing.T) {
 		t.Fatalf("non-claude session with stale activity did not idle-timeout via the activity clock")
 	}
 }
+
+// TestIdleTracker_ClearIdleAnchorRestartsMeasurement verifies that clearing a
+// session's anchor — what the reconciler does when it observes the session dead
+// — makes a same-name replacement re-measure its idleness from scratch. Without
+// this, a restarted named session inherits its predecessor's accumulation and
+// can be idle-killed on its first post-restart idle observation.
+func TestIdleTracker_ClearIdleAnchorRestartsMeasurement(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	it.setTimeout("deacon", 1*time.Hour)
+
+	sp := newFakeIdleSnapshotProvider()
+	startFakeSession(t, sp.Fake, "deacon")
+	sp.idle["deacon"] = true
+
+	base := time.Now()
+	// Activity stays fresh at every observation so only the content clock can
+	// fire — the activity clock must never be the reason for a verdict here.
+	check := func(at time.Time) bool {
+		sp.SetActivity("deacon", at)
+		return it.checkIdle("deacon", "", "claude", "", sp, at)
+	}
+
+	if check(base) {
+		t.Fatalf("checkIdle fired on the first idle observation; want anchor-only")
+	}
+
+	// The session dies and a replacement takes the same runtime name.
+	it.clearIdleAnchor("deacon")
+
+	if check(base.Add(61 * time.Minute)) {
+		t.Fatalf("checkIdle fired 61m after the CLEARED anchor; the replacement inherited its predecessor's accumulation")
+	}
+	// Re-anchored at 61m, so the timeout is reached only 61m later still.
+	if check(base.Add(90 * time.Minute)) {
+		t.Fatalf("checkIdle fired 29m into the re-measured idle run (timeout 1h)")
+	}
+	if !check(base.Add(123 * time.Minute)) {
+		t.Fatalf("checkIdle did not fire after 62m of continuous re-measured idle")
+	}
+	if _, ok := it.idleSince["deacon"]; ok {
+		t.Fatalf("idleSince retained an anchor for %q after firing", "deacon")
+	}
+}
+
+// TestIdleTracker_ContentClockFallsBackToActivityClock verifies the content
+// clock is ADDITIVE. A Claude non-ACP pane the scan can never read as idle (a
+// session crashed to a shell, or an overridden prompt that never matches the
+// configured prefix) must keep the stale-activity recycle route it had before
+// the content clock existed, rather than reporting "not idle" forever.
+func TestIdleTracker_ContentClockFallsBackToActivityClock(t *testing.T) {
+	t.Parallel()
+
+	it := newIdleTracker()
+	it.setTimeout("deacon", 1*time.Hour)
+
+	sp := newFakeIdleSnapshotProvider()
+	startFakeSession(t, sp.Fake, "deacon")
+	sp.idle["deacon"] = false // pane never matches the ready-prompt prefix
+
+	base := time.Now()
+	sp.SetActivity("deacon", base)
+
+	if it.checkIdle("deacon", "", "claude", "", sp, base.Add(30*time.Minute)) {
+		t.Fatalf("checkIdle fired at 30m with a 1h timeout")
+	}
+	if !it.checkIdle("deacon", "", "claude", "", sp, base.Add(61*time.Minute)) {
+		t.Fatalf("checkIdle did not fall back to the activity clock for an unreadable pane; the content clock must supplement it, not replace it")
+	}
+
+	// A snapshot error takes the same fallback route.
+	sp.err["deacon"] = errIdleSnapshotProbe
+	if !it.checkIdle("deacon", "", "claude", "", sp, base.Add(61*time.Minute)) {
+		t.Fatalf("checkIdle did not fall back to the activity clock on a snapshot error")
+	}
+}

@@ -29,10 +29,11 @@ type idleTracker interface {
 	// configured timeout. template is the agent's qualified template name and
 	// is used as a fallback lookup when the session name is not registered
 	// directly (pool sessions). provider and transport identify the runtime so
-	// the tracker can pick the right idle measurement: interactive TUIs whose
-	// coarse pane-activity clock cannot see idleness (the Claude Code TUI over
-	// a non-ACP transport) are measured by a content-based pane scan, all
-	// others by sp.GetLastActivity().
+	// the tracker can pick the right idle measurement: every session is
+	// measured by sp.GetLastActivity(), and interactive TUIs whose coarse
+	// pane-activity clock cannot see idleness (the Claude Code TUI over a
+	// non-ACP transport) are additionally measured by a content-based pane
+	// scan, either of which can report the session idle.
 	checkIdle(sessionName, template, provider, transport string, sp runtime.Provider, now time.Time) bool
 
 	// setTimeout configures the idle timeout for a single session name.
@@ -45,6 +46,14 @@ type idleTracker interface {
 	// runtime session names carry per-instance bead IDs and cannot be
 	// enumerated up front. Duration of 0 clears the entry.
 	setTimeoutForTemplate(template string, timeout time.Duration)
+
+	// clearIdleAnchor discards any content-idle accumulation held for a
+	// session name. Called when a session is observed dead so a later session
+	// reusing the same name (a restarted named session) re-measures its
+	// idleness from scratch instead of inheriting its predecessor's anchor,
+	// and so anchors for gone sessions do not accumulate over the lifetime of
+	// a long-running controller.
+	clearIdleAnchor(sessionName string)
 
 	// exemptTemplateFallbackForSession prevents one stable session from
 	// inheriting the template timeout. Used for mode="always" named sessions
@@ -95,6 +104,12 @@ func (m *memoryIdleTracker) setTimeoutForTemplate(template string, timeout time.
 	m.templateTimeouts[template] = timeout
 }
 
+func (m *memoryIdleTracker) clearIdleAnchor(sessionName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.idleSince, sessionName)
+}
+
 func (m *memoryIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
 	if sessionName == "" {
 		return
@@ -122,11 +137,22 @@ func (m *memoryIdleTracker) checkIdle(sessionName, template, provider, transport
 	// repaints its status line, so GetLastActivity stays perpetually fresh and
 	// the activity-clock test below never fires — leaving an idle always-on
 	// heartbeat awake indefinitely (ga-07mi8). For those sessions, drive an
-	// idle-since anchor from a point-in-time pane scan instead, when the
+	// idle-since anchor from a point-in-time pane scan as well, when the
 	// runtime can take one.
+	//
+	// The content clock is ADDITIVE, not a replacement: a negative content
+	// observation falls through to the activity clock below. A pane the scan
+	// cannot read as idle — a crashed-to-shell session, an overridden prompt
+	// that never matches the configured prefix, a snapshot error — would
+	// otherwise report "not idle" forever and lose the stale-activity recycle
+	// route it has always had. Falling through adds no kill the activity clock
+	// did not already make: a genuinely working TUI repaints, so its activity
+	// clock stays fresh and the check below stays false.
 	if idleTrackerContentClockApplies(provider, transport) {
 		if snap, ok := sp.(runtime.IdleSnapshotProvider); ok {
-			return m.checkIdleByContent(sessionName, snap, timeout, now)
+			if m.checkIdleByContent(sessionName, snap, timeout, now) {
+				return true
+			}
 		}
 	}
 
@@ -167,12 +193,13 @@ func (m *memoryIdleTracker) checkIdleByContent(sessionName string, snap runtime.
 }
 
 // idleTrackerContentClockApplies reports whether a session needs the
-// content-based idle clock instead of the coarse pane-activity clock: the
+// content-based idle clock in addition to the coarse pane-activity clock: the
 // Claude Code TUI over a non-ACP transport. ACP delivers in-process (no
 // repainting pane) and non-Claude providers do not hold a continuously
 // repainting interactive composer, so their activity clock reflects real
-// idleness. This mirrors pollerTUIComposerCanStick on the nudge path
-// (ga-32mpo).
+// idleness on its own. This mirrors the identical gate on the nudge path — the
+// wait-idle short-circuit in cmd_nudge.go restricts itself to the claude,
+// non-ACP transport for the same reason (gco-90ui).
 func idleTrackerContentClockApplies(provider, transport string) bool {
 	return transport != "acp" && provider == "claude"
 }

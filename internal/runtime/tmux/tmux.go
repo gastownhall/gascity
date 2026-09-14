@@ -3736,16 +3736,29 @@ func idlePromptPrefix(configured string) string {
 
 // snapshotPaneIdle takes one observation of the session's pane and reports
 // whether it currently shows a ready prompt with no active-processing
-// indicator. It is the single-observation primitive shared by WaitForIdle
-// (which polls it up to a consecutive-idle threshold) and SnapshotIdle (which
-// returns it directly). A capture error is returned verbatim so callers can
-// distinguish a session that has gone away (ErrSessionNotFound / ErrNoServer)
-// from a transient read failure.
+// indicator, resolving the session's configured ready-prompt prefix first. It
+// is the entry point for single-observation callers (SnapshotIdle); WaitForIdle
+// resolves the prefix once and polls snapshotPaneIdleWithPrefix directly so its
+// loop does not re-exec tmux show-environment on every 200ms tick.
 func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
-	promptPrefix := DefaultReadyPromptPrefix
+	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session))
+}
+
+// resolveIdlePromptPrefix reads the session's configured ready-prompt prefix,
+// falling back to DefaultReadyPromptPrefix when it is unset or unreadable.
+func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
-		promptPrefix = idlePromptPrefix(configured)
+		return idlePromptPrefix(configured)
 	}
+	return DefaultReadyPromptPrefix
+}
+
+// snapshotPaneIdleWithPrefix is the pure pane scan behind idle detection: it
+// captures the pane once and reports whether it shows promptPrefix with no
+// active-processing indicator. A capture error is returned verbatim so callers
+// can distinguish a session that has gone away (ErrSessionNotFound /
+// ErrNoServer) from a transient read failure.
+func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
 	prefix := strings.TrimSpace(promptPrefix)
 
 	lines, err := t.CapturePaneLines(session, promptObservationLines)
@@ -3796,6 +3809,11 @@ func (t *Tmux) SnapshotIdle(session string) (bool, error) {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
+	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
+	// and re-reading it per tick would add a tmux show-environment exec to
+	// every 200ms poll.
+	promptPrefix := t.resolveIdlePromptPrefix(session)
+
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
 
@@ -3804,7 +3822,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		idle, err := t.snapshotPaneIdle(session)
+		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
