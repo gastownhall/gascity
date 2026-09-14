@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -65,9 +66,18 @@ type fakeStartOps struct {
 	disableMouseAndActivityErr error
 	runSetupCommandErr         error
 	sendKeysErr                error
+	// sendKeysErrs, if non-empty, is consumed sequentially across calls
+	// (like createErrs) and takes priority over sendKeysErr — used to
+	// simulate a startup nudge that confirms on a later retry attempt.
+	sendKeysErrs               []error
+	sendKeysIdx                int
 	capturePaneText            string
 	capturePaneErr             error
 	recordStartCrashPath       string
+	recordUnconfirmedNudgePath string
+
+	paneBusyResult bool
+	paneBusyErr    error
 }
 
 type errReader struct{}
@@ -174,7 +184,17 @@ func (f *fakeStartOps) sendKeys(name, text string) error {
 	if f.sendKeysHook != nil {
 		f.sendKeysHook()
 	}
+	if f.sendKeysIdx < len(f.sendKeysErrs) {
+		err := f.sendKeysErrs[f.sendKeysIdx]
+		f.sendKeysIdx++
+		return err
+	}
 	return f.sendKeysErr
+}
+
+func (f *fakeStartOps) paneBusy(name string) (bool, error) {
+	f.calls = append(f.calls, startCall{method: "paneBusy", name: name})
+	return f.paneBusyResult, f.paneBusyErr
 }
 
 func (f *fakeStartOps) setRemainOnExit(name string) error {
@@ -195,6 +215,11 @@ func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
 func (f *fakeStartOps) recordStartCrash(name, _ string) string {
 	f.calls = append(f.calls, startCall{method: "recordStartCrash", name: name})
 	return f.recordStartCrashPath
+}
+
+func (f *fakeStartOps) recordUnconfirmedNudge(name, _ string, _ error) string {
+	f.calls = append(f.calls, startCall{method: "recordUnconfirmedNudge", name: name})
+	return f.recordUnconfirmedNudgePath
 }
 
 func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) error {
@@ -941,13 +966,19 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		assertCallSequence(t, ops, wantCalls)
 	})
 
-	// The startup nudge has no retry-capable caller, so an unconfirmed submit
-	// must not fail the start: the keystrokes reached tmux and the session is
+	// The startup nudge has no retry-capable caller beyond
+	// sendStartupNudgeWithRetry's own bounded ladder, so an unconfirmed
+	// submit that never clears — even after exhausting every backoff — must
+	// not fail the start: the keystrokes reached tmux and the session is
 	// already verified alive. Only genuine delivery errors are fatal (above).
-	t.Run("unconfirmed submit is not fatal", func(t *testing.T) {
+	t.Run("unconfirmed submit is not fatal but is durably recorded after exhausting retries", func(t *testing.T) {
+		origBackoffs := startupNudgeRetryBackoffs
+		startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+		defer func() { startupNudgeRetryBackoffs = origBackoffs }()
 		ops := &fakeStartOps{
-			hasSessionResult: true,
-			sendKeysErr:      fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			hasSessionResult:           true,
+			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
 		}
 
 		cfg := runtime.Config{
@@ -959,8 +990,357 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 			t.Fatalf("doStartSession = %v, want nil for an unconfirmed startup nudge", err)
 		}
 
-		assertCallSequence(t, ops, wantCalls)
+		// One initial attempt plus one retry per shrunk backoff.
+		callsByMethod(t, ops, "sendKeys", len(startupNudgeRetryBackoffs)+1)
+		// dr-6siig: an unconfirmed startup nudge has no retry-capable caller
+		// (Start returns nil, so nothing requeues it), so it must leave a
+		// durable artifact for a later observer instead of only a stderr
+		// line that vanishes with the process.
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
 	})
+}
+
+// TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt is the fail-before/
+// pass-after proof for the retry-with-backoff fix: a submitter that only
+// confirms on its 3rd attempt must eventually succeed, sleeping between each
+// unconfirmed attempt.
+func TestSendStartupNudgeWithRetry_ConfirmsOnLaterAttempt(t *testing.T) {
+	calls := 0
+	var sleeps []time.Duration
+	send := func() error {
+		calls++
+		if calls < 3 {
+			return ErrNudgeSubmitUnconfirmed
+		}
+		return nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(d time.Duration) { sleeps = append(sleeps, d) }, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("send calls = %d, want 3", calls)
+	}
+	if len(sleeps) != 2 {
+		t.Fatalf("sleeps = %v, want 2 backoff waits", sleeps)
+	}
+	if sleeps[0] != startupNudgeRetryBackoffs[0] || sleeps[1] != startupNudgeRetryBackoffs[1] {
+		t.Fatalf("sleeps = %v, want %v", sleeps, startupNudgeRetryBackoffs[:2])
+	}
+}
+
+// TestSendStartupNudgeWithRetry_StopsRetryingOncePaneGoesBusy proves the
+// gastownhall/gascity#5019 review-discussion fix: if busy reports true once
+// a backoff has elapsed, the ladder stops instead of re-running send's
+// C-u/paste/submit cycle against a pane that has since gone busy — a Claude
+// Code pane already mid-turn queues input rather than rejecting it, so a
+// blind resend would enqueue a second copy of the nudge behind whichever
+// submit actually landed.
+func TestSendStartupNudgeWithRetry_StopsRetryingOncePaneGoesBusy(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	busyCalls := 0
+	busy := func() (bool, error) {
+		busyCalls++
+		return true, nil
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (busy after the first backoff should stop the ladder)", calls)
+	}
+	if busyCalls != 1 {
+		t.Fatalf("busy calls = %d, want 1", busyCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_KeepsRetryingWhilePaneStaysIdle proves busy
+// alone does not change behavior when it keeps reporting false (or errors):
+// the ladder still exhausts exactly as it did before this check existed.
+func TestSendStartupNudgeWithRetry_KeepsRetryingWhilePaneStaysIdle(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	busy := func() (bool, error) { return false, nil }
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, busy)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	wantCalls := len(startupNudgeRetryBackoffs) + 1
+	if calls != wantCalls {
+		t.Fatalf("send calls = %d, want %d", calls, wantCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_FailsAfterExhaustingBackoffs proves the retry
+// is bounded: a submitter that never confirms must still return
+// ErrNudgeSubmitUnconfirmed once every backoff is spent, not retry forever.
+// (The call site treats this as a warning rather than a start failure — see
+// TestDoStartSessionReturnsNudgeDeliveryError's "even after exhausting
+// retries" case — but the helper itself must still surface the sentinel.)
+func TestSendStartupNudgeWithRetry_FailsAfterExhaustingBackoffs(t *testing.T) {
+	calls := 0
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) {}, nil)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	wantCalls := len(startupNudgeRetryBackoffs) + 1
+	if calls != wantCalls {
+		t.Fatalf("send calls = %d, want %d", calls, wantCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_NonRetryableErrorFailsFast proves a healthy
+// fast boot (or a genuinely non-retryable failure) never pays the backoff
+// cost: only ErrNudgeSubmitUnconfirmed is retried.
+func TestSendStartupNudgeWithRetry_NonRetryableErrorFailsFast(t *testing.T) {
+	calls := 0
+	wantErr := errors.New("command too long")
+	slept := false
+	send := func() error {
+		calls++
+		return wantErr
+	}
+	err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (no retry for non-unconfirmed errors)", calls)
+	}
+	if slept {
+		t.Error("should not sleep for a non-retryable error")
+	}
+}
+
+// TestSendStartupNudgeWithRetry_SucceedsImmediatelyNeverSleeps proves the
+// common healthy-boot path incurs zero backoff cost.
+func TestSendStartupNudgeWithRetry_SucceedsImmediatelyNeverSleeps(t *testing.T) {
+	calls := 0
+	slept := false
+	send := func() error {
+		calls++
+		return nil
+	}
+	if err := sendStartupNudgeWithRetry(context.Background(), send, func(time.Duration) { slept = true }, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1", calls)
+	}
+	if slept {
+		t.Error("should not sleep when the first attempt confirms")
+	}
+}
+
+// TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping proves
+// that a start already being canceled elsewhere (e.g. the supervising
+// startup_timeout deadline) does not sleep through the remainder of the
+// backoff ladder: the helper must notice cancellation and return the current
+// unconfirmed error immediately instead of burning up to ~20s of retries
+// against a start that is already being torn down.
+func TestSendStartupNudgeWithRetry_CanceledContextStopsWithoutSleeping(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	var sleeps []time.Duration
+	send := func() error {
+		calls++
+		if calls == 1 {
+			cancel()
+		}
+		return ErrNudgeSubmitUnconfirmed
+	}
+	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) { sleeps = append(sleeps, d) }, nil)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (cancellation should stop further attempts)", calls)
+	}
+	if len(sleeps) != 0 {
+		t.Fatalf("sleeps = %v, want none (a canceled context must not sleep through the backoff ladder)", sleeps)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_CancelsDuringBackoff covers the other half of
+// the cancellation contract: cancellation that arrives while a backoff is
+// already in progress. Production passes sleepWithContext, which returns
+// early on cancellation rather than running the timer down, so the ladder
+// must re-check ctx after the sleep returns — otherwise an interrupted
+// backoff falls straight through into another full C-u/paste/submit cycle
+// against a start that is already being torn down. The sleep fake here
+// stands in for that early return: it cancels and returns immediately,
+// exactly as sleepWithContext does when its ctx is done mid-wait.
+func TestSendStartupNudgeWithRetry_CancelsDuringBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	var sleeps []time.Duration
+	send := func() error {
+		calls++
+		return ErrNudgeSubmitUnconfirmed
+	}
+	sleep := func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		cancel()
+	}
+	busyCalls := 0
+	busy := func() (bool, error) {
+		busyCalls++
+		return false, nil
+	}
+	err := sendStartupNudgeWithRetry(ctx, send, sleep, busy)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	if calls != 1 {
+		t.Fatalf("send calls = %d, want 1 (cancellation during the backoff must not trigger another resend)", calls)
+	}
+	if len(sleeps) != 1 {
+		t.Fatalf("sleeps = %v, want exactly the one interrupted backoff", sleeps)
+	}
+	if busyCalls != 0 {
+		t.Fatalf("busy calls = %d, want 0 (a canceled start must not keep polling the pane)", busyCalls)
+	}
+}
+
+// TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline proves the
+// ladder never spends more than startupNudgeRetryBudgetFraction of ctx's
+// remaining deadline on retries: a caller with a short startup_timeout must
+// keep the majority of its remaining budget for the steps after the nudge
+// (see launchOrchestration's warning-and-continue path), even when the busy
+// indicator never appears and every attempt comes back unconfirmed.
+//
+// send itself advances the fake clock a little on every call, standing in
+// for NudgeSession/submitEnterAndConfirm's real busy-indicator polling,
+// which is the dominant cost of an unconfirmed attempt in production — not
+// the backoff between attempts. A budget that only bounded the sum of the
+// backoffs (ignoring how long each send call actually took) would let a
+// handful of slow, always-unconfirmed sends alone blow through the ctx
+// deadline; this proves wall-clock time (as sendStartupNudgeWithRetry
+// observes it through startupNudgeNow) is what's actually bounded. The
+// clock is faked rather than really slept: the resourcecensus fixed_sleep
+// ratchet forbids new untagged time.Sleep call sites, and the fake makes
+// the bound deterministic instead of scheduler-dependent.
+func TestSendStartupNudgeWithRetry_BoundedByRemainingContextDeadline(t *testing.T) {
+	origBackoffs := startupNudgeRetryBackoffs
+	const perSendCost = 30 * time.Millisecond
+	startupNudgeRetryBackoffs = []time.Duration{perSendCost, perSendCost, perSendCost, perSendCost}
+	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+
+	// Fake clock, anchored at the real present so the ctx deadline below
+	// still lies in its future. Every fake send/sleep advances it.
+	start := time.Now()
+	now := start
+	origNow := startupNudgeNow
+	startupNudgeNow = func() time.Time { return now }
+	defer func() { startupNudgeNow = origNow }()
+
+	// Deliberately short so the ladder's own worst case (4 sends + 4
+	// backoffs, each perSendCost) is well over budget for this deadline, so
+	// the bound must cut retries short. The real ctx timer never fires —
+	// nothing here really sleeps — only its deadline value matters.
+	const ctxTimeout = 80 * time.Millisecond
+	ctx, cancel := context.WithDeadline(context.Background(), start.Add(ctxTimeout))
+	defer cancel()
+
+	calls := 0
+	send := func() error {
+		calls++
+		now = now.Add(perSendCost) // stand-in for submitEnterAndConfirm's real polling cost
+		return ErrNudgeSubmitUnconfirmed
+	}
+	var sleeps []time.Duration
+	err := sendStartupNudgeWithRetry(ctx, send, func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		now = now.Add(d)
+	}, nil)
+	elapsed := now.Sub(start)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+
+	budget := time.Duration(float64(ctxTimeout) * startupNudgeRetryBudgetFraction)
+	if elapsed > budget+perSendCost {
+		// Allow one perSendCost of slack: the mandatory first attempt always
+		// runs regardless of budget, so total elapsed = first attempt + the
+		// bounded retries.
+		t.Fatalf("elapsed = %v, want <= ~%v (budget %v + first attempt): ladder must leave room for the rest of startup", elapsed, budget+perSendCost, budget)
+	}
+	if calls >= len(startupNudgeRetryBackoffs)+1 {
+		t.Fatalf("calls = %d, want fewer than the full ladder (%d): the deadline should have cut retries short", calls, len(startupNudgeRetryBackoffs)+1)
+	}
+	if calls != len(sleeps)+1 {
+		t.Fatalf("calls = %d, want %d (one send per sleep plus the initial attempt)", calls, len(sleeps)+1)
+	}
+}
+
+// TestDoStartSession_RetriesUnconfirmedStartupNudge is the call-site
+// integration proof: doStartSession's Step 6 wires sendKeys through
+// sendStartupNudgeWithRetry, so a nudge that confirms on retry still lets the
+// session start succeed. Backoffs are shrunk to keep the test fast.
+func TestDoStartSession_RetriesUnconfirmedStartupNudge(t *testing.T) {
+	origBackoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond, time.Millisecond}
+	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		sendKeysErrs:     []error{ErrNudgeSubmitUnconfirmed, nil},
+	}
+	cfg := runtime.Config{
+		Command: "claude",
+		Nudge:   "start working",
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	nudgeCalls := callsByMethod(t, ops, "sendKeys", 2)
+	if nudgeCalls[0].command != "start working" || nudgeCalls[1].command != "start working" {
+		t.Fatalf("nudge calls = %#v, want both to carry the nudge text", nudgeCalls)
+	}
+}
+
+// TestDoStartSession_WarnsAfterExhaustingNudgeRetries proves the start still
+// SUCCEEDS once every retry attempt comes back unconfirmed: the startup
+// nudge has no retry-capable caller beyond this bounded ladder, so exhausting
+// it is a warning (the agent may sit with the nudge drafted-but-unsubmitted),
+// not a start failure — matching TestDoStartSessionReturnsNudgeDeliveryError's
+// "unconfirmed submit is not fatal even after exhausting retries" case, and
+// distinct from a genuine delivery error (also covered there), which is
+// fatal.
+func TestDoStartSession_WarnsAfterExhaustingNudgeRetries(t *testing.T) {
+	origBackoffs := startupNudgeRetryBackoffs
+	startupNudgeRetryBackoffs = []time.Duration{time.Millisecond}
+	defer func() { startupNudgeRetryBackoffs = origBackoffs }()
+
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		sendKeysErrs:     []error{ErrNudgeSubmitUnconfirmed, ErrNudgeSubmitUnconfirmed},
+	}
+	cfg := runtime.Config{
+		Command: "claude",
+		Nudge:   "start working",
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("doStartSession = %v, want nil: exhausting nudge retries must warn, not fail the start", err)
+	}
+	callsByMethod(t, ops, "sendKeys", 2)
 }
 
 func TestDoStartSession_AcceptStartupDialogsOnly(t *testing.T) {
@@ -2777,7 +3157,7 @@ func TestRecordStartCrashWritesDurableArtifact(t *testing.T) {
 	o := &tmuxStartOps{tm: tm, runtimeDir: dir}
 
 	path := o.recordStartCrash("mayor", "panic: startup failed\nPane is dead")
-	want := filepath.Join(dir, "sessions", "mayor", "start-stderr.log")
+	want := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(dir), "mayor", "start-stderr.log")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
 	}

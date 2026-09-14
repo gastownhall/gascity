@@ -294,6 +294,15 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				opts.MemberStores = []beads.Store{store}
 			}
 		case "retry-eval":
+			// A retry-eval validating a required artifact resolves the
+			// artifact worktree through the workflow's source bead or input
+			// convoy, which are work class; when the graph class relocated,
+			// supply the work leg as the member tail so that read crosses the
+			// class boundary. Route-gated exactly like the drain: on every
+			// other city graphStore IS store and the tail stays empty.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -306,6 +315,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			// Same cross-store required-artifact source resolution as
+			// retry-eval above.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -711,7 +725,11 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// older callers stamp ambiguous refs and the only reachable city
 			// from a control-dispatcher is the one it was launched in.
 			if name != "" && cityName != "" && name != cityName {
-				return nil, fmt.Errorf("city ref %q does not match this city %q", ref, cityName)
+				// Same config-drift class as the removed rig below: a city
+				// renamed mid-flight leaves in-flight workflows stamped with
+				// the old name, and restoring the name heals the finalize.
+				// Pending, not terminal.
+				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? finalizer retries until the name is restored)", dispatch.ErrControlPending, ref, cityName)
 			}
 			return openStoreAtForCity(cityPath, cityPath)
 		case strings.HasPrefix(ref, "rig:"):
@@ -728,7 +746,19 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				}
 				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
 			}
-			return nil, fmt.Errorf("rig %q not found in city config", name)
+			// A rig entry can be removed from city.toml while its workflows
+			// are still in flight. A hard error here falls into the cmd-layer
+			// quarantine catch-all, which terminally closes the finalizer AND
+			// settles the workflow root — stranding the domain parent open
+			// forever with no retry handle, even after the rig is re-added.
+			// Classify as pending instead: the finalizer stays open,
+			// gc.last_finalize_error records the reason, and the next sweep
+			// completes the finalize once the rig is restored via
+			// `gc rig add`. Fail loud, not terminal. Malformed refs (the
+			// default arm below) stay hard: no config change can ever make
+			// them resolve, and pending there would be unbounded retry of a
+			// permanent error.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
@@ -2080,7 +2110,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if err != nil {
 			return err
 		}
-		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
+		matches, skips, scans, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
 		if err != nil {
 			return err
 		}
@@ -2098,6 +2128,35 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		}
 		totalRoots, totalBeads, openCount := summarizeSourceWorkflowMatches(matches)
 		if totalRoots == 0 {
+			capability := assessZeroMatchSourceWorkflowScan(scans, sourceBeadID)
+			if capability.reason != "" {
+				_, _ = fmt.Fprintf(
+					stdout,
+					"result=unknown source_bead_id=%s matched_roots=0 reason=%s scanned_stores=%d",
+					sourceBeadID,
+					capability.reason,
+					capability.scannedStores,
+				)
+				if len(capability.blockingRoots) > 0 {
+					_, _ = fmt.Fprintf(stdout, " blocking_roots=%s", strings.Join(capability.blockingRoots, ","))
+				}
+				if len(capability.failedStores) > 0 {
+					_, _ = fmt.Fprintf(stdout, " failed_stores=%s", strings.Join(capability.failedStores, ","))
+				}
+				_, _ = fmt.Fprintln(stdout)
+				switch {
+				case capability.reason == "store-scan-failed":
+					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not scan every candidate store, so a zero match cannot be trusted: %s\n", strings.Join(capability.failedStores, ","))
+				case capability.err != nil:
+					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not establish whether unindexed source linkage exists: %v\n", capability.err)
+				case capability.reason == "source-bead-not-resident":
+					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not establish source bead residency in the stores it scanned\n")
+				default:
+					_, _ = fmt.Fprintf(stderr, "warning: delete-source could not establish a clean workflow scan because unindexed roots reference the source bead\n")
+				}
+				resultCode = 1
+				return nil
+			}
 			cleared := false
 			if apply {
 				var clearErr error
@@ -2232,7 +2291,7 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if target.storeView.store == nil || strings.TrimSpace(target.sourceBead.ID) == "" {
 			return fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
 		}
-		matches, skips, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
+		matches, skips, _, err := collectSourceWorkflowMatches(cfg, cityPath, sourceBeadID, target.storeRef)
 		if err != nil {
 			return err
 		}
@@ -2456,10 +2515,19 @@ func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) 
 	return restoreErr
 }
 
-func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
-	stores, skips, err := openSourceWorkflowStores(cfg, cityPath, sourceBeadID)
+// openSourceWorkflowStoresForCollect is the store-opening step
+// collectSourceWorkflowMatches uses. Tests override it to hand back a store
+// that opens successfully but fails a later List call: a shape production
+// code cannot otherwise construct, since a scan failure (as opposed to an
+// open failure, already covered by the openStore injection on
+// openSourceWorkflowStoresWith) happens inside the beads.Store implementation
+// itself, after openSourceWorkflowStores has already returned.
+var openSourceWorkflowStoresForCollect = openSourceWorkflowStores // residency:allow — test-injection seam, indirects the same call so a test can substitute the returned store; enumerates no new store
+
+func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, []sourceWorkflowStoreScan, error) {
+	stores, skips, err := openSourceWorkflowStoresForCollect(cfg, cityPath, sourceBeadID)
 	if err != nil {
-		return nil, skips, err
+		return nil, skips, nil, err
 	}
 	// A relocated class binding is not one of the directories the scan
 	// enumerated, and on a converged city it is where the live workflow graph
@@ -2467,36 +2535,42 @@ func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sour
 	// leave the running one.
 	stores, err = federateSweepViews(cityPath, stores)
 	if err != nil {
-		return nil, skips, err
+		return nil, skips, nil, err
 	}
 	return collectSourceWorkflowMatchesFromStores(cfg, cityPath, sourceBeadID, sourceStoreRef, stores, skips)
 }
 
-func collectSourceWorkflowMatchesFromStores(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, error) {
+func collectSourceWorkflowMatchesFromStores(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string, stores []convoyStoreView, skips []sourceWorkflowStoreSkip) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, []sourceWorkflowStoreScan, error) {
 	cityName := loadedCityName(cfg, cityPath)
 	if err := ensureSelectedSourceStorePresent(cfg, cityPath, cityName, sourceStoreRef, stores, skips); err != nil {
-		return nil, skips, err
+		return nil, skips, nil, err
 	}
 	c := &sourceWorkflowMatchCollector{
-		cfg:            cfg,
-		cityPath:       cityPath,
-		cityName:       cityName,
-		stores:         stores,
-		skips:          skips,
-		matchesByLabel: map[string]sourceWorkflowStoreMatch{},
-		visited:        map[string]struct{}{},
-		failedStores:   map[int]struct{}{},
+		cfg:             cfg,
+		cityPath:        cityPath,
+		cityName:        cityName,
+		stores:          stores,
+		skips:           skips,
+		matchesByLabel:  map[string]sourceWorkflowStoreMatch{},
+		visited:         map[string]struct{}{},
+		attemptedStores: map[int]struct{}{},
+		failedStores:    map[int]struct{}{},
 	}
 	if err := c.collect(sourceBeadID, sourceStoreRef); err != nil {
-		return nil, c.skips, err
+		return nil, c.skips, c.scans(), err
 	}
 	if !c.anyStoreScanned {
 		if c.firstScanErr != nil {
-			return nil, c.skips, c.firstScanErr
+			return nil, c.skips, c.scans(), c.firstScanErr
 		}
-		return nil, c.skips, fmt.Errorf("no source workflow stores were available to scan")
+		return nil, c.skips, c.scans(), fmt.Errorf("no source workflow stores were available to scan")
 	}
-	return c.matches(), c.skips, nil
+	return c.matches(), c.skips, c.scans(), nil
+}
+
+type sourceWorkflowStoreScan struct {
+	view   convoyStoreView
+	failed bool
 }
 
 // ensureSelectedSourceStorePresent fails when a specific source store was
@@ -2537,6 +2611,7 @@ type sourceWorkflowMatchCollector struct {
 
 	matchesByLabel  map[string]sourceWorkflowStoreMatch
 	visited         map[string]struct{}
+	attemptedStores map[int]struct{}
 	failedStores    map[int]struct{}
 	skips           []sourceWorkflowStoreSkip
 	anyStoreScanned bool
@@ -2592,6 +2667,7 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		return nil, nil
 	}
 	c.visited[visitKey] = struct{}{}
+	c.attemptedStores[index] = struct{}{}
 
 	roots, err := sourceworkflow.ListLiveRoots(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef)
 	if err != nil {
@@ -2678,6 +2754,110 @@ func (c *sourceWorkflowMatchCollector) matches() []sourceWorkflowStoreMatch {
 		matches = append(matches, match)
 	}
 	return matches
+}
+
+// scans returns the exact store views the collector attempted, including the
+// views whose walk failed. The zero-match capability check must use this
+// snapshot rather than reopening candidates after the fact.
+func (c *sourceWorkflowMatchCollector) scans() []sourceWorkflowStoreScan {
+	scans := make([]sourceWorkflowStoreScan, 0, len(c.attemptedStores))
+	for index, view := range c.stores {
+		if _, attempted := c.attemptedStores[index]; !attempted {
+			continue
+		}
+		_, failed := c.failedStores[index]
+		scans = append(scans, sourceWorkflowStoreScan{view: view, failed: failed})
+	}
+	return scans
+}
+
+type zeroMatchSourceWorkflowScan struct {
+	reason        string
+	blockingRoots []string
+	failedStores  []string
+	scannedStores int
+	err           error
+}
+
+// assessZeroMatchSourceWorkflowScan determines whether a zero from the
+// indexed source-workflow query is strong enough to declare already_clean.
+// It deliberately performs no matching and is called only after that query
+// returned no roots.
+func assessZeroMatchSourceWorkflowScan(scans []sourceWorkflowStoreScan, sourceBeadID string) zeroMatchSourceWorkflowScan {
+	sourceBeadID = sourceworkflow.NormalizeSourceBeadID(sourceBeadID)
+	successfulViews := make([]convoyStoreView, 0, len(scans))
+	failedPaths := make([]string, 0, len(scans))
+	sourceResident := false
+	for _, scan := range scans {
+		if scan.failed {
+			failedPaths = append(failedPaths, scan.view.path)
+			continue
+		}
+		if scan.view.store == nil {
+			continue
+		}
+		successfulViews = append(successfulViews, scan.view)
+		if _, err := scan.view.store.Get(sourceBeadID); err == nil {
+			sourceResident = true
+		}
+	}
+
+	// A failed scan means the zero from the indexed query cannot be trusted:
+	// the store that failed might have held the live root the query would
+	// otherwise have found. Report unknown even when every store that DID
+	// scan successfully came back clean — a scan we never completed is not
+	// evidence of "nothing to clean".
+	if len(failedPaths) > 0 {
+		slices.Sort(failedPaths)
+		return zeroMatchSourceWorkflowScan{
+			reason:        "store-scan-failed",
+			failedStores:  failedPaths,
+			scannedStores: len(successfulViews),
+		}
+	}
+
+	anyStoreScanned := len(successfulViews) > 0
+	if !anyStoreScanned || !sourceResident {
+		return zeroMatchSourceWorkflowScan{
+			reason:        "source-bead-not-resident",
+			scannedStores: len(successfulViews),
+		}
+	}
+
+	blockingSet := make(map[string]struct{})
+	for _, view := range successfulViews {
+		roots, err := beads.HandlesFor(view.store).Live.List(beads.ListQuery{
+			Metadata: map[string]string{
+				beadmeta.FormulaVarPrefix + graphv2.LegacyIssueVar: sourceBeadID,
+			},
+		})
+		if err != nil {
+			return zeroMatchSourceWorkflowScan{
+				reason:        "unindexed-source-linkage",
+				scannedStores: len(successfulViews),
+				err:           err,
+			}
+		}
+		for _, root := range roots {
+			if sourceworkflow.IsWorkflowRoot(root) {
+				blockingSet[root.ID] = struct{}{}
+			}
+		}
+	}
+	if len(blockingSet) == 0 {
+		return zeroMatchSourceWorkflowScan{scannedStores: len(successfulViews)}
+	}
+
+	blockingRoots := make([]string, 0, len(blockingSet))
+	for rootID := range blockingSet {
+		blockingRoots = append(blockingRoots, rootID)
+	}
+	slices.Sort(blockingRoots)
+	return zeroMatchSourceWorkflowScan{
+		reason:        "unindexed-source-linkage",
+		blockingRoots: blockingRoots,
+		scannedStores: len(successfulViews),
+	}
 }
 
 func mergeSourceWorkflowMatch(matches map[string]sourceWorkflowStoreMatch, next sourceWorkflowStoreMatch) {

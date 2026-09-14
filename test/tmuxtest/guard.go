@@ -25,6 +25,16 @@ import (
 	"time"
 )
 
+// tmuxGuardCommandTimeout bounds every tmux client invocation this package
+// aims at a server it may already have wedged -- the Guard's own kill-server
+// calls, the orphan sweep's query/kill pair, and the sweep regression test's
+// cleanup -- so a wedged-but-accepting server cannot hang a suite that is
+// only trying to clean up after itself. TestEveryKillServerCallIsBounded
+// enforces that for kill-server. Guard.HasSession is deliberately outside
+// this rule: it queries a server the caller believes is healthy, and its
+// timeout is the caller's own test deadline. cmd/gc's leak guard bounds the
+// identical kill-server call for the same stated reason
+// (cmd/gc/tmux_leak_guard_test.go, tmuxGuardKillTimeout).
 const tmuxGuardCommandTimeout = 2 * time.Second
 
 const tmuxSiblingSocketStaleAfter = 24 * time.Hour
@@ -146,7 +156,7 @@ func KillAllTestSessions(t testing.TB) {
 	t.Helper()
 	var cleaned int
 	for _, socketPath := range listTestSocketPaths() {
-		if err := killTestSocketPath(socketPath); err == nil {
+		if err := killTmuxServerAtSocket(socketPath); err == nil {
 			cleaned++
 		}
 	}
@@ -172,10 +182,21 @@ func killTestSocketServer(socketName string) error {
 	return exec.CommandContext(ctx, "tmux", args...).Run()
 }
 
-func killTestSocketPath(socketPath string) error {
+// killTmuxServerAtSocket issues a bounded "tmux -S <socketPath> kill-server"
+// and reports why it failed, so a caller that surfaces the failure can name
+// the server it could not shut down. The server exiting is asynchronous and
+// is not waited for here; see the orphan sweep's reaper for that.
+func killTmuxServerAtSocket(socketPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), tmuxGuardCommandTimeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").Run()
+	out, err := exec.CommandContext(ctx, "tmux", "-S", socketPath, "kill-server").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("tmux -S %s kill-server: %w", socketPath, ctxErr)
+	}
+	return fmt.Errorf("tmux -S %s kill-server: %w (%s)", socketPath, err, strings.TrimSpace(string(out)))
 }
 
 // listTestSocketPaths returns tmux socket paths for orphaned gctest cities.

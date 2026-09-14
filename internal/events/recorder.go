@@ -125,7 +125,9 @@ func WithArchiveRetainAge(d time.Duration) FileRecorderOption {
 // .tmp path. What it skips is the sweep's RECOVERY WORK — a directory pass that
 // gzips and renames the files a crash stranded — not the open's directory read,
 // which happens either way because ReadLatestSeq consults the archives to
-// continue the sequence.
+// continue the sequence. As of the NUL-tail repair it also skips
+// truncateNulPaddedTail, so a transient per-open recorder does not repair an
+// unclean-shutdown tail; the long-lived recorder does that on its next open.
 //
 // The long-lived recorder keeps the sweep, so crash recovery of orphaned
 // rotating files is unaffected, and stranded rotating files stay readable
@@ -184,8 +186,11 @@ type RotationResult struct {
 // renamed to the seq-stamped convention using the migration time as
 // their retention timestamp, events.jsonl.rotating-* files left from a
 // crashed rotation are gzipped into canonical archive names, and
-// *.gz.tmp files are removed. Sweep failures are logged to stderr and
-// do not block the recorder from opening.
+// *.gz.tmp files are removed. The active log itself is also checked for
+// a NUL-padded tail left by an unclean shutdown (see
+// truncateNulPaddedTail) and truncated back to the last complete line
+// before appends resume. Sweep failures are logged to stderr and do not
+// block the recorder from opening.
 func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) (*FileRecorder, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating event log directory: %w", err)
@@ -208,6 +213,9 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 	if !r.skipSweep {
 		if err := reapOrphanedRotatingFiles(filepath.Dir(path), stderr); err != nil {
 			fmt.Fprintf(stderr, "events: rotation: orphan sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		if err := truncateNulPaddedTail(path, stderr); err != nil {
+			fmt.Fprintf(stderr, "events: rotation: NUL-tail check: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 	}
 
