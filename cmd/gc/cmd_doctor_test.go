@@ -1069,3 +1069,58 @@ func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
 		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
 	}
 }
+
+// TestWriteDoctorJSONOKReflectsBlockingFailed pins ok to the same gate the
+// plain-text/exit-code path already uses (BlockingFailed == 0) -- an
+// advisory-only failure must not flip ok to false, and a blocking failure
+// must not leave it stuck at the JSON envelope's hardcoded default of true.
+func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
+	tests := []struct {
+		name   string
+		report *doctor.Report
+		wantOK bool
+	}{
+		{
+			name:   "clean report",
+			report: &doctor.Report{},
+			wantOK: true,
+		},
+		{
+			name: "advisory failure only",
+			report: &doctor.Report{
+				Failed: 1,
+				Results: []*doctor.CheckResult{
+					{Name: "advisory", Status: doctor.StatusError, Severity: doctor.SeverityAdvisory, Message: "advisory issue"},
+				},
+			},
+			wantOK: true,
+		},
+		{
+			name: "blocking failure",
+			report: &doctor.Report{
+				Failed:         1,
+				BlockingFailed: 1,
+				Results: []*doctor.CheckResult{
+					{Name: "blocking", Status: doctor.StatusError, Severity: doctor.SeverityBlocking, Message: "blocking issue"},
+				},
+			},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeDoctorJSON(&buf, tt.report); err != nil {
+				t.Fatalf("writeDoctorJSON: %v", err)
+			}
+			var decoded doctorJSONReport
+			if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode doctor JSON: %v; out=%q", err, buf.String())
+			}
+			if decoded.OK != tt.wantOK {
+				t.Fatalf("ok = %v, want %v; blocking_failed=%d out=%s", decoded.OK, tt.wantOK, tt.report.BlockingFailed, buf.String())
+			}
+		})
+	}
+}
