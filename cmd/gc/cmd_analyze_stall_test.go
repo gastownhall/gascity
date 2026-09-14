@@ -13,10 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
-// mockStallBeadEvent builds a bead.created/bead.updated/bead.closed event
-// carrying a bead snapshot payload, matching beads.DecodeBeadEventPayload's
-// expected shape.
-func mockStallBeadEvent(t *testing.T, seq uint64, eventType string, ts time.Time, b beads.Bead) events.Event {
+// mockStallBeadEvent builds a bead.created event carrying a bead snapshot
+// payload, matching beads.DecodeBeadEventPayload's expected shape.
+func mockStallBeadEvent(t *testing.T, seq uint64, ts time.Time, b beads.Bead) events.Event {
 	t.Helper()
 	payload, err := json.Marshal(b)
 	if err != nil {
@@ -24,7 +23,7 @@ func mockStallBeadEvent(t *testing.T, seq uint64, eventType string, ts time.Time
 	}
 	return events.Event{
 		Seq:     seq,
-		Type:    eventType,
+		Type:    events.BeadCreated,
 		Ts:      ts,
 		Subject: b.ID,
 		Payload: payload,
@@ -35,7 +34,7 @@ func TestRunAnalyzeStall_TableOutput(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 	es := []events.Event{
-		mockStallBeadEvent(t, 1, events.BeadCreated, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-2"}),
+		mockStallBeadEvent(t, 1, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-2"}),
 	}
 	writeEventsFile(t, dir, es)
 
@@ -61,7 +60,7 @@ func TestRunAnalyzeStall_JSONOutput(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 	es := []events.Event{
-		mockStallBeadEvent(t, 1, events.BeadCreated, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-2"}),
+		mockStallBeadEvent(t, 1, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-2"}),
 	}
 	writeEventsFile(t, dir, es)
 
@@ -96,8 +95,8 @@ func TestRunAnalyzeStall_PoolFilter(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().UTC()
 	es := []events.Event{
-		mockStallBeadEvent(t, 1, events.BeadCreated, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-1"}),
-		mockStallBeadEvent(t, 2, events.BeadCreated, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-2", Status: "in_progress", Assignee: "mechanic-1"}),
+		mockStallBeadEvent(t, 1, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-1", Status: "in_progress", Assignee: "polecat-1"}),
+		mockStallBeadEvent(t, 2, now.Add(-30*time.Minute), beads.Bead{ID: "gcg-2", Status: "in_progress", Assignee: "mechanic-1"}),
 	}
 	writeEventsFile(t, dir, es)
 
