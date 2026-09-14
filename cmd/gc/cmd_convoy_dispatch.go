@@ -2492,7 +2492,7 @@ func restoreWorkflowDeleteDeps(store beads.Store, downDeps, upDeps []beads.Dep) 
 // open failure, already covered by the openStore injection on
 // openSourceWorkflowStoresWith) happens inside the beads.Store implementation
 // itself, after openSourceWorkflowStores has already returned.
-var openSourceWorkflowStoresForCollect = openSourceWorkflowStores
+var openSourceWorkflowStoresForCollect = openSourceWorkflowStores // residency:allow — test-injection seam, indirects the same call so a test can substitute the returned store; enumerates no new store
 
 func collectSourceWorkflowMatches(cfg *config.City, cityPath, sourceBeadID, sourceStoreRef string) ([]sourceWorkflowStoreMatch, []sourceWorkflowStoreSkip, []sourceWorkflowStoreScan, error) {
 	stores, skips, err := openSourceWorkflowStoresForCollect(cfg, cityPath, sourceBeadID)
