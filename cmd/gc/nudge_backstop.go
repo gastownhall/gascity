@@ -16,8 +16,8 @@ import (
 // nudge content, and persisted-metadata shape; the engine drives only the
 // shared timing decision and the actual runtime.Provider.Nudge delivery.
 //
-// poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
-// predicates: initial trigger delivery and later graph-v2 successor delivery.
+// Each backstop lane implements this interface and registers through its own
+// runNudgeBackstop call site; those call sites are the current list of lanes.
 type backstopPredicate interface {
 	// governs reports whether this predicate applies to the session bead at
 	// all.
