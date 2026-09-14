@@ -855,7 +855,7 @@ func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
 
 // TestReadFilteredTailMaxScanBytesBoundsBackwardWalk is the regression for
 // #4418: a Filter.Type that never matches near EOF (the common case for a
-// rare/optional event type) otherwise forces readFilteredTailFromFile to
+// rare/optional event type) otherwise forces readFilteredTailFrom to
 // walk the entire file backward, at the same cost as an unfiltered forward
 // scan. MaxScanBytes caps that walk; "not found within the window" must be
 // the result rather than an unbounded scan.
