@@ -157,6 +157,9 @@ type AgentPatch struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// MaxStartFailures overrides the consecutive failed-start count that parks
+	// a routed work bead (see Agent.MaxStartFailures).
+	MaxStartFailures *int `toml:"max_start_failures,omitempty"`
 	// ScaleCheck overrides the command template whose output reports new
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
@@ -671,6 +674,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.MinActiveSessions != nil {
 		a.MinActiveSessions = p.MinActiveSessions
+	}
+	if p.MaxStartFailures != nil {
+		a.MaxStartFailures = p.MaxStartFailures
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck

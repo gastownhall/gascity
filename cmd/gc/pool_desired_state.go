@@ -238,7 +238,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -261,7 +261,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -275,6 +275,25 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
+// ComputePoolDesiredStatesDeferring is the production entry: deferredTriggers
+// (the work bead ids the start gate held back this build,
+// workStartDeferralPass.deferred) keeps a session already minted for such a
+// bead out of the in-flight tier, so it is neither reused as spent new demand
+// nor started for the bead (pool_start_backoff.go). The other entries pass nil
+// and are the test surface.
+func ComputePoolDesiredStatesDeferring(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	deferredTriggers map[string]struct{},
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, deferredTriggers, decisionTime, trace)
+}
+
 // ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
 // caller-supplied decision time while preserving per-work demand provenance.
 func ComputePoolDesiredStatesWithDemandTracedAt(
@@ -286,7 +305,7 @@ func ComputePoolDesiredStatesWithDemandTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, decisionTime, trace)
 }
 
 func computePoolDesiredStates(
@@ -297,7 +316,7 @@ func computePoolDesiredStates(
 	scaleCheckDemand map[string]scaleCheckDemand,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, nil, time.Time{}, trace)
 }
 
 func computePoolDesiredStatesAt(
@@ -306,6 +325,7 @@ func computePoolDesiredStatesAt(
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
+	deferredTriggers map[string]struct{},
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
@@ -496,7 +516,7 @@ func computePoolDesiredStatesAt(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
-	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime, deferredTriggers)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
 		if info.ID == "" {
@@ -763,6 +783,7 @@ func poolNewDemandRequests(
 	sessionInfos []sessionpkg.Info,
 	resumeSessionBeadIDs map[string]struct{},
 	decisionTime time.Time,
+	deferredTriggers map[string]struct{},
 ) (map[string][]SessionRequest, map[string][]SessionRequest) {
 	protected := make(map[string][]SessionRequest)
 	inFlight := make(map[string][]SessionRequest)
@@ -793,6 +814,11 @@ func poolNewDemandRequests(
 				continue
 			}
 			if normalizedSessionTemplateInfo(sb, cfg) != template {
+				continue
+			}
+			// A session minted for a bead the start gate holds back is not spent
+			// demand: reusing it would start it for that bead (pool_start_backoff.go).
+			if _, deferred := deferredTriggers[strings.TrimSpace(sb.TriggerBeadID)]; deferred {
 				continue
 			}
 			req := SessionRequest{

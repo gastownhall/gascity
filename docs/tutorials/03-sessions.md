@@ -256,6 +256,27 @@ counted compaction segments. The HTTP API's `tail` query parameter still counts
 compaction segments.
 </Accordion>
 
+## When a pool session cannot start
+
+A routed work bead whose session start keeps failing (a `pre_start` that exits
+non-zero, a provider error) is not restarted every tick. Each failed start is
+recorded on the work bead (`gc.start_failures`, `gc.start_failure` with the
+last error line, `gc.start_backoff_until`) and the pool waits 10s after the
+first failure, doubling per failure up to 5m, before starting it again; one
+confirmed start clears the count. After `max_start_failures` consecutive
+failures (an agent key, default 5, `0` never parks) the bead is **parked**:
+`gc.parked_at`, `gc.park_reason` and `gc.park_failures` are written, the pool
+stops starting sessions for it, its status, assignee and route are untouched,
+and one mail goes to the agent named by `[session] park_alert_to` (for example
+`park_alert_to = "mayor"`; there is no default). The park never depends on
+that mail: an empty or failing target stamps `gc.park_mail_failed` on the bead
+and logs one line. `gc bd show <id>` prints the keys. Nothing unparks a bead
+automatically; re-dispatch it with `gc sling --reassign <agent> <id>`, which
+clears the park and the count before routing, or release it in place with
+`gc bd update <id> --unset-metadata gc.parked_at --unset-metadata gc.park_reason
+--unset-metadata gc.park_failures --unset-metadata gc.park_mail_failed`. A bead
+held by a configured named session is not covered: only pool starts are counted.
+
 ## What's next
 
 You've created sessions on demand, kept the mayor alive with an always-on

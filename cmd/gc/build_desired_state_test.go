@@ -912,7 +912,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -973,7 +973,7 @@ func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}
@@ -1017,7 +1017,7 @@ func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *t
 		template: template,
 		storeKey: "rig:hello-world",
 		store:    store,
-	}})
+	}}, newWorkStartDeferralPass(time.Now(), nil))
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
 	}

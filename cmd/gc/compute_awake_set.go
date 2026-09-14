@@ -22,18 +22,19 @@ type AwakeInput struct {
 	Agents                   []AwakeAgent
 	NamedSessions            []AwakeNamedSession
 	SessionBeads             []AwakeSessionBead
-	WorkBeads                []AwakeWorkBead // in_progress assigned work plus ready open assigned work
-	ScaleCheckCounts         map[string]int  // agent template → scale_check count
-	NamedSessionDemand       map[string]bool // named-session identity → routed/assigned work demand
-	NamedSessionRoutedDemand map[string]bool // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
-	NamedSessionWorkQ        map[string]bool // named-session identity → bridge-carried work_query demand
-	WorkSet                  map[string]bool // agent template → work_query found pending work
-	RunningSessions          map[string]bool // session name → tmux exists
-	AttachedSessions         map[string]bool // session name → user attached
-	PendingSessions          map[string]bool // session name → pending interaction
-	ReadyWaitSet             map[string]bool // session bead ID → durable wait is ready
-	ChatIdleTimeout          time.Duration   // global idle timeout for manual/chat sessions (0 = disabled)
-	ManualGracePeriod        time.Duration   // grace period before manual sessions can be idle-slept (0 = disabled)
+	WorkBeads                []AwakeWorkBead     // in_progress assigned work plus ready open assigned work
+	ScaleCheckCounts         map[string]int      // agent template → scale_check count
+	NamedSessionDemand       map[string]bool     // named-session identity → routed/assigned work demand
+	NamedSessionRoutedDemand map[string]bool     // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
+	NamedSessionWorkQ        map[string]bool     // named-session identity → bridge-carried work_query demand
+	WorkSet                  map[string]bool     // agent template → work_query found pending work
+	RunningSessions          map[string]bool     // session name → tmux exists
+	AttachedSessions         map[string]bool     // session name → user attached
+	PendingSessions          map[string]bool     // session name → pending interaction
+	ReadyWaitSet             map[string]bool     // session bead ID → durable wait is ready
+	DeferredTriggers         map[string]struct{} // work bead ID → the pool start gate holds it back this tick (parked / backed off)
+	ChatIdleTimeout          time.Duration       // global idle timeout for manual/chat sessions (0 = disabled)
+	ManualGracePeriod        time.Duration       // grace period before manual sessions can be idle-slept (0 = disabled)
 	Now                      time.Time
 }
 
@@ -78,6 +79,7 @@ type AwakeSessionBead struct {
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
 	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
+	TriggerBeadID             string    // work bead the session was minted for (gc.trigger_bead_id)
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -228,7 +230,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if !ok || agent.Suspended {
 			continue
 		}
-		active := collectActiveBeads(input.SessionBeads, template, input.Now)
+		active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now))
 		filled := countAssignedScaleSlots(input.SessionBeads, input.WorkBeads, input.NamedSessions, template)
 		for _, bead := range active {
 			if filled >= count {
@@ -240,7 +242,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			desired[bead.SessionName] = "scaled:demand"
 			filled++
 		}
-		creating := collectCreatingBeads(input.SessionBeads, template)
+		creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template))
 		for _, bead := range creating {
 			if filled >= count {
 				break
@@ -272,11 +274,11 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			continue // named sessions are handled in the named-session pass
 		}
 		// collectActiveBeads already excludes DependencyOnly and Drained
-		if active := collectActiveBeads(input.SessionBeads, template, input.Now); len(active) > 0 {
+		if active := input.excludeDeferredSessions(collectActiveBeads(input.SessionBeads, template, input.Now)); len(active) > 0 {
 			desired[active[0].SessionName] = "work-query"
 			continue
 		}
-		if creating := collectCreatingBeads(input.SessionBeads, template); len(creating) > 0 {
+		if creating := input.excludeDeferredSessions(collectCreatingBeads(input.SessionBeads, template)); len(creating) > 0 {
 			desired[creating[0].SessionName] = "work-query"
 		}
 	}
@@ -365,7 +367,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		if covered >= agent.MinActiveSessions {
 			continue
 		}
-		for _, bead := range cityStopPoolBeads(input.SessionBeads, template) {
+		for _, bead := range input.excludeDeferredSessions(cityStopPoolBeads(input.SessionBeads, template)) {
 			if covered >= agent.MinActiveSessions {
 				break
 			}
@@ -696,6 +698,37 @@ func isNamedSessionTemplate(named []AwakeNamedSession, template string) bool {
 		}
 	}
 	return false
+}
+
+// deferredSession reports whether the pool start gate holds back the work
+// bead a session was minted for this tick (parked, or inside its backoff): such
+// a session is not scaled demand, not a work-query wake and not min-active
+// capacity for its template, so a surviving creating session for a parked bead
+// is not re-woken while a sibling waits (codex r3 finding 5,
+// pool_start_backoff.go). A pending-create claim and an explicit wake stand:
+// the first is a start already minted, the second an operator's hand.
+func (input AwakeInput) deferredSession(b AwakeSessionBead) bool {
+	if len(input.DeferredTriggers) == 0 || b.TriggerBeadID == "" {
+		return false
+	}
+	_, deferred := input.DeferredTriggers[b.TriggerBeadID]
+	return deferred
+}
+
+// excludeDeferredSessions drops the deferred sessions from a candidate list,
+// keeping the collector's order.
+func (input AwakeInput) excludeDeferredSessions(candidates []AwakeSessionBead) []AwakeSessionBead {
+	if len(input.DeferredTriggers) == 0 {
+		return candidates
+	}
+	kept := candidates[:0:0]
+	for _, b := range candidates {
+		if input.deferredSession(b) {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	return kept
 }
 
 func collectActiveBeads(beads []AwakeSessionBead, template string, now time.Time) []AwakeSessionBead {

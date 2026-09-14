@@ -1058,12 +1058,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
+	startDeferral := newWorkStartDeferralPass(poolDecisionTime, nil)
+	_, poolWorkBeads := poolDemandAssignedWork(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, startDeferral)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, poolDecisionTime)),
+		PoolDesiredCounts(ComputePoolDesiredStatesDeferring(
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, startDeferral.deferred, poolDecisionTime, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1083,6 +1084,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		withAssignedWorkStores(awakeAssignedStores),
+		withWorkStartFailurePolicy(newWorkStartFailurePolicy(cfg, oneShotStore, rigStores, defaultMailProvider(cityPath), cfg.Session.ParkAlertTo)),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.

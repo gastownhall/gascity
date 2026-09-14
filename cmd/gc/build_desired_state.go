@@ -91,6 +91,11 @@ type DesiredStateResult struct {
 	// assignee-only; the idle-claim backstop uses it to re-nudge an already
 	// running pool slot after that slot is rebound to newly routed work.
 	ReadyUnassignedRoutedWorkBeads []beads.Bead
+	// PoolStartRecheckAt is the earliest start-backoff deadline the pool
+	// demand gate held a row back to this build (zero when none): the cached
+	// demand snapshot must be rebuilt at that instant, because the deadline
+	// passing writes nothing a fingerprint could notice (pool_start_backoff.go).
+	PoolStartRecheckAt time.Time
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
@@ -774,6 +779,9 @@ func buildDesiredStateWithSessionBeadsAt(
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
 	assignedReadyCache := newReadyDemandCache()
+	// One start-deferral pass per build: the instant every demand row is judged
+	// against (never beaconTime, which is captured once at supervisor start).
+	startDeferral := newWorkStartDeferralPass(time.Now(), trace)
 	if store != nil {
 		subPhaseStart = time.Now()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
@@ -850,7 +858,9 @@ func buildDesiredStateWithSessionBeadsAt(
 		// an explicit-handle CachingStore returns its memoized pre-write live
 		// snapshot as the authoritative demand read.
 		demandReadyCache := newReadyDemandCache()
-		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, unassignedRoutedBeads)
+		// The dispatcher flag reads the same gate as the two demand tiers: a
+		// parked or backed-off control bead is not demand for a dispatcher seat.
+		controlDispatcherOpenDemand := openControlDispatcherDemand(cfg, startDeferral.filter(unassignedRoutedBeads))
 		recordDemandSubPhase(trace, "demand_snapshot.collect_unassigned_routed", subPhaseStart, map[string]any{
 			"beads": len(unassignedRoutedBeads),
 		})
@@ -861,7 +871,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		})
 		if len(defaultScaleTargets) > 0 {
 			subPhaseStart = time.Now()
-			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, demandReadyCache)
+			defaultCounts, defaultDemand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, defaultScaleTargets, startDeferral, demandReadyCache)
 			recordDemandSubPhase(trace, "demand_snapshot.default_scale_demand", subPhaseStart, map[string]any{
 				"targets": len(defaultScaleTargets),
 			})
@@ -941,19 +951,11 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-		bp.assignedWorkBeads = poolWorkBeads
+		poolOwnedWorkBeads, poolWorkBeads := poolDemandAssignedWork(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs, startDeferral)
+		bp.assignedWorkBeads = poolOwnedWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
-			cfg,
-			poolWorkBeads,
-			sessionBeads.OpenInfos(),
-			scaleCheckCounts,
-			scaleCheckDemandByTemplate,
-			poolDecisionTime,
-			trace,
-		)
+		poolDesiredStates := ComputePoolDesiredStatesDeferring(cfg, poolWorkBeads, sessionBeads.OpenInfos(), scaleCheckCounts, scaleCheckDemandByTemplate, startDeferral.deferred, poolDecisionTime, trace)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)
 		for _, poolState := range poolDesiredStates {
 			cfgAgent := findAgentByTemplate(cfg, poolState.Template)
@@ -1187,6 +1189,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
+		PoolStartRecheckAt:                 startDeferral.recheckAt,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1882,11 +1885,11 @@ func defaultScaleCheckTargetForAgent(
 // that need normalization should call defaultScaleCheckCountsAndDemand
 // directly with a real *config.City.
 func defaultScaleCheckCounts(targets []defaultScaleCheckTarget) (map[string]int, map[string]bool, []error) {
-	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, targets)
+	counts, _, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, targets, newWorkStartDeferralPass(time.Now(), nil))
 	return counts, partialTemplates, errs
 }
 
-func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
+func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCheckTarget, startDeferral *workStartDeferralPass, caches ...*readyDemandCache) (map[string]int, map[string]scaleCheckDemand, map[string]bool, []error) {
 	cache := optionalReadyDemandCache(caches)
 	counts := make(map[string]int, len(targets))
 	demand := make(map[string]scaleCheckDemand, len(targets))
@@ -1962,6 +1965,11 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			// drains, every tick, forever. See demand_serve_predicate.go.
 			template, servable := demandServableForTemplates(cfg, b, group.templates)
 			if !servable {
+				continue
+			}
+			// A parked or backed-off row is not demand this tick: neither counted
+			// nor listed, so no seat is minted for it (pool_start_backoff.go).
+			if startDeferral.skip(b, template) {
 				continue
 			}
 			seen := countedBeads[template]

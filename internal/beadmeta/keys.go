@@ -197,6 +197,10 @@ const (
 	OutputJSONRequiredMetadataKey       = "gc.output_json_required"
 	ParentBeadIDMetadataKey             = "gc.parent_bead_id"
 	ParentConvoyIDMetadataKey           = "gc.parent_convoy_id"
+	ParkFailuresMetadataKey             = "gc.park_failures"
+	ParkMailFailedMetadataKey           = "gc.park_mail_failed"
+	ParkReasonMetadataKey               = "gc.park_reason"
+	ParkedAtMetadataKey                 = "gc.parked_at"
 	PartialFragmentMetadataKey          = "gc.partial_fragment"
 	PartialRetryMetadataKey             = "gc.partial_retry"
 	PackMetadataKey                     = "gc.pack"
@@ -227,6 +231,10 @@ const (
 	ScopeRefMetadataKey                 = "gc.scope_ref"
 	ScopeRoleMetadataKey                = "gc.scope_role"
 	SessionAffinityMetadataKey          = "gc.session_affinity"
+	StartBackoffUntilMetadataKey        = "gc.start_backoff_until"
+	StartFailedAtMetadataKey            = "gc.start_failed_at"
+	StartFailureMetadataKey             = "gc.start_failure"
+	StartFailuresMetadataKey            = "gc.start_failures"
 	SessionIDMetadataKey                = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
@@ -527,6 +535,10 @@ var KnownMetadataKeys = []string{
 	OutputJSONRequiredMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
+	ParkFailuresMetadataKey,
+	ParkMailFailedMetadataKey,
+	ParkReasonMetadataKey,
+	ParkedAtMetadataKey,
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
 	PackMetadataKey,
@@ -559,6 +571,10 @@ var KnownMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
 	SessionIDCamelMetadataKey,
+	StartBackoffUntilMetadataKey,
+	StartFailedAtMetadataKey,
+	StartFailureMetadataKey,
+	StartFailuresMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
 	SourceBeadIDMetadataKey,

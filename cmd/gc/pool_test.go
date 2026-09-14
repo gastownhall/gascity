@@ -830,6 +830,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Env:                          map[string]string{"K": "V"},
 		MaxActiveSessions:            intPtr(5),
 		MinActiveSessions:            intPtr(1),
+		MaxStartFailures:             intPtr(3),
 		ScaleCheck:                   "echo 3",
 		WorkQuery:                    "bd ready",
 		SlingQuery:                   "bd update {}",

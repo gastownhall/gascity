@@ -219,6 +219,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		EnvRemove:               []string{"REMOVE_ME"},
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
+		MaxStartFailures:        intVal(3),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}
@@ -376,6 +377,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		MCPAppend:               []string{"tmux-helper"},
 		MaxActiveSessions:       intVal(5),
 		MinActiveSessions:       intVal(1),
+		MaxStartFailures:        intVal(3),
 		ScaleCheck:              strVal("echo 3"),
 		OptionDefaults:          map[string]string{"model": "sonnet"},
 	}

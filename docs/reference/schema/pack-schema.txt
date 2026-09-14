@@ -145,6 +145,11 @@
           "type": "integer",
           "description": "MinActiveSessions is the minimum number of sessions to keep alive.\nAgent-level only. Counts against rig/workspace caps. Replaces pool.min.\nThis controls pool sessions independently of [[named_session]]\nmode=\"always\"; both produce sessions, and gc doctor reports accidental\ncombinations."
         },
+        "max_start_failures": {
+          "type": "integer",
+          "description": "MaxStartFailures is the number of consecutive failed session starts for\none routed work bead after which the pool PARKS the bead (writes\ngc.parked_at on it, stops starting sessions for it, sends one mail to\n[session] park_alert_to). Each failed start before that backs the bead\noff: 10s after the first, doubling per failure, capped at 5m. Nil means\nthe default of 5; 0 never parks (the backoff still applies); negative is\nrefused. A parked bead is released by hand: `gc sling --reassign` or\n`gc bd update --unset-metadata gc.parked_at ...`.",
+          "default": 5
+        },
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
@@ -645,6 +650,10 @@
         "min_active_sessions": {
           "type": "integer",
           "description": "MinActiveSessions overrides the minimum number of sessions to keep alive."
+        },
+        "max_start_failures": {
+          "type": "integer",
+          "description": "MaxStartFailures overrides the consecutive failed-start count that parks\na routed work bead (see Agent.MaxStartFailures)."
         },
         "scale_check": {
           "type": "string",

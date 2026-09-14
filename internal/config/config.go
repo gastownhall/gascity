@@ -793,6 +793,9 @@ type AgentOverride struct {
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// MaxStartFailures overrides the consecutive failed-start count that parks
+	// a routed work bead (see Agent.MaxStartFailures).
+	MaxStartFailures *int `toml:"max_start_failures,omitempty"`
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
@@ -1579,6 +1582,13 @@ type SessionConfig struct {
 	// setup_timeout of silence. Duration string. Empty (the default) keeps
 	// the fixed setup_timeout deadline.
 	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
+	// ParkAlertTo is the agent identity (as `gc mail send` addresses it, e.g.
+	// "mayor") that receives ONE mail each time the pool parks a routed work
+	// bead after max_start_failures consecutive failed starts. No default: when
+	// empty, or when the send fails, the bead is parked all the same and the
+	// park stamps gc.park_mail_failed on it plus one loud supervisor-log line.
+	// The park never depends on the mail.
+	ParkAlertTo string `toml:"park_alert_to,omitempty"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
@@ -3280,6 +3290,15 @@ type Agent struct {
 	// mode="always"; both produce sessions, and gc doctor reports accidental
 	// combinations.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
+	// MaxStartFailures is the number of consecutive failed session starts for
+	// one routed work bead after which the pool PARKS the bead (writes
+	// gc.parked_at on it, stops starting sessions for it, sends one mail to
+	// [session] park_alert_to). Each failed start before that backs the bead
+	// off: 10s after the first, doubling per failure, capped at 5m. Nil means
+	// the default of 5; 0 never parks (the backoff still applies); negative is
+	// refused. A parked bead is released by hand: `gc sling --reassign` or
+	// `gc bd update --unset-metadata gc.parked_at ...`.
+	MaxStartFailures *int `toml:"max_start_failures,omitempty" jsonschema:"default=5"`
 	// ScaleCheck is a shell command template whose output reports new
 	// unassigned session demand. In bead-backed reconciliation this is
 	// additive: assigned work is resumed separately, and ScaleCheck reports
@@ -3568,6 +3587,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.MaxStartFailures = copyIntPtr(a.MaxStartFailures)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
@@ -4126,6 +4146,9 @@ func ValidateAgents(agents []Agent) error {
 			*a.MaxActiveSessions >= 0 && *a.MinActiveSessions > *a.MaxActiveSessions {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
+		}
+		if a.MaxStartFailures != nil && *a.MaxStartFailures < 0 {
+			return fmt.Errorf("agent %q: max_start_failures must be >= 0 (0 never parks)", a.Name)
 		}
 	}
 
@@ -4761,4 +4784,20 @@ func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
 	}
 	// Neither set: leave FormulaV2 nil so it stays default-on (via
 	// FormulaV2Enabled) and is omitted from any generated/round-tripped config.
+}
+
+// DefaultMaxStartFailures is the consecutive failed-start count that parks a
+// routed work bead when an agent sets no max_start_failures.
+const DefaultMaxStartFailures = 5
+
+// EffectiveMaxStartFailures returns the agent's park threshold: the configured
+// max_start_failures, or DefaultMaxStartFailures when unset. 0 means never park.
+func (a *Agent) EffectiveMaxStartFailures() int {
+	if a == nil || a.MaxStartFailures == nil {
+		return DefaultMaxStartFailures
+	}
+	if *a.MaxStartFailures < 0 {
+		return DefaultMaxStartFailures
+	}
+	return *a.MaxStartFailures
 }
