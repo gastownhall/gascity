@@ -952,6 +952,11 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
 }
 
+// newEventsProviderForNameWithConfig builds the events provider for an
+// already-resolved provider name. On failure it returns a nil provider and an
+// error: the file-backed branch must not hand back the *events.FileRecorder
+// directly, because a failed open boxes a typed nil into the events.Provider
+// interface, where it reads as non-nil to every caller's nil guard.
 func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
 		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
@@ -962,7 +967,11 @@ func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, 
 	case "fail":
 		return events.NewFailFake(), nil
 	default:
-		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		recorder, err := newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		if err != nil {
+			return nil, err
+		}
+		return recorder, nil
 	}
 }
 
