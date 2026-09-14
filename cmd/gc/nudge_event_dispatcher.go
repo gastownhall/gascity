@@ -54,10 +54,23 @@ const (
 // closed-loop delivery verifies paste+submit; it is the backstop, not the
 // gate.
 //
-// All deliveries run on one worker goroutine: a delivery blocks for seconds
-// (idle verification, paste, submit confirm), which must never stall the
-// reconciler loop, and a single worker means supervisor-side deliveries to
-// the same pane cannot interleave.
+// A delivery blocks for seconds (idle verification, paste, submit confirm)
+// and cannot be canceled: runtime.Provider.Nudge takes no context, and the
+// herdr client applies no default timeout, so a wedged pane holds its caller
+// until herdr itself returns. The scheduler goroutine therefore never runs a
+// delivery itself. It hands each due session to a goroutine of that session's
+// own, at most one in flight per session, which is exactly the blast radius
+// the per-session sidecar pollers had: one wedged pane strands its own
+// session's queue and no other. Coalescing on the in-flight set also keeps the
+// goroutine count bounded by the number of sessions with queued work, rather
+// than by the number of events that arrived while one was stuck.
+//
+// The backstop full pass is one goroutine walking every session, so it can
+// still stall behind a wedged pane. That is deliberate rather than overlooked:
+// it is the safety net for a missed event, targeted kicks keep flowing for
+// every other session while it waits, and making it per-session too would
+// duplicate the scheduler inside the pass for no gain the event path does not
+// already provide.
 //
 // Providers without an event stream (tmux) leave the dispatcher inactive and
 // every existing path byte-identical: the supervisor tick keeps its inline
@@ -82,6 +95,14 @@ type nudgeEventDispatcher struct {
 	pending      map[string]nudgeEventKick
 	fullPassDue  bool
 	kicked       chan struct{} // buffered-1 worker wake
+
+	// inflight holds the sessions with a delivery goroutine running, keyed by
+	// session name; the empty key is the backstop full pass. A kick for a
+	// session already in here is dropped rather than queued: the running pass
+	// re-reads the queue and the live observation when it gets there, so it
+	// will see whatever the dropped kick would have told it.
+	inflight map[string]bool
+	delivery sync.WaitGroup
 
 	// streamGen holds the generation of the currently-established stream, 0
 	// when none. Forward goroutines clear only their own generation, so a
@@ -259,7 +280,11 @@ func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-
 // kick gets its own pass carrying the budget its idle event earned. Idle waits
 // between kicks are timer-driven off the earliest scheduled attempt.
 func (d *nudgeEventDispatcher) worker(ctx context.Context) {
+	// LIFO: drain the delivery goroutines first, then report the worker down.
+	// Anything observing workerDone (shutdown, and the tests' teardown) then
+	// knows no pass is still writing.
 	defer close(d.workerDone)
+	defer d.drainDeliveries()
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
@@ -301,10 +326,10 @@ func (d *nudgeEventDispatcher) worker(ctx context.Context) {
 			// than folded into the sweep: each was earned by a real idle event
 			// and is due at the moment its target's stamp ages out, which the
 			// sweep's own timing has nothing to do with.
-			d.pass("", 0)
+			d.spawnPass("", 0)
 		}
 		for i, name := range due {
-			d.pass(name, dueBudget[i])
+			d.spawnPass(name, dueBudget[i])
 		}
 		if !full && len(due) == 0 {
 			if !nextDue.IsZero() {
@@ -349,6 +374,64 @@ func (d *nudgeEventDispatcher) observePasses(fn func(sessionFilter string)) {
 // pass runs one delivery pass and then notifies the observer. Every
 // worker-driven pass goes through here, including the ones that find nothing
 // to deliver and return early, so the notification means "a pass completed",
+// nudgeEventDeliveryDrainGrace bounds how long shutdown waits for in-flight
+// delivery goroutines. It is a bound rather than an unconditional Wait because
+// the thing being waited on is exactly the thing that can wedge: Nudge takes no
+// context, so a delivery into a hung pane returns when herdr returns and not
+// before. Blocking city shutdown on a hung pane would be a worse failure than
+// abandoning the goroutine, so after the grace the process goes on without it.
+const nudgeEventDeliveryDrainGrace = 5 * time.Second
+
+// drainDeliveries waits out the in-flight delivery goroutines, up to the
+// grace. It reports nothing: a delivery still running at shutdown is the hung
+// pane case, which the delivery path already logs for itself.
+func (d *nudgeEventDispatcher) drainDeliveries() {
+	done := make(chan struct{})
+	go func() {
+		d.delivery.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(nudgeEventDeliveryDrainGrace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+// spawnPass runs one pass on a goroutine of its own, unless a pass for the
+// same session is already running. It returns as soon as the goroutine is
+// started (or declined), so the scheduler loop never blocks on a delivery.
+//
+// Declining a duplicate is not a lost wake-up. The running pass re-reads the
+// queue and the live observation for its session, so anything the dropped
+// kick would have carried is already in what that pass reads; and the patrol
+// tick's full pass is the backstop if the running pass finishes just before
+// the item lands.
+func (d *nudgeEventDispatcher) spawnPass(sessionFilter string, retriesLeft int) {
+	d.mu.Lock()
+	if d.inflight == nil {
+		d.inflight = map[string]bool{}
+	}
+	if d.inflight[sessionFilter] {
+		d.mu.Unlock()
+		return
+	}
+	d.inflight[sessionFilter] = true
+	d.mu.Unlock()
+
+	d.delivery.Add(1)
+	go func() {
+		defer d.delivery.Done()
+		defer func() {
+			d.mu.Lock()
+			delete(d.inflight, sessionFilter)
+			d.mu.Unlock()
+		}()
+		d.pass(sessionFilter, retriesLeft)
+	}()
+}
+
 // not "a pass delivered something".
 func (d *nudgeEventDispatcher) pass(sessionFilter string, retriesLeft int) {
 	d.runPass(sessionFilter, retriesLeft)
