@@ -2125,6 +2125,9 @@ func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, ti
 		// out of it. Spending them from `timeout` would shrink each chunk's
 		// share of the configured readiness budget as the prompt grows, making
 		// large prompts more timeout-prone -- the exact case chunking targets.
+		// The deadline is shared across every chunk rather than per-chunk, so a
+		// retry-heavy first chunk can starve the later ones and turn what would
+		// have been a plain timeout into errPartialPasteDelivery.
 		deadline := time.Now().Add(timeout + time.Duration(len(chunks)-1)*copilotPasteChunkDelay)
 		return sendPasteChunks(chunks, func(chunk string) error {
 			remaining := time.Until(deadline)

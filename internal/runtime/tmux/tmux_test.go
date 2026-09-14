@@ -2394,7 +2394,12 @@ func TestNudgeStartupWithoutProviderUsesOrdinaryDelivery(t *testing.T) {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
 	defer func() { _ = tm.KillSession(sessionName) }()
-	time.Sleep(300 * time.Millisecond)
+
+	// Wait for the pane to be running `cat -v` rather than the launching shell.
+	shellsToExclude := []string{"bash", "zsh", "sh"}
+	if err := tm.WaitForCommand(context.Background(), sessionName, shellsToExclude, 5*time.Second); err != nil {
+		t.Fatalf("waiting for pane command: %v", err)
+	}
 
 	if err := tm.nudgeStartupSession(sessionName, "startup prompt"); err != nil {
 		t.Fatalf("nudgeStartupSession without GC_PROVIDER: %v", err)
