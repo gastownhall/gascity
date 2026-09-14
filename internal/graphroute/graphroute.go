@@ -60,6 +60,12 @@ type GraphRouteBinding struct {
 	// metadata for the decision. Empty means the formula did not opt in, and a
 	// re-decorated step's stale group is cleared rather than preserved.
 	ContinuationGroup string
+	// IndependentSteps marks a one-shot pool step: each claim gets a fresh
+	// session, so a formula-declared continuation group can never be honored
+	// here. ApplyGraphRouteBinding uses this to tell a formula-declared group
+	// (which would silently be lost) apart from the router's own transient
+	// drain bookkeeping (which is always safe to clear and replace).
+	IndependentSteps bool
 }
 
 type graphStepTarget struct {
@@ -175,8 +181,10 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata[beadmeta.RunTargetMetadataKey], routeVars))}
 }
 
-// ApplyGraphRouteBinding sets the routing metadata on a recipe step.
-func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
+// ApplyGraphRouteBinding sets the routing metadata on a recipe step. It
+// returns an error if honoring the binding would silently destroy a
+// formula-declared continuation group (see IndependentSteps).
+func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) error {
 	// Clear any prior session back-references so the metadata always matches
 	// the current binding when a step is re-decorated (#2843).
 	delete(step.Metadata, beadmeta.SessionNameMetadataKey)
@@ -188,7 +196,7 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// the transient Assignee is cleared on close. (#2843)
 		step.Metadata[beadmeta.SessionIDMetadataKey] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
-		return
+		return nil
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
 	if binding.MetadataOnly {
@@ -211,13 +219,22 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		if group := strings.TrimSpace(binding.ContinuationGroup); group != "" {
 			step.Metadata[beadmeta.ContinuationGroupMetadataKey] = group
 			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
+		} else if stale := strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey]); binding.IndependentSteps && stale != "" && !strings.HasPrefix(stale, "drain:") {
+			// IndependentSteps means each claim of this pool step gets a fresh
+			// session, so a formula-declared continuation group can never be
+			// honored here. The unconditional clear below would silently
+			// destroy that formula's drain contract with no signal (#5584).
+			// A "drain:"-prefixed value is the router's own transient
+			// bookkeeping (sharedDrainContinuationGroup in
+			// internal/dispatch/drain.go), always safe to clear and replace.
+			return fmt.Errorf("graphroute: step %q is IndependentSteps-routed but formula-declared continuation group %q would be silently dropped", step.ID, stale)
 		} else {
 			for _, key := range beadmeta.SessionAffinityMetadataKeys {
 				delete(step.Metadata, key)
 			}
 		}
 		step.Assignee = ""
-		return
+		return nil
 	}
 	if binding.SessionName != "" {
 		// Durable session back-reference for single-session agents (#2843).
@@ -226,6 +243,7 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		step.Metadata[beadmeta.SessionNameMetadataKey] = binding.SessionName
 	}
 	step.Assignee = binding.SessionName
+	return nil
 }
 
 // ApplyGraphControlRouteBinding routes control steps to the store-scoped
@@ -248,8 +266,9 @@ func ApplyGraphControlRouteBinding(step *formula.RecipeStep, binding GraphRouteB
 }
 
 // AssignGraphStepRoute applies routing to a step, optionally diverting
-// control steps to the control dispatcher.
-func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) {
+// control steps to the control dispatcher. It returns an error if the
+// execution binding's ApplyGraphRouteBinding call does (see IndependentSteps).
+func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteBinding, controlBinding *GraphRouteBinding) error {
 	if controlBinding != nil {
 		switch {
 		case executionBinding.QualifiedName != "":
@@ -265,11 +284,11 @@ func AssignGraphStepRoute(step *formula.RecipeStep, executionBinding GraphRouteB
 			delete(step.Metadata, GraphExecutionRigContextMetaKey)
 		}
 		ApplyGraphControlRouteBinding(step, *controlBinding)
-		return
+		return nil
 	}
 	delete(step.Metadata, GraphExecutionRouteMetaKey)
 	delete(step.Metadata, GraphExecutionRigContextMetaKey)
-	ApplyGraphRouteBinding(step, executionBinding)
+	return ApplyGraphRouteBinding(step, executionBinding)
 }
 
 // WorkflowExecutionRouteFromMeta extracts the execution route from bead metadata.
@@ -640,10 +659,14 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		// binding is a per-step value copy, so this never pollutes the route cache.
 		binding.ContinuationGroup = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
 		if IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
-			AssignGraphStepRoute(step, binding, &controlRoute)
+			if err := AssignGraphStepRoute(step, binding, &controlRoute); err != nil {
+				return err
+			}
 			continue
 		}
-		AssignGraphStepRoute(step, binding, nil)
+		if err := AssignGraphStepRoute(step, binding, nil); err != nil {
+			return err
+		}
 	}
 	return nil
 }
