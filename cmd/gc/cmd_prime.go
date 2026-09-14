@@ -261,6 +261,20 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 	return code
 }
 
+// hookNudgePollerSessionProvider resolves the session provider for the hook
+// path's poller decision. It fails OPEN: a provider this process cannot
+// construct must not stop `gc prime` from spawning the sidecar it would have
+// spawned before, so the error is reported and nil is returned, which
+// maybeStartNudgePoller reads as "no provider opinion, keep today's behavior".
+func hookNudgePollerSessionProvider(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
+	sp, err := newSessionProviderFromContext(spctx, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc prime: session provider unavailable for nudge poller (fail open): %v\n", err) //nolint:errcheck
+		return nil
+	}
+	return sp
+}
+
 // doPrimeWithHookFormatOpts is the full entry point. consumeHandoff=false makes
 // the invocation non-destructive: durable auto-handoff mail is still rendered
 // into the output, but is not archived. Preview callers (--json) pass false so
@@ -422,6 +436,8 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
+			spctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
+			hookSP := hookNudgePollerSessionProvider(spctx, stderr)
 			maybeStartNudgePoller(withNudgeTargetFence(openNudgeBeadStore(cityPath).Store, nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
@@ -431,7 +447,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}))
+			}), hookSP)
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
