@@ -151,6 +151,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 		bead := AwakeSessionBead{
 			ID:          info.ID,
 			SessionName: name,
+			Alias:       strings.TrimSpace(info.Alias),
 			// Canonicalize so adopted beads persisted under a legacy identity
 			// (e.g. a removed binding) key the awake engine by the current
 			// agent template. Unresolvable templates pass through unchanged.

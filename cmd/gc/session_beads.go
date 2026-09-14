@@ -914,11 +914,15 @@ func sessionAssignmentIdentifiersForConfig(sessionBead beads.Bead, cfg *config.C
 }
 
 func sessionAssignmentIdentifierRaw(sessionBead beads.Bead) []string {
-	return []string{
-		strings.TrimSpace(sessionBead.ID),
-		strings.TrimSpace(sessionBead.Metadata["session_name"]),
-		strings.TrimSpace(sessionBead.Metadata[namedSessionIdentityMetadata]),
-	}
+	// ai-city local patch (2026-09-14): pool seats claim work under their
+	// alias (GC_ALIAS, e.g. "tributary/gastown.nux"), not the tmux
+	// session_name ("tributary--gastown__nux"). The orphan-release path already
+	// recognizes the full identity set (sessionBeadAssigneeIdentities: id,
+	// session_name, named identity, alias, alias_history); the keep-awake,
+	// scale-slot and drain-ack close gates must use the same set, otherwise a
+	// working pool seat reads as work-free and the reconciler retires it
+	// mid-claim (ki-43ip: 175-285 retirements/day on tributary).
+	return sessionBeadAssigneeIdentities(sessionBead)
 }
 
 // sessionAssignmentIdentifiersForConfigInfo is the session.Info form of
@@ -961,11 +965,9 @@ func sessionAssignmentIdentifiersForConfigInfo(info session.Info, cfg *config.Ci
 }
 
 func sessionAssignmentIdentifierRawInfo(info session.Info) []string {
-	return []string{
-		strings.TrimSpace(info.ID),
-		strings.TrimSpace(info.SessionNameMetadata),
-		strings.TrimSpace(info.ConfiguredNamedIdentity),
-	}
+	// Info twin of sessionAssignmentIdentifierRaw (see the alias note there);
+	// session.AssigneeIdentities is the confined codec both forms share.
+	return session.AssigneeIdentities(info)
 }
 
 // sessionAssignmentIdentifiersInfo is the session.Info form of
