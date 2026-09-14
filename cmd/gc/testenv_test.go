@@ -119,6 +119,7 @@ func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 	}
 	preserved := []string{
 		"GC_FAST_UNIT",
+		"GC_HERDR_LIVE_TESTS",
 		"GC_REAL_PROCESS_SIGNAL_TESTS",
 		"GC_TEST_KEEP",
 		"GC_WORKER_REPORT_DIR",
@@ -195,6 +196,10 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
+		// The live herdr tier's opt-in. Without it here the scrub below would
+		// strip the variable before any cmd/gc live journey could read it, so
+		// `make test-herdr-live` could never reach the journeys in this package.
+		key == "GC_HERDR_LIVE_TESTS" ||
 		strings.HasPrefix(key, "GC_LIVE_") ||
 		strings.HasPrefix(key, "GC_SESSION_CHAOS_") ||
 		strings.HasPrefix(key, "GC_TEST_")

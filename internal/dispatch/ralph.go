@@ -69,6 +69,16 @@ func processRalphCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	if err != nil {
 		return ControlResult{}, err
 	}
+	// A gate that ran but could not see its infrastructure (ga-pqlgh: bd/gc
+	// reads blinded by the gate sandbox) exits nonzero and would otherwise be
+	// indistinguishable from a real verdict. Normalize it to GateError so it
+	// takes the attempt-free re-run path below, bounded by the same
+	// maxCheckInfraRetries budget.
+	if reason, blind := convergence.ClassifyInfraBlind(result); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s (reclassified %s -> %s)",
+			bead.ID, attempt, reason, formatGateExitCode(result.ExitCode), result.Outcome, convergence.GateError)
+		result.Outcome = convergence.GateError
+	}
 	opts.tracef("ralph check-result bead=%s logical=%s attempt=%d outcome=%s exit=%s dur=%s truncated=%v stderr=%q stdout=%q",
 		bead.ID, logicalID, attempt, result.Outcome, formatGateExitCode(result.ExitCode), result.Duration, result.Truncated,
 		traceClipString(result.Stderr, traceCheckOutputCap), traceClipString(result.Stdout, traceCheckOutputCap))

@@ -966,6 +966,7 @@ type AgentPatch struct {
 	Args                    *[]string         `json:"Args"`
 	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
+	ContextAdvisory         ContextAdvisory   `json:"ContextAdvisory"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
 	Dir                     string            `json:"Dir"`
@@ -1493,6 +1494,20 @@ type ConfigValidateOutputBody struct {
 
 	// Warnings Validation warnings.
 	Warnings *[]string `json:"warnings"`
+}
+
+// ContextAdvisory defines model for ContextAdvisory.
+type ContextAdvisory struct {
+	Enabled      *bool                  `json:"Enabled"`
+	Tiers        *[]ContextAdvisoryTier `json:"Tiers"`
+	WindowTokens *int64                 `json:"WindowTokens"`
+}
+
+// ContextAdvisoryTier defines model for ContextAdvisoryTier.
+type ContextAdvisoryTier struct {
+	Enabled   *bool   `json:"Enabled"`
+	Message   *string `json:"Message"`
+	Threshold *int64  `json:"Threshold"`
 }
 
 // ControlRootSettleFailedPayload defines model for ControlRootSettleFailedPayload.

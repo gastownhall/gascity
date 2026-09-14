@@ -59,6 +59,15 @@ const (
 	// session has to rematerialize a worktree and complete startup dialog.
 	defaultNudgePollStartGrace = 5 * time.Minute
 
+	// nudgePollIdleObserveEvery bounds how many consecutive ticks the poll
+	// loop may skip nudgeObserveTarget while nothing is queued for this
+	// target before forcing a fresh observation anyway. obs.Running is the
+	// only signal that detects a dead session, so this cadence must stay
+	// small enough that an idle target still exits promptly once its session
+	// ends -- it only needs to be large enough to matter, not to eliminate
+	// every idle-tick observation (ga-8x82f4).
+	nudgePollIdleObserveEvery = 5
+
 	// defaultNudgePollMemLimitMB is the soft Go runtime memory limit
 	// (debug.SetMemoryLimit) installed for the long-lived `gc nudge poll`
 	// sidecar. The sidecar re-parses the whole-file city bead store on every
@@ -97,6 +106,7 @@ var (
 	nudgePokeController                      = pokeController
 	nudgeObserveTarget                       = workerObserveNudgeTarget
 	nudgeWithdrawQueuedWaitNudges            = withdrawQueuedWaitNudges
+	nudgePollDeliverQueued                   = tryDeliverQueuedNudgesByPoller
 	nudgeWarningWriter             io.Writer = os.Stderr
 )
 
@@ -459,12 +469,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var wispExtra string // set after target resolution; captured by defer closure
 	emittedHookContext := false
 	var injectPrefix string
+	var contextHookInput []byte
 	if inject {
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
-		injectPrefix = clockInjectLine() + contextInjectLine(readHookStdin())
+		contextHookInput = readHookStdin()
+		injectPrefix = clockInjectLine()
 		defer func() {
 			if !emittedHookContext {
 				line := injectPrefix + wispExtra
@@ -483,6 +495,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	if targetID == "" {
 		if inject {
+			injectPrefix += contextInjectLine(contextHookInput)
 			return 0
 		}
 		fmt.Fprintln(stderr, "gc nudge drain: session not specified (set $GC_ALIAS/$GC_SESSION_ID or pass an alias/id)") //nolint:errcheck
@@ -492,12 +505,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	target, err := resolveNudgeTarget(targetID, stderr)
 	if err != nil {
 		if inject {
+			injectPrefix += contextInjectLine(contextHookInput)
 			return 0
 		}
 		fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if inject {
+		injectPrefix += contextInjectLineForAdvisory(contextHookInput, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
 		wispExtra = wispStepInjectionContent(target.cityPath)
 	}
 
@@ -728,6 +743,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	sessStore := cliSessionStore(store.Store, target.cfg, target.cityPath)
 	var missingSince time.Time
 	var lastFreeOS time.Time
+	var idleTicksSinceObserve int
 	for {
 		// Each tick that observes a changed beads.json re-parses the whole-file
 		// store, leaving several hundred MB of transient garbage. The soft
@@ -738,6 +754,28 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			debug.FreeOSMemory()
 			lastFreeOS = now
 		}
+
+		// Cheap gate, read before paying for the expensive observe/deliver
+		// pair: this target's queue state alone (no tmux/session probe) tells
+		// us whether there is anything to deliver this tick. When nothing is
+		// due, most ticks skip nudgeObserveTarget entirely -- but never for
+		// more than nudgePollIdleObserveEvery consecutive ticks, so a poller
+		// whose session died while its queue sat empty still notices and
+		// exits instead of being immortalized (ga-8x82f4).
+		hasDue := nudgePollTargetHasDueWork(target, time.Now())
+		observeThisTick := hasDue
+		if !observeThisTick {
+			idleTicksSinceObserve++
+			if idleTicksSinceObserve >= nudgePollIdleObserveEvery {
+				observeThisTick = true
+			}
+		}
+		if !observeThisTick {
+			time.Sleep(interval)
+			continue
+		}
+		idleTicksSinceObserve = 0
+
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
@@ -769,7 +807,13 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		missingSince = time.Time{}
-		delivered, pollErr := tryDeliverQueuedNudgesByPoller(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
+		if !hasDue {
+			// Observed only to satisfy the idle-cadence liveness check above;
+			// the cheap gate already established there is nothing to deliver.
+			time.Sleep(interval)
+			continue
+		}
+		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -784,7 +828,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		// the dispatcher's separate "not-matched" class and is deliberately not
 		// counted here: the poll loop never exits while the session runs, so
 		// counting it would turn this into a tick counter and take the queue
-		// flock every interval. See #5317.
+		// flock every interval. See #5317. Re-checked fresh (not reusing the
+		// pre-observe hasDue above) because the delivery attempt just run can
+		// itself have consumed the only due item.
 		if nudgePollTargetHasDueWork(target, time.Now()) {
 			skipReason := "not-delivered"
 			if pollErr != nil {

@@ -63,6 +63,10 @@
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
         },
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory overrides context-pressure guidance for this agent."
+        },
         "upstream": {
           "type": "string",
           "description": "Upstream selects the model-serving endpoint (a key in [upstreams]) for\nthis agent — WHO serves the model. \"\" (default) falls back to\nagent_defaults.upstream; if still empty, no upstream env is injected\n(ambient behavior). Switching it relaunches the agent in the warm box."
@@ -300,6 +304,10 @@
     },
     "AgentDefaults": {
       "properties": {
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory is the city-wide default context-pressure guidance."
+        },
         "provider": {
           "type": "string",
           "description": "Provider is the default provider name for agents that do not set their\nown provider. It also counts as a configured provider for implicit agent\ninjection."
@@ -430,6 +438,10 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "context_advisory": {
+          "$ref": "#/$defs/ContextAdvisory",
+          "description": "ContextAdvisory overrides context-pressure guidance for this agent."
         },
         "upstream": {
           "type": "string",
@@ -652,6 +664,41 @@
         "name"
       ],
       "description": "AgentPatch modifies existing agents identified by rig scope and Name."
+    },
+    "ContextAdvisory": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "window_tokens": {
+          "type": "integer"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/ContextAdvisoryTier"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ContextAdvisory configures context-pressure guidance."
+    },
+    "ContextAdvisoryTier": {
+      "properties": {
+        "threshold": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "ContextAdvisoryTier is one threshold and message in a context-pressure advisory."
     },
     "Import": {
       "properties": {

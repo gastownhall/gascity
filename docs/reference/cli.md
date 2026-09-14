@@ -1411,14 +1411,18 @@ gc doctor --check controller,events-log --json
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1991,12 +1995,13 @@ bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
 only in the controller's dispatch condition environment, never in a session
 shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
 pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
-after start) and never decides what a session claims; the pool is pull. It
-appears in the chain below only as a name fallback for work already claimed:
-for a vapor wisp the trigger IS the work bead. A formula step that must close
+after start) and never decides what a session claims; the pool is pull. Named
+singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
+lifetime, pointing at a different bead than the one currently claimed, so it
+must never be consulted ahead of the claim. A formula step that must close
 the bead it is running reads the stamp back here:
 
-    BEAD_ID="$&#123;GC_BEAD_ID:-$&#123;GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)&#125;&#125;"
+    BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
 
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity and when the session has claimed nothing, so a caller that

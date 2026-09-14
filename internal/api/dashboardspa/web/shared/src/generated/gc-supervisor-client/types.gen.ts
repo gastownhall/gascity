@@ -62,6 +62,7 @@ export type AgentPatch = {
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
+    ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
@@ -643,6 +644,18 @@ export type ConfigValidateOutputBody = {
      * Validation warnings.
      */
     warnings: Array<string> | null;
+};
+
+export type ContextAdvisory = {
+    Enabled: boolean | null;
+    Tiers: Array<ContextAdvisoryTier> | null;
+    WindowTokens: number | null;
+};
+
+export type ContextAdvisoryTier = {
+    Enabled: boolean | null;
+    Message: string | null;
+    Threshold: number | null;
 };
 
 export type ControlRootSettleFailedPayload = {
