@@ -43,14 +43,13 @@ func run() error {
 		checkNames: []string{
 			prwatchdog.CheckName,
 			prwatchdog.CIRequiredName,
-			prwatchdog.MacCheckName,
+			prwatchdog.MacVerdictCheckName,
 			prwatchdog.ReviewFormulasCheckName,
 		},
 	}
 
 	eval := prwatchdog.Watch(context.Background(), fetcher, realClock{}, realSleeper{}, prwatchdog.PollOptions{
 		HeadSHA:                  headSHA,
-		NeedsMacLabel:            parseBoolEnv("NEEDS_MAC_LABEL"),
 		NeedsReviewFormulasLabel: parseBoolEnv("NEEDS_REVIEW_FORMULAS_LABEL"),
 		Deadline:                 prwatchdog.ObservationDeadline,
 		Interval:                 pollInterval,
@@ -196,7 +195,7 @@ func renderSummary(eval prwatchdog.Evaluation) string {
 	b.WriteString("| --- | --- |\n")
 	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CheckName, eval.Summary.Check)
 	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.CIRequiredName, eval.Summary.CIRequired)
-	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.MacCheckName, eval.Summary.Mac)
+	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.MacVerdictCheckName, eval.Summary.Mac)
 	fmt.Fprintf(&b, "| %s | %s |\n", prwatchdog.ReviewFormulasCheckName, eval.Summary.ReviewFormulas)
 	return b.String()
 }

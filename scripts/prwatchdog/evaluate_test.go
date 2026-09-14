@@ -85,6 +85,10 @@ func TestEvaluate_CoreStateMachine(t *testing.T) {
 			checkRuns: []CheckRun{
 				{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
 				{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+				// Mac verdict must be present (even neutral) to reach a
+				// terminal pass now that mac-regression.yml posts it
+				// unconditionally for every head SHA (ga-ismqdw.1 criterion C).
+				{Name: MacVerdictCheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionNeutral, StartedAt: base},
 			},
 			elapsed:  3 * time.Minute,
 			wantPass: true,
@@ -158,6 +162,10 @@ func TestEvaluate_DuplicateCheckRunsNewestWins(t *testing.T) {
 			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: older, ID: 1},
 			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: newer, ID: 2},
 			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: newer, ID: 3},
+			// Mac verdict must be present (even neutral) to reach a
+			// terminal pass now that mac-regression.yml posts it
+			// unconditionally for every head SHA (ga-ismqdw.1 criterion C).
+			{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionNeutral, StartedAt: newer, ID: 4},
 		},
 		Elapsed:  1 * time.Minute,
 		Deadline: ObservationDeadline,
@@ -285,6 +293,10 @@ func TestEvaluate_ReviewFormulasOptIn(t *testing.T) {
 	coreOK := []CheckRun{
 		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
 		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+		// Mac verdict must be present (even neutral) to let evaluation fall
+		// through to the ReviewFormulas gate now that mac-regression.yml
+		// posts it unconditionally for every head SHA (ga-ismqdw.1 criterion C).
+		{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionNeutral, StartedAt: base},
 	}
 
 	t.Run("not requested: passes without a review-formulas run", func(t *testing.T) {

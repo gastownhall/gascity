@@ -51,6 +51,10 @@ func TestWatch_PollsUntilTerminalThenStops(t *testing.T) {
 		{runs: []CheckRun{
 			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
 			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+			// Mac verdict must be present (even neutral) for Evaluate to
+			// reach a terminal pass now that mac-regression.yml posts it
+			// unconditionally for every head SHA (ga-ismqdw.1 criterion C).
+			{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionNeutral, StartedAt: base},
 		}},
 	}}
 
