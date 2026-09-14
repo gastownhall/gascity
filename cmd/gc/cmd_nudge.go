@@ -1932,14 +1932,6 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
-	// Event-capable providers retire the sidecar class entirely: the
-	// supervisor-hosted nudge event dispatcher owns queued delivery for them
-	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
-	// it. Callers without a resolved provider pass nil and keep today's
-	// spawn behavior.
-	if providerRetiresNudgePollers(sp) {
-		return
-	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
 	// processes only remove their PID file via the release closure, so any
 	// poller that is killed/crashes/os.Exit's leaves the .pid behind forever.
@@ -1952,6 +1944,17 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
 	if nudgeDispatcherIsSupervisor(target.cfg) {
+		return
+	}
+	// Event-capable providers retire the sidecar class, but only while
+	// something is actually hosting the replacement. The nudge event
+	// dispatcher lives in the controller and owns queued delivery for such
+	// providers in BOTH nudge_dispatcher modes, so a spawned poller would only
+	// race it. With no controller answering, nothing owns it at all, and
+	// suppressing here would leave the queue undelivered until one comes back.
+	// So this fails OPEN: no controller, spawn the poller. Callers without a
+	// resolved provider pass nil and keep today's spawn behavior too.
+	if providerRetiresNudgePollers(sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the
@@ -2002,6 +2005,18 @@ var startNudgePoller = ensureNudgePoller
 // nudgeDispatcherIsSupervisor reports whether the city is configured to use
 // the supervisor-hosted nudge dispatcher rather than per-session pollers.
 // A nil cfg defaults to legacy mode, matching DaemonConfig.NudgeDispatcherMode.
+// nudgePollerDispatcherIsLive reports whether a controller is answering for
+// this city. That process is the one hosting the nudge event dispatcher, so it
+// is the thing whose absence makes retiring the sidecar unsafe.
+//
+// It asks the running system rather than reading a file or inferring from
+// config, per the house rule that the process table and the socket are the
+// source of truth for what is running. A var so tests can answer it without a
+// controller.
+var nudgePollerDispatcherIsLive = func(cityPath string) bool {
+	return controllerAlive(cityPath) > 0
+}
+
 func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 	if cfg == nil {
 		return false

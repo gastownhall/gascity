@@ -821,7 +821,14 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// seconds via the provider's verified delivery, and the sidecar poller
 	// class retires for such providers. Config reload re-points the
 	// dispatcher when it swaps the provider.
-	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix)
+	// The dispatcher resolves its stores through the CONTROLLER's routes, not
+	// through the one-shot CLI funnel: cliStorageRoutes attaches a bead.* emit
+	// target meant for a process with no emitter of its own, and this one has
+	// the CachingStore's (class_store_emit.go). Both class stores come from the
+	// city store, never from each other; see nudgeDispatchStores.
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func() (beads.NudgesStore, beads.Store) {
+		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+	})
 	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
 
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
