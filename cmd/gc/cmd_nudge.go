@@ -1772,8 +1772,33 @@ var startNudgePoller = ensureNudgePoller
 // source of truth for what is running. A var so tests can answer it without a
 // controller.
 var nudgePollerDispatcherIsLive = func(cityPath string) bool {
-	return controllerAlive(cityPath) > 0
+	nudgePollerLiveMu.Lock()
+	defer nudgePollerLiveMu.Unlock()
+	if live, ok := nudgePollerLiveCache[cityPath]; ok {
+		return live
+	}
+	live := controllerAliveForNudgePoller(cityPath) > 0
+	if nudgePollerLiveCache == nil {
+		nudgePollerLiveCache = map[string]bool{}
+	}
+	nudgePollerLiveCache[cityPath] = live
+	return live
 }
+
+// The probe is answered once per city per process, and that is not an
+// optimization detail. controllerAlive carries a 2s read deadline, and
+// `gc prime` asks this question once per resolved agent inside its loop, so an
+// overloaded controller would otherwise add seconds per agent to a
+// hook-frequency command, at exactly the moment hook latency has to stay
+// bounded. A one-shot process is short enough that a changed answer mid-run
+// would not be actionable anyway.
+var (
+	nudgePollerLiveMu    sync.Mutex
+	nudgePollerLiveCache map[string]bool
+	// controllerAliveForNudgePoller is the probe itself, separated from the
+	// caching around it so a test can count how many times it is reached.
+	controllerAliveForNudgePoller = controllerAlive
+)
 
 func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 	if cfg == nil {

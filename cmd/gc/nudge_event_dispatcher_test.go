@@ -48,6 +48,30 @@ type nudgeEventedFake struct {
 	// one. nudgeEntered reports that a delivery has actually reached Nudge.
 	nudgeHeld    map[string]<-chan struct{}
 	nudgeEntered chan string
+	observeHeld  map[string]<-chan struct{}
+}
+
+// holdObserve makes IsRunning for session block until release is closed. The
+// sweep's observation goes through IsRunning, and observation is the call that
+// still stalled the sweep after the delivery was moved off it, so parking Nudge
+// alone proves less than it looks like it does.
+func (f *nudgeEventedFake) holdObserve(session string, release <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.observeHeld == nil {
+		f.observeHeld = map[string]<-chan struct{}{}
+	}
+	f.observeHeld[session] = release
+}
+
+func (f *nudgeEventedFake) IsRunning(name string) bool {
+	f.mu.Lock()
+	release := f.observeHeld[name]
+	f.mu.Unlock()
+	if release != nil {
+		<-release
+	}
+	return f.Fake.IsRunning(name)
 }
 
 // holdNudge makes Nudge for session block until release is closed, and gives
@@ -762,6 +786,20 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 	}
 }
 
+// resetNudgePollerLiveCache empties the per-process controller-probe cache, so
+// one test's answer does not decide another's.
+func resetNudgePollerLiveCache(t *testing.T) {
+	t.Helper()
+	nudgePollerLiveMu.Lock()
+	nudgePollerLiveCache = nil
+	nudgePollerLiveMu.Unlock()
+	t.Cleanup(func() {
+		nudgePollerLiveMu.Lock()
+		nudgePollerLiveCache = nil
+		nudgePollerLiveMu.Unlock()
+	})
+}
+
 // stubNudgePollerDispatcherLive answers the controller probe without a
 // controller. Left unstubbed, the probe pings a socket that is not there and
 // every test would take the fail-open branch.
@@ -860,6 +898,126 @@ func TestNudgeEventDispatcherNeverResolvesThroughTheOneShotFunnel(t *testing.T) 
 	}
 }
 
+// TestNudgeEventDispatcherSweepMakesNoProviderCall is the finding the previous
+// version of the sweep test missed, and the reason it missed it is the point.
+//
+// That test parks Nudge. The sweep genuinely stopped reaching Nudge, so it went
+// green, and "the sweep cannot be stalled" looked proven. It was not: the
+// enumeration still observed each matched session inline, observation is a
+// server call on an uncancellable context, and one hung session still stopped
+// the walk before it reached the rest. The test pinned the case it wedged.
+//
+// This one wedges the observation instead. The sweep must complete anyway,
+// because it now reads only the queue and the session beads.
+func TestNudgeEventDispatcherSweepMakesNoProviderCall(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info, seen := newNudgeDispatcherFixture(t, fake)
+
+	release := make(chan struct{})
+	fake.holdObserve(info.SessionName, release)
+	t.Cleanup(func() { close(release) })
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake.setBusy(info.SessionName, false)
+	fake.setStamp(info.SessionName, time.Now().Add(-time.Minute))
+
+	for i := 0; i < 3; i++ {
+		d.kickAll()
+		if filter := seen.next(t, "a sweep while observation is wedged"); filter != "" {
+			t.Fatalf("sweep %d ran with filter %q, want the enumerating sweep: the sweep is making a provider call, so one hung session stops it from reaching the others", i, filter)
+		}
+	}
+}
+
+// TestNudgeEventDispatcherBoundsUnattributedSweeps keeps the fix for the
+// dropped unattributed event from becoming its own poll loop. One sweep covers
+// every session, so a wave of unattributable events and a single one need the
+// same work; without a bound, each event bought a full walk of every open
+// session.
+func TestNudgeEventDispatcherBoundsUnattributedSweeps(t *testing.T) {
+	fake := newNudgeEventedFake()
+	_, d, _, seen := newNudgeDispatcherFixture(t, fake)
+
+	now := time.Now()
+	d.kickAllUnattributed(now)
+	if filter := seen.next(t, "the first unattributed event's sweep"); filter != "" {
+		t.Fatalf("first unattributed sweep ran with filter %q, want a full sweep", filter)
+	}
+
+	for i := 0; i < 5; i++ {
+		d.kickAllUnattributed(now.Add(time.Duration(i) * time.Millisecond))
+	}
+	seen.assertQuiet(t, time.Second, "a burst of unattributed events inside the interval must buy no further sweep")
+
+	// Past the interval, the next one is reconciled again.
+	d.kickAllUnattributed(now.Add(nudgeEventUnattributedSweepInterval + time.Millisecond))
+	if filter := seen.next(t, "the sweep past the coalescing interval"); filter != "" {
+		t.Fatalf("post-interval sweep ran with filter %q, want a full sweep", filter)
+	}
+}
+
+// TestNudgePollerDispatcherProbeIsAnsweredOncePerProcess bounds what the
+// round-1 liveness check costs. controllerAlive carries a 2s read deadline and
+// gc prime asks once per resolved agent, so an unbounded probe turns a degraded
+// controller into seconds of hook latency per agent.
+func TestNudgePollerDispatcherProbeIsAnsweredOncePerProcess(t *testing.T) {
+	dir := t.TempDir()
+	probes := 0
+	prevAlive := controllerAliveForNudgePoller
+	controllerAliveForNudgePoller = func(string) int {
+		probes++
+		return 4242
+	}
+	t.Cleanup(func() { controllerAliveForNudgePoller = prevAlive })
+	resetNudgePollerLiveCache(t)
+
+	for i := 0; i < 5; i++ {
+		if !nudgePollerDispatcherIsLive(dir) {
+			t.Fatalf("probe %d reported no controller despite a live pid", i)
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("probes = %d, want 1: the controller ping is answered once per city per process", probes)
+	}
+}
+
+// TestAwaitNudgeEventsDownWaitsThenGivesUp covers the wait shutdown now performs
+// before it stops sessions or tears down the provider.
+//
+// The dispatcher bounds its own delivery drain, but that bound meant nothing
+// while shutdown ran concurrently with it: a delivery lost its provider
+// immediately rather than after the advertised grace. The wait is itself
+// bounded for the mirror-image reason, so a dispatcher that will not come down
+// cannot hold city shutdown open instead.
+func TestAwaitNudgeEventsDownWaitsThenGivesUp(t *testing.T) {
+	cr := &CityRuntime{stderr: testWriter(t), logPrefix: "test"}
+
+	// No dispatcher: nothing to wait for.
+	cr.awaitNudgeEventsDown()
+
+	cr.nudgeEvents = &nudgeEventDispatcher{workerDone: make(chan struct{})}
+	returned := make(chan struct{})
+	go func() {
+		cr.awaitNudgeEventsDown()
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+		t.Fatal("awaitNudgeEventsDown returned while the scheduler was still up: shutdown would tear the provider down under a live delivery")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(cr.nudgeEvents.workerDone)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("awaitNudgeEventsDown did not return after the scheduler came down")
+	}
+}
+
 func TestProviderRetiresNudgePollers(t *testing.T) {
 	if providerRetiresNudgePollers(nil) {
 		t.Fatal("nil provider must not retire pollers")
@@ -887,13 +1045,13 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 // the CLI funnel here is the correct construction for it; the production
 // wiring deliberately does not, because the controller already has an emitter
 // (class_store_emit.go).
-func testNudgeDispatchStores(cityPath string) func() (beads.NudgesStore, beads.Store) {
-	return func() (beads.NudgesStore, beads.Store) {
+func testNudgeDispatchStores(cityPath string) func(*config.City) (beads.NudgesStore, beads.Store) {
+	return func(cfg *config.City) (beads.NudgesStore, beads.Store) {
 		cityStore, err := openStoreAtForCity(cityPath, cityPath)
 		if err != nil || cityStore == nil {
 			return beads.NudgesStore{}, nil
 		}
-		return nudgeDispatchStores(cliStorageRoutes(cityPath), cityStore, nil, cityPath, nil)
+		return nudgeDispatchStores(cliStorageRoutes(cityPath), cityStore, cfg, cityPath, nil)
 	}
 }
 

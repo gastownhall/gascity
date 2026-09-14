@@ -90,7 +90,13 @@ type nudgeEventDispatcher struct {
 	// controller, which does have one, so resolving that way would put a
 	// second emitter on every relocated-class write. Injecting the stores also
 	// means no pass opens a store handle it would then have to close.
-	stores func() (beads.NudgesStore, beads.Store)
+	// It takes cfg rather than reading one, because the only mutable field the
+	// wiring would otherwise reach for is CityRuntime.cfg, which the reconciler
+	// reassigns under serviceStateMu. Passes run on their own goroutines, so an
+	// unguarded read there is a data race that no test can observe: every test
+	// substitutes its own closure, so the production one runs nowhere. runPass
+	// already holds a cfg it read under d.mu, so it hands that one over.
+	stores func(cfg *config.City) (beads.NudgesStore, beads.Store)
 
 	// Timing knobs, shrunk by tests. quiescence mirrors the sidecar pollers'
 	// idle gate; retryEpsilon pads the aged-stamp retry.
@@ -104,8 +110,11 @@ type nudgeEventDispatcher struct {
 	gen          int64              // subscription generation counter
 	cancel       context.CancelFunc // cancels the current subscription
 	pending      map[string]nudgeEventKick
-	fullPassDue  bool
-	kicked       chan struct{} // buffered-1 worker wake
+	// lastUnattributedSweep rate-limits the sweeps an unattributed idle
+	// event may buy; see kickAllUnattributed.
+	lastUnattributedSweep time.Time
+	fullPassDue           bool
+	kicked                chan struct{} // buffered-1 worker wake
 
 	// inflight holds the passes running, keyed by session name, with the empty
 	// key reserved for the enumerating sweep. Because the sweep only fans out,
@@ -143,7 +152,7 @@ type nudgeEventKick struct {
 
 // newNudgeEventDispatcher returns a dispatcher whose subscriptions and worker
 // live within parent. Wire a provider with update.
-func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string, stores func() (beads.NudgesStore, beads.Store)) *nudgeEventDispatcher {
+func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string, stores func(cfg *config.City) (beads.NudgesStore, beads.Store)) *nudgeEventDispatcher {
 	d := &nudgeEventDispatcher{
 		parent:       parent,
 		cityPath:     cityPath,
@@ -255,6 +264,30 @@ func (d *nudgeEventDispatcher) wakeWorker() {
 	}
 }
 
+// nudgeEventUnattributedSweepInterval bounds how often an idle event the
+// provider could not attribute to a session may buy a full sweep.
+//
+// One sweep covers every session with pending work, so a wave of N such events
+// and a single one need the same amount of work; without a bound, N events buy
+// N sweeps, and each sweep walks every open session, which is the poll loop
+// this dispatcher exists to retire. The cost of the bound is that a trickle
+// arriving faster than the interval reconciles on the interval instead of on
+// each event, and the patrol tick remains the backstop underneath that.
+const nudgeEventUnattributedSweepInterval = 5 * time.Second
+
+// kickAllUnattributed runs a sweep for an idle event carrying no session,
+// unless one was already bought within the interval.
+func (d *nudgeEventDispatcher) kickAllUnattributed(now time.Time) {
+	d.mu.Lock()
+	if !d.lastUnattributedSweep.IsZero() && now.Sub(d.lastUnattributedSweep) < nudgeEventUnattributedSweepInterval {
+		d.mu.Unlock()
+		return
+	}
+	d.lastUnattributedSweep = now
+	d.mu.Unlock()
+	d.kickAll()
+}
+
 // forward consumes one subscription until the stream ends, translating events
 // into kicks. Only the idle-agent kind and resyncs matter here: the provider
 // decides which of its own agent states is the idle-equivalent and translates
@@ -282,7 +315,7 @@ func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-
 					// sidecar that used to cover it has been retired for
 					// event-capable providers, so ignoring this waits for the
 					// next patrol tick instead of reacting to the idle.
-					d.kickAll()
+					d.kickAllUnattributed(time.Now())
 					continue
 				}
 				d.kickSessionAfter(ev.Session, 0, nudgeEventRetryBudget)
@@ -510,7 +543,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if d.stores == nil {
 		return
 	}
-	store, sessStore := d.stores()
+	store, sessStore := d.stores(cfg)
 	if store.Store == nil || sessStore == nil {
 		return
 	}
@@ -520,19 +553,24 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	if sessionFilter == "" {
-		// The sweep ENUMERATES; it never delivers. Handing each due session to
-		// its own pass is what makes the in-flight set mean what it says: every
-		// actual delivery is keyed by session name, so one session can never be
-		// delivered to twice at once, and a pane wedged inside Nudge cannot
-		// stall the sweep that would have reached the other sessions. An
-		// already-idle session emits no new idle event, so before this the
-		// sweep was its ONLY path and a single wedged pane stranded it.
-		fanOut := func(target nudgeTarget, _ worker.LiveObservation) (bool, error) {
-			d.spawnPass(target.sessionName, 0)
-			return false, nil
-		}
-		if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, "", d.stderr, fanOut); err != nil {
+		// The sweep ENUMERATES and hands off, and it makes no provider call
+		// while doing it. Both halves are load-bearing.
+		//
+		// Handing off is what makes the in-flight set mean what it says: every
+		// actual delivery is keyed by session name, so one session cannot be
+		// delivered to twice at once. Making no provider call is what makes the
+		// sweep unstallable: deliverPendingQueuedNudges observes each matched
+		// session inline, and observation is a server call on an uncancellable
+		// context, so a sweep built on it was still one hung session away from
+		// never reaching the rest. A session already idle when its nudge was
+		// queued emits no idle transition, so the sweep is its only path.
+		names, err := pendingNudgeSessionNames(d.cityPath, cfg, sessionBeads)
+		if err != nil {
 			fmt.Fprintf(d.stderr, "%s: nudge event dispatch sweep: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+			return
+		}
+		for _, name := range names {
+			d.spawnPass(name, 0)
 		}
 		return
 	}
