@@ -424,7 +424,7 @@ func deleteSessionBeadAfterClose(store beads.Store, id string) error {
 			log.Printf("gc api: deleting bead after close %s: already gone", id)
 			return nil
 		}
-		if !isTransientBeadDeleteConflict(err) {
+		if !isRetryableStoreConflict(err) {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
@@ -432,7 +432,7 @@ func deleteSessionBeadAfterClose(store beads.Store, id string) error {
 	return err
 }
 
-func isTransientBeadDeleteConflict(err error) bool {
+func isRetryableStoreConflict(err error) bool {
 	if err == nil {
 		return false
 	}

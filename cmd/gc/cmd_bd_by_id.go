@@ -44,15 +44,13 @@ package main
 // beads.Store. The in-process form of the same list, for the one-shot commands
 // that hold two ordinary stores, is by_id_store_route.go.
 //
-// The class leg is probed for EVERY id, not only for ids inside the class
-// namespace, and that is the one place this surface is deliberately STRONGER
-// than the shared resolver rather than merely equal to it. ClassCandidates
-// gates on the namespace before it builds a list (IDInNamespace), and `gc
-// storage migrate` preserves ids — so a bead the migration relocated keeps its
-// HQ/rig-era prefix and the resolver returns nil for exactly the ids that
-// moved. Only a residence probe reaches those, and without it their reads are
-// answered from the work store's retained pre-migration copy, frozen at
-// migration time. See resolve.
+// The class leg is probed for ids outside the class namespace too, not only
+// for ids inside it, because `gc storage migrate` preserves ids — so a bead the
+// migration relocated keeps its HQ/rig-era prefix, and without a residence
+// probe its reads are answered from the work store's retained pre-migration
+// copy, frozen at migration time. That probe is storeref's, not this surface's:
+// resolve runs the shared plan, which keeps the probe for exactly as long as
+// the binding has not been certified free of relics. See resolve.
 //
 // # Three deliberate properties
 //
@@ -700,6 +698,16 @@ type bdByIDClassDoor struct {
 	// here is released.
 	Store   beads.Store
 	Binding string
+	// CityPath is what resolve plans over. The residence probe belongs to
+	// storeref, and storeref reaches this city's bindings by path — so the door
+	// carries the path rather than a second derivation of the binding list.
+	//
+	// resolve and the served Graph must read the SAME binding handle. Both come
+	// from the cliResidencyBindings memo today (cliSoleClassBinding for Graph,
+	// cliByIDBindingOwner's topology for resolve), so residence is proven on the
+	// handle the write then lands in. Split those two derivations and a read
+	// could prove residence in one copy while the write goes to another.
+	CityPath string
 }
 
 // bindingName names the binding in operator-facing text.
@@ -757,41 +765,68 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 	if err != nil {
 		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", binding.Name, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name}, true, nil
+	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name, CityPath: cityPath}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
 //
-// A read failure is an error, never absence. Reading "the binding could not
-// answer" as "the bead is not there" is the root-loss shape this whole lane
-// exists to prevent, and it is the one classification a caller cannot recover
-// from once it has been flattened.
+// The question goes to storeref's by-id plan, not to a Get this door takes
+// itself. There is exactly one implementation of "does this binding hold this
+// id" in the tree that knows about the boot census, and a second answer taken
+// locally would be blind to it — so the answer is asked for where it is known,
+// not recomputed where it isn't. hookClaimClassRoute.holds was the last probe
+// still asking the binding directly; ga-qdt5y.16 collapsed it onto the same
+// plan, over a frame it captures once at construction, so there is no longer a
+// second spelling of this judgement anywhere in cmd/gc.
 //
-// The residence probe is why an id with no reserved prefix is asked about at
-// all: `gc storage migrate` copies the work store's infrastructure slice with
-// its ids PRESERVED, so a converged city holds work-shaped ids in its binding
-// and deciding ownership by prefix alone would send those reads back to the
-// ledger they were moved off.
+// The probe is why an id with no reserved prefix is asked about at all: `gc
+// storage migrate` copies the work store's infrastructure slice with its ids
+// PRESERVED, so a converged city holds work-shaped ids in its binding, and
+// deciding ownership by prefix alone would send those reads back to the ledger
+// they were moved off. The plan keeps the probe for as long as the binding
+// might hold such a relic, retiring it only on the conjunction of a
+// boot-verified "this binding mints only inside its reserved namespaces" and a
+// census, actually taken this process, that found none.
 //
-// The one error that is not a fault is the funnel's standing refusal. It says
-// this city's storage configuration cannot be served, which is a statement
-// about the city and about no particular bead — and a refused city still serves
-// work from its work ledger. So for a work id it establishes nothing and the
-// existing path stands; for an id only the class binding could own it is the
-// answer, and falls through to the fault arm.
+// The census counting CLOSED residents too (ga-qdt5y.19) is load-bearing here,
+// not incidental. Migration never deletes the source, so the work store keeps a
+// frozen pre-migration copy of every relic forever; a verdict that retired the
+// probe when the last relic closed would serve that id from the frozen copy —
+// OPEN, with pre-migration fields, permanently. The door depends on the wider
+// verdict, which is why the two landed together.
+//
+// A read failure is an error, never absence: flattening "the binding could not
+// answer" into "the bead is not there" is the root-loss shape this lane exists
+// to prevent, and it is the one classification a caller cannot recover from.
+// The standing storage refusal is the single error that is not a fault, and the
+// plan splits it by leg — tolerated on the probe, where a refused city still
+// serves work from its work ledger, and surfaced on the authority leg, where a
+// reserved id has nowhere else to live and the refusal IS the answer.
 func (d bdByIDClassDoor) resolve(id string) (bdByIDResolution, error) {
 	resolution := bdByIDResolution{Graph: d.Graph, Reserved: bdIDIsClassReserved(id)}
-	bead, err := d.Graph.Get(id)
-	switch {
-	case err == nil:
-		resolution.Bead = bead
-		resolution.Found = true
-	case errors.Is(err, beads.ErrNotFound):
-	case isStandingStorageRefusal(err) && !resolution.Reserved:
-	default:
-		return bdByIDResolution{}, fmt.Errorf("reading %q from %s: %w", id, d.bindingName(), err)
+	owner, owned, err := cliByIDBindingOwner(d.CityPath, id)
+	if err != nil {
+		return bdByIDResolution{}, d.readFailure(id, err)
 	}
+	if !owned {
+		return resolution, nil
+	}
+	bead, err := beadForOwner(owner, id)
+	if err != nil {
+		return bdByIDResolution{}, d.readFailure(id, err)
+	}
+	resolution.Bead = bead
+	resolution.Found = true
 	return resolution, nil
+}
+
+// readFailure names the binding in the sentence an operator reads.
+//
+// The resolver names a losing leg by its ref token (class:gcg…), which is the
+// right identifier for a plan and the wrong one for a person who configured a
+// binding under a name. The token rides inside as the wrapped cause.
+func (d bdByIDClassDoor) readFailure(id string, err error) error {
+	return fmt.Errorf("reading %q from %s: %w", id, d.bindingName(), err)
 }
 
 // firstResident returns the first id the class binding actually holds, or ""
@@ -882,7 +917,17 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	if !served {
 		return refuseUnservedClassMutation(door, bdArgs, named, namesClassBead, mutationIDs, stderr)
 	}
-	return serveBdByIDResolved(door, op, bdArgs, rigName, cityPath, stdout, stderr)
+	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
+}
+
+// classDoorRepoDirs is the checkout table this door hands its close gate. A
+// binding is a store rather than a checkout, so the city is what a bead the
+// binding merely HOLDS answers to; a bead that names a rig as its owner answers
+// to that rig's checkout instead, which is why the rig table travels with the
+// city path. The table loads the config lazily (cityRigsLoader), so a read this
+// door serves pays for it only when a close actually asks.
+func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
+	return workRecordRepoDirs{cityPath: cityPath, legacy: cityPath, rigs: cityRigsLoader(cityPath)}
 }
 
 // refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
@@ -915,9 +960,9 @@ func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs []string, named st
 // resolves the id against the class binding, refuses the cases this surface
 // must not serve (a work-store id it does not own, a reserved-prefix id with no
 // row, an explicit --rig work scope), runs the ADR-0009 work-record close gate,
-// and dispatches the verb against the class graph. repoFallback is the git repo
-// the close gate falls back to when a closing bead carries no gc.work_dir.
-func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName, repoFallback string, stdout, stderr io.Writer) (int, bool) {
+// and dispatches the verb against the class graph. repoDirs is the checkout
+// table the close gate resolves a closing bead's repository from.
+func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -948,7 +993,7 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
 	}
-	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoFallback, stderr) {
+	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr) {
 		return 1, true
 	}
 	switch op.Verb {
@@ -988,12 +1033,12 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 // gate reuses it rather than re-reading the class store, and door.Store answers
 // any other id the argv might name. Returns true only when the close must be
 // blocked (enforcement on and the work record invalid).
-func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoFallback string, stderr io.Writer) bool {
+func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
 	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
 		return false
 	}
 	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
-	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoFallback, workRecordEnforceEnabled(), stderr)
+	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig

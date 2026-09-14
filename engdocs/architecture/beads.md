@@ -191,6 +191,57 @@ enforced by the conformance suite in `internal/beads/beadstest/conformance.go`.
     file first, then `os.Rename` to the target path -- never partial
     writes.
 
+16. **A namespace-fenced store refuses a pinned id outside the namespaces
+    it serves.** Minting settles the ids a store *generates*, not the ids a
+    caller *pins*, and Create honors a pinned id verbatim -- so a binding
+    that claims a namespace stops holding that claim the moment anything
+    pins a foreign id into it. A fenced store refuses one, wrapping
+    `beads.ErrPinnedIDOutsideNamespace` (the contract is the sentinel; an
+    out-of-tree store cannot be held to error prose). The refusal writes
+    nothing and runs before normalization and before any read, so it neither
+    advances the mint sequence nor reveals whether the store holds the row.
+    Membership covers every namespace the binding holds, not just the mint
+    one, is tested on the separator and on the id exactly as it will be
+    stored, and folds case without rewriting the id. Mints,
+    `CreateWithForeignID` (the `gc storage migrate` copy path) and the ids a
+    bead *refers* to are all outside the fence. A store configured with no
+    namespaces is unfenced, which is how a binding serving the work class is
+    opened -- work beads carry the operator's configured prefix.
+    The fence covers `Store.Tx`'s create as well as the standalone one -- a
+    transaction is not an exemption, since the bead it commits is just as
+    resident and just as unreachable. `CreateWithForeignID` has no
+    transactional variant for that reason: the migration copy runs on the
+    store, not inside a caller's transaction.
+    `beadstest.RunPinnedIDFenceConformance` is the executable form, and its
+    `OverRestrictionControls` rows pass unfenced by design: without them,
+    refusing every pinned id would conform.
+
+    Fencing is a property of the binding provider, not of every Store. Both
+    shipped providers fence: `internal/storebinding/sqlite` and
+    `internal/storebinding/beadsworkspace`. Which namespaces a binding claims
+    follows from the classes it was *assigned*, so the derivation lives above
+    both in `storebinding.EngineReservedPrefixes` -- one function, so two
+    providers cannot answer it differently for the same assignment, and a
+    third inherits the rule by calling it.
+
+17. **ParentID is a weak, city-scoped reference -- except on the bd-CLI
+    provider.** A split city routes by class, so a parent and its child are
+    co-resident only when they classify the same way. A store therefore
+    persists and filters `ParentID` verbatim and never resolves, validates,
+    rewrites or places by an id in a namespace it does not serve;
+    `beadstest.RunStoreTests` pins that as
+    `ParentIDNamesARowThisStoreDoesNotHave`. MemStore, FileStore, SQLiteStore
+    and the exec provider carry every parent. NativeDoltStore carries a
+    foreign one and refuses a dangling id inside the namespace it serves,
+    before writing -- the strong reading its library forces.
+
+    `BdStore` does not comply. It passes `--parent` through to bd, which
+    resolves the id unconditionally and derives the child's id from it, so a
+    cross-store parent is refused and, when it does resolve, placement
+    follows the parent instead of the child's class. The divergence is
+    invisible to CI because the only conformance run over a real bd is
+    skipped (ga-e7z613). Tracked in ga-6od57.
+
 ## Metadata vocabulary (gc.*)
 
 `bead.Metadata` is a `map[string]string`, and the `gc.` prefix is the

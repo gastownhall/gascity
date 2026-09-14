@@ -4,6 +4,7 @@ package hybrid
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -21,10 +22,13 @@ var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider          = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -93,6 +97,12 @@ func (p *Provider) ObserveLiveness(name string, processNames []string) runtime.L
 	return runtime.ObserveLiveness(p.route(name), name, processNames)
 }
 
+// ObserveLivenessWithError forwards the optional error-bearing observation to
+// the selected backend without collapsing uncertainty into false.
+func (p *Provider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithError(p.route(name), name, processNames)
+}
+
 // Nudge delegates to the routed backend.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
@@ -105,6 +115,18 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 		return wp.WaitForIdle(ctx, name, timeout)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// SnapshotIdle delegates to the routed backend when it can take a
+// point-in-time idle observation. Like WaitForIdle this must be forwarded
+// explicitly: this Provider enumerates the optional interfaces it supports
+// rather than embedding a backend, so a local tmux session would otherwise
+// lose SnapshotIdle for every session in a local/remote split city.
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	if sp, ok := p.route(name).(runtime.IdleSnapshotProvider); ok {
+		return sp.SnapshotIdle(name)
+	}
+	return false, runtime.ErrInteractionUnsupported
 }
 
 // NudgeNow delegates to the routed backend when it supports immediate
@@ -228,6 +250,8 @@ func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: lc.CanReportAttachment && rc.CanReportAttachment,
 		CanReportActivity:   lc.CanReportActivity && rc.CanReportActivity,
+		CanStream:           lc.CanStream && rc.CanStream,
+		CanAttachTTY:        lc.CanAttachTTY && rc.CanAttachTTY,
 		NeedsClaimBackstop:  lc.NeedsClaimBackstop || rc.NeedsClaimBackstop,
 	}
 }
@@ -238,4 +262,25 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 		return scp.SleepCapability(name)
 	}
 	return runtime.SessionSleepCapabilityDisabled
+}
+
+// SubscribeSessionEvents forwards the session-event stream of whichever
+// backend implements runtime.SessionEventProvider. Today only herdr does, so
+// without this method, wrapping an event-capable local backend (e.g. herdr)
+// behind hybrid for remote routing would fail the
+// runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the whole event-driven
+// reconcile poke, falling back to patrol polling with no underlying
+// capability loss to explain it.
+func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	lSEP, lok := p.local.(runtime.SessionEventProvider)
+	rSEP, rok := p.remote.(runtime.SessionEventProvider)
+	switch {
+	case lok:
+		return lSEP.SubscribeSessionEvents(ctx)
+	case rok:
+		return rSEP.SubscribeSessionEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
+	}
 }

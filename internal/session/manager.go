@@ -276,6 +276,11 @@ type Info struct {
 	// start-in-flight) and parse it for the in-flight deadline, so the Info
 	// mirror keeps the raw value.
 	LastWokeAt string // last_woke_at (raw)
+	// SleptAt is the RAW slept_at metadata (RFC3339 or empty): the fallback
+	// wake-fairness key stamped by SleepPatch/AcknowledgeDrainPatch alongside
+	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
+	// instead of collapsing straight to CreatedAt (#2574).
+	SleptAt string // slept_at (raw)
 	// AwakeStartedAt is the RAW awake_started_at metadata (RFC3339 or empty):
 	// the immutable start-of-awake-interval epoch that survives sleep/drain
 	// teardowns (unlike last_woke_at / pending_create_started_at, which are
@@ -449,6 +454,13 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
+	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
+	// firing session.wake_refused, so repeated reconciler ticks on the same
+	// unserved explicit wake request emit only once. Mirrors
+	// StrandedEventEmittedAt's guard pattern. Cleared by ClearWakeBlockersPatch
+	// alongside wake_attempts so a fresh explicit wake gets its own emission.
+	WakeRefusedEventAt string // wake_refused_event_at (raw)
 	// ProviderKind is the RAW provider_kind metadata, verbatim — the provider
 	// FAMILY marker (claude/codex/gemini) stamped from ResolvedProvider, distinct
 	// from Provider (the concrete provider name). The session-logs / mcp-integration
@@ -1271,6 +1283,8 @@ func (m *Manager) Suspend(id string) error {
 		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+			"slept_at":     "",
+			"sleep_reason": "",
 		}}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}
@@ -1698,8 +1712,9 @@ func templateOverrideWakeInFlight(metadata map[string]string, state State, now t
 // pruneStateTimestamp returns the timestamp that PruneDetailed compares
 // against its cutoff for a session in the given state. Suspended sessions keep
 // the historical CreatedAt fallback for legacy beads. Asleep sessions normally
-// require slept_at, except legacy drained-asleep beads without slept_at can use
-// the bead update timestamp because sleep_reason=drained is terminal.
+// require slept_at; legacy beads without slept_at fall back to a stale
+// suspended_at, then to the bead update timestamp when sleep_reason=drained
+// is terminal.
 func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 	switch state {
 	case StateSuspended:
@@ -1715,6 +1730,12 @@ func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 		}
 		if strings.TrimSpace(b.Metadata["slept_at"]) != "" {
 			return time.Time{}, false
+		}
+		// Legacy beads written before the suspended->asleep re-projection fix
+		// (gastownhall/gascity#5739) carry a stale suspended_at with no slept_at;
+		// use it so those already-stuck sessions become prunable too.
+		if ts, ok := parsePruneMetadataTimestamp(b.Metadata, "suspended_at"); ok {
+			return ts, true
 		}
 		if strings.TrimSpace(b.Metadata["sleep_reason"]) != "drained" {
 			return time.Time{}, false
@@ -1839,21 +1860,28 @@ func (m *Manager) Get(id string) (Info, error) {
 
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
 // has already been loaded by the caller, avoiding a redundant store fetch.
-func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
+func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) (RuntimeObservation, error) {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
-		return obs
+		return obs, nil
 	}
-	liveness := runtime.ObserveLiveness(m.sp, info.SessionName, processNames)
+	liveness, err := runtime.ObserveLivenessWithError(m.sp, info.SessionName, processNames)
+	if err != nil {
+		return RuntimeObservation{}, err
+	}
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
 	if obs.Running {
 		obs.Attached = m.sp.IsAttached(info.SessionName)
-		if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
+		lastActive, err := m.sp.GetLastActivity(info.SessionName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			return RuntimeObservation{}, fmt.Errorf("observe last activity for %q: %w", info.SessionName, err)
+		}
+		if err == nil {
 			obs.LastActive = lastActive
 		}
 	}
-	return obs
+	return obs, nil
 }
 
 // List returns all chat sessions, optionally filtered by state and template,

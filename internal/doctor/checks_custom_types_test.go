@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -48,9 +47,9 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	// this check StatusOK, defeating the assertion below. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
-	t.Setenv("HOME", t.TempDir())
+	testOwnedHome(t)
 
-	dir := t.TempDir()
+	dir := guardedTempDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -65,22 +64,6 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 	if !c.CanFix() {
 		t.Fatal("CanFix should return true")
-	}
-}
-
-// retryRemoveAllForTest retries os.RemoveAll briefly to absorb a lingering
-// embedded-dolt background writer that can hold files open a few dozen ms
-// past the owning bd subprocess's apparent exit — which otherwise races
-// t.TempDir()'s single-shot RemoveAll cleanup with an intermittent
-// "directory not empty" error. Falls through silently on final failure so
-// TempDir's own best-effort cleanup still gets the last word.
-func retryRemoveAllForTest(t *testing.T, dir string) {
-	t.Helper()
-	for i := 0; i < 10; i++ {
-		if err := os.RemoveAll(dir); err == nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -126,11 +109,9 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// to the shared server regardless of the vars above. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testOwnedHome(t)
 
-	dir := t.TempDir()
-	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
+	dir := guardedTempDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -220,11 +201,9 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testOwnedHome(t)
 
-	dir := t.TempDir()
-	t.Cleanup(func() { retryRemoveAllForTest(t, dir) })
+	dir := guardedTempDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()

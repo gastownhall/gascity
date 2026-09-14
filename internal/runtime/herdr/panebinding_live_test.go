@@ -3,7 +3,6 @@ package herdr
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -17,14 +16,9 @@ import (
 // this herdr version does to the name, the provider contract must hold: the
 // session stays running, a re-issued Start refuses with ErrSessionExists
 // (never a second placement — that was the spawn storm), and Stop still tears
-// the pane down. Skipped when herdr is unavailable or in -short mode.
+// the pane down. Opt-in live tier: see requireLiveHerdr.
 func TestProviderLiveOccupantSwapKeepsLiveness(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	requireLiveHerdr(t)
 
 	p := New("gctest-swap", t.TempDir(), t.TempDir(), 0, 0)
 	_ = p.Stop("swap") // clear any leftover from a crashed prior run

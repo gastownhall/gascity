@@ -2,13 +2,16 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
@@ -52,8 +55,32 @@ func beadPriority(b beads.Bead) int {
 	if b.Priority != nil {
 		return *b.Priority
 	}
-	return 0
+	// nil Priority round-trips through native_dolt_store as bd's documented
+	// mid default (P2), not "highest" — match that semantics here so an
+	// unset-priority bead cannot out-schedule an explicitly-labeled P1 bead.
+	return 2
 }
+
+// beadPriorityRankOffset is the base of the scheduler's descending rank scale.
+// It sits above every bd priority (0-4) so a rank-bearing request always sorts
+// ahead of the "new"/floor-guarantee requests that leave SessionRequest.
+// BeadPriority at its zero value.
+const beadPriorityRankOffset = 10
+
+// beadPriorityRank converts a bd priority — ascending-urgent, where P0 is the
+// most urgent — into the descending rank SessionRequest.BeadPriority is sorted
+// by, where a larger value is scheduled first. Without this inversion a P4 bead
+// would out-schedule a P0 one.
+func beadPriorityRank(p int) int {
+	return beadPriorityRankOffset - p
+}
+
+// legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed by
+// work bead ID. worktreeSpecForBead runs for every ready bead on every
+// scale-check tick and nothing backfills ownership metadata onto beads that
+// never published it, so an unguarded log line would repeat for the life of
+// the process.
+var legacyWorkDirNoticeSeen sync.Map // work bead ID -> struct{}
 
 // worktreeSpecForBead reconstructs the exact single-owner verification input
 // from metadata published after gc worktree ensure succeeds. A work_dir with
@@ -67,8 +94,10 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 			bead.ID, beadmeta.WorkDirMetadataKey, canonicalPath, beadmeta.LegacyWorkDirMetadataKey, legacyPath)
 	}
 	path := canonicalPath
+	pathKey := beadmeta.WorkDirMetadataKey
 	if path == "" {
 		path = legacyPath
+		pathKey = beadmeta.LegacyWorkDirMetadataKey
 	}
 	if path == "" {
 		return nil, nil
@@ -87,11 +116,46 @@ func worktreeSpecForBead(bead beads.Bead, storeRef string) (*worktree.Spec, erro
 		{beadmeta.WorktreeGenerationMetadataKey, bead.Metadata[beadmeta.WorktreeGenerationMetadataKey]},
 		{beadmeta.WorktreeLifecycleMetadataKey, bead.Metadata[beadmeta.WorktreeLifecycleMetadataKey]},
 	}
+	missing := make([]string, 0, len(values))
+	present := make([]string, 0, len(values))
 	for _, item := range values {
 		if strings.TrimSpace(item.value) == "" {
-			return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
-				bead.ID, beadmeta.WorkDirMetadataKey, path, item.key)
+			missing = append(missing, item.key)
+		} else {
+			present = append(present, item.key)
 		}
+	}
+	if len(missing) == len(values) {
+		// A bead carrying work_dir without any ownership evidence is not
+		// incomplete evidence -- it never claimed to publish any. Recipe steps
+		// are still minted this way (stampDrainItemRecipe in
+		// internal/dispatch/drain.go copies both work_dir spellings and none
+		// of the nine ownership keys), so treat it as an unmanaged workspace
+		// and let the seat spawn as it always did, instead of erroring it into
+		// permanent starvation.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with no worktree ownership metadata; treating as unmanaged",
+				bead.ID, pathKey, path)
+		}
+		return nil, nil
+	}
+	if len(present) == 1 && present[0] == beadmeta.WorkBranchMetadataKey {
+		// gc.work_branch alone is not incomplete evidence either -- it is the
+		// shape a hook claim's ambient branch stamp produces on an otherwise
+		// unmanaged bead (hookClaimIdentityPatch stamps gc.work_branch onto
+		// any bead with a resolvable branch, independent of whether the bead
+		// ever published worktree ownership evidence). Treat it the same as
+		// the zero-key case above instead of hard-erroring the seat into
+		// permanent starvation the first time a hook claim touches it.
+		if _, dup := legacyWorkDirNoticeSeen.LoadOrStore(bead.ID, struct{}{}); !dup {
+			log.Printf("worktreeSpecForBead: work bead %s has %s=%q with only %s published; treating as unmanaged",
+				bead.ID, pathKey, path, beadmeta.WorkBranchMetadataKey)
+		}
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("work bead %s has %s=%q but is missing %s",
+			bead.ID, beadmeta.WorkDirMetadataKey, path, missing[0])
 	}
 	// The bead's own gc.root_store_ref is the canonical spelling
 	// ("city:<name>", "rig:<name>") and is what the creating side recorded in
@@ -254,6 +318,11 @@ func computePoolDesiredStatesAt(
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
 	namedSessionBeadIDs := make(map[string]bool)
+	// asleepSessionBeadIDs marks non-closed sessions whose runtime state is
+	// asleep (normalizeInfoState also folds "drained" into StateAsleep). A
+	// wake_mode="fresh" agent must not resume one of these stale rows — see the
+	// resume-tier guard below.
+	asleepSessionBeadIDs := make(map[string]bool)
 	for _, sb := range sessionInfos {
 		if sb.Closed {
 			continue
@@ -270,6 +339,9 @@ func computePoolDesiredStatesAt(
 		}
 		if isNamedSessionInfo(sb) {
 			namedSessionBeadIDs[sb.ID] = true
+		}
+		if sb.State == sessionpkg.StateAsleep {
+			asleepSessionBeadIDs[sb.ID] = true
 		}
 	}
 
@@ -326,9 +398,46 @@ func computePoolDesiredStatesAt(
 				if namedSessionBeadIDs[sessionBeadID] {
 					continue
 				}
+				// A wake_mode="fresh" pool agent must not inherit a stale
+				// *asleep* session bead: by configuration it never wants the
+				// old session's state back, so resuming that row leaves the
+				// pool bound to a session it will not reuse and the assigned
+				// work stranded. Plan a clean session bound to the same work
+				// instead — the wake-known-identity tier with an empty
+				// SessionBeadID, the same shape the closed-session case
+				// already uses. A live (non-asleep) session still resumes;
+				// agents with unset or wake_mode="resume" are unaffected.
+				// (gastownhall/gascity#4849)
+				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					if _, ok := wakeRequestedTemplates[template]; ok {
+						continue
+					}
+					wakeRequestedTemplates[template] = struct{}{}
+					resumeRequests = append(resumeRequests, SessionRequest{
+						Template:     template,
+						BeadPriority: beadPriorityRank(beadPriority(wb)),
+						Tier:         "wake-known-identity",
+						// SessionBeadID intentionally empty: the stale asleep
+						// bead must not be reused, so realizePoolDesiredSessions
+						// plans a clean create.
+						WorkBeadID:     wb.ID,
+						WorkBeadTitle:  strings.TrimSpace(wb.Title),
+						WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
+						WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
+						BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					})
+					if trace != nil {
+						trace.RecordDecision(TraceSitePoolWakeKnownIdentity, TraceReasonAssignedWork, TraceOutcomeScheduled, template, "", traceRecordPayload{
+							"tier":                   "wake-known-identity",
+							"work_bead":              wb.ID,
+							"skipped_asleep_session": sessionBeadID,
+						})
+					}
+					continue
+				}
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:       template,
-					BeadPriority:   beadPriority(wb),
+					BeadPriority:   beadPriorityRank(beadPriority(wb)),
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
@@ -363,7 +472,7 @@ func computePoolDesiredStatesAt(
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
 				Template:       template,
-				BeadPriority:   beadPriority(wb),
+				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),
@@ -388,6 +497,13 @@ func computePoolDesiredStatesAt(
 		}
 	}
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
+	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
+	for _, info := range sessionInfos {
+		if info.ID == "" {
+			continue
+		}
+		sessionInfoByID[info.ID] = info
+	}
 	// A wake-known request has assigned work but no surviving concrete session
 	// identity. Freshly completed unassigned pool sessions are valid concrete
 	// capacity for that request. Bind them before calculating residual protected
@@ -425,15 +541,34 @@ func computePoolDesiredStatesAt(
 		scaleCount, hasScaleCount := scaleCheckCounts[template]
 		protected := protectedNewRequests[template]
 		if !hasScaleCount && len(protected) == 0 {
+			// A template with no demand never becomes a key in
+			// scaleCheckCounts, so without this record the skip is silent and
+			// a pool that correctly wants zero sessions reads exactly like a
+			// pool the controller never evaluated. That ambiguity has already
+			// cost days of misdiagnosis; the decision below is the evidence
+			// that the template was reached and found idle on purpose.
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolDemandCompute, TraceReasonNoDemand, TraceOutcomeSkipped, template, "", traceRecordPayload{
+					"scale_check": scaleCount,
+					"protected":   len(protected),
+					"in_flight":   len(inFlightNewRequests[template]),
+				})
+			}
 			continue
 		}
 		if _, ok := aliasHeldTemplates[template]; ok {
 			continue
 		}
-		effectiveDemand := max(scaleCount, len(protected))
+		inFlight := inFlightNewRequests[template]
+		inFlightFloor := 0
+		for _, req := range inFlight {
+			if info, ok := sessionInfoByID[req.SessionBeadID]; ok && poolSessionWithinPendingCreateLease(info, cfg, decisionTime) {
+				inFlightFloor++
+			}
+		}
+		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
-		inFlight := inFlightNewRequests[template]
 		protectedCount := minInt(len(protected), newCount)
 		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
 		reusedCount := protectedCount + inFlightCount
@@ -722,6 +857,40 @@ func poolSessionEligibleForProtectedDemand(info sessionpkg.Info, decisionTime ti
 		strings.TrimSpace(info.WaitHold) == "" &&
 		!metadataTimeInFuture(info.HeldUntil, decisionTime) &&
 		!metadataTimeInFuture(info.QuarantinedUntil, decisionTime)
+}
+
+// poolSessionWithinPendingCreateLease reports whether an in-flight
+// pending-create pool session is still within its own lease window and should
+// therefore establish a demand floor of its own, mirroring the protected-
+// session floor above. decisionTime is injected the same way as
+// poolSessionWithinPostCreateProtection so every decision in a tick shares one
+// clock observation; a zero decisionTime fails closed for the same reason.
+//
+// The lease arithmetic itself is not reimplemented here: it delegates to
+// pendingCreateLeaseExpiredForRollbackInfo (session_reconciler.go), the exact
+// predicate the reconciler's own rollback path uses, so a bead genuinely stuck
+// past its lease is never propped up by this floor — it still rolls back on
+// schedule. That function only reasons about beads in a rollback-eligible
+// state (start-pending/creating/asleep, via pendingCreateRollbackState) and
+// returns false (not expired) for any other state as a no-op default, so the
+// state gate is re-checked here first: a pending_create_claim left set on an
+// already-stopped or failed-create session is not a live in-flight attempt
+// and must not establish a floor, regardless of how recently it was created.
+func poolSessionWithinPendingCreateLease(info sessionpkg.Info, cfg *config.City, decisionTime time.Time) bool {
+	if decisionTime.IsZero() {
+		return false
+	}
+	if !info.PendingCreateClaim {
+		return false
+	}
+	if !pendingCreateRollbackState(info.MetadataState) {
+		return false
+	}
+	var startupTimeout time.Duration
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return !pendingCreateLeaseExpiredForRollbackInfo(info, &clock.Fake{Time: decisionTime}, startupTimeout)
 }
 
 // poolSessionConsumesNewDemandInfo reports whether a pool session already
