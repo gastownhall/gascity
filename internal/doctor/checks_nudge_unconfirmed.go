@@ -57,15 +57,23 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var details []string
+	var malformed []string
+	sessions := make(map[string]struct{})
 	for _, entry := range entries {
+		name := entry.Name()
 		if !entry.IsDir() {
+			// Reporting a non-directory child as clean is the same false-green
+			// this check exists to close. Collect it and keep scanning: an
+			// early return here would suppress the genuine unconfirmed-nudge
+			// details for every remaining session.
+			malformed = append(malformed, name)
 			continue
 		}
-		name := entry.Name()
 		for _, filename := range nudgeUnconfirmedDiagnosticFiles {
 			path := filepath.Join(sessionsDir, name, filename)
 			if _, statErr := os.Stat(path); statErr == nil {
 				details = append(details, fmt.Sprintf("session %q: %s", name, filename))
+				sessions[name] = struct{}{}
 			} else if !os.IsNotExist(statErr) {
 				r.Status = StatusError
 				r.Severity = SeverityAdvisory
@@ -75,16 +83,30 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if len(details) == 0 {
+	if len(details) == 0 && len(malformed) == 0 {
 		r.Status = StatusOK
 		r.Message = "no unconfirmed nudge deliveries"
 		return r
 	}
 
 	sort.Strings(details)
+	sort.Strings(malformed)
+	for _, name := range malformed {
+		details = append(details, fmt.Sprintf("unexpected non-directory entry %q under %s", name, sessionsDir))
+	}
+
 	r.Status = StatusWarning
 	r.Severity = SeverityAdvisory
-	r.Message = fmt.Sprintf("%d session(s) have an unconfirmed nudge delivery", len(details))
+	// A session holding both diagnostic files is one session, not two; the
+	// details stay per-artifact.
+	r.Message = fmt.Sprintf("%d session(s) have an unconfirmed nudge delivery", len(sessions))
+	if len(malformed) > 0 {
+		if len(sessions) == 0 {
+			r.Message = fmt.Sprintf("%d unexpected non-directory entry(ies) under %s", len(malformed), sessionsDir)
+		} else {
+			r.Message += fmt.Sprintf("; %d unexpected non-directory entry(ies) under %s", len(malformed), sessionsDir)
+		}
+	}
 	r.Details = details
 	return r
 }

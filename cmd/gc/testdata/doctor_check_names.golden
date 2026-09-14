@@ -15,6 +15,7 @@ provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
+nudge-unconfirmed
 dolt-topology
 dolt-drift
 config-valid
@@ -31,7 +32,6 @@ duration-range
 provider-parity
 formula-requirements
 named-always-min-conflict
-nudge-unconfirmed
 instructions-file
 service-secrets-perms
 skill-collision
