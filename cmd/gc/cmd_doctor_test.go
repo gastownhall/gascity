@@ -1069,3 +1069,36 @@ func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
 		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
 	}
 }
+
+// The wiring is the fix: RigWorktreesCheck only sees the per-bead
+// worktree population if buildDoctorChecks registers it in the per-rig
+// loop, and it must inherit that loop's suspended-rig skip like every
+// other rig check.
+func TestBuildDoctorChecksRegistersRigWorktreesCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "awake", Path: "awake", Prefix: "aw"},
+			{Name: "sleeping", Path: "sleeping", Prefix: "sl", SuspendedOnStart: true},
+		},
+	}
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	names := doctorCheckNames(checks)
+	if doctorCheckIndex(names, "rig:awake:worktrees") < 0 {
+		t.Errorf("rig:awake:worktrees not registered; names=%v", names)
+	}
+	if doctorCheckIndex(names, "rig:sleeping:worktrees") >= 0 {
+		t.Errorf("rig:sleeping:worktrees registered for a suspended rig; names=%v", names)
+	}
+}
