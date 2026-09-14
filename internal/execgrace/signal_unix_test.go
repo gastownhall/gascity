@@ -54,10 +54,7 @@ sleep 30
 
 	// The trap must NOT run promptly: it is deferred behind the foreground
 	// `sleep 30`, which never received a signal and will run to completion.
-	time.Sleep(300 * time.Millisecond)
-	if _, err := os.Stat(interruptFile); err == nil {
-		t.Fatal("rollback trap ran despite leader-only signal — root-cause hypothesis not confirmed")
-	}
+	waitForFileToRemainAbsent(t, interruptFile, 300*time.Millisecond)
 	t.Log("confirmed: leader-only signal leaves the rollback trap deferred behind the foreground child")
 }
 
@@ -140,14 +137,7 @@ func TestInterruptProcessGroupRetryReachesLateJoiningMember(t *testing.T) {
 		t.Fatalf("interruptProcessGroup: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(interruptFile); err == nil {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("rollback marker never appeared — retry did not reach the late-joining group member")
+	waitForFile(t, interruptFile)
 }
 
 // TestSignalUnixHelperProcess is not a real test: it is the well-known Go
@@ -177,7 +167,9 @@ func TestSignalUnixHelperProcess(_ *testing.T) {
 		delayMS, _ := strconv.Atoi(os.Getenv("HELPER_JOIN_DELAY_MS"))
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT)
-		time.Sleep(time.Duration(delayMS) * time.Millisecond)
+		timer := time.NewTimer(time.Duration(delayMS) * time.Millisecond)
+		defer timer.Stop()
+		<-timer.C
 		if err := syscall.Setpgid(0, joinPgid); err != nil {
 			os.Exit(2)
 		}
@@ -191,12 +183,36 @@ func TestSignalUnixHelperProcess(_ *testing.T) {
 
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	poll := time.NewTicker(2 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-poll.C:
+			if _, err := os.Stat(path); err == nil {
+				return
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for %s", path)
+		}
+	}
+}
+
+func waitForFileToRemainAbsent(t *testing.T, path string, duration time.Duration) {
+	t.Helper()
+	timeout := time.NewTimer(duration)
+	defer timeout.Stop()
+	poll := time.NewTicker(2 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-poll.C:
+			if _, err := os.Stat(path); err == nil {
+				t.Fatalf("file %s appeared during absence window", path)
+			}
+		case <-timeout.C:
 			return
 		}
-		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("timed out waiting for %s", path)
 }
