@@ -7,8 +7,10 @@
 #   2. Session-only population (count=0)                 → prune IS invoked normally
 #      (mayor's primary ask: a gm-prefixed city keeps its non-session beads, but
 #      still reaps session beads -- this must not regress into a no-op).
-#   3. City database unresolved                          → prune NOT invoked
-#      (fail closed), anomaly recorded.
+#   3. City database unresolved                          → guard cannot verify
+#      type scope, but bd's own prune proceeds unverified; anomaly recorded
+#      (matching every other CITY_DB-unresolved branch elsewhere in this file;
+#      blocking prune here would regress the zero-Dolt-databases contract).
 #   4. Backup-age gate already skipping                   → guard's own SQL count is
 #      not run at all (short-circuit; only the backup-age anomaly fires).
 
@@ -120,16 +122,19 @@ else
     fail "T2: session-only population (count=0) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called"
 fi
 
-# T3: city database unresolved → fail closed, prune skipped
+# T3: city database unresolved → type-scope guard cannot verify, but bd's own
+# prune proceeds unverified (bd resolves its own store independently of this
+# file's direct-SQL CITY_DB; failing prune closed here would regress
+# TestReaperSessionPruneRunsWhenNoDoltDatabases's established contract).
 result=$(run_step6 "0" "" "fresh")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
-if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "yes" ] \
         && printf '%s' "$anomaly_msg" | grep -qi "database"; then
-    pass "T3: city database unresolved → prune skipped (fail closed), anomaly recorded"
+    pass "T3: city database unresolved → type-scope guard skipped (unverifiable), bd prune still proceeds, anomaly recorded"
 else
-    fail "T3: city database unresolved → expected bd=no anomaly=yes+database keyword; got bd=$bd_called anomaly=$anomaly_called msg=$anomaly_msg"
+    fail "T3: city database unresolved → expected bd=yes anomaly=yes+database keyword; got bd=$bd_called anomaly=$anomaly_called msg=$anomaly_msg"
 fi
 
 # T4: backup-age gate already stale → guard's own SQL count never runs
