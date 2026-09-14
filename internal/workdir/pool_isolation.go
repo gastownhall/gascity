@@ -2,6 +2,9 @@
 package workdir
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -23,6 +26,53 @@ import (
 // config), and nothing in today's system spontaneously creates a second
 // concurrent instance for such an agent absent one of the explicit signals
 // above.
-func ValidatePoolWorkDirIsolation(_ string, _ string, _ []config.Agent, _ []config.Rig) error {
+func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Agent, rigs []config.Rig) error {
+	for i := range agents {
+		a := agents[i]
+		if !requiresPoolWorkDirIsolationCheck(a) {
+			continue
+		}
+
+		firstName := a.QualifiedInstanceName(a.Name + "-1")
+		secondName := a.QualifiedInstanceName(a.Name + "-2")
+
+		firstPath, err := ResolveWorkDirPathStrict(cityPath, cityName, firstName, a, rigs)
+		if err != nil {
+			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), firstName, err)
+		}
+		secondPath, err := ResolveWorkDirPathStrict(cityPath, cityName, secondName, a, rigs)
+		if err != nil {
+			return fmt.Errorf("agent %q: resolving work_dir for pool instance %q: %w", a.QualifiedName(), secondName, err)
+		}
+
+		if firstPath == secondPath {
+			return fmt.Errorf(
+				"agent %q supports multiple concurrent sessions but work_dir does not vary per instance (instances %q and %q both resolve to %q); "+
+					"set work_dir to a template that includes {{.AgentBase}} (or another value that differs per instance) so concurrent sessions get isolated working directories",
+				a.QualifiedName(), firstName, secondName, firstPath,
+			)
+		}
+	}
 	return nil
+}
+
+// requiresPoolWorkDirIsolationCheck reports whether the agent carries an
+// explicit configuration signal that it may run more than one concurrently
+// active session — as opposed to merely defaulting to an unset
+// max_active_sessions, which SupportsExpandedSessionIdentities treats as
+// "unlimited" for identity-discovery purposes but which is also the
+// ordinary shape of a default singleton/named-session agent. Isolation
+// enforcement needs the narrower, explicit-only reading so it does not hard
+// fail every minimally-configured agent that never opted into pooling.
+func requiresPoolWorkDirIsolationCheck(a config.Agent) bool {
+	if !a.SupportsExpandedSessionIdentities() {
+		return false
+	}
+	if strings.TrimSpace(a.Namepool) != "" || len(a.NamepoolNames) > 0 {
+		return true
+	}
+	if a.MinActiveSessions != nil || strings.TrimSpace(a.ScaleCheck) != "" {
+		return true
+	}
+	return a.MaxActiveSessions != nil
 }
