@@ -1212,9 +1212,9 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // takes a bead id. It is merely QUOTED when it is the value of any other flag,
 // and a quoted id decides nothing ABOUT OWNERSHIP: `gc bd list --metadata-field
 // workflow_id=gcg-…` selects work rows by a field they carry, so no bead of the
-// relocated class is being addressed and this walk returns false for it.
+// relocated class is being addressed and this walk collects no id from it.
 //
-// False here does not mean forwarded. The selector dialect guard in
+// An empty result here does not mean forwarded. The selector dialect guard in
 // bd_relocated_classes.go runs first and refuses that same argv on servability
 // — a projection whose predicate names a namespace this ledger holds no row
 // under cannot answer it, and `[]` is a confident wrong answer. What this walk
