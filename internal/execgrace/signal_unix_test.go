@@ -168,7 +168,6 @@ func TestSignalUnixHelperProcess(_ *testing.T) {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT)
 		timer := time.NewTimer(time.Duration(delayMS) * time.Millisecond)
-		defer timer.Stop()
 		<-timer.C
 		if err := syscall.Setpgid(0, joinPgid); err != nil {
 			os.Exit(2)
