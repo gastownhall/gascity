@@ -157,9 +157,15 @@ func TestCityStatusObservationTimesOut(t *testing.T) {
 // the outer bound: the observation must run to completion and return the real
 // answer instead of the empty timeout fallback.
 func TestCityStatusObservationTimeoutDisabled(t *testing.T) {
+	// The observation is bounded by a budget this city disabled, so it must have
+	// run: the send below is the receipt. Waiting on a wall-clock duration would
+	// prove the same thing at a cost the ledger will not absorb --
+	// test/test-resources.toml pins the untagged fixed-sleep totals as a ceiling
+	// that cannot grow -- so the fake reports completion through a channel.
+	observed := make(chan struct{}, 1)
 	oldObserve := observeSessionTargetForStatus
 	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
-		time.Sleep(20 * time.Millisecond)
+		observed <- struct{}{}
 		return worker.LiveObservation{Running: true}, nil
 	}
 	t.Cleanup(func() { observeSessionTargetForStatus = oldObserve })
@@ -174,6 +180,11 @@ func TestCityStatusObservationTimeoutDisabled(t *testing.T) {
 		statusObservationTarget{runtimeSessionName: "slow-session"},
 		&stderr,
 	)
+	select {
+	case <-observed:
+	default:
+		t.Fatal("observation did not run with the outer bound disabled")
+	}
 	if !obs.Running {
 		t.Fatal("observation should report running with the outer bound disabled")
 	}
