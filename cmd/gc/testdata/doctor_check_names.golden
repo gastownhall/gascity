@@ -15,6 +15,7 @@ provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
+nudge-unconfirmed
 dolt-topology
 dolt-drift
 config-valid

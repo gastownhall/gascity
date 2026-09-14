@@ -399,3 +399,65 @@ func TestProvider_CapabilitiesIntersectsEveryField(t *testing.T) {
 		}
 	}
 }
+
+// idleSnapshotProvider is a backend that can take a point-in-time idle
+// observation. A plain runtime.Fake deliberately cannot, so it stands in for a
+// backend without the capability.
+type idleSnapshotProvider struct {
+	*runtime.Fake
+	idle  map[string]bool
+	calls []string
+}
+
+func newIdleSnapshotProvider() *idleSnapshotProvider {
+	return &idleSnapshotProvider{Fake: runtime.NewFake(), idle: make(map[string]bool)}
+}
+
+func (p *idleSnapshotProvider) SnapshotIdle(name string) (bool, error) {
+	p.calls = append(p.calls, name)
+	return p.idle[name], nil
+}
+
+// The composite must satisfy IdleSnapshotProvider itself, or the idle-timeout
+// reconciler's type-assert fails for every session in a local/remote split
+// city and the content-based idle clock silently never runs (ga-07mi8).
+var _ runtime.IdleSnapshotProvider = (*Provider)(nil)
+
+func TestSnapshotIdle_RoutesToBackend(t *testing.T) {
+	local, remote := newIdleSnapshotProvider(), newIdleSnapshotProvider()
+	h := New(local, remote, isRemote)
+	local.idle["local-agent"] = true
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if err != nil {
+		t.Fatalf("SnapshotIdle(local-agent): %v", err)
+	}
+	if !idle {
+		t.Error("SnapshotIdle(local-agent) = false, want true from the local backend")
+	}
+	if !reflect.DeepEqual(local.calls, []string{"local-agent"}) {
+		t.Errorf("local backend SnapshotIdle calls = %v, want [local-agent]", local.calls)
+	}
+	if len(remote.calls) != 0 {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want none", remote.calls)
+	}
+
+	if _, err := h.SnapshotIdle("remote-agent-1"); err != nil {
+		t.Fatalf("SnapshotIdle(remote-agent-1): %v", err)
+	}
+	if !reflect.DeepEqual(remote.calls, []string{"remote-agent-1"}) {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want [remote-agent-1]", remote.calls)
+	}
+}
+
+func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
+	h := New(runtime.NewFake(), runtime.NewFake(), isRemote)
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("SnapshotIdle error = %v, want ErrInteractionUnsupported", err)
+	}
+	if idle {
+		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	runtimepkg "github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -2296,10 +2297,47 @@ func TestNudgeSession_WithRetry(t *testing.T) {
 	// Give shell a moment to initialize
 	time.Sleep(200 * time.Millisecond)
 
-	// NudgeSession should succeed on a ready session
+	// NudgeSession should succeed on a ready session. A plain shell pane has
+	// no busy-state indicator, so this exercises the fallback path, which
+	// reports nil on a successful send regardless (see tmux.go:NudgeSession).
 	err := tm.NudgeSession(sessionName, "test message")
 	if err != nil {
 		t.Errorf("NudgeSession() = %v, want nil", err)
+	}
+}
+
+func TestNudgeSessionFallbackRecordsUnconfirmedDiagnostic(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	runtimeDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.RuntimeDir = runtimeDir
+	tm := NewTmuxWithConfig(cfg)
+	sessionName := "gt-test-nudge-unconfirmed-diag-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
+
+	if err := tm.NewSession(sessionName, os.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+	time.Sleep(200 * time.Millisecond)
+
+	// A plain shell pane (no GC_PROVIDER) takes the fallback path, which can
+	// never confirm delivery. The send must still report success...
+	if err := tm.NudgeSession(sessionName, "test message"); err != nil {
+		t.Fatalf("NudgeSession() = %v, want nil", err)
+	}
+
+	// ...while recording a best-effort diagnostic so the gap stays
+	// observable (bead dr-6siig DoD option (b)).
+	path := filepath.Join(citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir), sessionName, "nudge-unconfirmed.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected diagnostic file at %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), "test message") {
+		t.Errorf("diagnostic file = %q, want it to contain the nudge text", string(data))
 	}
 }
 
@@ -2683,6 +2721,75 @@ func TestPaneContainsBusyIndicator(t *testing.T) {
 			got := paneContainsBusyIndicator(tt.lines)
 			if got != tt.want {
 				t.Errorf("paneContainsBusyIndicator(%v) = %v, want %v", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPaneShowsDrainedComposer(t *testing.T) {
+	longSent := strings.Repeat("x", 50)
+	longSentFirst40 := strings.Repeat("x", 40)
+
+	tests := []struct {
+		name  string
+		lines []string
+		sent  string
+		want  bool
+	}{
+		{"nil lines", nil, "hello", false},
+		{"no ready-prompt line observed", []string{"some output", "still no prompt"}, "hello", false},
+		{"bare drained composer", []string{"❯ "}, "hello", true},
+		{"composer still holds exact sent draft", []string{"❯ hello"}, "hello", false},
+		{"composer holds sent draft with trailing padding", []string{"❯ hello  "}, "hello", false},
+		{"composer holds unrelated newer text", []string{"❯ something else entirely"}, "hello", true},
+		{
+			"long draft truncated to pane width still detected via 40-rune compare",
+			[]string{"❯ " + longSentFirst40},
+			longSent,
+			false,
+		},
+		{
+			"long draft's composer drained",
+			[]string{"❯ "},
+			longSent,
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier draft, now bare",
+			[]string{"❯ hello", "✻ Worked for 2s", "❯ "},
+			"hello",
+			true,
+		},
+		{
+			"only the LAST ready-prompt line is the live composer: earlier bare, now drafted",
+			[]string{"❯ ", "some noise", "❯ hello"},
+			"hello",
+			false,
+		},
+		{
+			"real captured idle mayor pane: bare composer beneath a done marker",
+			[]string{"✻ Worked for 1m 49s", "", "❯ ", "  bypass permissions on"},
+			"reminder: please respond to the review",
+			true,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, still drafted",
+			[]string{"❯ first line of reminder"},
+			"\nfirst line of reminder\nsecond line",
+			false,
+		},
+		{
+			"multiline sent: only its first non-empty line is compared, composer drained",
+			[]string{"❯ "},
+			"\nfirst line of reminder\nsecond line",
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := paneShowsDrainedComposer(tt.lines, tt.sent)
+			if got != tt.want {
+				t.Errorf("paneShowsDrainedComposer(%v, %q) = %v, want %v", tt.lines, tt.sent, got, tt.want)
 			}
 		})
 	}

@@ -22,6 +22,7 @@ var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
@@ -114,6 +115,18 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 		return wp.WaitForIdle(ctx, name, timeout)
 	}
 	return runtime.ErrInteractionUnsupported
+}
+
+// SnapshotIdle delegates to the routed backend when it can take a
+// point-in-time idle observation. Like WaitForIdle this must be forwarded
+// explicitly: this Provider enumerates the optional interfaces it supports
+// rather than embedding a backend, so a local tmux session would otherwise
+// lose SnapshotIdle for every session in a local/remote split city.
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	if sp, ok := p.route(name).(runtime.IdleSnapshotProvider); ok {
+		return sp.SnapshotIdle(name)
+	}
+	return false, runtime.ErrInteractionUnsupported
 }
 
 // NudgeNow delegates to the routed backend when it supports immediate

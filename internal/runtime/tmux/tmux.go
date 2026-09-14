@@ -130,9 +130,16 @@ type Config struct {
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
 	SocketName string
-	// RuntimeDir is the city runtime root (".gc/runtime") under which a
-	// per-session start-crash diagnostic is persisted. Empty disables the
-	// durable capture (e.g. ad-hoc invocations and tests run unchanged).
+	// RuntimeDir is the city runtime root under which per-session
+	// diagnostics are persisted. Production sets it to
+	// citylayout.RuntimePath(cityPath), which is "<city>/.gc" -- this doc
+	// said ".gc/runtime" and it was wrong, which is the same mistake gc
+	// doctor made when it went looking for these artifacts under
+	// .gc/runtime/sessions and found a permanently empty directory
+	// (dr-6siig HIGH 1). Resolve the subdirectory through
+	// citylayout.SessionDiagnosticsDirForRuntimeDir, never by joining a
+	// literal. Empty disables the durable capture, so ad-hoc invocations
+	// and tests run unchanged.
 	RuntimeDir string
 }
 
@@ -217,6 +224,15 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// ErrNudgeSubmitDeliveredUnobserved indicates the submit Enter reached the
+	// pane AND the composer drained, so delivery is proven -- only the busy
+	// state OBSERVATION failed (the indicator rendered outside the confirm
+	// budget, or never rendered at all). Unlike ErrNudgeSubmitUnconfirmed,
+	// callers must NOT retry this: retrying would re-inject a message the
+	// session already received, which is the ga-civwyz duplicate-reminder
+	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
+	// days of production logs).
+	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -2369,11 +2385,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			// normal retry delay and spends one of its bounded attempts —
 			// the same handling as any other delivery failure — instead of
 			// silently losing the nudge.
+			//
+			// One extra capture here, on the already-failed path only: check
+			// whether the composer actually drained before concluding the
+			// submit itself is in doubt. A drained composer is positive
+			// evidence the Enter reached the pane and the agent consumed it —
+			// only the busy-state OBSERVATION missed it — so that case must be
+			// reported as proven delivery, not requeued as a failure.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
+	// This family has no busy-state indicator AT ALL — confirmation is
+	// structurally impossible, not merely unobserved. Reporting every
+	// successful send as ErrNudgeSubmitUnconfirmed (the verified path's
+	// signal for "the submit MAY have failed, please retry") was tried and
+	// reverted here: this branch's callers (the queue drain in
+	// cmd/gc/cmd_nudge.go, mail-notify dedup) treat that error as a genuine
+	// delivery failure and re-enqueue/resend, so a family that can never
+	// confirm would have every successful nudge duplicated and eventually
+	// dead-lettered. Instead, keep reporting success on send and record a
+	// best-effort diagnostic (see recordUnconfirmedSubmit) so the gap is
+	// observable without corrupting the retry contract.
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
@@ -2386,9 +2423,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
+		t.recordUnconfirmedSubmit(session, message)
 		return nil
 	}
 	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
+}
+
+// recordUnconfirmedSubmit persists a best-effort diagnostic artifact when a
+// nudge submit was sent on a provider family with no busy-state indicator,
+// so delivery could not be confirmed (see the fallback branch of
+// NudgeSession above). This is deliberately separate from the retry/error
+// contract: the send is still reported as successful to the caller, since
+// treating it as a retryable failure would duplicate every delivery for
+// these provider families (see the comment above the call site). Disabled
+// (no-op) when RuntimeDir is unset. An I/O error is NOT swallowed: it is
+// warned on stderr, because the caller's decision to report success rests
+// entirely on this artifact existing, and a discarded write error leaves the
+// operation returning success with neither confirmation nor evidence.
+func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", session)
+	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
+	writeDiagnosticTextBlock(&b, "--- nudge text ---\n", message)
+
+	if _, err := writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic nudge-unconfirmed.log not written: %v\n", session, err)
+	}
 }
 
 // NudgePane sends a message to a specific pane reliably.
@@ -3693,6 +3753,69 @@ func idlePromptPrefix(configured string) string {
 	return DefaultReadyPromptPrefix
 }
 
+// snapshotPaneIdle takes one observation of the session's pane and reports
+// whether it currently shows a ready prompt with no active-processing
+// indicator, resolving the session's configured ready-prompt prefix first. It
+// is the entry point for single-observation callers (SnapshotIdle); WaitForIdle
+// resolves the prefix once and polls snapshotPaneIdleWithPrefix directly so its
+// loop does not re-exec tmux show-environment on every 200ms tick.
+func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
+	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session))
+}
+
+// resolveIdlePromptPrefix reads the session's configured ready-prompt prefix,
+// falling back to DefaultReadyPromptPrefix when it is unset or unreadable.
+func (t *Tmux) resolveIdlePromptPrefix(session string) string {
+	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
+		return idlePromptPrefix(configured)
+	}
+	return DefaultReadyPromptPrefix
+}
+
+// snapshotPaneIdleWithPrefix is the pure pane scan behind idle detection: it
+// captures the pane once and reports whether it shows promptPrefix with no
+// active-processing indicator. A capture error is returned verbatim so callers
+// can distinguish a session that has gone away (ErrSessionNotFound /
+// ErrNoServer) from a transient read failure.
+func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
+	prefix := strings.TrimSpace(promptPrefix)
+
+	lines, err := t.CapturePaneLines(session, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+
+	// Check for active processing indicator in the status bar.
+	// Claude Code shows "esc to interrupt" while processing — if present,
+	// the agent is busy regardless of whether the prompt is visible.
+	if paneContainsBusyIndicator(lines) {
+		return false, nil
+	}
+
+	// Scan captured lines for the prompt prefix.
+	// Claude Code renders a status bar below the prompt line,
+	// so the prompt may not be the last non-empty line.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SnapshotIdle reports whether the named session is at an idle interactive
+// boundary right now — a ready prompt with no active-processing indicator — in
+// a single non-blocking observation. It implements
+// [runtime.IdleSnapshotProvider]. A session that has gone away is reported as
+// an error, not as idle.
+func (t *Tmux) SnapshotIdle(session string) (bool, error) {
+	return t.snapshotPaneIdle(session)
+}
+
 // WaitForIdle polls until the agent appears to be at an idle prompt.
 // Unlike WaitForRuntimeReady (which is for bootstrap), this is for steady-state
 // idle detection — used to avoid interrupting agents mid-work.
@@ -3705,11 +3828,10 @@ func idlePromptPrefix(configured string) string {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
-	promptPrefix := DefaultReadyPromptPrefix
-	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
-		promptPrefix = idlePromptPrefix(configured)
-	}
-	prefix := strings.TrimSpace(promptPrefix)
+	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
+	// and re-reading it per tick would add a tmux show-environment exec to
+	// every 200ms poll.
+	promptPrefix := t.resolveIdlePromptPrefix(session)
 
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
@@ -3719,7 +3841,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
+		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -3733,34 +3855,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 			continue
 		}
-
-		// Check for active processing indicator in the status bar.
-		// Claude Code shows "esc to interrupt" while processing — if present,
-		// the agent is busy regardless of whether the prompt is visible.
-		if paneContainsBusyIndicator(lines) {
-			consecutiveIdle = 0
-			if err := waitForIdlePoll(ctx); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Scan captured lines for the prompt prefix.
-		// Claude Code renders a status bar below the prompt line,
-		// so the prompt may not be the last non-empty line.
-		foundPrompt := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-				foundPrompt = true
-				break
-			}
-		}
-
-		if foundPrompt {
+		if idle {
 			consecutiveIdle++
 			if consecutiveIdle >= requiredConsecutive {
 				return nil
@@ -3934,6 +4029,82 @@ func paneContainsBusyIndicator(lines []string) bool {
 		}
 	}
 	return false
+}
+
+// paneShowsDrainedComposer reports whether the pane's live composer -- the
+// LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
+// -- has drained, meaning the submit Enter actually reached the pane and the
+// agent consumed it. Earlier lines that also start with the prompt prefix are
+// scrollback transcript entries, not the live composer, and are ignored.
+//
+// It returns false when the composer still holds sent: the first non-empty
+// line of sent (compared on its first 40 runes, trimmed) is still present in
+// what remains after stripping the prompt prefix. That is the ga-bwm case --
+// the message is sitting drafted-but-unsubmitted -- and callers must keep
+// treating it as unconfirmed and retry. It returns true otherwise: the
+// composer is bare (or holds different, newer text), so the prior submit
+// drained it and only the busy-state OBSERVATION failed. When no line
+// matches the prompt prefix at all, the composer cannot be observed, so this
+// conservatively returns false rather than claiming delivery is proven.
+func paneShowsDrainedComposer(lines []string, sent string) bool {
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	if !observed {
+		return false
+	}
+	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
+	if draft != "" && strings.Contains(remainder, draft) {
+		return false
+	}
+	return true
+}
+
+// lastComposerRemainder returns the text after the ready-prompt prefix on the
+// LAST captured line that matches it -- the live composer, since any earlier
+// match is a scrollback transcript entry -- and whether any line matched at
+// all. Mirrors matchesPromptPrefix's normalization (NBSP folding, box-border
+// stripping) so a line it would call a match also yields a remainder here.
+func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
+
+	var remainder string
+	var observed bool
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+			switch {
+			case strings.HasPrefix(cand, normalizedPrefix):
+				remainder, observed = cand[len(normalizedPrefix):], true
+			case prefixTrimmed != "" && cand == prefixTrimmed:
+				remainder, observed = "", true
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return remainder, observed
+}
+
+// firstNonEmptyLine returns the first line of s (split on "\n") that is not
+// blank after trimming, or "" if every line is blank.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// firstNRunes returns the first n runes of s, or all of s when it has n
+// runes or fewer.
+func firstNRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // GetSessionInfo returns detailed information about a session.

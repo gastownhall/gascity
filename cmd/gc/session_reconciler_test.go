@@ -42,7 +42,7 @@ func newFakeIdleTracker() *fakeIdleTracker {
 	}
 }
 
-func (f *fakeIdleTracker) checkIdle(sessionName, template string, _ runtime.Provider, _ time.Time) bool {
+func (f *fakeIdleTracker) checkIdle(sessionName, template, _, _ string, _ runtime.Provider, _ time.Time) bool {
 	if f.idle[sessionName] {
 		return true
 	}
@@ -61,6 +61,10 @@ func (f *fakeIdleTracker) setTimeoutForTemplate(template string, _ time.Duration
 		f.templates[template] = true
 	}
 }
+
+// clearIdleAnchor is a no-op: this double has no content-idle anchor state,
+// and its idle map is driven directly by tests.
+func (f *fakeIdleTracker) clearIdleAnchor(string) {}
 
 func (f *fakeIdleTracker) exemptTemplateFallbackForSession(sessionName string) {
 	if sessionName != "" {

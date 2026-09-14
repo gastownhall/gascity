@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -88,7 +89,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, p.startOps(cfg), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -223,7 +224,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), p.startOps(cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -237,7 +238,13 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
+	// The runtime dir is what makes the startup-nudge and start-crash
+	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
+	// unconfirmed startup nudge on this path was suppressed by
+	// launchOrchestration and then recorded nowhere: success returned with
+	// neither confirmed delivery nor the durable evidence that suppression
+	// is predicated on.
+	if err := doRelaunchSession(ctx, p.startOps(cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -457,6 +464,13 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 // WaitForIdle waits for the named session to reach an idle prompt.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
 	return p.tm.WaitForIdle(ctx, name, timeout)
+}
+
+// SnapshotIdle reports, in a single non-blocking observation, whether the named
+// session is at an idle interactive boundary right now. It implements
+// [runtime.IdleSnapshotProvider].
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	return p.tm.SnapshotIdle(name)
 }
 
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
@@ -829,6 +843,7 @@ type startOps interface {
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
+	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
@@ -862,6 +877,21 @@ type tmuxStartOps struct {
 // literal compiles fine and produces output that still looks like a diagnostic,
 // so a forgotten field is invisible. TestProductionStartOpsUseTheConstructor
 // enforces that.
+// startOps builds the start-ops for a production session. Every Provider
+// entry point that starts, relaunches, or drives a live session goes through
+// here rather than calling newTmuxStartOps directly, because the runtime dir
+// is the only thing that makes the start-crash and startup-nudge-unconfirmed
+// diagnostics reachable, and two of the three call sites passed "" -- so
+// Relaunch and RunLive suppressed an unconfirmed startup nudge and then
+// recorded it nowhere, returning success with neither confirmed delivery nor
+// the durable evidence that suppression is predicated on (dr-6siig HIGH 2).
+// Passing the field explicitly at each site is what let two of them omit it;
+// TestProductionStartOpsCarryRuntimeDir asserts this stays the only
+// production construction, so the defect cannot recur by omission.
+func (p *Provider) startOps(cfg runtime.Config) *tmuxStartOps {
+	return newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg)
+}
+
 func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
 	return &tmuxStartOps{
 		tm:              tm,
@@ -980,21 +1010,86 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	if signal != "" {
 		fmt.Fprintf(&b, "signal: %s\n", signal)
 	}
-	b.WriteString("--- last pane output ---\n")
-	b.WriteString(paneContent)
-	if paneContent != "" && !strings.HasSuffix(paneContent, "\n") {
-		b.WriteByte('\n')
-	}
+	writeDiagnosticTextBlock(&b, "--- last pane output ---\n", paneContent)
 
-	dir := filepath.Join(o.runtimeDir, "sessions", name)
-	if err := runtime.EnsurePrivateDir(dir); err != nil {
-		return ""
-	}
-	path := filepath.Join(dir, "start-stderr.log")
-	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
-		return ""
+	return o.writeDiagnostic(name, "start-stderr.log", b.String())
+}
+
+// recordUnconfirmedNudge persists a durable diagnostic artifact when the
+// startup nudge is delivered but not confirmed ([ErrNudgeSubmitUnconfirmed]).
+// The startup nudge has no retry-capable caller (see launchOrchestration), so
+// unlike the queue-path nudge — which requeues on this error and gets a
+// bounded number of fresh attempts — a lost startup nudge would otherwise be
+// invisible with no other record. This mirrors recordStartCrash's diagnostic
+// capture (same runtimeDir/sessions/<name>/ location, same best-effort
+// semantics): a disabled capture (empty runtimeDir) or any I/O error returns
+// "" without affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordUnconfirmedNudge(name, message string, cause error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	fmt.Fprintf(&b, "cause: %v\n", cause)
+	writeDiagnosticTextBlock(&b, "--- startup nudge text ---\n", message)
+
+	return o.writeDiagnostic(name, "startup-nudge-unconfirmed.log", b.String())
+}
+
+// writeDiagnostic writes a per-session diagnostic and warns on stderr when the
+// write was attempted and failed. Every caller here has already suppressed the
+// underlying error on the promise that this artifact exists; discarding the
+// write error too would leave the operation returning success with neither
+// confirmation nor evidence, which is exactly the silent loss the artifacts
+// were added to close.
+func (o *tmuxStartOps) writeDiagnostic(name, filename, content string) string {
+	path, err := writeSessionDiagnosticFile(o.runtimeDir, name, filename, content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic %s not written: %v\n", name, filename, err)
 	}
 	return path
+}
+
+// writeDiagnosticTextBlock appends a labeled text block to a diagnostic
+// builder, normalizing a missing trailing newline. Shared by
+// recordStartCrash, recordUnconfirmedNudge, and Tmux.recordUnconfirmedSubmit.
+func writeDiagnosticTextBlock(b *strings.Builder, label, text string) {
+	b.WriteString(label)
+	b.WriteString(text)
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		b.WriteByte('\n')
+	}
+}
+
+// writeSessionDiagnosticFile writes a per-session diagnostic artifact under
+// the city's session-diagnostics directory, as <dir>/<name>/<filename>. The
+// directory comes from citylayout so the writers and gc doctor's
+// nudge-unconfirmed check resolve one path rather than two literals; they did
+// not, and every artifact this function wrote was invisible to that check.
+//
+// It returns ("", nil) when capture is disabled (empty runtimeDir) and
+// ("", err) when the write was attempted and failed. The distinction is the
+// point: callers promise a durable record when they suppress a delivery
+// error, so a failed write has to be reportable rather than indistinguishable
+// from a deliberately disabled one. Callers still do not fail the operation on
+// it -- they warn -- because treating an unconfirmable delivery as a failure
+// would duplicate every nudge on provider families that can never confirm.
+//
+// Owner-only, via the private writers rather than os.MkdirAll/os.WriteFile:
+// every artifact routed through here is captured pane output or nudge text,
+// which is exactly the material the redaction pass upstream cannot be trusted
+// to have caught in full. startcrash_redaction_test asserts the 0600.
+func writeSessionDiagnosticFile(runtimeDir, name, filename, content string) (string, error) {
+	sessionsDir := citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir)
+	if sessionsDir == "" {
+		return "", nil
+	}
+	dir := filepath.Join(sessionsDir, name)
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
+		return "", fmt.Errorf("creating session diagnostic dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, filename)
+	if err := runtime.WritePrivateFile(path, []byte(content)); err != nil {
+		return "", fmt.Errorf("writing session diagnostic %s: %w", path, err)
+	}
+	return path, nil
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
@@ -1429,12 +1524,25 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// retry-capable caller beyond the bounded ladder just spent, so
 			// exhausting it is a warning, not a start failure: the session
 			// starts, but the agent may sit silently idle with the nudge
-			// still drafted in its input line rather than acted on. Any
+			// still drafted in its input line rather than acted on. A submit
+			// proven delivered but never observed busy
+			// (ErrNudgeSubmitDeliveredUnobserved) is the same warning-not-
+			// failure case for a different reason: the ladder above already
+			// refuses to retry it (retrying would re-inject a message the
+			// session already received), so by the time it reaches here
+			// delivery is proven and only the observation missed it. Any
 			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
+			// The stderr warning alone is not a durable record (Layer 0
+			// session output is not retained), so an unconfirmed startup
+			// nudge would otherwise vanish with nothing to reconcile against
+			// afterward. Persist a diagnostic artifact alongside the
+			// warning so a later observer (gc trace, a human, or an
+			// automated sweep) can find and act on it.
 			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}
 

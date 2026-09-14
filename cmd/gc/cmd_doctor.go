@@ -231,6 +231,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
+	// Reads only ctx.CityPath, so it stays outside the config gate: a broken
+	// city.toml is precisely when session diagnostics need to be visible.
+	register(doctor.NewNudgeUnconfirmedCheck())
 
 	// Config-dependent checks run only when city.toml loaded cleanly. If it
 	// fails, the core config check above reports the parse error.
@@ -432,6 +435,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// bead-store-preflight already registered early (near city data gates) when storeOK is false.
 		for _, rig := range activeRigs {
 			register(doctor.NewRigPathCheck(rig))
+			// Per-bead worktrees live at <rig>/worktrees/, not under
+			// $CITY/.gc/worktrees/, so none of the city-scoped worktree
+			// checks above can see them.
+			register(doctor.NewRigWorktreesCheck(rig, doctorCfg))
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
