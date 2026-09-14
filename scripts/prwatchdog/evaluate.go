@@ -39,8 +39,11 @@ const (
 	CheckName = "Check"
 	// CIRequiredName is the comprehensive required CI check run.
 	CIRequiredName = "CI / required"
-	// MacCheckName is the opt-in macOS regression check run.
-	MacCheckName = "Mac regression summary"
+	// MacVerdictCheckName is the unconditional macOS regression verdict
+	// check run. mac-regression.yml posts this for every head SHA it
+	// observes -- neutral when its own gate decided no tier applied, and
+	// success/failure once a tier actually ran.
+	MacVerdictCheckName = "Mac Regression verdict"
 	// ReviewFormulasCheckName is the opt-in formula-review check run.
 	ReviewFormulasCheckName = "Integration / review-formulas"
 	// RequiredCheckName is the name this watchdog publishes as its own
@@ -67,7 +70,6 @@ type Input struct {
 	CheckRuns                []CheckRun
 	Elapsed                  time.Duration
 	Deadline                 time.Duration
-	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
 	FetchError               error
 }
@@ -206,18 +208,21 @@ func Evaluate(in Input) Evaluation {
 		return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
 	}
 
-	if !in.NeedsMacLabel {
+	v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, MacVerdictCheckName, "incomplete", "incomplete", atDeadline)
+	if v == verdictFail && fk == failNonSuccess && word == string(ConclusionNeutral) {
+		// The gate in mac-regression.yml decided no tier applied to this
+		// head SHA -- that is not an opt-in request, so report it as such
+		// rather than as a failure.
 		summary.Mac = "not requested (opt-in)"
 	} else {
-		v, word, fk = evaluateGate(in.CheckRuns, in.HeadSHA, MacCheckName, "incomplete", "incomplete", atDeadline)
 		summary.Mac = word
 		switch {
 		case v == verdictWait:
 			return Evaluation{Summary: summary}
 		case v == verdictFail && fk == failNotConcluded:
-			return Evaluation{Terminal: true, Reason: "Mac regression requested but incomplete", Summary: summary}
+			return Evaluation{Terminal: true, Reason: "Mac regression verdict incomplete", Summary: summary}
 		case v == verdictFail:
-			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", MacCheckName, word), Summary: summary}
+			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", MacVerdictCheckName, word), Summary: summary}
 		}
 	}
 

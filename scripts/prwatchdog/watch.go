@@ -23,7 +23,6 @@ type Sleeper interface {
 // PollOptions configures a Watch invocation.
 type PollOptions struct {
 	HeadSHA                  string
-	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
 	Deadline                 time.Duration
 	Interval                 time.Duration
@@ -42,7 +41,6 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 			CheckRuns:                runs,
 			Elapsed:                  elapsed,
 			Deadline:                 opts.Deadline,
-			NeedsMacLabel:            opts.NeedsMacLabel,
 			NeedsReviewFormulasLabel: opts.NeedsReviewFormulasLabel,
 			FetchError:               err,
 		})

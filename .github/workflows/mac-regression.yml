@@ -137,6 +137,8 @@ jobs:
               - 'cmd/gc/**'
               - 'internal/pathutil/**'
               - 'internal/fsys/**'
+              - 'internal/sessionlog/**'
+              - 'internal/worker/**'
               - '.github/actions/setup-gascity-macos/**'
       - name: Decide which tiers should run
         id: gate
@@ -614,6 +616,8 @@ jobs:
       - mac-integration-bdstore
       - mac-integration-rest
       - mac-integration-review-formulas
+    permissions:
+      checks: write
     runs-on: ${{ needs.runner-policy.outputs.runner_2vcpu }}
     steps:
       - name: Summarize
@@ -621,6 +625,8 @@ jobs:
           GATE_RESULT: ${{ needs.gate.result }}
           RUN_SMOKE: ${{ needs.gate.outputs.run_smoke }}
           REASON: ${{ needs.gate.outputs.reason }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
@@ -654,6 +660,11 @@ jobs:
 
           Not run: ${REASON}
           EOF
+            gh api --method POST "/repos/${GITHUB_REPOSITORY}/check-runs" \
+              -f name="Mac Regression verdict" \
+              -f head_sha="${HEAD_SHA}" \
+              -f status="completed" \
+              -f conclusion="neutral"
             exit 0
           fi
 
@@ -681,4 +692,15 @@ jobs:
               *) fail=1 ;;
             esac
           done
+
+          verdict_conclusion="success"
+          if [[ "$fail" != "0" ]]; then
+            verdict_conclusion="failure"
+          fi
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/check-runs" \
+            -f name="Mac Regression verdict" \
+            -f head_sha="${HEAD_SHA}" \
+            -f status="completed" \
+            -f conclusion="${verdict_conclusion}"
+
           exit "$fail"
