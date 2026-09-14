@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestBeadPriority_NilDefaultsToP2 is the regression test for the
@@ -27,5 +28,35 @@ func TestBeadPriority_ExplicitPriorityPreserved(t *testing.T) {
 	got = beadPriority(beads.Bead{ID: "w-p0", Priority: intPtr(0)})
 	if got != 0 {
 		t.Fatalf("beadPriority(explicit P0) = %d, want 0", got)
+	}
+}
+
+// TestComputePoolDesiredStates_ExplicitP1BeatsNilPriority is the end-to-end
+// half of the ra-vsvjlx regression: beadPriority's return value only means
+// anything once it has been ranked and sorted by applyNestedCaps. With
+// max_active_sessions=1, the explicitly-labeled P1 bead must take the single
+// slot even though the unset-priority bead is listed first.
+func TestComputePoolDesiredStates_ExplicitP1BeatsNilPriority(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(1), 0)},
+	}
+	unset := workBead("w-unset", "claude", "s1", "in_progress", 0)
+	unset.Priority = nil
+	work := []beads.Bead{
+		unset,
+		workBead("w-p1", "claude", "s2", "in_progress", 1),
+	}
+	sessions := []beads.Bead{
+		sessionBead("s1", "open"),
+		sessionBead("s2", "open"),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("expected 1 request under cap=1, got %#v", result)
+	}
+	if got := result[0].Requests[0].WorkBeadID; got != "w-p1" {
+		t.Errorf("accepted work bead = %q, want %q — an unset-priority bead must not out-schedule an explicit P1", got, "w-p1")
 	}
 }
