@@ -187,18 +187,25 @@ func (s degradedQueryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
-// TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer is the
-// case only the in-tick snapshot check can catch, and the reason that check
-// exists as a separate layer rather than as a duplicate of the store scan.
-//
-// derivePoolSessionName deliberately proceeds on the identity-derived name when
-// the reservation scan errors: the name is idempotent per slot, so an
-// unverified claim re-addresses the slot's own box, and refusing would stall
-// every unaliased pool create for as long as the store is unhappy. That
-// tolerance is only safe because the snapshot of this tick's open beads is
-// consulted FIRST. Lose the ordering, or lose the snapshot check, and a
-// degraded store becomes a license to point a second agent at a live session's
-// box — the one outcome worse than the leak.
+type selectiveDegradedQueryStore struct {
+	beads.Store
+	failValue string
+	err       error
+}
+
+func (s selectiveDegradedQueryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	for _, value := range q.Metadata {
+		if value == s.failValue {
+			return nil, s.err
+		}
+	}
+	return s.Store.List(q)
+}
+
+// TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer pins
+// the snapshot collision result ahead of the failing store scan. Either source
+// of uncertainty refuses the create; a known live holder additionally keeps
+// the typed collision result used by the retry loop.
 func TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer(t *testing.T) {
 	mem := beads.NewMemStore()
 	identity := poolChurnIdentity()
@@ -223,22 +230,58 @@ func TestPoolSessionCreate_LiveHolderBlocksEvenWhenTheStoreScanCannotAnswer(t *t
 	}
 }
 
-// TestPoolSessionCreate_DegradedStoreStillCreatesWithoutALiveHolder is the
-// discriminating control for the test above: the tolerance it guards must
-// actually be there. With the same unanswerable store and no live holder in the
-// snapshot, the create proceeds — otherwise a degraded store would stall every
-// pool in the city, which is the failure mode the fail-closed derive was
-// specifically designed not to have.
-func TestPoolSessionCreate_DegradedStoreStillCreatesWithoutALiveHolder(t *testing.T) {
+// TestPoolSessionCreate_DegradedStoreRefusesWithoutALiveHolder is the
+// discriminating control for the test above: an empty snapshot is not proof
+// that the runtime identifier is free when the authoritative reservation scan
+// cannot answer. The create must fail closed and leave no session bead.
+func TestPoolSessionCreate_DegradedStoreRefusesWithoutALiveHolder(t *testing.T) {
 	mem := beads.NewMemStore()
 	identity := poolChurnIdentity()
 
-	degraded := degradedQueryStore{Store: mem, err: errors.New("gateway unreachable")}
+	availabilityErr := errors.New("gateway unreachable")
+	degraded := degradedQueryStore{Store: mem, err: availabilityErr}
 	info, err := createPoolSessionBeadWithAlias(degraded, poolChurnTemplate, nil, newSessionBeadSnapshot(nil), time.Now().UTC(), identity, "")
-	if err != nil {
-		t.Fatalf("create refused on a degraded store with nothing holding the name: %v", err)
+	if !errors.Is(err, availabilityErr) {
+		t.Fatalf("create error = %v, want wrapped availability error", err)
 	}
-	if want := poolIdentitySessionName(identity.AgentName, poolChurnTemplate); strings.TrimSpace(info.SessionNameMetadata) != want {
-		t.Fatalf("session_name = %q, want %q", info.SessionNameMetadata, want)
+	if info.ID != "" {
+		t.Fatalf("refused create returned session %#v", info)
+	}
+	created, listErr := mem.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after availability error", created)
+	}
+}
+
+func TestPoolSessionCreate_DegradedTransientIdentityCheckRefusesWithoutCreating(t *testing.T) {
+	mem := beads.NewMemStore()
+	availabilityErr := errors.New("identity lookup unavailable")
+	store := selectiveDegradedQueryStore{
+		Store:     mem,
+		failValue: "worker-1",
+		err:       availabilityErr,
+	}
+	identity := poolSessionCreateIdentity{
+		AgentName:     "worker-1",
+		Slot:          1,
+		TransientSlot: true,
+	}
+
+	info, err := createPoolSessionBeadWithAlias(store, "worker", nil, newSessionBeadSnapshot(nil), time.Now().UTC(), identity, "")
+	if !errors.Is(err, availabilityErr) {
+		t.Fatalf("create error = %v, want wrapped transient-identity availability error", err)
+	}
+	if info.ID != "" {
+		t.Fatalf("refused create returned session %#v", info)
+	}
+	created, listErr := mem.ListByLabel(sessionBeadLabel, 0)
+	if listErr != nil {
+		t.Fatalf("listing session beads: %v", listErr)
+	}
+	if len(created) != 0 {
+		t.Fatalf("session beads = %#v, want none after transient-identity availability error", created)
 	}
 }

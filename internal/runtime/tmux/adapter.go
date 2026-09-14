@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -88,7 +89,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -223,7 +224,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -237,7 +238,13 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // re-stage files (those are provision-half and unchanged on a launch-only change),
 // and on failure it leaves the warm box in place rather than tearing it down.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := doRelaunchSession(ctx, newTmuxStartOps(p.tm, "", p.cfg.SetupMaxTimeout, cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
+	// The runtime dir is what makes the startup-nudge and start-crash
+	// diagnostics reachable. Relaunch and RunLive passed "" here, so an
+	// unconfirmed startup nudge on this path was suppressed by
+	// launchOrchestration and then recorded nowhere: success returned with
+	// neither confirmed delivery nor the durable evidence that suppression
+	// is predicated on.
+	if err := doRelaunchSession(ctx, p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -459,6 +466,13 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return p.tm.WaitForIdle(ctx, name, timeout)
 }
 
+// SnapshotIdle reports, in a single non-blocking observation, whether the named
+// session is at an idle interactive boundary right now. It implements
+// [runtime.IdleSnapshotProvider].
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	return p.tm.SnapshotIdle(name)
+}
+
 // WaitForInterruptBoundary waits for a provider-native interrupt acknowledgement
 // before the next user turn is injected.
 func (p *Provider) WaitForInterruptBoundary(ctx context.Context, name string, since time.Time, timeout time.Duration) error {
@@ -635,11 +649,16 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // sessions. It mirrors the multi-backend degraded-but-usable signal that
 // [runtime.MergeBackendListResults] produces for composite providers, and is
 // the ListRunning-side analog of the StateCache liveness fix in #4082.
+//
+// The error also sets [runtime.PartialListError.ServerAbsent] so callers
+// holding independent proof of death (for example a session bead created
+// before the host booted) can distinguish "no server at all" from a server
+// that answered partially, without weakening the fail-safe for either.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	all, err := p.tm.listSessionNames()
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err)}
+			return nil, &runtime.PartialListError{Err: fmt.Errorf("tmux server unreachable: %w", err), ServerAbsent: true}
 		}
 		return nil, err
 	}
@@ -824,7 +843,9 @@ type startOps interface {
 	hasSession(name string) (bool, error)
 	capturePane(name string, lines int) (string, error)
 	recordStartCrash(name, paneContent string) string
+	recordUnconfirmedNudge(name, message string, cause error) string
 	sendKeys(name, text string) error
+	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
@@ -845,6 +866,11 @@ type tmuxStartOps struct {
 	// pane capture and crash artifact this startup produces. Built by
 	// newTmuxStartOps; a zero value simply redacts nothing.
 	secrets []string
+	// freshStart marks a session this startup created from nothing, so a
+	// partially-delivered startup prompt can be discarded outright. Relaunch
+	// and RunLive drive an already-warm box and must leave it standing on
+	// failure (see Provider.Relaunch), so they set this false.
+	freshStart bool
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -856,12 +882,28 @@ type tmuxStartOps struct {
 // literal compiles fine and produces output that still looks like a diagnostic,
 // so a forgotten field is invisible. TestProductionStartOpsUseTheConstructor
 // enforces that.
-func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
+// startOps builds the start-ops for a production session. Every Provider
+// entry point that starts, relaunches, or drives a live session goes through
+// here rather than calling newTmuxStartOps directly, because the runtime dir
+// is the only thing that makes the start-crash and startup-nudge-unconfirmed
+// diagnostics reachable, and two of the three call sites passed "" -- so
+// Relaunch and RunLive suppressed an unconfirmed startup nudge and then
+// recorded it nowhere, returning success with neither confirmed delivery nor
+// the durable evidence that suppression is predicated on (dr-6siig HIGH 2).
+// Passing the field explicitly at each site is what let two of them omit it;
+// TestProductionStartOpsCarryRuntimeDir asserts this stays the only
+// production construction, so the defect cannot recur by omission.
+func (p *Provider) startOps(cfg runtime.Config, freshStart bool) *tmuxStartOps {
+	return newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg, freshStart)
+}
+
+func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config, freshStart bool) *tmuxStartOps {
 	return &tmuxStartOps{
 		tm:              tm,
 		runtimeDir:      runtimeDir,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+		freshStart:      freshStart,
 	}
 }
 
@@ -974,19 +1016,39 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent string) string {
 	if signal != "" {
 		fmt.Fprintf(&b, "signal: %s\n", signal)
 	}
-	b.WriteString("--- last pane output ---\n")
-	b.WriteString(paneContent)
-	if paneContent != "" && !strings.HasSuffix(paneContent, "\n") {
-		b.WriteByte('\n')
-	}
+	writeDiagnosticTextBlock(&b, "--- last pane output ---\n", paneContent)
 
-	dir := filepath.Join(o.runtimeDir, "sessions", name)
-	if err := runtime.EnsurePrivateDir(dir); err != nil {
-		return ""
-	}
-	path := filepath.Join(dir, "start-stderr.log")
-	if err := runtime.WritePrivateFile(path, []byte(b.String())); err != nil {
-		return ""
+	return o.writeDiagnostic(name, "start-stderr.log", b.String())
+}
+
+// recordUnconfirmedNudge persists a durable diagnostic artifact when the
+// startup nudge is delivered but not confirmed ([ErrNudgeSubmitUnconfirmed]).
+// The startup nudge has no retry-capable caller (see launchOrchestration), so
+// unlike the queue-path nudge — which requeues on this error and gets a
+// bounded number of fresh attempts — a lost startup nudge would otherwise be
+// invisible with no other record. This mirrors recordStartCrash's diagnostic
+// capture (same runtimeDir/sessions/<name>/ location, same best-effort
+// semantics): a disabled capture (empty runtimeDir) or any I/O error returns
+// "" without affecting startup. Returns the artifact path when written.
+func (o *tmuxStartOps) recordUnconfirmedNudge(name, message string, cause error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", name)
+	fmt.Fprintf(&b, "cause: %v\n", cause)
+	writeDiagnosticTextBlock(&b, "--- startup nudge text ---\n", message)
+
+	return o.writeDiagnostic(name, "startup-nudge-unconfirmed.log", b.String())
+}
+
+// writeDiagnostic writes a per-session diagnostic and warns on stderr when the
+// write was attempted and failed. Every caller here has already suppressed the
+// underlying error on the promise that this artifact exists; discarding the
+// write error too would leave the operation returning success with neither
+// confirmation nor evidence, which is exactly the silent loss the artifacts
+// were added to close.
+func (o *tmuxStartOps) writeDiagnostic(name, filename, content string) string {
+	path, err := writeSessionDiagnosticFile(o.runtimeDir, name, filename, content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic %s not written: %v\n", name, filename, err)
 	}
 	return path
 }
@@ -1006,13 +1068,79 @@ func discardPartialStartup(err error, killWithProcesses, killSession func() erro
 	return errors.Join(err, fmt.Errorf("discard partial startup session: process cleanup: %w; fallback kill: %w", killErr, fallbackErr))
 }
 
+// writeDiagnosticTextBlock appends a labeled text block to a diagnostic
+// builder, normalizing a missing trailing newline. Shared by
+// recordStartCrash, recordUnconfirmedNudge, and Tmux.recordUnconfirmedSubmit.
+func writeDiagnosticTextBlock(b *strings.Builder, label, text string) {
+	b.WriteString(label)
+	b.WriteString(text)
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		b.WriteByte('\n')
+	}
+}
+
+// writeSessionDiagnosticFile writes a per-session diagnostic artifact under
+// the city's session-diagnostics directory, as <dir>/<name>/<filename>. The
+// directory comes from citylayout so the writers and gc doctor's
+// nudge-unconfirmed check resolve one path rather than two literals; they did
+// not, and every artifact this function wrote was invisible to that check.
+//
+// It returns ("", nil) when capture is disabled (empty runtimeDir) and
+// ("", err) when the write was attempted and failed. The distinction is the
+// point: callers promise a durable record when they suppress a delivery
+// error, so a failed write has to be reportable rather than indistinguishable
+// from a deliberately disabled one. Callers still do not fail the operation on
+// it -- they warn -- because treating an unconfirmable delivery as a failure
+// would duplicate every nudge on provider families that can never confirm.
+//
+// Owner-only, via the private writers rather than os.MkdirAll/os.WriteFile:
+// every artifact routed through here is captured pane output or nudge text,
+// which is exactly the material the redaction pass upstream cannot be trusted
+// to have caught in full. startcrash_redaction_test asserts the 0600.
+func writeSessionDiagnosticFile(runtimeDir, name, filename, content string) (string, error) {
+	sessionsDir := citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir)
+	if sessionsDir == "" {
+		return "", nil
+	}
+	dir := filepath.Join(sessionsDir, name)
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
+		return "", fmt.Errorf("creating session diagnostic dir %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, filename)
+	if err := runtime.WritePrivateFile(path, []byte(content)); err != nil {
+		return "", fmt.Errorf("writing session diagnostic %s: %w", path, err)
+	}
+	return path, nil
+}
+
 func (o *tmuxStartOps) sendKeys(name, text string) error {
 	err := o.tm.nudgeStartupSession(name, text)
+	if !o.freshStart {
+		// Relaunch and RunLive drive a box this startup did not create, and
+		// Provider.Relaunch documents that a failure leaves it in place. Report
+		// the partial delivery instead of tearing down a warm session.
+		return err
+	}
+	// Belt-and-braces on the fresh-start path only: Provider.Start already
+	// calls the token-guarded cleanupFailedStart for any error returned here,
+	// so this kill is redundant cleanup rather than the only cleanup.
 	return discardPartialStartup(
 		err,
 		func() error { return o.tm.KillSessionWithProcesses(name) },
 		func() error { return o.tm.KillSession(name) },
 	)
+}
+
+// paneBusy reports whether the target agent pane is showing a busy/
+// processing indicator right now — used between startup-nudge retries to
+// avoid blindly re-running the full C-u/paste/submit cycle against a pane
+// that already went busy (see sendStartupNudgeWithRetry).
+func (o *tmuxStartOps) paneBusy(name string) (bool, error) {
+	target := name
+	if agentPane, err := o.tm.FindAgentPane(name); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	return o.tm.paneBusy(target)
 }
 
 func (o *tmuxStartOps) setRemainOnExit(name string) error {
@@ -1418,15 +1546,38 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 		return err
 	}
 	if cfg.Nudge != "" {
-		if err := ops.sendKeys(name, cfg.Nudge); err != nil {
-			// The startup nudge has no retry-capable caller: the keystrokes
-			// reached tmux and the session is verified alive above, so an
-			// unconfirmed submit is a warning, not a start failure. Any other
-			// error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		if err := sendStartupNudgeWithRetry(ctx,
+			func() error { return ops.sendKeys(name, cfg.Nudge) },
+			func(d time.Duration) { _ = sleepWithContext(ctx, d) },
+			func() (bool, error) { return ops.paneBusy(name) }); err != nil {
+			// A resume-mode (or cold-start) session's startup nudge races the
+			// TUI's own boot: readiness detection and the TUI actually being
+			// able to accept input are not the same moment, so a submit
+			// injected right after waitForReady returns can land unconfirmed
+			// even though the session itself is alive and verified above
+			// (see sendStartupNudgeWithRetry). The startup nudge has no
+			// retry-capable caller beyond the bounded ladder just spent, so
+			// exhausting it is a warning, not a start failure: the session
+			// starts, but the agent may sit silently idle with the nudge
+			// still drafted in its input line rather than acted on. A submit
+			// proven delivered but never observed busy
+			// (ErrNudgeSubmitDeliveredUnobserved) is the same warning-not-
+			// failure case for a different reason: the ladder above already
+			// refuses to retry it (retrying would re-inject a message the
+			// session already received), so by the time it reaches here
+			// delivery is proven and only the observation missed it. Any
+			// other error still fails the start.
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed: %v\n", name, err)
+			// The stderr warning alone is not a durable record (Layer 0
+			// session output is not retained), so an unconfirmed startup
+			// nudge would otherwise vanish with nothing to reconcile against
+			// afterward. Persist a diagnostic artifact alongside the
+			// warning so a later observer (gc trace, a human, or an
+			// automated sweep) can find and act on it.
+			fmt.Fprintf(os.Stderr, "warning: startup nudge to %q delivered but not confirmed after retries: %v\n", name, err)
+			ops.recordUnconfirmedNudge(name, cfg.Nudge, err)
 		}
 	}
 
@@ -1437,6 +1588,120 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
+}
+
+// startupNudgeRetryBackoffs are the delays between resend attempts when the
+// startup nudge comes back ErrNudgeSubmitUnconfirmed. Proven empirically: a
+// submit injected right after readiness is observed (~0.3s into a booting
+// claude TUI) sits unconfirmed, while the same injection ~6s later lands —
+// readiness detection and the TUI actually accepting input are not the same
+// moment. A var (not a const) so tests can shrink it.
+var startupNudgeRetryBackoffs = []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 8 * time.Second}
+
+// startupNudgeRetryBudgetFraction caps the total wall-clock time
+// sendStartupNudgeWithRetry may spend on retries (both the backoff sleeps AND
+// the resend attempts themselves — a single send can itself take seconds:
+// NudgeSession's submitEnterAndConfirm polls for the busy indicator for a
+// couple of seconds per attempt before giving up) to this fraction of ctx's
+// *remaining* deadline, measured once on entry. The full backoff ladder sums
+// to 20s worst case even before counting per-attempt cost, but the nudge is
+// a warning-only step (see the call site in launchOrchestration): exhausting
+// it must still leave the majority of whatever startup budget is left for
+// the steps that follow (session_live, etc.), or a robustness feature turns
+// into an outright start failure whenever the busy indicator never appears.
+// Half is a deliberately conservative split: it guarantees a canceled/
+// exhausted ladder never consumes more of the remaining budget than it
+// leaves behind.
+const startupNudgeRetryBudgetFraction = 0.5
+
+// sendStartupNudgeWithRetry calls send (a full clear+paste+submit cycle, e.g.
+// ops.sendKeys) and, if it reports ErrNudgeSubmitUnconfirmed, waits out a
+// backoff and calls send again — re-running the whole cycle re-pastes the
+// nudge text, which self-heals a draft the still-booting TUI cleared or
+// redrew. Any other error, or exhausting the backoffs, returns immediately so
+// a healthy fast boot never pays this cost.
+//
+// busy is checked once the backoff sleep has elapsed, right before the next
+// resend: send's own busy-indicator poll (submitEnterAndConfirm) only runs
+// for a couple of seconds per attempt and can still miss a pane that goes
+// busy a little later — an agent whose first turn started from a large argv
+// prompt can take several more seconds to render its busy indicator. If busy
+// now reports true, the earlier submit (or a turn that started some other
+// way) has landed, so this returns nil instead of blindly re-running
+// send's C-u/paste/submit cycle: Claude Code queues input typed mid-turn
+// rather than rejecting it, so a resend against an already-busy pane risks
+// enqueueing a second copy of the nudge behind the one that just landed
+// (gastownhall/gascity#5019 review discussion). busy may be nil, in which
+// case this check is skipped and the ladder behaves as before. A busy
+// check's own error is treated the same as "not busy" — best-effort, never
+// a reason to fail the retry loop itself.
+//
+// ctx is checked before each backoff sleep: if the start is already being
+// canceled elsewhere (e.g. the supervising startup_timeout deadline), this
+// stops immediately rather than sleeping through the remainder of the ladder
+// only to hand back the same unconfirmed error a bit later — a canceled
+// start must not be pushed past the budget it's trying to protect.
+//
+// The ladder is additionally bounded by startupNudgeRetryBudgetFraction of
+// ctx's remaining deadline (if any), computed once on entry: a retry (the
+// backoff sleep AND the resend that follows it) is only taken if the actual
+// wall-clock time already spent in this function, plus the next backoff,
+// still fits inside that budget. Wall-clock elapsed — not just the sum of
+// intended sleep durations — is what's measured, because the dominant cost
+// of an unconfirmed attempt is usually the busy-indicator poll inside send
+// itself, not the backoff between attempts; bounding only the sleeps would
+// let a handful of slow, always-unconfirmed sends alone blow through the
+// deadline. This keeps a fully-exhausted ladder from silently eating the
+// whole startup deadline before the warning-and-continue path (the caller's
+// fallback for ErrNudgeSubmitUnconfirmed) gets a chance to return — the
+// retry exists to make startup more robust, not to spend the deadline the
+// rest of startup needs.
+//
+// startupNudgeNow is the clock behind that wall-clock measurement. It is a
+// package variable (same shape as internal/extmsg's timeNow) so the budget
+// test can advance a fake clock from its send/sleep fakes instead of really
+// sleeping — the resourcecensus fixed_sleep ratchet forbids new untagged
+// time.Sleep call sites, and a fake clock also makes the bound deterministic
+// rather than scheduler-dependent.
+var startupNudgeNow = time.Now
+
+func sendStartupNudgeWithRetry(ctx context.Context, send func() error, sleep func(time.Duration), busy func() (bool, error)) error {
+	start := startupNudgeNow()
+	budget := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := deadline.Sub(start); remaining > 0 {
+			budget = time.Duration(float64(remaining) * startupNudgeRetryBudgetFraction)
+		} else {
+			budget = 0
+		}
+	}
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = send()
+		if err == nil || !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			return err
+		}
+		if attempt >= len(startupNudgeRetryBackoffs) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		next := startupNudgeRetryBackoffs[attempt]
+		if budget >= 0 && startupNudgeNow().Sub(start)+next > budget {
+			return err
+		}
+		sleep(next)
+		if ctx.Err() != nil {
+			return err
+		}
+		if busy != nil {
+			if isBusy, _ := busy(); isBusy {
+				return nil
+			}
+		}
+	}
 }
 
 // runSessionSetup runs session_setup commands then session_setup_script.

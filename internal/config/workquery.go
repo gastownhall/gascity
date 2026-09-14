@@ -333,6 +333,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
@@ -344,14 +345,37 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
+// preferExecutablePoolDemandScript keeps graph-v2 workflow roots available as
+// launch fallbacks, but moves them behind executable routed work in the same
+// ready result. The claim hook consumes candidates in order; without this
+// preference an older root can be returned forever while its ready child waits
+// behind it. A malformed reader payload is preserved for the hook's existing
+// fail-open handling rather than being converted into false-empty demand.
+func preferExecutablePoolDemandScript() string {
+	predicate := graphWorkflowAnchorJQPredicate()
+	preferJQ := `[.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
+		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
+}
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
-	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
-	// behind it to fall through to instead of idle-exiting; the hook layer
-	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	// sorting; the worker first-row path rides the reader's canonical
+	// (priority, created_at, id) default order — both readers default to it
+	// (bd ready's default --sort priority; the federated reader's merged
+	// beads.SortBeadsReadyOrder). An explicit --sort oldest here makes the
+	// claim window priority-blind: a routed P0 behind more than --limit older
+	// lower-priority rows is never served at all, so pool workers
+	// deterministically starve the highest-priority routed work (measured on a
+	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
+	// rows — the bounded window contained zero P0s until the older rows
+	// drained). FIFO fairness survives within a priority band via the
+	// created_at term. The tier stays widened past a single row (limit=20, not
+	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
+	// routed work behind it to fall through to instead of idle-exiting; the
+	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
+	// the result.
+	return bdReadyPoolDemandShell("--limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -386,8 +410,35 @@ func (a *Agent) poolDemandTarget() string {
 }
 
 func standardAssignedWorkQueryScript(topo QueryTopology) string {
-	return standardAssignedInProgressWorkQueryScript(topo) +
+	return standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		standardAssignedReadyWorkQueryScript(topo)
+}
+
+// standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor is the
+// combined work query's crash-recovery tier. An assigned graph.v2 workflow
+// root is the session's launch/continuation anchor, so remember it while the
+// ready tiers look for executable work. If no ready work exists, buildWorkQuery
+// emits the remembered root as the compatibility fallback.
+//
+// The assigned-in-progress-only query deliberately keeps the original
+// standardAssignedInProgressWorkQueryScript behavior: callers asking for that
+// tier alone still receive the anchor.
+func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
+	return `gc_assigned_workflow_anchor_json=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		assignedInProgressTierCommand("id", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		assignedInProgressCandidatesTierCommand("id", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		`fi; ` +
+		`fi; ` +
+		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
+		`done; `
 }
 
 // assignedInProgressTierCommand is the crash-recovery read for one identity.
@@ -415,12 +466,24 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
+	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+}
+
+// assignedInProgressCandidatesTierCommand is the bounded second read used only
+// after the stock one-row recovery tier has identified a graph workflow root.
+// This preserves that tier's byte and fail-open contracts while preventing the
+// root from hiding another in-progress step owned by the same session.
+func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
+	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
+}
+
+func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
 	fed := topo.FederatedReady
 	reader := bdListInProgressCommand
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=1` +
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
 		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
 }
 
@@ -499,6 +562,41 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // deployment runs, for zero behavior change. Same zero-risk scoping the ready
 // tiers used for their own swap.
 func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string {
+	return inProgressBlockedByEnrichmentScriptWithServeAction(
+		federated,
+		checkHold,
+		`printf "%s" "$r" && exit 0; `,
+	)
+}
+
+func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool) string {
+	graphAnchorJQ := `.[0] | select(` + graphWorkflowAnchorJQPredicate() + `) | .id // empty`
+	serveAction := `graph_anchor_id=$(printf "%s" "$r" | jq -r ` +
+		shellquote.Quote(graphAnchorJQ) + ` 2>/dev/null); ` +
+		`if [ -n "$graph_anchor_id" ]; then ` +
+		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
+		`else printf "%s" "$r" && exit 0; fi; `
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction)
+}
+
+func graphWorkflowAnchorJQPredicate() string {
+	return `(` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` +
+		jqMeta(beadmeta.FormulaContractMetadataKey) + ` == "graph.v2")`
+}
+
+// serveOrdinaryInProgressCandidateScript selects the first non-anchor row from
+// the bounded second read, then applies the unchanged crash-recovery gates.
+func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) string {
+	predicate := graphWorkflowAnchorJQPredicate()
+	nonAnchorJQ := `[.[] | select((` + predicate + `) | not)] | .[:1]`
+	return `gc_assigned_in_progress_candidates_json="$r"; ` +
+		`r=$(printf "%s" "$gc_assigned_in_progress_candidates_json" | jq -c ` + shellquote.Quote(nonAnchorJQ) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript(federated, checkHold) +
+		`fi; `
+}
+
+func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
 	// The tier stores its candidate row in $r and its enriched copy in
 	// $r_enriched; both callers use those names.
 	const shellVar = "r"
@@ -548,7 +646,7 @@ func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string 
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
 		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
-		`printf "%s" "` + v + `" && exit 0; ` +
+		serveAction +
 		`fi; `
 }
 
@@ -572,8 +670,30 @@ func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
-	return legacyControlAssignedInProgressWorkQueryScript(topo) +
+	return legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		legacyControlAssignedReadyWorkQueryScript(topo)
+}
+
+func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
+	return `gc_assigned_workflow_anchor_json=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		assignedInProgressTierCommand("cand", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		assignedInProgressCandidatesTierCommand("cand", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		`fi; ` +
+		`fi; ` +
+		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("cand", topo) +
+		`done; ` +
+		`done; `
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
@@ -639,6 +759,23 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 		`fi; `
 }
 
+func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
+	_ = topo
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	query := bdQueryEphemeralStatusQuietShell("in_progress")
+	return `gc_open_ephemeral_in_progress=$(` + query + `); ` +
+		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(false, false) +
+		`fi; ` +
+		`fi; `
+}
+
 // ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
 // `bd query` because there is no federated form of it and it needs none: a
 // relocated class store has no bead-policy layer, so an orchestration wisp lands
@@ -673,11 +810,74 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
+// namedSelfTargetAdmit is the origin-gate condition that lets a non-ephemeral
+// session continue to the routed (pool-demand) tier instead of short-circuiting.
+// It is true only when the session carries a claim alias (GC_ALIAS) and the probe
+// target ($1) is exactly that alias.
+//
+// The identities line up by construction: poolDemandTarget() (baked in as $1),
+// RoutedToIdentity() (the claim-match primary route target the hook checks), and
+// GC_ALIAS all resolve to the same raw QualifiedName() for a plain named session
+// (cfg.NamedSessions[i].QualifiedName() flows into GC_ALIAS alongside
+// GC_SESSION_ORIGIN=named). So admitting on this condition surfaces exactly the
+// work the session itself can claim — routed_to=<self>, assignee="" — and nothing
+// routed elsewhere. A named+pool hybrid probes its PoolName, which is != GC_ALIAS,
+// so it stays gated and cannot over-claim its pool's routed work; an empty alias
+// fails closed.
+//
+// Beyond the ephemeral|"" fall-through arm the condition deliberately ignores the
+// origin value: admission is keyed on claim identity, not on origin. Any
+// non-ephemeral session whose GC_ALIAS equals its probe target is admitted,
+// including a manual session an operator deliberately aliased as the queue
+// identity (`gc session new <agent> --alias <that identity>` forces
+// origin=manual). That is the same identity coincidence proved above, so the
+// admitted work stays exactly the work the claim path already accepts. It is NOT
+// a general widening to manual sessions: an unaliased one carries GC_ALIAS="" and
+// fails closed on the first test.
+const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
+
+// poolDemandOriginGateScript emits the plain origin gate. It is valid only at
+// `sh -c` script top level, where $1 is the probe target baked in after `--`.
 func poolDemandOriginGateScript() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || exit 0 ;; ` +
 		`esac; `
+}
+
+// poolDemandOriginGateScriptWithGraphAnchorFallback emits the origin gate used by
+// the combined work query, which flushes a remembered assigned workflow anchor
+// before short-circuiting. Like the plain gate it is valid only at `sh -c` script
+// top level, where $1 is the probe target baked in after `--`.
+func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
+	return `case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || { [ -z "$gc_assigned_workflow_anchor_json" ] || printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; } ;; ` +
+		`esac; `
+}
+
+func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
+	fed := topo.FederatedReady
+	readyCommand := readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
+		` --metadata-field "` + beadmeta.RootBeadIDMetadataKey + `=$graph_anchor_id"` +
+		` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` +
+		PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest --limit=20` +
+		readyReaderStderrSink(fed)
+	return `probe_assigned_graph_anchor_ready() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`[ -z "$gc_assigned_workflow_anchor_json" ] && return 1; ` +
+		`graph_anchor_id=$(printf "%s" "$gc_assigned_workflow_anchor_json" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`[ -z "$graph_anchor_id" ] && return 1; ` +
+		`r=$(` + readyCommand + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`return 1; ` +
+		`}; `
+}
+
+func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
+	return `if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
 
 func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
@@ -798,15 +998,26 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback() +
+			// Define the ordinary pool reader before the narrower anchor reader.
+			// Besides keeping the generated tiers easy to identify mechanically,
+			// function definition order does not change their invocation order:
+			// the anchor probe below still runs first.
 			poolDemandFirstRowFunctionScript(topo) +
+			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+			`probe_assigned_graph_anchor_ready "$1"; ` +
+			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback() +
 		poolDemandFirstRowFunctionScript(topo) +
+		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+		`probe_assigned_graph_anchor_ready "$1"; ` +
+		`probe_assigned_graph_anchor_ready "$2"; ` +
+		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`

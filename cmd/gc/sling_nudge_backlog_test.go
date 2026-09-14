@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -8,15 +9,22 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
+// deadBacklogID returns a zero-padded ID so that lexicographic order (the
+// nudgequeue.SortState ID tiebreak, used when every item shares the same
+// DeadAt/CreatedAt as seeded here) matches seed/index order 0..n-1.
+func deadBacklogID(i int) string {
+	return fmt.Sprintf("nudge-dead-%04d", i)
+}
+
 func seedDeadBacklog(t *testing.T, cityPath string, now time.Time, n int) map[string]string {
 	t.Helper()
 	buckets := make(map[string]string, n)
 	if err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		for i := 0; i < n; i++ {
-			id := time.Duration(i).String()
-			buckets["nudge-dead-"+id] = "dead"
+			id := deadBacklogID(i)
+			buckets[id] = "dead"
 			state.Dead = append(state.Dead, queuedNudge{
-				ID: "nudge-dead-" + id, BeadID: "bead-dead-" + id,
+				ID: id, BeadID: "bead-" + id,
 				Agent: "gascity/deployer", Source: "sling", Message: "backlog",
 				CreatedAt: now.Add(-2 * time.Hour), DeadAt: now.Add(-2 * time.Hour),
 				LastError: "expired",
@@ -27,6 +35,22 @@ func seedDeadBacklog(t *testing.T, cityPath string, now time.Time, n int) map[st
 		t.Fatalf("seeding backlog: %v", err)
 	}
 	return buckets
+}
+
+// deadBacklogProcessed returns how many leading (by seed/index order, which
+// SortState's ID tiebreak preserves here) dead items the maintenance sweep
+// repairs-and-prunes before nudgeEnqueueMaintenanceBudget elapses. Each
+// processed item costs advancingNudgeStoreDeadItemOps store ops at the given
+// latency; the sweep checks the deadline before processing each item, so the
+// count is the number of items whose cumulative cost falls at-or-under the
+// budget.
+func deadBacklogProcessed(backlog int, latency time.Duration) int {
+	itemCost := time.Duration(advancingNudgeStoreDeadItemOps) * latency
+	processed := int(nudgeEnqueueMaintenanceBudget/itemCost) + 1
+	if processed > backlog {
+		processed = backlog
+	}
+	return processed
 }
 
 type enqueueTiming struct {
@@ -60,13 +84,23 @@ func timeEnqueue(t *testing.T, backlog int, latency time.Duration) enqueueTiming
 		t.Fatalf("advancing store ops (backlog=%d) = %d, want at most %d", backlog, timing.operations, maxOps)
 	}
 
+	processed := deadBacklogProcessed(backlog, latency)
+	survivors := backlog - processed
 	buckets := nudgeQueueBucketsByID(t, cityPath)
-	if got, want := len(buckets), len(seededBuckets)+1; got != want {
-		t.Fatalf("queued item count (backlog=%d) = %d, want %d; buckets=%v", backlog, got, want, buckets)
+	if got, want := len(buckets), survivors+1; got != want {
+		t.Fatalf("queued item count (backlog=%d) = %d, want %d (processed=%d survived=%d); buckets=%v", backlog, got, want, processed, survivors, buckets)
 	}
-	for id, wantBucket := range seededBuckets {
-		if bucket := buckets[id]; bucket != wantBucket {
-			t.Fatalf("seeded queued nudge %q bucket = %q, want %q; buckets=%v", id, bucket, wantBucket, buckets)
+	for i := 0; i < backlog; i++ {
+		id := deadBacklogID(i)
+		bucket, present := buckets[id]
+		if i < processed {
+			if present {
+				t.Fatalf("dead nudge %q (i=%d, backlog=%d) still present as %q, want repaired-and-pruned; buckets=%v", id, i, backlog, bucket, buckets)
+			}
+			continue
+		}
+		if bucket != seededBuckets[id] {
+			t.Fatalf("surviving dead nudge %q (i=%d, backlog=%d) bucket = %q, want %q; buckets=%v", id, i, backlog, bucket, seededBuckets[id], buckets)
 		}
 	}
 	if bucket := buckets[item.ID]; bucket != "pending" {

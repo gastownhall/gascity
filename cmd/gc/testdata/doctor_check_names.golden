@@ -15,6 +15,7 @@ provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
+nudge-unconfirmed
 dolt-topology
 dolt-drift
 config-valid
@@ -36,6 +37,7 @@ service-secrets-perms
 skill-collision
 skill-dangling-sink
 order-firing-current
+order-outcome-healthy
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
@@ -59,6 +61,7 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+executor-identity-residue
 census-owner-liveness
 run-target-routed-to-backfill
 route-recovery-quarantine
@@ -68,6 +71,8 @@ work-option-metadata-migration
 backlog-depth
 order-tracking-retention
 session-model
+startup-health-episodes
+gate-sandbox-reads
 dolt-server
 fork-rate
 dolt-noms-size

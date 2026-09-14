@@ -106,6 +106,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ContinuityEligible:         b.Metadata["continuity_eligible"],
 		TransportMetadata:          b.Metadata["transport"],
 		LastWokeAt:                 b.Metadata["last_woke_at"],
+		SleptAt:                    b.Metadata["slept_at"],
 		AwakeStartedAt:             b.Metadata["awake_started_at"],
 		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
 		StateReason:                b.Metadata["state_reason"],
@@ -145,6 +146,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		SessionIDFlag:                  b.Metadata["session_id_flag"],
 		TemplateOverrides:              b.Metadata["template_overrides"],
 		WakeAttemptsMetadata:           b.Metadata["wake_attempts"],
+		WakeRefusedEventAt:             b.Metadata["wake_refused_event_at"],
 		ProviderKind:                   b.Metadata["provider_kind"],
 		BuiltinAncestor:                b.Metadata["builtin_ancestor"],
 

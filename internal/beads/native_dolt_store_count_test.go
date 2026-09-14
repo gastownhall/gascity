@@ -210,3 +210,32 @@ func TestNativeDoltStoreCountPropagatesBackendError(t *testing.T) {
 		t.Fatalf("Count err = %v, want %v", err, wantErr)
 	}
 }
+
+// TestNativeDoltStoreWitnessesItsOwnRows covers the RowWitness half of this
+// backend. Without it the store-health count has no disproof of a zero on a
+// native-store city, and the guard that rejects an uncorroborated zero would
+// be inert on exactly the store the fast path exists for.
+func TestNativeDoltStoreWitnessesItsOwnRows(t *testing.T) {
+	var store Store = &NativeDoltStore{}
+	witness, ok := store.(RowWitness)
+	if !ok {
+		t.Fatal("NativeDoltStore does not implement RowWitness; the store-health count loses its disproof of a zero on native-store cities")
+	}
+	if witness.SawRows() {
+		t.Fatal("SawRows() = true before any read")
+	}
+
+	s := store.(*NativeDoltStore)
+	s.noteRows(0)
+	if s.SawRows() {
+		t.Fatal("an empty read latched the witness; a zero must never certify itself, or the store-health guard would consult evidence the failing read just wrote")
+	}
+	s.noteRows(7)
+	if !s.SawRows() {
+		t.Fatal("SawRows() = false after the backend returned rows")
+	}
+	s.noteRows(0)
+	if !s.SawRows() {
+		t.Fatal("a later empty read unlatched the witness; a scope that once held rows is not a scope that holds none")
+	}
+}

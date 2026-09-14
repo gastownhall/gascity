@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1927,9 +1928,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -1944,6 +1946,9 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	if nudged != "alice" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "alice")
 	}
+	if nudgedMessageID == "" || !strings.Contains(stdout.String(), "sent message "+nudgedMessageID) {
+		t.Errorf("nudgeFn called with messageID %q, want the reply's own message ID (stdout: %s)", nudgedMessageID, stdout.String())
+	}
 }
 
 func TestMailReplyNotifyNudgeError(t *testing.T) {
@@ -1951,7 +1956,7 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -2441,6 +2446,95 @@ func TestMailDeleteMultiPartialFailure(t *testing.T) {
 	}
 }
 
+func TestMailDeleteWhitespaceJoinedIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("sender", "recipient", "", "batch me"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	rec := &memRecorder{}
+	code := doMailDelete(mp, rec, []string{"gc-1 gc-2\tgc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDelete = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{"Deleted message gc-1", "Deleted message gc-2", "Deleted message gc-3"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if n := len(rec.events); n != 3 {
+		t.Errorf("recorded events = %d, want 3", n)
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after delete: %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, b.Status)
+		}
+	}
+}
+
+func TestMailDeleteWhitespaceJoinedIDsJSON(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 2; i++ {
+		if _, err := mp.Send("sender", "recipient", "", "batch me"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailDeleteJSON(mp, events.Discard, []string{"gc-1 gc-2"}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailDeleteJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got mailActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal result: %v; stdout: %s", err, stdout.String())
+	}
+	if want := []string{"gc-1", "gc-2"}; !slices.Equal(got.IDs, want) {
+		t.Errorf("result IDs = %v, want %v", got.IDs, want)
+	}
+	if got.Count == nil || *got.Count != 2 {
+		t.Errorf("result Count = %v, want 2", got.Count)
+	}
+}
+
+func TestMailArchiveAndDeleteWhitespaceOnlyArg(t *testing.T) {
+	tests := []struct {
+		name    string
+		archive bool
+		wantErr string
+	}{
+		{name: "archive", archive: true, wantErr: "gc mail archive: missing message ID\n"},
+		{name: "delete", wantErr: "gc mail delete: missing message ID\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			var code int
+			if tt.archive {
+				code = doMailArchive(mail.NewFake(), events.Discard, []string{" \t\n "}, &stdout, &stderr)
+			} else {
+				code = doMailDelete(mail.NewFake(), events.Discard, []string{" \t\n "}, &stdout, &stderr)
+			}
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1; stdout: %s", code, stdout.String())
+			}
+			if got := stderr.String(); got != tt.wantErr {
+				t.Errorf("stderr = %q, want %q", got, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestMailDeleteMultiExecProviderUsesDeleteCommand(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "ops.log")
@@ -2738,6 +2832,36 @@ func TestMailArchiveSuccess(t *testing.T) {
 	}
 	if b.Status != "closed" {
 		t.Errorf("bead status = %q, want \"closed\"", b.Status)
+	}
+}
+
+func TestMailArchiveWhitespaceJoinedIDs(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	for i := 0; i < 3; i++ {
+		if _, err := mp.Send("sender", "recipient", "", "batch me"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchive(mp, events.Discard, []string{"gc-1 gc-2\ngc-3"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchive = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, want := range []string{"Archived message gc-1", "Archived message gc-2", "Archived message gc-3"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	for _, id := range []string{"gc-1", "gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s) after archive: %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("bead %s status = %q, want closed", id, b.Status)
+		}
 	}
 }
 
@@ -3060,9 +3184,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -3077,6 +3202,9 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	if nudged != "mayor" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "mayor")
 	}
+	if nudgedMessageID != "gc-1" {
+		t.Errorf("nudgeFn called with messageID %q, want %q (the sent message's ID)", nudgedMessageID, "gc-1")
+	}
 }
 
 func TestMailSendNotifyNudgeError(t *testing.T) {
@@ -3084,7 +3212,7 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -3109,7 +3237,7 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		nudgeCalled = true
 		return nil
 	}
@@ -3186,6 +3314,103 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	}
 	if b.Description != "Token refresh fails after 30min" {
 		t.Errorf("bead Description = %q, want %q", b.Description, "Token refresh fails after 30min")
+	}
+}
+
+// TestMailSendSubjectOnlyStoresEmptyBody pins the storage contract for
+// `gc mail send <to> -s "text"` with no -m and no positional body: an empty
+// body is a legal stored state and stays empty. The subject is required
+// (POST /v0/mail marks it minLength:1) and the body is explicitly optional
+// there, so a subject-only message is well-formed rather than a message whose
+// content went missing. What was broken was the rendering, not the storage;
+// see TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage (ga-6eukj0).
+func TestMailSendSubjectOnlyStoresEmptyBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "Build is green", ""}, nil, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0", code)
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Build is green" {
+		t.Errorf("bead Title = %q, want %q", b.Title, "Build is green")
+	}
+	if b.Description != "" {
+		t.Errorf("bead Description = %q, want empty (an omitted body is a legal state, not a lost one)", b.Description)
+	}
+}
+
+// TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage is the actual
+// ga-6eukj0 defect. A subject-only message reached the agent-facing injection
+// as "[Build is green]: " — a subject in brackets and nothing behind the
+// colon, which reads as a message whose body was lost. The subject IS the
+// message here, so it must render as the message.
+func TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]: \n") {
+		t.Errorf("subject-only message rendered as an empty-bodied message:\n%s", out)
+	}
+}
+
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce guards the pre-existing
+// subject==body shape produced by the positional form: `gc mail send <to>
+// "text"` arrives with no subject, and beadmail.Send backfills the title from
+// the body, so Title and Description are identical.
+func TestFormatInjectOutputSubjectEqualToBodyRendersOnce(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green", Body: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]") {
+		t.Errorf("identical subject and body rendered twice:\n%s", out)
+	}
+}
+
+// TestPrintMessageKeepsBodyIdenticalToSubject pins the documented output of
+// the positional send. `gc mail send <to> "text"` supplies a body and no
+// subject, and beadmail.Send synthesizes the title from that body, so the two
+// fields hold the same string with the SUBJECT being the derived one.
+// Suppressing the Body line here would print only the synthesized field and
+// hide the one the user actually typed, which is the "content renders as
+// though it were lost" failure this command family exists to avoid.
+//
+// This duplicates cmd/gc/testdata/events.txtar:32 on purpose. That txtar runs
+// only under GC_FAST_UNIT=0, so a suppression reintroduced here would survive
+// the whole fast unit loop and surface only in CI.
+//
+// Note the injection path deliberately renders such a message ONCE (see
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce): it emits a single
+// "from X: message" line, where repeating the string is pure noise. The
+// labeled Subject/Body view is a different contract and shows both.
+func TestPrintMessageKeepsBodyIdenticalToSubject(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(mail.Message{
+		ID: "gc-1", From: "human", To: "mayor",
+		Subject: "hey there", Body: "hey there",
+	}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "Subject:  hey there") {
+		t.Errorf("missing Subject line:\n%s", got)
+	}
+	if !strings.Contains(got, "Body:     hey there") {
+		t.Errorf("Body line dropped for a positional send; the body is what the user typed:\n%s", got)
 	}
 }
 

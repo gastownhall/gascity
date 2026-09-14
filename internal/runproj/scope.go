@@ -44,14 +44,26 @@ func fromRootMetadataScope(metadata map[string]string) (runScopeWithStoreRef, bo
 	}
 
 	// Fallback (gascity-dashboard-km0w): recover scope from gc.root_store_ref.
-	if rootStoreRef == "" {
-		return runScopeWithStoreRef{}, false
-	}
-	parsedKind, parsedRef, ok := fromStoreRef(rootStoreRef)
-	if !ok || !scopeRefRe.MatchString(parsedRef) {
+	parsedKind, parsedRef, ok := ScopeFromRootStoreRef(rootStoreRef)
+	if !ok {
 		return runScopeWithStoreRef{}, false
 	}
 	return runScopeWithStoreRef{scopeKind: parsedKind, scopeRef: parsedRef, rootStoreRef: rootStoreRef}, true
+}
+
+// ScopeFromRootStoreRef recovers a scope from a gc.root_store_ref value: a
+// "city:<ref>" or "rig:<ref>" ref names the scope its root belongs to. Any
+// other ref — a class binding ("class:<name>"), an empty value, a malformed
+// pair — reports ok=false, meaning the ref names no scope and the caller keeps
+// whatever scope it already had. It is the fallback arm of
+// fromRootMetadataScope, exported so the API's workflow projections resolve a
+// root's scope the same way this package's run projection does.
+func ScopeFromRootStoreRef(rootStoreRef string) (kind, ref string, ok bool) {
+	parsedKind, parsedRef, parsed := fromStoreRef(rootStoreRef)
+	if !parsed || !scopeRefRe.MatchString(parsedRef) {
+		return "", "", false
+	}
+	return parsedKind, parsedRef, true
 }
 
 // fromStoreRef parses a "<kind>:<ref>" store ref. Port of TS fromStoreRef.

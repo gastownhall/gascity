@@ -426,7 +426,7 @@ func historyHasDiagnosticCode(history *worker.HistorySnapshot, code string) bool
 
 func expectedHistoryDiagnosticCode(profile ProfileID) string {
 	switch profile {
-	case ProfileClaudeTmuxCLI, ProfilePiTmuxCLI, ProfileAntigravityTmuxCLI:
+	case ProfileClaudeTmuxCLI, ProfileCursorTmuxCLI, ProfilePiTmuxCLI, ProfileAntigravityTmuxCLI:
 		return "malformed_tail"
 	case ProfileCodexTmuxCLI:
 		return "malformed_jsonl"

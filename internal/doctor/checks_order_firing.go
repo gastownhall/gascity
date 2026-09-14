@@ -12,8 +12,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
@@ -186,7 +188,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// Track severity contributions across error-level entries. Warnings should
 	// stay visible without converting an advisory error into a blocking gate.
 	var blockingErrors, advisoryErrors int
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	// Resolve every order-run lookup the loop below will need up front and in
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
@@ -264,7 +266,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
 	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
 	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
 	if err != nil {
@@ -283,11 +285,11 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	}
 }
 
-func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+func orderFiringCurrentScanConfig(cfg *config.City, cityPath string) *config.City {
 	if cfg == nil {
 		return nil
 	}
-	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	suspended := orderFiringCurrentSuspendedRigs(cfg, cityPath)
 	if len(suspended) == 0 {
 		return cfg
 	}
@@ -326,7 +328,7 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
 		return scanCfg
 	}
-	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	suspended := orderFiringCurrentSuspendedRigs(originalCfg, cityPath)
 	if len(suspended) == 0 {
 		return scanCfg
 	}
@@ -372,14 +374,31 @@ func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) (
 	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
 }
 
-func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+// orderFiringCurrentSuspendedRigs resolves the effective suspension state
+// for every rig, merging the runtime override in
+// .gc/runtime/suspension-state.json (written by `gc rig suspend`/`resume`
+// and canonical whenever it holds an explicit preference) with each rig's
+// authored city.toml default. A missing or unreadable state file is treated
+// as "no runtime override," matching the best-effort convention used
+// elsewhere in this codebase (loadSuspensionStateBestEffort in cmd/gc) —
+// this check is advisory, so misclassifying as "not suspended" is no worse
+// than the pre-existing behavior.
+func orderFiringCurrentSuspendedRigs(cfg *config.City, cityPath string) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {
 		return out
 	}
+	var st suspensionstate.State
+	if cityPath != "" {
+		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+	}
 	for _, rig := range cfg.Rigs {
-		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
-			out[rig.Name] = true
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		if suspensionstate.EffectiveRigSuspended(st, name, rig.EffectiveSuspendedOnStart()) {
+			out[name] = true
 		}
 	}
 	return out
@@ -609,19 +628,21 @@ func (c *OrderFiringCurrentCheck) readEventTail(path string, filter events.Filte
 // latestControllerStartedAt reports the newest controller start. The tail read
 // finds it within a few lines on any city whose controller has started since
 // the log last rotated. Only when the active log holds no controller start at
-// all does it pay for the full read (which also covers archives) — the same
-// cost this always paid, now confined to the case that actually needs it.
+// all does it look in the archives, and then it stops at the newest archive
+// holding one.
+//
+// The archive leg deliberately does not use an unbounded read. That walk
+// gunzips and decodes every retained archive, and its cost grows with every
+// rotation: on a city with 70 archives it measured over 110 seconds of CPU,
+// inside `gc doctor` and inside the supervisor's order-dispatch pass. The
+// condition that reaches this leg — an active log with no controller start —
+// persists for as long as the controller stays up across rotations, so the
+// walk was paid on every invocation rather than rarely.
 func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (time.Time, error) {
 	filter := events.Filter{Type: events.ControllerStarted}
 	startEvents, err := c.readEventTail(eventPath, filter, 1)
 	if err != nil {
 		return time.Time{}, err
-	}
-	if len(startEvents) == 0 {
-		startEvents, err = c.readEventTail(eventPath, filter, 0)
-		if err != nil {
-			return time.Time{}, err
-		}
 	}
 	var latest time.Time
 	for _, event := range startEvents {
@@ -629,7 +650,17 @@ func (c *OrderFiringCurrentCheck) latestControllerStartedAt(eventPath string) (t
 			latest = event.Ts
 		}
 	}
-	return latest, nil
+	if !latest.IsZero() {
+		return latest, nil
+	}
+	archived, found, err := events.LatestArchivedMatch(eventPath, filter)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !found {
+		return time.Time{}, nil
+	}
+	return archived.Ts, nil
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {

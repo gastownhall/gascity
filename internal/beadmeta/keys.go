@@ -39,18 +39,24 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey      = "gc.attempt_log"
-	AttemptMetadataKey         = "gc.attempt"
-	BondMetadataKey            = "gc.bond"
-	BondVarsMetadataKey        = "gc.bond_vars"
-	BoundStepIDMetadataKey     = "gc.bound_step_id"
-	BrainParentSIDMetadataKey  = "gc.brain_parent_sid"
-	CancelRequestedMetadataKey = "gc.cancel_requested"
-	CheckInfraRetryMetadataKey = "gc.check_infra_retry"
-	CheckModeMetadataKey       = "gc.check_mode"
-	CheckPathMetadataKey       = "gc.check_path"
-	CheckTimeoutMetadataKey    = "gc.check_timeout"
-	CityPathMetadataKey        = "gc.city_path"
+	AttemptLogMetadataKey     = "gc.attempt_log"
+	AttemptMetadataKey        = "gc.attempt"
+	BondMetadataKey           = "gc.bond"
+	BondVarsMetadataKey       = "gc.bond_vars"
+	BoundStepIDMetadataKey    = "gc.bound_step_id"
+	BrainParentSIDMetadataKey = "gc.brain_parent_sid"
+	// BudgetDeferredUntilMetadataKey holds an RFC3339 timestamp stamped by the
+	// sling boundary (host/bin/gc in the outer city repo) when a claim attempt
+	// is refused for build-budget reasons; deacon-dispatch.sh clears it on
+	// successful dispatch. `gc hook --claim` must not hand out a candidate
+	// while this timestamp is still in the future. See gm-o45y5y.
+	BudgetDeferredUntilMetadataKey = "gc.budget_deferred_until"
+	CancelRequestedMetadataKey     = "gc.cancel_requested"
+	CheckInfraRetryMetadataKey     = "gc.check_infra_retry"
+	CheckModeMetadataKey           = "gc.check_mode"
+	CheckPathMetadataKey           = "gc.check_path"
+	CheckTimeoutMetadataKey        = "gc.check_timeout"
+	CityPathMetadataKey            = "gc.city_path"
 	// ClaimedAtMetadataKey records the RFC3339 UTC instant a bead was first
 	// claimed through `gc hook --claim`. It is write-once: the claim hook
 	// stamps it only when absent from the bead's current metadata and never
@@ -58,7 +64,20 @@ const (
 	// keys in this same claim-time patch (see hookClaimIdentityPatch in
 	// cmd/gc/cmd_hook_claim.go). Feeds the created→claimed and
 	// claimed→started latency-watch transitions (OBS-001).
-	ClaimedAtMetadataKey                 = "gc.claimed_at"
+	ClaimedAtMetadataKey = "gc.claimed_at"
+	// ClaimGenerationMetadataKey is the scheduler-owned generation-fencing
+	// token for molecule.ClaimExact. It is a counter fenced through
+	// beads.ConditionalWriter.UpdateIfMatch on the bead's revision (distinct
+	// from gc.claimed_at's write-once and gc.control_epoch's
+	// compare-and-overwrite mechanisms): a caller reads the current value,
+	// computes the next generation, and applies a single UpdateIfMatch call
+	// that advances this key AND commits the claim's effects (assignee,
+	// status, session identity) together in one atomic, revision-fenced
+	// write. A stale or racing claimant loses that write outright
+	// (*beads.PreconditionFailedError) with no fallback and no partial
+	// effect ever lands. See molecule.ClaimExact's doc for the exact
+	// guarantee this does and does not provide.
+	ClaimGenerationMetadataKey           = "gc.claim_generation"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
@@ -136,6 +155,7 @@ const (
 	FanoutModeMetadataKey                = "gc.fanout_mode"
 	FanoutStateMetadataKey               = "gc.fanout_state"
 	FinalDispositionMetadataKey          = "gc.final_disposition"
+	FinalizerBeadIDMetadataKey           = "gc.finalizer_bead_id"
 	ForEachMetadataKey                   = "gc.for_each"
 	FormulaMetadataKey                   = "gc.formula"
 	FormulaContractMetadataKey           = "gc.formula_contract"
@@ -150,52 +170,64 @@ const (
 	IterationMetadataKey                 = "gc.iteration"
 	ItemRootKeyMetadataKey               = "gc.item_root_key"
 	KindMetadataKey                      = "gc.kind"
-	LastFailureClassMetadataKey          = "gc.last_failure_class"
-	LastFinalizeErrorMetadataKey         = "gc.last_finalize_error"
-	LogicalBeadIDMetadataKey             = "gc.logical_bead_id"
-	MaxAttemptsMetadataKey               = "gc.max_attempts"
-	MissingRootBeadIDMetadataKey         = "gc.missing_root_bead_id"
-	ModelMetadataKey                     = "gc.model"
-	NativeStepDependenciesMetadataKey    = "gc.native_step_dependencies.v1"
-	NextAttemptMetadataKey               = "gc.next_attempt"
-	OnExhaustedMetadataKey               = "gc.on_exhausted"
-	OnFailMetadataKey                    = "gc.on_fail"
-	OriginalKindMetadataKey              = "gc.original_kind"
-	OutcomeBeadIDMetadataKey             = "gc.outcome_bead_id"
-	OutcomeMetadataKey                   = "gc.outcome"
-	OutputJSONMetadataKey                = "gc.output_json"
-	OutputJSONRequiredMetadataKey        = "gc.output_json_required"
-	ParentBeadIDMetadataKey              = "gc.parent_bead_id"
-	ParentConvoyIDMetadataKey            = "gc.parent_convoy_id"
-	PartialFragmentMetadataKey           = "gc.partial_fragment"
-	PartialRetryMetadataKey              = "gc.partial_retry"
-	PackMetadataKey                      = "gc.pack"
-	PackRootMetadataKey                  = "gc.pack_root"
-	PackWorkspaceMetadataKey             = "gc.pack_workspace"
-	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
-	RalphStepIDMetadataKey               = "gc.ralph_step_id"
-	ReasoningMetadataKey                 = "gc.reasoning"
-	RequiredArtifactMetadataKey          = "gc.required_artifact"
-	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
-	ReviewGateMetadataKey                = "gc.review_gate"
-	RetryCountMetadataKey                = "gc.retry_count"
-	RetryFromMetadataKey                 = "gc.retry_from"
-	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
-	RetryStateMetadataKey                = "gc.retry_state"
-	RigRootMetadataKey                   = "gc.rig_root"
-	RootBeadIDMetadataKey                = "gc.root_bead_id"
-	RootStoreRefMetadataKey              = "gc.root_store_ref"
-	RouteQuarantineMetadataKey           = "gc.route_recovery_quarantined"
-	RouteQuarantineReasonMetadataKey     = "gc.route_recovery_quarantine_reason"
-	RoutedToMetadataKey                  = "gc.routed_to"
-	RunTargetMetadataKey                 = "gc.run_target"
-	RuntimeVarsMetadataKey               = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                 = "gc.scope_kind"
-	ScopeNameMetadataKey                 = "gc.scope_name"
-	ScopeRefMetadataKey                  = "gc.scope_ref"
-	ScopeRoleMetadataKey                 = "gc.scope_role"
-	SessionAffinityMetadataKey           = "gc.session_affinity"
-	SessionIDMetadataKey                 = "gc.session_id"
+	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
+	// completion facts the completions backstop has fully reconciled: the root
+	// is closed, every listed step is closed, and every emittable fact is in
+	// the journal. A closed root's steps never change again, so the stamp is
+	// terminal and the backstop sweep skips stamped roots instead of paying a
+	// per-root step listing to rediscover a converged state every hour
+	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
+	// lane, which reacts to the close events themselves.
+	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LastFailureClassMetadataKey         = "gc.last_failure_class"
+	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
+	LeaseOwnerMetadataKey               = "gc.lease_owner"
+	LogicalBeadIDMetadataKey            = "gc.logical_bead_id"
+	MaxAttemptsMetadataKey              = "gc.max_attempts"
+	MissingRootBeadIDMetadataKey        = "gc.missing_root_bead_id"
+	ModelMetadataKey                    = "gc.model"
+	NativeStepDependenciesMetadataKey   = "gc.native_step_dependencies.v1"
+	NextAttemptMetadataKey              = "gc.next_attempt"
+	OnExhaustedMetadataKey              = "gc.on_exhausted"
+	OnFailMetadataKey                   = "gc.on_fail"
+	OriginalKindMetadataKey             = "gc.original_kind"
+	OutcomeBeadIDMetadataKey            = "gc.outcome_bead_id"
+	OutcomeMetadataKey                  = "gc.outcome"
+	OutputJSONMetadataKey               = "gc.output_json"
+	OutputJSONRequiredMetadataKey       = "gc.output_json_required"
+	ParentBeadIDMetadataKey             = "gc.parent_bead_id"
+	ParentConvoyIDMetadataKey           = "gc.parent_convoy_id"
+	PartialFragmentMetadataKey          = "gc.partial_fragment"
+	PartialRetryMetadataKey             = "gc.partial_retry"
+	PackMetadataKey                     = "gc.pack"
+	PackRootMetadataKey                 = "gc.pack_root"
+	PackWorkspaceMetadataKey            = "gc.pack_workspace"
+	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
+	RalphStepIDMetadataKey              = "gc.ralph_step_id"
+	ReasoningMetadataKey                = "gc.reasoning"
+	RequiredArtifactMetadataKey         = "gc.required_artifact"
+	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
+	ReviewGateMetadataKey               = "gc.review_gate"
+	RetryCountMetadataKey               = "gc.retry_count"
+	RetryFromMetadataKey                = "gc.retry_from"
+	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
+	RetryStateMetadataKey               = "gc.retry_state"
+	RigRootMetadataKey                  = "gc.rig_root"
+	RootBeadIDMetadataKey               = "gc.root_bead_id"
+	RootSettleFailedAtMetadataKey       = "gc.root_settle_failed_at"
+	RootSettleFailedMetadataKey         = "gc.root_settle_failed"
+	RootStoreRefMetadataKey             = "gc.root_store_ref"
+	RouteQuarantineMetadataKey          = "gc.route_recovery_quarantined"
+	RouteQuarantineReasonMetadataKey    = "gc.route_recovery_quarantine_reason"
+	RoutedToMetadataKey                 = "gc.routed_to"
+	RunTargetMetadataKey                = "gc.run_target"
+	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
+	ScopeKindMetadataKey                = "gc.scope_kind"
+	ScopeNameMetadataKey                = "gc.scope_name"
+	ScopeRefMetadataKey                 = "gc.scope_ref"
+	ScopeRoleMetadataKey                = "gc.scope_role"
+	SessionAffinityMetadataKey          = "gc.session_affinity"
+	SessionIDMetadataKey                = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -212,14 +244,42 @@ const (
 	SpecForRefMetadataKey       = "gc.spec_for_ref"
 	StderrMetadataKey           = "gc.stderr"
 	StdoutMetadataKey           = "gc.stdout"
-	StepIDMetadataKey           = "gc.step_id"
-	StepRefMetadataKey          = "gc.step_ref"
-	StepTimeoutMetadataKey      = "gc.step_timeout"
-	SyntheticKindMetadataKey    = "gc.synthetic_kind"
-	SyntheticMetadataKey        = "gc.synthetic"
-	TemplateMetadataKey         = "gc.template"
-	TerminalMetadataKey         = "gc.terminal"
-	TriggerBeadIDMetadataKey    = "gc.trigger_bead_id"
+	// StepDefinedEmittedMetadataKey records, on a graph.v2 physical step bead,
+	// that its execution.step_defined fact has already been emitted AND
+	// acknowledged durable. The level-triggered projector restates the full
+	// graph every control tick; this per-step marker is what makes that
+	// restatement idempotent, so a step_defined is emitted once and a steady
+	// tick restates nothing (ga-rd8le). A step still lacking the marker —
+	// freshly created, or one whose emit was not acknowledged durable (a dropped
+	// append, or a recorder that cannot promise durability) — is emitted and
+	// marked on the next healthy tick, so every creator and recovery path
+	// self-heals. The mark is written only after the emit is acknowledged, so a
+	// dropped emit never marks the step and is safely re-emitted; presence alone
+	// is significant, and the stamped RFC3339 value is for observability only.
+	//
+	// The marker is durable on the step bead, while the emitted step_defined
+	// lives in the event journal, which retention can trim: with opt-in archive
+	// retention (events.rotation.archive_retain_age) a long-lived run's
+	// once-emitted step_defined can age out of the retained journal while this
+	// marker persists, so a consumer reading only retained events may no longer
+	// see it. The offline full restate ('gc events reemit-execution') is the
+	// reemit path — it drives Projection.Events, which ignores this marker and
+	// re-states every step, so it re-materializes any aged-out definition.
+	//
+	// A host crash is the second way the two can diverge: the acknowledged
+	// append is not fsynced, so an OS crash can lose the JSONL line while this
+	// marker — written to a separate store with its own commit durability —
+	// survives. The same reemit path ('gc events reemit-execution')
+	// re-materializes the lost definition.
+	StepDefinedEmittedMetadataKey = "gc.step_defined_emitted"
+	StepIDMetadataKey             = "gc.step_id"
+	StepRefMetadataKey            = "gc.step_ref"
+	StepTimeoutMetadataKey        = "gc.step_timeout"
+	SyntheticKindMetadataKey      = "gc.synthetic_kind"
+	SyntheticMetadataKey          = "gc.synthetic"
+	TemplateMetadataKey           = "gc.template"
+	TerminalMetadataKey           = "gc.terminal"
+	TriggerBeadIDMetadataKey      = "gc.trigger_bead_id"
 	// InfraMigratedFromMetadataKey stamps a bead the storage-class migration
 	// copied into a binding with the name of the binding it came from, so a
 	// resumed attempt can tell a row it wrote from content the destination
@@ -232,6 +292,14 @@ const (
 	WorkDirMetadataKey             = "gc.work_dir"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
+	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
+	WorktreeBaseSHAMetadataKey     = "gc.worktree_base_sha"
+	WorktreeCreatorMetadataKey     = "gc.worktree_creator"
+	WorktreeGenerationMetadataKey  = "gc.worktree_generation"
+	WorktreeLifecycleMetadataKey   = "gc.worktree_lifecycle"
+	WorktreeOwnerMetadataKey       = "gc.worktree_owner"
+	WorktreeRepoMetadataKey        = "gc.worktree_repo"
+	WorktreeRootMetadataKey        = "gc.worktree_root"
 	WorkflowIDMetadataKey          = "gc.workflow_id"
 )
 
@@ -302,11 +370,13 @@ const (
 	// CurrentClaimBeadIDMetadataKey records, on the CLAIMING SESSION's bead, the
 	// id of the work bead that session most recently claimed through
 	// `gc hook --claim`. It is the durable back-channel that makes the claimed
-	// step id readable from the step's own shell: a pool session's shell has no
-	// GC_BEAD_ID / GC_TRIGGER_BEAD_ID (those exist only in the dispatch
-	// condition-script environment, internal/convergence/condition.go), so
-	// without this stamp a formula step cannot name the bead it is running and
-	// silently skips its own close. `gc hook current` reads it back.
+	// step id readable from the step's own shell: GC_BEAD_ID exists only in the
+	// dispatch condition-script environment (internal/convergence/condition.go),
+	// and GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
+	// pool-level spawn marker (cmd/gc/build_desired_state.go) — is absent on
+	// other seats and never drives claim selection, so without this stamp a
+	// formula step cannot reliably name the bead it is running and silently
+	// skips its own close. `gc hook current` reads it back.
 	//
 	// It is deliberately distinct from internal/session.CurrentBeadIDKey
 	// ("currently_processing_bead_id"), which the session RECONCILER stamps when
@@ -363,6 +433,7 @@ var KnownMetadataKeys = []string{
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
 	BrainParentSIDMetadataKey,
+	BudgetDeferredUntilMetadataKey,
 	CancelRequestedMetadataKey,
 	CheckInfraRetryMetadataKey,
 	CheckModeMetadataKey,
@@ -370,6 +441,7 @@ var KnownMetadataKeys = []string{
 	CheckTimeoutMetadataKey,
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
+	ClaimGenerationMetadataKey,
 	ClosedByAttemptMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
@@ -422,6 +494,7 @@ var KnownMetadataKeys = []string{
 	FanoutModeMetadataKey,
 	FanoutStateMetadataKey,
 	FinalDispositionMetadataKey,
+	FinalizerBeadIDMetadataKey,
 	ForEachMetadataKey,
 	FormulaMetadataKey,
 	FormulaContractMetadataKey,
@@ -438,6 +511,7 @@ var KnownMetadataKeys = []string{
 	KindMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
+	LeaseOwnerMetadataKey,
 	LogicalBeadIDMetadataKey,
 	MaxAttemptsMetadataKey,
 	MissingRootBeadIDMetadataKey,
@@ -470,6 +544,8 @@ var KnownMetadataKeys = []string{
 	RetryStateMetadataKey,
 	RigRootMetadataKey,
 	RootBeadIDMetadataKey,
+	RootSettleFailedAtMetadataKey,
+	RootSettleFailedMetadataKey,
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,
@@ -493,6 +569,7 @@ var KnownMetadataKeys = []string{
 	SpecForRefMetadataKey,
 	StderrMetadataKey,
 	StdoutMetadataKey,
+	StepDefinedEmittedMetadataKey,
 	StepIDMetadataKey,
 	StepRefMetadataKey,
 	StepTimeoutMetadataKey,
@@ -509,6 +586,14 @@ var KnownMetadataKeys = []string{
 	WorkDirMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
+	WorktreeBaseRefMetadataKey,
+	WorktreeBaseSHAMetadataKey,
+	WorktreeCreatorMetadataKey,
+	WorktreeGenerationMetadataKey,
+	WorktreeLifecycleMetadataKey,
+	WorktreeOwnerMetadataKey,
+	WorktreeRepoMetadataKey,
+	WorktreeRootMetadataKey,
 	WorkflowIDMetadataKey,
 }
 
