@@ -45,8 +45,14 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 	sessionsDir := citylayout.SessionDiagnosticsDir(ctx.CityPath)
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
-		r.Status = StatusOK
-		r.Message = "no session runtime directory; nothing to check"
+		if os.IsNotExist(err) {
+			r.Status = StatusOK
+			r.Message = "no session runtime directory; nothing to check"
+			return r
+		}
+		r.Status = StatusError
+		r.Severity = SeverityAdvisory
+		r.Message = fmt.Sprintf("cannot read session diagnostic directory %s: %v", sessionsDir, err)
 		return r
 	}
 
@@ -60,6 +66,11 @@ func (c *NudgeUnconfirmedCheck) Run(ctx *CheckContext) *CheckResult {
 			path := filepath.Join(sessionsDir, name, filename)
 			if _, statErr := os.Stat(path); statErr == nil {
 				details = append(details, fmt.Sprintf("session %q: %s", name, filename))
+			} else if !os.IsNotExist(statErr) {
+				r.Status = StatusError
+				r.Severity = SeverityAdvisory
+				r.Message = fmt.Sprintf("cannot inspect session diagnostic %s: %v", path, statErr)
+				return r
 			}
 		}
 	}

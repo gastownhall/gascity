@@ -18,6 +18,25 @@ func TestNudgeUnconfirmedCheckOKWhenNoDiagnostics(t *testing.T) {
 	}
 }
 
+func TestNudgeUnconfirmedCheckErrorsWhenDiagnosticsCannotBeRead(t *testing.T) {
+	cityRoot := t.TempDir()
+	sessionsDir := citylayout.SessionDiagnosticsDir(cityRoot)
+	if err := os.MkdirAll(filepath.Dir(sessionsDir), 0o755); err != nil {
+		t.Fatalf("mkdir runtime root: %v", err)
+	}
+	if err := os.WriteFile(sessionsDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write sessions path as file: %v", err)
+	}
+
+	r := NewNudgeUnconfirmedCheck().Run(&CheckContext{CityPath: cityRoot})
+	if r.Status != StatusError || r.Severity != SeverityAdvisory {
+		t.Fatalf("unreadable diagnostics status = %v severity = %v, want advisory error: %s", r.Status, r.Severity, r.Message)
+	}
+	if !strings.Contains(r.Message, "cannot read session diagnostic directory") {
+		t.Fatalf("unreadable diagnostics message = %q, want read failure", r.Message)
+	}
+}
+
 func TestNudgeUnconfirmedCheckWarnsOnDiagnosticFile(t *testing.T) {
 	cityRoot := t.TempDir()
 	sessionDir := filepath.Join(citylayout.SessionDiagnosticsDir(cityRoot), "gc-worker-1")

@@ -12,10 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
-
-	"github.com/gastownhall/gascity/internal/citylayout"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -979,7 +978,7 @@ func TestDoStartSessionReturnsNudgeDeliveryError(t *testing.T) {
 		ops := &fakeStartOps{
 			hasSessionResult:           true,
 			sendKeysErr:                fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "test"),
-			recordUnconfirmedNudgePath: "/city/.gc/runtime/sessions/test/startup-nudge-unconfirmed.log",
+			recordUnconfirmedNudgePath: "/city/.gc/sessions/test/startup-nudge-unconfirmed.log",
 		}
 
 		cfg := runtime.Config{
