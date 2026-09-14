@@ -129,7 +129,13 @@ func TestWatch_APIErrorStopsImmediatelyWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestWatch_PassesThroughOptInLabels(t *testing.T) {
+// TestWatch_FailsClosedWhenMacVerdictNeverAppears asserts the Mac gate is
+// wired through the full Watch() poll loop, not just Evaluate() in
+// isolation: mac-regression.yml now posts a MacVerdictCheckName run
+// unconditionally (neutral when its gate decided no tier applied), so
+// there is no longer a caller-supplied opt-in label to pass through --
+// PollOptions no longer carries a NeedsMacLabel field at all.
+func TestWatch_FailsClosedWhenMacVerdictNeverAppears(t *testing.T) {
 	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	clock := &fakeClock{now: base}
 	sleeper := &fakeSleeper{clock: clock}
@@ -137,20 +143,19 @@ func TestWatch_PassesThroughOptInLabels(t *testing.T) {
 		{runs: []CheckRun{
 			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
 			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
-			// Mac opt-in run omitted deliberately: with NeedsMacLabel true
-			// below, this must fail closed at the deadline instead of
-			// passing on core evidence alone.
+			// MacVerdictCheckName run omitted deliberately: its absence at
+			// the deadline must fail closed instead of passing on core
+			// evidence alone.
 		}},
 	}}
 
 	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
-		HeadSHA:       testHeadSHA,
-		NeedsMacLabel: true,
-		Deadline:      10 * time.Minute,
-		Interval:      10 * time.Minute,
+		HeadSHA:  testHeadSHA,
+		Deadline: 10 * time.Minute,
+		Interval: 10 * time.Minute,
 	})
 
 	if eval.Pass {
-		t.Fatalf("expected fail because the requested Mac run never appeared, got %+v", eval)
+		t.Fatalf("expected fail because the Mac verdict check run never appeared, got %+v", eval)
 	}
 }

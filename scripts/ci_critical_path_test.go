@@ -22,6 +22,7 @@ type ciCriticalPathJob struct {
 	If              string                    `yaml:"if"`
 	RunsOn          string                    `yaml:"runs-on"`
 	Needs           ciCriticalPathNeeds       `yaml:"needs"`
+	Permissions     map[string]string         `yaml:"permissions"`
 	Outputs         map[string]string         `yaml:"outputs"`
 	Steps           []ciCriticalPathStep      `yaml:"steps"`
 	Strategy        ciCriticalPathJobStrategy `yaml:"strategy"`
@@ -682,7 +683,7 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
 		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
 	}
-	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", ".github/actions/setup-gascity-macos/**"}
+	wantFilterEntries := []string{"cmd/gc/**", "internal/pathutil/**", "internal/fsys/**", "internal/sessionlog/**", "internal/worker/**", ".github/actions/setup-gascity-macos/**"}
 	filterValue := filterStep.With["filters"]
 	for _, entry := range wantFilterEntries {
 		if !strings.Contains(filterValue, "'"+entry+"'") {
@@ -856,6 +857,97 @@ func TestMacRegressionHeaderCommentDescribesCentralizedGate(t *testing.T) {
 	}
 	if !strings.Contains(content, "gate") {
 		t.Error("mac-regression.yml header comment should describe the centralized gate job")
+	}
+}
+
+// TestMacRegressionSummaryPostsVerdictCheckRun asserts the mac-regression-summary
+// job publishes its own durable, name-stable check run (ga-ismqdw.1 criterion
+// A) instead of relying solely on $GITHUB_STEP_SUMMARY: a neutral conclusion
+// when the gate decided no tier should run, and a success/failure conclusion
+// mirroring $fail once a tier actually ran. prwatchdog polls the Checks API,
+// so a run that only ever writes to $GITHUB_STEP_SUMMARY is invisible to it
+// -- on any real skip (schedule-only trigger, no needs-mac label, no path
+// hit) prwatchdog would wait out its full 25m deadline and fail closed on a
+// run that was never supposed to produce Mac evidence at all. The gate-failed
+// branch (GATE_RESULT != success) is unchanged -- it stays exit 1 only.
+func TestMacRegressionSummaryPostsVerdictCheckRun(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job, ok := wf.Jobs["mac-regression-summary"]
+	if !ok {
+		t.Fatal("mac-regression workflow has no mac-regression-summary job")
+	}
+
+	wantPerms := map[string]string{"checks": "write"}
+	if len(job.Permissions) != len(wantPerms) {
+		t.Fatalf("mac-regression-summary permissions = %v, want exactly %v (job-level permissions replace the workflow-top-level default entirely, so this job must be self-contained rather than relying on the blanket contents: read)", job.Permissions, wantPerms)
+	}
+	for key, level := range wantPerms {
+		if got := job.Permissions[key]; got != level {
+			t.Errorf("mac-regression-summary permissions[%q] = %q, want %q", key, got, level)
+		}
+	}
+
+	var summarize ciCriticalPathStep
+	var found bool
+	for _, step := range job.Steps {
+		if step.Name == "Summarize" {
+			summarize, found = step, true
+		}
+	}
+	if !found {
+		t.Fatal("mac-regression-summary has no Summarize step")
+	}
+
+	wantEnv := map[string]string{
+		"GH_TOKEN": "${{ github.token }}",
+		"HEAD_SHA": "${{ inputs.head_sha || github.sha }}",
+	}
+	for name, want := range wantEnv {
+		if got := summarize.Env[name]; got != want {
+			t.Errorf("Summarize env %s = %q, want %q", name, got, want)
+		}
+	}
+
+	const postCall = `"/repos/${GITHUB_REPOSITORY}/check-runs"`
+	if got := strings.Count(summarize.Run, postCall); got != 2 {
+		t.Errorf("Summarize run script posts to the check-runs API %d times, want exactly 2 (once for the not-requested/neutral branch, once for the ran success/failure branch)", got)
+	}
+	for _, marker := range []string{
+		`gh api --method POST`,
+		`-f name="Mac Regression verdict"`,
+		`-f head_sha="${HEAD_SHA}"`,
+		`-f status="completed"`,
+		`-f conclusion="neutral"`,
+	} {
+		if !strings.Contains(summarize.Run, marker) {
+			t.Errorf("Summarize run script missing %q", marker)
+		}
+	}
+
+	notRequestedIdx := strings.Index(summarize.Run, `"${RUN_SMOKE}" != "true"`)
+	if notRequestedIdx < 0 {
+		t.Fatal("Summarize run script missing the not-requested branch")
+	}
+	exitZeroOffset := strings.Index(summarize.Run[notRequestedIdx:], "exit 0")
+	if exitZeroOffset < 0 {
+		t.Fatal("Summarize run script's not-requested branch has no exit 0")
+	}
+	notRequestedBranch := summarize.Run[notRequestedIdx : notRequestedIdx+exitZeroOffset]
+	if !strings.Contains(notRequestedBranch, `-f conclusion="neutral"`) {
+		t.Error("Summarize not-requested branch does not post a neutral verdict check run before exit 0 -- prwatchdog has nothing to observe on a skipped run")
+	}
+
+	ranBranch := summarize.Run[notRequestedIdx+exitZeroOffset:]
+	concludeIdx := strings.Index(ranBranch, `-f conclusion="${verdict_conclusion}"`)
+	if concludeIdx < 0 {
+		t.Fatal(`Summarize ran branch does not post a computed success/failure verdict conclusion (want a shell variable such as "${verdict_conclusion}" driven by $fail)`)
+	}
+	failExitIdx := strings.Index(ranBranch, `exit "$fail"`)
+	if failExitIdx < 0 {
+		t.Fatal(`Summarize ran branch must still end with exit "$fail" -- the verdict check run is additive, not a replacement for the job's own exit status`)
+	}
+	if concludeIdx > failExitIdx {
+		t.Error(`Summarize ran branch posts its verdict check run after exit "$fail" -- the POST must happen before the step can exit`)
 	}
 }
 
