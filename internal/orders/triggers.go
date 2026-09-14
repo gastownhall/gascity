@@ -201,7 +201,7 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 			cronFieldMatches(hour, t.Hour()) &&
 			cronFieldMatches(dom, t.Day()) &&
 			cronFieldMatches(month, int(t.Month())) &&
-			cronFieldMatches(dow, int(t.Weekday()))
+			cronDayOfWeekMatches(dow, int(t.Weekday()))
 	}
 	sameWallMinute := func(x, y time.Time) bool {
 		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
@@ -287,27 +287,196 @@ func matchesInWallGap(matchesAt func(time.Time) bool, prev, t time.Time) bool {
 	return false
 }
 
-// cronFieldMatches checks if a single cron field matches a value.
-// Supports: "*" (any), exact integer, or comma-separated values.
-func cronFieldMatches(field string, value int) bool {
-	if field == "*" {
-		return true
+// cronField describes one positional field of a schedule: its human name and
+// the closed value range checkCron will ever test it against. Values outside
+// that range can never match — an "hour" of 25 is as dead as a syntax error —
+// so validation rejects both.
+type cronField struct {
+	name     string
+	low      int
+	high     int
+	extraMsg string
+}
+
+// cronFields are the five schedule fields, in order. Day-of-week runs to 7
+// because 7 is the common cron spelling of Sunday: time.Weekday never yields
+// it, so cronDayOfWeekMatches probes such a schedule at both readings rather
+// than letting it validate cleanly and never fire.
+var cronFields = [5]cronField{
+	{name: "minute", low: 0, high: 59},
+	{name: "hour", low: 0, high: 23},
+	{name: "day-of-month", low: 1, high: 31},
+	{name: "month", low: 1, high: 12},
+	{name: "day-of-week", low: 0, high: 7, extraMsg: " (0 or 7 = Sunday)"},
+}
+
+// ValidateCronSchedule reports whether a schedule is expressible in the
+// grammar cronFieldMatches implements. It exists because every rejection here
+// was, before it, an order that loaded cleanly and then never ran: the
+// evaluator has no way to signal "I did not understand this field", it just
+// fails to match, forever. Order validation calls this at load so the failure
+// lands where someone is looking.
+func ValidateCronSchedule(schedule string) error {
+	fields := strings.Fields(schedule)
+	if len(fields) != 5 {
+		return fmt.Errorf("cron schedule %q: want 5 fields (minute hour day-of-month month day-of-week), got %d", schedule, len(fields))
 	}
-	for _, part := range strings.Split(field, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "*/") {
-			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
-			if err == nil && step > 0 && value%step == 0 {
-				return true
-			}
-			continue
+	for i, field := range fields {
+		if err := validateCronField(cronFields[i], field); err != nil {
+			return err
 		}
-		n, err := strconv.Atoi(part)
-		if err == nil && n == value {
+	}
+	return nil
+}
+
+func validateCronField(f cronField, field string) error {
+	if field == "" {
+		return fmt.Errorf("cron %s field is empty", f.name)
+	}
+	for _, term := range strings.Split(field, ",") {
+		if err := validateCronTerm(f, strings.TrimSpace(term)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateCronTerm mirrors cronTermMatches term for term. Any change to one
+// belongs in the other: a term this accepts but that cannot match is exactly
+// the silent-never-fires bug this validation exists to prevent.
+func validateCronTerm(f cronField, term string) error {
+	bad := func(reason string) error {
+		return fmt.Errorf("cron %s field: %q %s%s", f.name, term, reason, f.extraMsg)
+	}
+
+	spec, stepText, hasStep := strings.Cut(term, "/")
+	step := 1
+	if hasStep {
+		n, err := strconv.Atoi(strings.TrimSpace(stepText))
+		if err != nil {
+			return bad("has a non-numeric step")
+		}
+		if n <= 0 {
+			return bad("has a step that is not positive")
+		}
+		step = n
+	}
+	spec = strings.TrimSpace(spec)
+	if spec == "*" {
+		// "*/N" anchors its stride at 0, so in a field whose low bound is 1
+		// the smallest value it can produce is N itself. Once N passes the
+		// field's high bound the matching set is empty and the schedule is
+		// dead — the same silent never-fires this validation exists to catch.
+		// "A-B/N" needs no equivalent check: it anchors at A, which always
+		// matches.
+		if hasStep && f.low > 0 && step > f.high {
+			return bad(fmt.Sprintf(`has no value in %d-%d (a "*/N" step counts from 0)`, f.low, f.high))
+		}
+		return nil
+	}
+
+	inBounds := func(v int) error {
+		if v < f.low || v > f.high {
+			return bad(fmt.Sprintf("is outside the valid range %d-%d", f.low, f.high))
+		}
+		return nil
+	}
+
+	lowText, highText, isRange := strings.Cut(spec, "-")
+	low, err := strconv.Atoi(strings.TrimSpace(lowText))
+	if err != nil {
+		return bad(`is not "*", an integer, a range "A-B", or a step of either`)
+	}
+	if err := inBounds(low); err != nil {
+		return err
+	}
+	if !isRange {
+		if hasStep {
+			return bad(`uses a step without a range; write "A-B/N" or "*/N"`)
+		}
+		return nil
+	}
+	high, err := strconv.Atoi(strings.TrimSpace(highText))
+	if err != nil {
+		return bad("has a non-numeric range end")
+	}
+	if err := inBounds(high); err != nil {
+		return err
+	}
+	if high < low {
+		return bad("has a range that ends before it starts")
+	}
+	return nil
+}
+
+// cronFieldMatches checks if a single cron field matches a value.
+// Supports: "*" (any), exact integer, comma-separated lists, "*/N" strides,
+// "A-B" ranges, and "A-B/N" stepped ranges.
+//
+// An unrecognized term matches nothing, and nothing distinguishes that from
+// an ordinary non-match: no error, no log line, just an order that stays
+// registered and never fires. ValidateCronSchedule rejects any term this
+// function cannot express, so a gap in the grammar surfaces as a load error
+// rather than a silently dead schedule.
+func cronFieldMatches(field string, value int) bool {
+	for _, part := range strings.Split(field, ",") {
+		if cronTermMatches(strings.TrimSpace(part), value) {
 			return true
 		}
 	}
 	return false
+}
+
+// cronDayOfWeekMatches accepts 7 as an alias for Sunday. time.Weekday never
+// yields 7, so a schedule written with the common cron spelling is probed at
+// both readings rather than silently never firing.
+func cronDayOfWeekMatches(field string, weekday int) bool {
+	if cronFieldMatches(field, weekday) {
+		return true
+	}
+	return weekday == 0 && cronFieldMatches(field, 7)
+}
+
+// cronTermMatches evaluates one comma-separated term of a cron field.
+// An unparseable term matches nothing; keep it in lockstep with
+// validateCronTerm, which decides what callers are allowed to write.
+func cronTermMatches(term string, value int) bool {
+	spec, stepText, hasStep := strings.Cut(term, "/")
+	step := 1
+	if hasStep {
+		n, err := strconv.Atoi(strings.TrimSpace(stepText))
+		if err != nil || n <= 0 {
+			return false
+		}
+		step = n
+	}
+	spec = strings.TrimSpace(spec)
+
+	if spec == "*" {
+		// Historic gc semantics for "*/N": the stride is anchored at 0 rather
+		// than at the field's minimum. Preserved deliberately — changing it
+		// would move the slots of every "*/N" schedule already in service.
+		return value%step == 0
+	}
+
+	lowText, highText, isRange := strings.Cut(spec, "-")
+	low, err := strconv.Atoi(strings.TrimSpace(lowText))
+	if err != nil {
+		return false
+	}
+	if !isRange {
+		// A bare "N/step" has no upper bound to stride against; reject it
+		// rather than guess. validateCronTerm refuses it too.
+		return !hasStep && low == value
+	}
+	high, err := strconv.Atoi(strings.TrimSpace(highText))
+	if err != nil || high < low {
+		return false
+	}
+	if value < low || value > high {
+		return false
+	}
+	return (value-low)%step == 0
 }
 
 // checkCondition runs the check command and returns due if exit code is 0.
