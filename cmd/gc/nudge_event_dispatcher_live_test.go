@@ -84,7 +84,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "live")
+	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "live", testNudgeDispatchStores(cityPath))
 	seen := newPasses()
 	d.observePasses(seen.record)
 	d.update(p, &config.City{}, true)

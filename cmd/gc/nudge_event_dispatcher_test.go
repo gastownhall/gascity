@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +41,45 @@ type nudgeEventedFake struct {
 	subs         []chan runtime.SessionEvent
 	busySessions map[string]bool
 	stamps       map[string]time.Time
+
+	// nudgeHeld wedges Nudge for a session until the channel is closed, which
+	// is the only way to park a delivery mid-flight: the pass observer fires
+	// after a pass returns, so it can hold a finished pass but not a hanging
+	// one. nudgeEntered reports that a delivery has actually reached Nudge.
+	nudgeHeld    map[string]<-chan struct{}
+	nudgeEntered chan string
+}
+
+// holdNudge makes Nudge for session block until release is closed, and gives
+// the test a channel that reports when a delivery has reached it.
+func (f *nudgeEventedFake) holdNudge(session string, release <-chan struct{}) <-chan string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.nudgeHeld == nil {
+		f.nudgeHeld = map[string]<-chan struct{}{}
+	}
+	if f.nudgeEntered == nil {
+		f.nudgeEntered = make(chan string, 8)
+	}
+	f.nudgeHeld[session] = release
+	return f.nudgeEntered
+}
+
+func (f *nudgeEventedFake) Nudge(name string, content []runtime.ContentBlock) error {
+	f.mu.Lock()
+	release := f.nudgeHeld[name]
+	entered := f.nudgeEntered
+	f.mu.Unlock()
+	if release != nil {
+		if entered != nil {
+			select {
+			case entered <- name:
+			default:
+			}
+		}
+		<-release
+	}
+	return f.Fake.Nudge(name, content)
 }
 
 func newNudgeEventedFake() *nudgeEventedFake {
@@ -180,7 +222,7 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", testNudgeDispatchStores(dir))
 	d.quiescence = 150 * time.Millisecond
 	d.retryEpsilon = 30 * time.Millisecond
 	seen := newPasses()
@@ -327,11 +369,18 @@ func TestNudgeEventDispatcherFullPassDoesNotRefillTheRetryBudget(t *testing.T) {
 	quiet := 4 * (150*time.Millisecond + 30*time.Millisecond)
 	seen.assertQuiet(t, quiet, "the idle event's retry budget was exhausted")
 
-	// Each sweep now gets exactly one observation pass and schedules no retry.
+	// A sweep HANDS OFF rather than delivering: one enumerating pass, then one
+	// fan-out pass per session with pending work, carrying no retry budget.
+	// The claim under test is unchanged and is about the budget, not the pass
+	// count: the handed-off pass must schedule nothing further, so a session
+	// that is busy forever earns no new retry chain from the sweep.
 	for i := 0; i < 3; i++ {
 		d.kickAll()
-		if filter := seen.next(t, "the backstop sweep"); filter != "" {
-			t.Fatalf("sweep %d ran with filter %q, want a full pass", i, filter)
+		if filter := seen.next(t, "the enumerating sweep"); filter != "" {
+			t.Fatalf("sweep %d ran with filter %q, want the enumerating pass", i, filter)
+		}
+		if filter := seen.next(t, "the sweep's fan-out"); filter != info.SessionName {
+			t.Fatalf("sweep %d fanned out to %q, want %q", i, filter, info.SessionName)
 		}
 		seen.assertQuiet(t, quiet, fmt.Sprintf("sweep %d must not restart the retry chain", i))
 	}
@@ -452,7 +501,7 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", testNudgeDispatchStores(dir))
 	defer func() {
 		cancel()
 		select {
@@ -572,6 +621,56 @@ func TestNudgeEventDispatcherOneParkedSessionDoesNotBlockAnother(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering is the sweep half of
+// the isolation claim, and it is the half that was wrong.
+//
+// A targeted kick needs an idle TRANSITION. A session that is already idle when
+// its nudge is queued never emits one, so the backstop sweep is its only path.
+// While the sweep delivered inline, one pane hanging inside Nudge held the
+// sweep's goroutine, and every later kickAll was dropped as a duplicate of the
+// pass that was stuck. Those sessions waited on the hung pane with nothing in
+// any log to say so.
+//
+// The sweep now enumerates and hands each session to a pass of its own, so it
+// returns while the wedged delivery runs elsewhere and the next sweep is free
+// to start.
+func TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info, seen := newNudgeDispatcherFixture(t, fake)
+
+	release := make(chan struct{})
+	entered := fake.holdNudge(info.SessionName, release)
+	t.Cleanup(func() { close(release) })
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake.setBusy(info.SessionName, false)
+	// Aged well past the fixture's 150ms quiescence window, so the pass gets
+	// through the idle gate and actually reaches Nudge.
+	fake.setStamp(info.SessionName, time.Now().Add(-time.Minute))
+
+	d.kickAll()
+	if filter := seen.next(t, "the enumerating sweep"); filter != "" {
+		t.Fatalf("first pass ran with filter %q, want the enumerating sweep", filter)
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no delivery reached Nudge within 10s; the fixture never handed the session off")
+	}
+
+	// The delivery is now wedged. A sweep must still complete: nothing about a
+	// hung pane belongs to the sweep any more.
+	for i := 0; i < 2; i++ {
+		d.kickAll()
+		if filter := seen.next(t, "a sweep while a delivery is wedged"); filter != "" {
+			t.Fatalf("sweep %d ran with filter %q, want the enumerating sweep: a wedged delivery is stalling the sweep, so an already-idle session's only path is blocked behind whichever pane hung first", i, filter)
+		}
+	}
+}
+
 // A second kick for a session whose pass is already running is dropped rather
 // than queued behind it, so a burst of idle events for one session cannot pile
 // up goroutines. The running pass re-reads the queue and the observation, so
@@ -642,9 +741,13 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 		sessionName: "gc-worker",
 	}
 
+	// Suppression needs BOTH halves: an event-capable provider and a
+	// controller actually hosting the dispatcher that replaces the sidecar.
+	stubNudgePollerDispatcherLive(t, true)
+
 	maybeStartNudgePoller(target, newNudgeEventedFake())
 	if spawns != 0 {
-		t.Fatalf("spawns = %d, want 0 for an event-capable provider", spawns)
+		t.Fatalf("spawns = %d, want 0 for an event-capable provider with a live dispatcher", spawns)
 	}
 
 	maybeStartNudgePoller(target, runtime.NewFake())
@@ -656,6 +759,104 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 	maybeStartNudgePoller(target, nil)
 	if spawns != 2 {
 		t.Fatalf("spawns = %d, want 2 for a nil provider", spawns)
+	}
+}
+
+// stubNudgePollerDispatcherLive answers the controller probe without a
+// controller. Left unstubbed, the probe pings a socket that is not there and
+// every test would take the fail-open branch.
+func stubNudgePollerDispatcherLive(t *testing.T, live bool) {
+	t.Helper()
+	prev := nudgePollerDispatcherIsLive
+	nudgePollerDispatcherIsLive = func(string) bool { return live }
+	t.Cleanup(func() { nudgePollerDispatcherIsLive = prev })
+}
+
+// TestMaybeStartNudgePollerSpawnsWhenNoDispatcherIsHosting is the other half of
+// the suppression rule, and it is the one that matters when things go wrong.
+//
+// Retiring the sidecar is only safe because something else owns delivery. If
+// the controller is not answering, nothing does: suppressing here would leave
+// every queued nudge undelivered until a controller came back, with no error
+// anywhere, because refusing to spawn looks exactly like the healthy case.
+func TestMaybeStartNudgePollerSpawnsWhenNoDispatcherIsHosting(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	spawns := 0
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		spawns++
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+	stubNudgePollerDispatcherLive(t, false)
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		cfg:         &config.City{},
+		agent:       config.Agent{Name: "worker"},
+		sessionName: "gc-worker",
+	}
+
+	maybeStartNudgePoller(target, newNudgeEventedFake())
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1: with no controller answering, nothing hosts the event dispatcher, so the sidecar must not be retired", spawns)
+	}
+}
+
+// TestNudgeEventDispatcherUnattributedIdleEventSweeps pins the empty-session
+// idle event as a reason to reconcile, not a reason to do nothing.
+//
+// A provider emits one when it saw an agent go idle and could not map the
+// event back to a session. Dropping it is silent: the sidecar that used to
+// cover the gap has been retired for this provider class, so the queue then
+// waits for the next patrol tick instead of reacting to the transition.
+func TestNudgeEventDispatcherUnattributedIdleEventSweeps(t *testing.T) {
+	fake := newNudgeEventedFake()
+	_, _, _, seen := newNudgeDispatcherFixture(t, fake)
+
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: "", Time: time.Now()})
+
+	if filter := seen.next(t, "the sweep an unattributed idle event must trigger"); filter != "" {
+		t.Fatalf("unattributed idle event ran a pass with filter %q, want the full sweep", filter)
+	}
+}
+
+// TestNudgeEventDispatcherNeverResolvesThroughTheOneShotFunnel pins, for this
+// file only, the property class_store_emit.go says is held "by construction":
+// the controller never reaches the CLI emit injector.
+//
+// cliStorageRoutes returns routes carrying a bead.* emit target, which exists
+// for a one-shot process that has no emitter of its own. This dispatcher runs
+// inside the controller, which has the CachingStore's. A call here would put a
+// second emitter on every relocated-class write, and nothing at runtime would
+// fail: the event log would simply carry two rows per mutation, worst on the
+// reconcile path where the cache re-absorbs rows in bulk. So the check is a
+// source scan, the same shape as the injection-site guard next to it.
+//
+// The scope is deliberately this file. Seventeen other non-test files call
+// cliStorageRoutes and each is presumed one-shot; establishing that for all of
+// them is a wider audit than this guard claims to have done.
+func TestNudgeEventDispatcherNeverResolvesThroughTheOneShotFunnel(t *testing.T) {
+	const subject = "nudge_event_dispatcher.go"
+	file, err := parser.ParseFile(token.NewFileSet(), subject, nil, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", subject, err)
+	}
+	var found []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "cliStorageRoutes" {
+			found = append(found, ident.Name)
+		}
+		return true
+	})
+	if len(found) != 0 {
+		t.Fatalf("%s calls cliStorageRoutes %d time(s); this dispatcher is controller-hosted, and those routes carry a bead.* emit target the controller must not add on top of its own emitter (class_store_emit.go). Take the stores from the CityRuntime instead.", subject, len(found))
 	}
 }
 
@@ -681,6 +882,21 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 // the other resolves both to the relocated one. Every resolver still agrees with
 // the placement plan while that happens, because neither side of that agreement
 // can see whose store it was handed.
+// testNudgeDispatchStores stands in for what the CityRuntime hands the
+// dispatcher in production. A test process is one-shot, so resolving through
+// the CLI funnel here is the correct construction for it; the production
+// wiring deliberately does not, because the controller already has an emitter
+// (class_store_emit.go).
+func testNudgeDispatchStores(cityPath string) func() (beads.NudgesStore, beads.Store) {
+	return func() (beads.NudgesStore, beads.Store) {
+		cityStore, err := openStoreAtForCity(cityPath, cityPath)
+		if err != nil || cityStore == nil {
+			return beads.NudgesStore{}, nil
+		}
+		return nudgeDispatchStores(cliStorageRoutes(cityPath), cityStore, nil, cityPath, nil)
+	}
+}
+
 func TestNudgeDispatchStoresDeriveBothClassesFromTheCityStore(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	relocatedNudges := beads.NewMemStore()
@@ -688,7 +904,7 @@ func TestNudgeDispatchStoresDeriveBothClassesFromTheCityStore(t *testing.T) {
 		coordclass.ClassNudges: relocatedNudges,
 	}}
 
-	nudges, sessStore := nudgeDispatchStores(routes, cityStore, nil, t.TempDir())
+	nudges, sessStore := nudgeDispatchStores(routes, cityStore, nil, t.TempDir(), nil)
 
 	if nudges.Store != beads.Store(relocatedNudges) {
 		t.Errorf("nudge store resolved to %p, want the relocated nudges store %p", nudges.Store, relocatedNudges)

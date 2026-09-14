@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -65,12 +66,12 @@ const (
 // goroutine count bounded by the number of sessions with queued work, rather
 // than by the number of events that arrived while one was stuck.
 //
-// The backstop full pass is one goroutine walking every session, so it can
-// still stall behind a wedged pane. That is deliberate rather than overlooked:
-// it is the safety net for a missed event, targeted kicks keep flowing for
-// every other session while it waits, and making it per-session too would
-// duplicate the scheduler inside the pass for no gain the event path does not
-// already provide.
+// The backstop sweep does not deliver. It walks the sessions with pending
+// items and hands each to a pass of its own, so a pane wedged inside Nudge
+// stalls only its own session and the sweep still reaches the rest. That
+// matters most for a session that is ALREADY idle when its nudge is queued:
+// it emits no new idle event, so the sweep is its only path, and an inline
+// sweep stranded it behind whichever pane happened to hang first.
 //
 // Providers without an event stream (tmux) leave the dispatcher inactive and
 // every existing path byte-identical: the supervisor tick keeps its inline
@@ -80,6 +81,16 @@ type nudgeEventDispatcher struct {
 	cityPath  string
 	stderr    io.Writer
 	logPrefix string
+
+	// stores hands back the two coordination-class stores a pass needs, from
+	// the stores the CONTROLLER already opened. It must not resolve through
+	// the one-shot CLI funnel: cliStorageRoutes returns routes carrying a
+	// bead.* emit target (class_store_emit.go), which exists for a process
+	// that has no emitter of its own. This dispatcher runs inside the
+	// controller, which does have one, so resolving that way would put a
+	// second emitter on every relocated-class write. Injecting the stores also
+	// means no pass opens a store handle it would then have to close.
+	stores func() (beads.NudgesStore, beads.Store)
 
 	// Timing knobs, shrunk by tests. quiescence mirrors the sidecar pollers'
 	// idle gate; retryEpsilon pads the aged-stamp retry.
@@ -96,11 +107,13 @@ type nudgeEventDispatcher struct {
 	fullPassDue  bool
 	kicked       chan struct{} // buffered-1 worker wake
 
-	// inflight holds the sessions with a delivery goroutine running, keyed by
-	// session name; the empty key is the backstop full pass. A kick for a
-	// session already in here is dropped rather than queued: the running pass
-	// re-reads the queue and the live observation when it gets there, so it
-	// will see whatever the dropped kick would have told it.
+	// inflight holds the passes running, keyed by session name, with the empty
+	// key reserved for the enumerating sweep. Because the sweep only fans out,
+	// every key that names a delivery is a session name, so the set really does
+	// bound deliveries to one per session. A kick for a session already in here
+	// is dropped rather than queued: the running pass re-reads the queue and
+	// the live observation when it gets there, so it will see whatever the
+	// dropped kick would have told it.
 	inflight map[string]bool
 	delivery sync.WaitGroup
 
@@ -114,6 +127,9 @@ type nudgeEventDispatcher struct {
 	// pass itself rather than on elapsed time; production leaves it nil.
 	passObserver func(sessionFilter string)
 
+	// workerDone closes when the SCHEDULER goroutine has returned. It does not
+	// mean every delivery has finished: drainDeliveries bounds that wait and
+	// may abandon a goroutine wedged inside Nudge.
 	workerDone chan struct{}
 }
 
@@ -127,12 +143,13 @@ type nudgeEventKick struct {
 
 // newNudgeEventDispatcher returns a dispatcher whose subscriptions and worker
 // live within parent. Wire a provider with update.
-func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string) *nudgeEventDispatcher {
+func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.Writer, logPrefix string, stores func() (beads.NudgesStore, beads.Store)) *nudgeEventDispatcher {
 	d := &nudgeEventDispatcher{
 		parent:       parent,
 		cityPath:     cityPath,
 		stderr:       stderr,
 		logPrefix:    logPrefix,
+		stores:       stores,
 		quiescence:   defaultNudgePollQuiescence,
 		retryEpsilon: nudgeEventRetryEpsilon,
 		pending:      make(map[string]nudgeEventKick),
@@ -259,6 +276,13 @@ func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-
 			switch ev.Kind {
 			case runtime.SessionEventAgentIdle:
 				if ev.Session == "" {
+					// The provider saw an agent go idle and could not say
+					// which one. That is a reason to reconcile every session
+					// with pending work, not to drop the transition: the
+					// sidecar that used to cover it has been retired for
+					// event-capable providers, so ignoring this waits for the
+					// next patrol tick instead of reacting to the idle.
+					d.kickAll()
 					continue
 				}
 				d.kickSessionAfter(ev.Session, 0, nudgeEventRetryBudget)
@@ -383,8 +407,19 @@ func (d *nudgeEventDispatcher) observePasses(fn func(sessionFilter string)) {
 const nudgeEventDeliveryDrainGrace = 5 * time.Second
 
 // drainDeliveries waits out the in-flight delivery goroutines, up to the
-// grace. It reports nothing: a delivery still running at shutdown is the hung
-// pane case, which the delivery path already logs for itself.
+// grace, and says so when the grace expires with deliveries still running.
+//
+// The report is the point. An expired grace means the process is about to tear
+// down the provider and the stores while a goroutine is still inside Nudge, so
+// that goroutine's own later logging may go to a writer nobody reads and its
+// post-delivery stamp may land on a closed store. Abandoning it is still the
+// right call, because blocking city shutdown on a hung pane is the worse
+// failure. Doing it silently is not: this line is the only place an operator
+// learns that a pane was hung at shutdown.
+//
+// Note what workerDone does and does not mean after this returns: the SCHEDULER
+// is down and will start no further pass. It is not a statement that no
+// delivery is still running.
 func (d *nudgeEventDispatcher) drainDeliveries() {
 	done := make(chan struct{})
 	go func() {
@@ -396,6 +431,7 @@ func (d *nudgeEventDispatcher) drainDeliveries() {
 	select {
 	case <-done:
 	case <-timer.C:
+		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: a queued-nudge delivery was still running after %s; abandoning it so shutdown is not blocked on a hung pane\n", d.logPrefix, nudgeEventDeliveryDrainGrace) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -453,9 +489,9 @@ func (d *nudgeEventDispatcher) pass(sessionFilter string, retriesLeft int) {
 // city that relocates `[beads.classes.nudges]` alone. main carries four
 // instances of exactly that shape in cmd_nudge.go; they are filed as
 // gastownhall/gascity#6348, and this pass is not a fifth.
-func nudgeDispatchStores(routes *storageRoutes, cityStore beads.Store, cfg *config.City, cityPath string) (beads.NudgesStore, beads.Store) {
-	nudges := beads.NudgesStore{Store: resolveNudgesStore(routes, cityStore, cfg, cityPath, nil)}
-	return nudges, resolveSessionStore(routes, cityStore, cfg, cityPath, nil)
+func nudgeDispatchStores(routes *storageRoutes, cityStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) (beads.NudgesStore, beads.Store) {
+	nudges := beads.NudgesStore{Store: resolveNudgesStore(routes, cityStore, cfg, cityPath, rec)}
+	return nudges, resolveSessionStore(routes, cityStore, cfg, cityPath, rec)
 }
 
 // runPass executes one delivery pass: the whole pending queue when
@@ -471,20 +507,33 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	cityStore, err := openStoreAtForCity(d.cityPath, d.cityPath)
-	if err != nil || cityStore == nil {
-		if err != nil {
-			fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening the city store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
+	if d.stores == nil {
 		return
 	}
-	store, sessStore := nudgeDispatchStores(cliStorageRoutes(d.cityPath), cityStore, cfg, d.cityPath)
-	if store.Store == nil {
+	store, sessStore := d.stores()
+	if store.Store == nil || sessStore == nil {
 		return
 	}
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if sessionFilter == "" {
+		// The sweep ENUMERATES; it never delivers. Handing each due session to
+		// its own pass is what makes the in-flight set mean what it says: every
+		// actual delivery is keyed by session name, so one session can never be
+		// delivered to twice at once, and a pane wedged inside Nudge cannot
+		// stall the sweep that would have reached the other sessions. An
+		// already-idle session emits no new idle event, so before this the
+		// sweep was its ONLY path and a single wedged pane stranded it.
+		fanOut := func(target nudgeTarget, _ worker.LiveObservation) (bool, error) {
+			d.spawnPass(target.sessionName, 0)
+			return false, nil
+		}
+		if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, "", d.stderr, fanOut); err != nil {
+			fmt.Fprintf(d.stderr, "%s: nudge event dispatch sweep: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
 		return
 	}
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
