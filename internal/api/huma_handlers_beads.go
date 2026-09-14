@@ -26,6 +26,9 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if err := cacheLiveOr503(cityStore); err != nil {
 		return nil, err
 	}
+	// Snapshot the federated store set once so both cache-hit and rebuilt
+	// responses report health for exactly the stores this endpoint serves.
+	stores := s.state.BeadStores()
 
 	limit := defaultPaginationLimit
 	if input.Limit > 0 {
@@ -60,13 +63,12 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		if body, ok := cachedResponseAs[ListBody[beads.Bead]](s, cacheKey, bucket); ok {
 			return &ListOutput[beads.Bead]{
 				Index:     s.latestIndex(),
-				CacheAgeS: cacheAgeSeconds(cityStore),
+				CacheAgeS: cacheAgeSecondsForStores(stores),
 				Body:      body,
 			}, nil
 		}
 	}
 
-	stores := s.state.BeadStores()
 	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
 	var rigNames []string
 	if input.Rig != "" {
@@ -232,7 +234,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 
 	index := s.latestIndex()
-	cacheAge := cacheAgeSeconds(cityStore)
+	// This response federates every selected rig cache. Report the oldest
+	// observation rather than the city-store age so operators can see a stale
+	// rig cache instead of a misleadingly healthy city cache.
+	cacheAge := cacheAgeSecondsForStores(stores)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
 	// limit-bounded read is unfetchable by design (#3208). next_cursor is the

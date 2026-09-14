@@ -68,3 +68,20 @@ func cacheAgeSeconds(store beads.Store) float64 {
 	}
 	return age
 }
+
+// cacheAgeSecondsForStores reports the oldest cache observation among the
+// stores participating in a federated read. A city-wide bead response is only
+// as fresh as its stalest rig leg, so reporting the city store alone can make a
+// boot-stale rig cache appear healthy after the city cache has refreshed.
+//
+// Stores without cache liveness (and caches with no successful observation)
+// contribute zero, matching cacheAgeSeconds' existing wire contract.
+func cacheAgeSecondsForStores(stores map[string]beads.Store) float64 {
+	var oldest float64
+	for _, store := range stores {
+		if age := cacheAgeSeconds(store); age > oldest {
+			oldest = age
+		}
+	}
+	return oldest
+}
