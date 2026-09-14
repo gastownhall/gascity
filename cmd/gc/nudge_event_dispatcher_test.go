@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -562,5 +564,35 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 	}
 	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
 		t.Fatal("event-capable provider must retire pollers")
+	}
+}
+
+// TestNudgeDispatchStoresDeriveBothClassesFromTheCityStore pins the base
+// argument, which is the part no other test in this package can see.
+//
+// The routes below relocate nudges and leave sessions where they are, which is
+// a supported configuration: [beads.classes.<name>] is per-class, and
+// storageRoutes.storeFor is a per-class map lookup. Under it, the two resolvers
+// answer differently for the same base, and a pass that derived one store from
+// the other resolves both to the relocated one. Every resolver still agrees with
+// the placement plan while that happens, because neither side of that agreement
+// can see whose store it was handed.
+func TestNudgeDispatchStoresDeriveBothClassesFromTheCityStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	relocatedNudges := beads.NewMemStore()
+	routes := &storageRoutes{stores: map[coordclass.Class]beads.Store{
+		coordclass.ClassNudges: relocatedNudges,
+	}}
+
+	nudges, sessStore := nudgeDispatchStores(routes, cityStore, nil, t.TempDir())
+
+	if nudges.Store != beads.Store(relocatedNudges) {
+		t.Errorf("nudge store resolved to %p, want the relocated nudges store %p", nudges.Store, relocatedNudges)
+	}
+	if sessStore == beads.Store(relocatedNudges) {
+		t.Fatalf("the session store resolved to the NUDGES store: on a city that relocates nudges alone, every session read in the pass would land in the nudges database")
+	}
+	if sessStore != beads.Store(cityStore) {
+		t.Errorf("session store resolved to %p, want the city store %p", sessStore, cityStore)
 	}
 }

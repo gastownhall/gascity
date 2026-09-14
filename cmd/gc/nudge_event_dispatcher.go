@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -359,6 +360,21 @@ func (d *nudgeEventDispatcher) pass(sessionFilter string, retriesLeft int) {
 	}
 }
 
+// nudgeDispatchStores derives the two coordination-class stores a delivery pass
+// needs. Both come from cityStore, and neither is ever derived from the other.
+//
+// That is the whole point of the helper. resolveClassStore returns its BASE
+// verbatim whenever the class is not relocated, so a session store derived from
+// the nudges store is correct on every city that relocates both classes together
+// or neither — and silently reads session beads out of the nudges database on a
+// city that relocates `[beads.classes.nudges]` alone. main carries four
+// instances of exactly that shape in cmd_nudge.go; they are filed as
+// gastownhall/gascity#6348, and this pass is not a fifth.
+func nudgeDispatchStores(routes *storageRoutes, cityStore beads.Store, cfg *config.City, cityPath string) (beads.NudgesStore, beads.Store) {
+	nudges := beads.NudgesStore{Store: resolveNudgesStore(routes, cityStore, cfg, cityPath, nil)}
+	return nudges, resolveSessionStore(routes, cityStore, cfg, cityPath, nil)
+}
+
 // runPass executes one delivery pass: the whole pending queue when
 // sessionFilter is empty, one session otherwise. Attempts use the sidecar
 // pollers' quiescence gate; an attempt whose target's activity stamp is
@@ -372,13 +388,17 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	store := openNudgeBeadStore(d.cityPath)
+	cityStore, err := openStoreAtForCity(d.cityPath, d.cityPath)
+	if err != nil || cityStore == nil {
+		if err != nil {
+			fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening the city store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	store, sessStore := nudgeDispatchStores(cliStorageRoutes(d.cityPath), cityStore, cfg, d.cityPath)
 	if store.Store == nil {
 		return
 	}
-	// Session-class reads route through the session store (identity today);
-	// the nudge queue stays on its own store.
-	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
