@@ -62,6 +62,7 @@ export type AgentPatch = {
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
+    ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
@@ -643,6 +644,18 @@ export type ConfigValidateOutputBody = {
      * Validation warnings.
      */
     warnings: Array<string> | null;
+};
+
+export type ContextAdvisory = {
+    Enabled: boolean | null;
+    Tiers: Array<ContextAdvisoryTier> | null;
+    WindowTokens: number | null;
+};
+
+export type ContextAdvisoryTier = {
+    Enabled: boolean | null;
+    Message: string | null;
+    Threshold: number | null;
 };
 
 export type ControlRootSettleFailedPayload = {
@@ -4940,7 +4953,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Retained bead row count used as the denominator, including open and closed beads.
+     * Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.
      */
     live_rows: number;
     /**
@@ -4948,9 +4961,13 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per retained row, including open and closed beads.
+     * Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.
      */
     ratio_mb_per_row: number;
+    /**
+     * True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.
+     */
+    rows_measured: boolean;
     /**
      * Total bytes of the store directory.
      */
@@ -4960,7 +4977,7 @@ export type StatusStoreHealth = {
      */
     threshold_mb_per_row: number;
     /**
-     * True when maintenance is overdue.
+     * True when maintenance is overdue. Meaningless unless rows_measured is true.
      */
     warning: boolean;
 };

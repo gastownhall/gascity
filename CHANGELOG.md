@@ -75,7 +75,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
   rather than forwarded. No in-repo caller uses the `@file.json` spelling.
 
+- **`gc bd` on a split city now decides ownership by RESIDENCE, so a
+  reserved-prefix id the relocated class binding does not hold falls through to
+  the work ledger instead of being refused on its prefix.** The binding is the
+  authority for its reserved namespaces, not their only lawful holder:
+  `config.ValidateRigs` deliberately admits a rig prefix inside a reserved
+  namespace (`ReservedPrefixWarnings` only advises) and `gc storage migrate`
+  preserved ids in the other direction, so such a rig mints work beads carrying
+  ids the binding has never held. Every read and every write addressed at one —
+  including the step-completion write a worked bead ends with — died at this one
+  door, while the HTTP API and `classRoutedStoreForID` already served the same
+  rows. `gc bd create --deps <reserved-id>` and `--parent <reserved-id>` now
+  execute against the work ledger on a clean binding miss, where they were
+  previously refused; a subject the binding actually holds is still refused with
+  the routing diagnostic, and every addressed id is probed, so an unserved
+  `dep add <miss> <resident>` is refused in either argv order. A binding that
+  cannot ANSWER — unopenable, refusing, or faulting — is still a hard error and
+  never read as absence.
+
+  One diagnostic is lost, by design: a truncated `gcg-…` id no longer gets the
+  "class stores resolve ids exactly (no substring match)" hint and instead falls
+  through to `bd`'s own substring not-found. Distinguishing a typo from a
+  shadow-prefixed rig's real bead requires knowing the namespace has one lawful
+  minter, which is the premise this change retires (ga-8w5c7).
+
 ### Fixed
+
+- **A closed binding row now supersedes its retained frozen twin in the
+  one-live-workflow-per-source-bead guard, so a converged city stops refusing a
+  sling whose only live root is gone.** A storage migration copies rows into the
+  class binding with ids preserved and deletes nothing, so a workflow root
+  relocated into the binding and later closed there still exists as an OPEN copy
+  in the retained work ledger. The guard unioned every leg's live roots, reported
+  that copy as live, named it in `blocking_workflow_ids`, and refused. The
+  collector now lets the binding's row win on a shared root id — live or closed —
+  asking the binding directly about the ids the work legs reported, with a
+  bounded per-id probe rather than a full closed scan. Only a row that is really
+  the same root supersedes: ids are unique within a store and store-prefixed ids
+  collide across stores, so the binding's row must be a workflow root, for the
+  same source bead, naming the same source store whenever both sides name one. A
+  probe that faults refuses the sling: a binding fault is an error, never
+  absence. A binding row that predates the `gc.source_store_ref` stamp
+  supersedes its twin only once it is closed, because a live one is invisible to
+  the guard's own scan and dropping its twin would leave the sling unguarded. A
+  city that relocates nothing has no binding leg, runs no probe, and enumerates
+  exactly what it did before.
+
+- **The one-live-workflow-per-source-bead guard reads the graph binding, so a
+  split city stops admitting a second live workflow.** A workflow root is graph
+  class, so on a city that relocates the graph class every live root is in the
+  binding — and neither sling door enumerated it. The API walked the city store
+  plus each rig store; the CLI walked the city and rig *directories*, which a
+  binding is not. Both then answered "no conflict" out of stores that
+  structurally could not hold the answer, and a second launch was admitted for a
+  source bead that already had one (the batch path instead rolled its launch
+  back, because the same blindness hid the root it had just created). Both
+  enumerators now lead with the relocated binding, under the same
+  `graph:<city>` store ref the workflow snapshot scan already mints and parses,
+  and the CLI gets it from the one class-binding front door rather than a second
+  enumerator. A scan fault on that leg refuses the sling instead of degrading to
+  the tolerated non-source-store warning: a binding fault is an error, never
+  absence. A city that relocates nothing enumerates exactly what it did before,
+  and one root reached through two legs is named once.
 
 - **The work-record close gate asks the repository the bead's OWNER points at,
   not the store it was read through.** A rig's work step that a relocated class
@@ -111,6 +172,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. See "If this city cut over before edge payloads were carried" in
   `docs/runbooks/split-storage-classes.md` for what is affected, what is not
   lost, and the destructive re-converge procedure.
+- **`gc workflow delete-source` and `gc workflow reopen-source` write the copy
+  of the source bead the residency contract owns, not the one the selector
+  named.** An explicit `--rig` / `--store-ref` pins the store the sweep works
+  in, and both commands were writing the source bead's metadata through that
+  same store. On a converged city — infrastructure classes relocated into the
+  class binding with ids preserved, the pre-migration copies retained and
+  frozen at cutover — an operator naming the city cleared `workflow_id` on the
+  frozen twin while the binding's live row went on pointing at the workflow
+  that had just been swept. The next resolve answers from the binding, still
+  sees a workflow, and refuses the re-sling as already-running against a tree
+  that no longer exists; `reopen-source` had the same defect one verb over,
+  reopening the twin and leaving the row the city actually reads closed and
+  still bound. Both now resolve the owning copy through the by-id residency
+  walk (binding-first, a binding fault is an error and never absence), then
+  clear any other resident copy's stale `workflow_id` best-effort so the two
+  cannot disagree. A city that relocates nothing, and any `--rig` run, writes
+  exactly the store it wrote before.
 
 - **A control bead served by a relocated class binding is routed to the
   dispatcher its own `gc.root_store_ref` names.** On a split city every rig's

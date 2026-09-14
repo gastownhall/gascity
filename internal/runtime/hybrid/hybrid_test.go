@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -309,5 +310,154 @@ func TestIsDeadRuntimeSessionReturnsRoutedCheckerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runtime unavailable") {
 		t.Fatalf("IsDeadRuntimeSession error = %v, want runtime unavailable", err)
+	}
+}
+
+// capsFake overrides the fake's capabilities so the intersection can be
+// exercised with differing backend support.
+type capsFake struct {
+	*runtime.Fake
+	caps runtime.ProviderCapabilities
+}
+
+func (c *capsFake) Capabilities() runtime.ProviderCapabilities { return c.caps }
+
+// TestProvider_CapabilitiesIntersectsEachConnectionOp exercises one field at a
+// time, in both backend orders, so a field cannot pass by being wired to the
+// wrong field, the wrong backend, or with the wrong operator. Setting both
+// fields on both backends, as an earlier shape did, leaves a CanStream wired to
+// CanAttachTTY reporting the right answer for the wrong reason.
+func TestProvider_CapabilitiesIntersectsEachConnectionOp(t *testing.T) {
+	for _, field := range []string{"CanStream", "CanAttachTTY"} {
+		for _, tc := range []struct {
+			name          string
+			first, second bool
+			want          bool
+		}{
+			{name: "both backends capable", first: true, second: true, want: true},
+			{name: "first backend only", first: true},
+			{name: "second backend only", second: true},
+			{name: "neither backend"},
+		} {
+			t.Run(field+"/"+tc.name, func(t *testing.T) {
+				p := New(&capsFake{runtime.NewFake(), capsWith(t, field, tc.first)},
+					&capsFake{runtime.NewFake(), capsWith(t, field, tc.second)}, isRemote)
+				if got := capsField(t, p.Capabilities(), field); got != tc.want {
+					t.Errorf("%s = %v, want %v", field, got, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// capsWith returns capabilities with exactly one named bool field set, so each
+// field's wiring is observed on its own.
+func capsWith(t *testing.T, field string, v bool) runtime.ProviderCapabilities {
+	t.Helper()
+	var caps runtime.ProviderCapabilities
+	f := reflect.ValueOf(&caps).Elem().FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	f.SetBool(v)
+	return caps
+}
+
+// capsField reads one named bool capability.
+func capsField(t *testing.T, caps runtime.ProviderCapabilities, field string) bool {
+	t.Helper()
+	f := reflect.ValueOf(caps).FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("runtime.ProviderCapabilities has no field %q", field)
+	}
+	return f.Bool()
+}
+
+// TestProvider_CapabilitiesIntersectsEveryField fails when a field is added to
+// runtime.ProviderCapabilities and not wired into this composite. The
+// intersection is a hand-maintained literal, and a field missing from it reads
+// as "not supported" no matter what either backend reports, which is how
+// CanStream and CanAttachTTY both went unnoticed: nothing consumes them yet, so
+// the first consumer would have inherited the wrong answer with no test red.
+//
+// Both backends report everything true, so the check holds for the fields that
+// intersect with AND and for NeedsClaimBackstop, which is an OR.
+func TestProvider_CapabilitiesIntersectsEveryField(t *testing.T) {
+	all := runtime.ProviderCapabilities{}
+	set := reflect.ValueOf(&all).Elem()
+	for i := 0; i < set.NumField(); i++ {
+		if set.Field(i).Kind() != reflect.Bool {
+			t.Fatalf("%s is not a bool, so this test no longer covers every capability", set.Type().Field(i).Name)
+		}
+		set.Field(i).SetBool(true)
+	}
+
+	got := reflect.ValueOf(New(&capsFake{runtime.NewFake(), all}, &capsFake{runtime.NewFake(), all}, isRemote).Capabilities())
+	for i := 0; i < got.NumField(); i++ {
+		if !got.Field(i).Bool() {
+			t.Errorf("%s = false with both backends reporting it true: the field is missing from the intersection", got.Type().Field(i).Name)
+		}
+	}
+}
+
+// idleSnapshotProvider is a backend that can take a point-in-time idle
+// observation. A plain runtime.Fake deliberately cannot, so it stands in for a
+// backend without the capability.
+type idleSnapshotProvider struct {
+	*runtime.Fake
+	idle  map[string]bool
+	calls []string
+}
+
+func newIdleSnapshotProvider() *idleSnapshotProvider {
+	return &idleSnapshotProvider{Fake: runtime.NewFake(), idle: make(map[string]bool)}
+}
+
+func (p *idleSnapshotProvider) SnapshotIdle(name string) (bool, error) {
+	p.calls = append(p.calls, name)
+	return p.idle[name], nil
+}
+
+// The composite must satisfy IdleSnapshotProvider itself, or the idle-timeout
+// reconciler's type-assert fails for every session in a local/remote split
+// city and the content-based idle clock silently never runs (ga-07mi8).
+var _ runtime.IdleSnapshotProvider = (*Provider)(nil)
+
+func TestSnapshotIdle_RoutesToBackend(t *testing.T) {
+	local, remote := newIdleSnapshotProvider(), newIdleSnapshotProvider()
+	h := New(local, remote, isRemote)
+	local.idle["local-agent"] = true
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if err != nil {
+		t.Fatalf("SnapshotIdle(local-agent): %v", err)
+	}
+	if !idle {
+		t.Error("SnapshotIdle(local-agent) = false, want true from the local backend")
+	}
+	if !reflect.DeepEqual(local.calls, []string{"local-agent"}) {
+		t.Errorf("local backend SnapshotIdle calls = %v, want [local-agent]", local.calls)
+	}
+	if len(remote.calls) != 0 {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want none", remote.calls)
+	}
+
+	if _, err := h.SnapshotIdle("remote-agent-1"); err != nil {
+		t.Fatalf("SnapshotIdle(remote-agent-1): %v", err)
+	}
+	if !reflect.DeepEqual(remote.calls, []string{"remote-agent-1"}) {
+		t.Errorf("remote backend SnapshotIdle calls = %v, want [remote-agent-1]", remote.calls)
+	}
+}
+
+func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
+	h := New(runtime.NewFake(), runtime.NewFake(), isRemote)
+
+	idle, err := h.SnapshotIdle("local-agent")
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("SnapshotIdle error = %v, want ErrInteractionUnsupported", err)
+	}
+	if idle {
+		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
 	}
 }

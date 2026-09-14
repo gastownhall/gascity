@@ -288,6 +288,18 @@ export const zConfigValidateOutputBody = z.object({
     warnings: z.array(z.string()).nullable()
 });
 
+export const zContextAdvisoryTier = z.object({
+    Enabled: z.boolean().nullable(),
+    Message: z.string().nullable(),
+    Threshold: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable()
+});
+
+export const zContextAdvisory = z.object({
+    Enabled: z.boolean().nullable(),
+    Tiers: z.array(zContextAdvisoryTier).nullable(),
+    WindowTokens: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable()
+});
+
 export const zControlRootSettleFailedPayload = z.object({
     error: z.string(),
     error_class: z.string(),
@@ -1091,6 +1103,7 @@ export const zAgentPatch = z.object({
     Args: z.array(z.string()).nullable(),
     AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
+    ContextAdvisory: zContextAdvisory,
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
     Dir: z.string(),
@@ -2907,6 +2920,7 @@ export const zStatusStoreHealth = z.object({
     live_rows: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     path: z.string(),
     ratio_mb_per_row: z.number(),
+    rows_measured: z.boolean(),
     size_bytes: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     threshold_mb_per_row: z.number(),
     warning: z.boolean()

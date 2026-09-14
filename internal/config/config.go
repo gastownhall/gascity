@@ -694,6 +694,8 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -2351,15 +2353,17 @@ type LocalDoctorCheck struct {
 // (broken-worktree pointers, missing files) remain hardcoded since they
 // cannot be operator-tuned in any meaningful sense.
 type DoctorConfig struct {
-	// WorktreeRigWarnSize is the per-rig warning threshold for the total
-	// disk footprint under .gc/worktrees/<rig>/. Reported by the
-	// worktree-disk-size check. Go-style human size string ("10GB", "500MB").
+	// WorktreeRigWarnSize is the per-rig warning threshold for a
+	// worktree population's total disk footprint. Reported by the
+	// worktree-disk-size check for .gc/worktrees/<rig>/, and by the
+	// rig:<rig>:worktrees check for the per-bead worktrees at
+	// <rig>/worktrees/. Go-style human size string ("10GB", "500MB").
 	// Empty or unparseable falls back to the default (10 GB).
 	WorktreeRigWarnSize string `toml:"worktree_rig_warn_size,omitempty" jsonschema:"default=10GB"`
 
-	// WorktreeRigErrorSize is the per-rig error threshold. When any rig
-	// exceeds this, the worktree-disk-size check reports an error rather
-	// than a warning. Empty or unparseable falls back to the default
+	// WorktreeRigErrorSize is the per-rig error threshold. When a rig
+	// worktree population exceeds this, the reporting check errors
+	// rather than warns. Empty or unparseable falls back to the default
 	// (50 GB).
 	WorktreeRigErrorSize string `toml:"worktree_rig_error_size,omitempty" jsonschema:"default=50GB"`
 
@@ -3059,6 +3063,8 @@ func (c *City) PackDirsForRig(rigName string) []string {
 // default_sling_formula, and append_fragments; the remaining fields are parsed
 // and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
+	// ContextAdvisory is the city-wide default context-pressure guidance.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent
 	// injection.
@@ -3227,6 +3233,8 @@ type Agent struct {
 	Session string `toml:"session,omitempty" jsonschema:"enum=acp"`
 	// Provider names the provider preset to use for this agent.
 	Provider string `toml:"provider,omitempty"`
+	// ContextAdvisory overrides context-pressure guidance for this agent.
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
 	// Upstream selects the model-serving endpoint (a key in [upstreams]) for
 	// this agent — WHO serves the model. "" (default) falls back to
 	// agent_defaults.upstream; if still empty, no upstream env is injected
@@ -3561,6 +3569,7 @@ func (a Agent) Clone() Agent {
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
+	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
@@ -3952,6 +3961,7 @@ func hasDeprecatedAttachmentFields(cfg *City) bool {
 // mergeAgentDefaults merges src into dst using later-layer precedence for
 // scalars and additive append semantics for list fields.
 func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, prov *Provenance) {
+	mergeContextAdvisory(&dst.ContextAdvisory, src.ContextAdvisory)
 	if src.Provider != "" {
 		if prov != nil && dst.Provider != "" && dst.Provider != src.Provider {
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.provider redefined by %q", label))
@@ -4668,6 +4678,9 @@ func Parse(data []byte) (*City, error) {
 	applyDaemonFormulaV2Default(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
+	if err := validateContextAdvisories(&cfg); err != nil {
+		return nil, err
+	}
 	// Stamp source=sourceInline on agents declared via [[agent]] in
 	// the parsed TOML. These are city.toml inline agents (or test
 	// fixtures using Parse directly); pack agents go through a

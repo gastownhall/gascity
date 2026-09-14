@@ -2982,6 +2982,22 @@ func discoverSessionBeadsWithRoots(
 				tp.InstanceName = sn
 			}
 		}
+		if isNamedSessionInfo(info) {
+			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+			// (build_desired_state.go ~1130-1139) did not populate this bead into
+			// desired this tick — e.g. during city suspend, which gates only that
+			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+			// but never sets these three fields, so without this the named-session
+			// markers session_beads.go and templateParamsSessionOrigin key off go
+			// missing and the bead is wrongly treated as non-named.
+			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["GC_SESSION_ORIGIN"] = "named"
+		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
@@ -6325,13 +6341,23 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// reappear at session start; the next tick converges it. That turns the
 	// permanent drift this fix targets into a transient one, which is the
 	// actual invariant — not that nothing else ever writes these paths.
+	//
+	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
+	// Staging has no version check and writes no backup, so without this it
+	// reverted a hook file that internal/hooks considers current — or newer,
+	// or user-authored — on every tick (#5554).
+	//
+	// One option value is created here and reused across every staging call
+	// below: it carries the per-pass write-tracking that keeps a path this pass
+	// itself wrote overridable by a later overlay layer (last-writer-wins).
+	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

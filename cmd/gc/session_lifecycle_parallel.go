@@ -25,6 +25,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -164,6 +165,17 @@ type startCandidate struct {
 	info  sessionpkg.Info
 	tp    TemplateParams
 	order int
+
+	// configured mirrors configuredNames[name()] at the pipeline's true
+	// construction site (reconcileSessionBeadsTracedWithNamedDemand). It
+	// propagates by value through preparedStart.candidate to
+	// startResult.prepared.candidate, letting commitStartFailure tell a
+	// controller-owned named session apart from an orphaned one without
+	// threading configuredNames through the intervening call chain. Left
+	// at its zero value (false) on the two non-pipeline construction sites
+	// (relaunchAgentForLaunchDrift, recoverRunningPendingCreate), which
+	// never produce a startResult and so never read it.
+	configured bool
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -246,6 +258,25 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// diedDuringStartup is true when the session started and then died
+	// before it was confirmed alive, detected either of two ways: (1) the
+	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
+	// directly from Start() — the only path reachable when the session has
+	// no session_key to recover through (e.g. a plain bash-script agent
+	// with no SessionIDFlag configured; see retryFreshStartAfterStaleKey's
+	// decline branch in internal/session/chat.go), or (2) Start() itself
+	// succeeded (startedFresh) and the *post-start* stability/liveness check
+	// below then found the session not running/alive (the "session %q died
+	// during startup" synthetic error; requires a non-empty SessionKey to
+	// run at all). Either way this is distinct from Start() returning some
+	// other, generic error (e.g. a transient provider error mid a gc
+	// suspend/resume cycle), which leaves diedDuringStartup false.
+	// commitStartFailure uses this to distinguish "this session actually came
+	// up and immediately exited, so its pending-create should roll back and
+	// retry fresh" from "Start() never got the process up at all, so a
+	// configured named session's pending-create should be preserved for a
+	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
+	diedDuringStartup bool
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
 	phases startPhaseTimings
@@ -1033,10 +1064,16 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
+	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+		return nil, candidate.info, err
+	}
 	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
-	} else if wd := candidate.info.WorkDir; wd != "" {
+	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+	}
+	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
+		return nil, candidate.info, err
 	}
 	// The task work_dir override above can replace agentCfg.WorkDir after
 	// template resolution already rendered PreStart commands (materialize-
@@ -1240,6 +1277,123 @@ func buildPreparedStartWithWorkDirResolver(
 		promptDelivered: promptDelivered,
 		promptHash:      promptHash,
 	}, candidate.info, nil
+}
+
+func preparedStartSessionWorkDir(info sessionpkg.Info) string {
+	if wd := strings.TrimSpace(info.WorkDirCanonical); wd != "" {
+		return wd
+	}
+	return strings.TrimSpace(info.WorkDir)
+}
+
+func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
+	if !ok {
+		return false, nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
+	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
+	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
+		patch[beadmeta.WorkDirMetadataKey] = concreteDir
+	}
+	if samePreparedWorkDirPath(legacy, templateDir) {
+		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
+	}
+	if len(patch) == 0 {
+		return false, nil
+	}
+	if store == nil || strings.TrimSpace(candidate.info.ID) == "" {
+		candidate.info = candidate.info.ApplyPatch(patch)
+		return true, nil
+	}
+	info, err := sessionFrontDoor(store).UpdateMetadataInfo(candidate.info, patch)
+	if err != nil {
+		return false, fmt.Errorf("repairing concrete pool work_dir for %s: %w", candidate.name(), err)
+	}
+	candidate.info = info
+	return true, nil
+}
+
+func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if !ok || strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+	if !samePreparedWorkDirPath(resolved, templateDir) {
+		return nil
+	}
+	return fmt.Errorf("pool session %s for concrete alias %s resolved template work_dir %q; want concrete work_dir %q",
+		candidate.name(), concretePoolPreparedIdentity(candidate, cfg), templateDir, concreteDir)
+}
+
+func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool) {
+	if cfg == nil || candidate.info.ManualSession || candidate.tp.ManualSession || !isPoolManagedSessionInfo(candidate.info) {
+		return "", "", false
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	if template == "" {
+		return "", "", false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return "", "", false
+	}
+	concreteIdentity := concretePoolPreparedIdentity(candidate, cfg)
+	if concreteIdentity == "" || concreteIdentity == template {
+		return "", "", false
+	}
+	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
+	if concreteDir == "" {
+		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *cfgAgent, cfg.Rigs); err == nil {
+			concreteDir = resolved
+		}
+	}
+	if concreteDir == "" {
+		return "", "", false
+	}
+	templateDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	if err != nil || templateDir == "" || samePreparedWorkDirPath(templateDir, concreteDir) {
+		return "", "", false
+	}
+	return templateDir, concreteDir, true
+}
+
+func concretePoolPreparedIdentity(candidate startCandidate, cfg *config.City) string {
+	if identity := strings.TrimSpace(candidate.tp.InstanceName); identity != "" {
+		return identity
+	}
+	if identity := strings.TrimSpace(candidate.info.CanonicalInstanceNameMetadata); identity != "" {
+		return identity
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return ""
+	}
+	_, identity := canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, candidate.info)
+	if identity != "" && identity != template {
+		return identity
+	}
+	return normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentNameInfo(candidate.info))
+}
+
+func preparedStartCityName(cityPath string, cfg *config.City) string {
+	fallback := ""
+	if strings.TrimSpace(cityPath) != "" {
+		fallback = filepath.Base(filepath.Clean(cityPath))
+	}
+	return config.EffectiveCityName(cfg, fallback)
+}
+
+func samePreparedWorkDirPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return samePath(a, b)
 }
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
@@ -1499,6 +1653,15 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// diedDuringStartup starts true when the provider/resume layer already
+	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
+	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
+	// decline in internal/session/chat.go when there is no session_key to
+	// recover through) — see the startResult.diedDuringStartup doc comment.
+	// The local post-start liveness check below can still independently set
+	// it true for the other detection path; neither path ever resets it back
+	// to false.
+	diedDuringStartup := errors.Is(err, runtime.ErrSessionDiedDuringStartup)
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
@@ -1546,6 +1709,7 @@ func runPreparedStartCandidate(
 				err = fmt.Errorf("observing session %q after startup: %w", item.candidate.name(), err)
 			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
+				diedDuringStartup = true
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
@@ -1556,13 +1720,14 @@ func runPreparedStartCandidate(
 	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
-			prepared:        item,
-			err:             nil,
-			outcome:         TraceOutcomeStartErrorConverged,
-			started:         started,
-			finished:        finished,
-			rollbackPending: false,
-			phases:          phases,
+			prepared:          item,
+			err:               nil,
+			outcome:           TraceOutcomeStartErrorConverged,
+			started:           started,
+			finished:          finished,
+			rollbackPending:   false,
+			diedDuringStartup: diedDuringStartup,
+			phases:            phases,
 		}
 	}
 	var outcome TraceOutcomeCode
@@ -1606,14 +1771,15 @@ func runPreparedStartCandidate(
 		rateLimitScreen = false
 	}
 	return startResult{
-		prepared:        item,
-		err:             err,
-		outcome:         outcome,
-		started:         started,
-		finished:        finished,
-		rollbackPending: rollbackPending,
-		rateLimitScreen: rateLimitScreen,
-		phases:          phases,
+		prepared:          item,
+		err:               err,
+		outcome:           outcome,
+		started:           started,
+		finished:          finished,
+		rollbackPending:   rollbackPending,
+		rateLimitScreen:   rateLimitScreen,
+		diedDuringStartup: diedDuringStartup,
+		phases:            phases,
 	}
 }
 
@@ -2414,7 +2580,21 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}
 		}
-		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		if !result.prepared.candidate.configured || result.diedDuringStartup {
+			// A configured named session (declared via [[named_session]]) must
+			// survive a single transient start failure mid pending-create (e.g.
+			// a gc suspend/resume cycle) so the reconciler can retry it, instead
+			// of being destructively closed with its session_name cleared — see
+			// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession.
+			// An orphaned (unconfigured) pending-create still rolls back here,
+			// per TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError.
+			// A configured session that DID start but then died during its
+			// post-start liveness check (diedDuringStartup) still rolls back
+			// here: it actually launched and exited, so the stale pending-create
+			// must clear for a fresh attempt next tick, matching base's fast
+			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}

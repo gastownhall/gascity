@@ -36,7 +36,8 @@
         "claims_errored",
         "stale_session",
         "non_turn_context",
-        "drain_pending"
+        "drain_pending",
+        "missing_session_registration"
       ]
     },
     "bead_id": {
@@ -102,7 +103,8 @@
               "claims_errored",
               "stale_session",
               "non_turn_context",
-              "drain_pending"
+              "drain_pending",
+              "missing_session_registration"
             ]
           }
         }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ZCode (Z.ai's GLM harness) keeps its sessions in a sqlite database under
@@ -90,7 +92,12 @@ func FindZCodeSessionFileByID(searchPaths []string, workDir, sessionID string) s
 			if walkErr != nil || entry.IsDir() || entry.Name() != sessionID+".json" {
 				return nil //nolint:nilerr // a missing root is simply no match
 			}
-			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+			// Compared via pathutil.SamePath, not raw string inequality: on
+			// macOS a real work dir resolves through the /var alias while the
+			// adapter's shelled-out cwd lands on the physical /private/var
+			// path, so a plain != always misses even though it is the same
+			// directory. See findZCodeMirrorInScope below for the same fix.
+			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
 				return nil
 			}
 			info, err := entry.Info()
@@ -175,6 +182,13 @@ func zcodeScopeEpoch(continuationEpoch string) string {
 // nothing for this work dir — including when no seat id was supplied: once the
 // seat has written anything for this work dir, a name-only mirror is a sibling
 // seat's or stale.
+//
+// That fallback is transient for a fresh seat: until its first turn is
+// mirrored its seat scope holds nothing, so a closed sibling's name-only
+// mirror — live or archived — is what resolves, and the seat's transcript and
+// activity read as the sibling's until the first write. The reader cannot
+// tell a legacy bead from a fresh seat; only the adapter can, and it adopts
+// name-only state on a restarted seat alone.
 func FindZCodeSessionFileByScope(searchPaths []string, workDir, sessionName, sessionBeadID, continuationEpoch string) string {
 	workDir = cleanOpenCodeWorkDir(workDir)
 	if workDir == "" {
@@ -216,7 +230,13 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 			path := filepath.Join(dir, name)
 			// The placeholder embeds its work dir (written through load_export
 			// when a boot turn is canceled), so it is scoped like a real mirror.
-			if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+			//
+			// Compared via pathutil.SamePath, not raw string inequality: on
+			// macOS a real work dir resolves through the /var alias while the
+			// adapter's shelled-out cwd lands on the physical /private/var
+			// path, so a plain != always misses even though it is the same
+			// directory.
+			if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
 				continue
 			}
 			info, err := entry.Info()
@@ -248,17 +268,21 @@ func findZCodeMirrorInScope(roots []string, scope, workDir string) string {
 }
 
 // sanitizeZCodeComponent mirrors the adapter's path-component sanitization
-// (tr -c 'A-Za-z0-9._-' '_'), so a lookup and the writer agree on the name.
+// (LC_ALL=C tr -c 'A-Za-z0-9._-' '_'), so a lookup and the writer agree on
+// the name. It walks BYTES, as tr does: every byte of a multi-byte rune folds
+// to its own underscore, so "ö" becomes "__". A rune-wise walk produced one
+// underscore and a scope the adapter never wrote.
 func sanitizeZCodeComponent(value string) string {
-	var b strings.Builder
-	for _, r := range value {
+	out := make([]byte, len(value))
+	for i := 0; i < len(value); i++ {
+		c := value[i]
 		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9',
-			r == '.', r == '_', r == '-':
-			b.WriteRune(r)
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+			out[i] = c
 		default:
-			b.WriteRune('_')
+			out[i] = '_'
 		}
 	}
-	return b.String()
+	return string(out)
 }
