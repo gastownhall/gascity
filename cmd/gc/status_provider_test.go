@@ -84,13 +84,8 @@ func TestStatusProviderPreservesNativeLivenessObservation(t *testing.T) {
 }
 
 func TestStatusProviderLivenessTimeoutPreservesObservationUncertainty(t *testing.T) {
-	origTimeout := statusProviderCallTimeout
 	origWarn := statusProviderTimeoutWarning
-	t.Cleanup(func() {
-		statusProviderCallTimeout = origTimeout
-		statusProviderTimeoutWarning = origWarn
-	})
-	statusProviderCallTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { statusProviderTimeoutWarning = origWarn })
 	statusProviderTimeoutWarning = func() {}
 
 	base := newStatusProbeProvider()
@@ -98,7 +93,7 @@ func TestStatusProviderLivenessTimeoutPreservesObservationUncertainty(t *testing
 	gate := make(chan struct{})
 	base.observeGate = gate
 	t.Cleanup(func() { close(gate) })
-	wrapped := newBoundedStatusProvider(base)
+	wrapped := newBoundedStatusProvider(base, 10*time.Millisecond)
 
 	got, err := runtime.ObserveLivenessWithError(wrapped, "worker", nil)
 	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
