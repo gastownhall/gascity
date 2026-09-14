@@ -222,6 +222,15 @@ func TestEvaluate_APIErrorFailsClosedImmediately(t *testing.T) {
 	}
 }
 
+// TestEvaluate_MacOptIn asserts the watchdog reads Mac's opt-in state
+// directly from the Checks API rather than from a caller-supplied label
+// flag (ga-ismqdw.1 criterion C): mac-regression.yml now always posts a
+// MacVerdictCheckName check run for every head SHA it observes -- a
+// neutral conclusion when its own gate decided no tier applied, and a
+// success/failure conclusion once a tier actually ran. This removes the
+// prior double bookkeeping where pr-evidence-watchdog.yml computed its own
+// NEEDS_MAC_LABEL from the PR label while mac-regression.yml's gate could
+// also trigger from a mac-sensitive path hit -- the two could diverge.
 func TestEvaluate_MacOptIn(t *testing.T) {
 	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	coreOK := []CheckRun{
@@ -229,8 +238,9 @@ func TestEvaluate_MacOptIn(t *testing.T) {
 		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
 	}
 
-	t.Run("not requested: passes without a Mac run", func(t *testing.T) {
-		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: coreOK, Elapsed: time.Minute, Deadline: ObservationDeadline, NeedsMacLabel: false})
+	t.Run("verdict neutral: passes, mac reported not requested", func(t *testing.T) {
+		runs := append(append([]CheckRun{}, coreOK...), CheckRun{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionNeutral, StartedAt: base})
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Elapsed: time.Minute, Deadline: ObservationDeadline})
 		if !eval.Pass || !eval.Terminal {
 			t.Fatalf("expected pass, got %+v", eval)
 		}
@@ -239,31 +249,31 @@ func TestEvaluate_MacOptIn(t *testing.T) {
 		}
 	})
 
-	t.Run("requested, missing at deadline: fails", func(t *testing.T) {
-		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: coreOK, Elapsed: ObservationDeadline, Deadline: ObservationDeadline, NeedsMacLabel: true})
+	t.Run("verdict missing at deadline: fails", func(t *testing.T) {
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: coreOK, Elapsed: ObservationDeadline, Deadline: ObservationDeadline})
 		if eval.Pass || !eval.Terminal {
 			t.Fatalf("expected fail-closed at deadline, got %+v", eval)
 		}
 	})
 
-	t.Run("requested, not yet concluded before deadline: keep observing", func(t *testing.T) {
-		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: coreOK, Elapsed: 5 * time.Minute, Deadline: ObservationDeadline, NeedsMacLabel: true})
+	t.Run("verdict not yet posted before deadline: keep observing", func(t *testing.T) {
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: coreOK, Elapsed: 5 * time.Minute, Deadline: ObservationDeadline})
 		if eval.Terminal {
-			t.Fatalf("expected to keep observing while an explicitly requested Mac run has not concluded, got %+v", eval)
+			t.Fatalf("expected to keep observing while the Mac verdict check run has not appeared, got %+v", eval)
 		}
 	})
 
-	t.Run("requested and succeeded: passes", func(t *testing.T) {
-		runs := append(append([]CheckRun{}, coreOK...), CheckRun{Name: MacCheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base})
-		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Elapsed: time.Minute, Deadline: ObservationDeadline, NeedsMacLabel: true})
+	t.Run("verdict succeeded: passes", func(t *testing.T) {
+		runs := append(append([]CheckRun{}, coreOK...), CheckRun{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base})
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Elapsed: time.Minute, Deadline: ObservationDeadline})
 		if !eval.Pass || !eval.Terminal {
 			t.Fatalf("expected pass, got %+v", eval)
 		}
 	})
 
-	t.Run("requested and failed: fails even though core CI passed", func(t *testing.T) {
-		runs := append(append([]CheckRun{}, coreOK...), CheckRun{Name: MacCheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base})
-		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Elapsed: time.Minute, Deadline: ObservationDeadline, NeedsMacLabel: true})
+	t.Run("verdict failed: fails even though core CI passed", func(t *testing.T) {
+		runs := append(append([]CheckRun{}, coreOK...), CheckRun{Name: "Mac Regression verdict", HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base})
+		eval := Evaluate(Input{HeadSHA: testHeadSHA, CheckRuns: runs, Elapsed: time.Minute, Deadline: ObservationDeadline})
 		if eval.Pass || !eval.Terminal {
 			t.Fatalf("expected fail, got %+v", eval)
 		}
