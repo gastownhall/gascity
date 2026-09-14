@@ -1,20 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"golang.org/x/sys/unix"
 )
 
 // Dolt holds an exclusive flock on each database's `.dolt/noms/LOCK` for the
@@ -69,13 +65,13 @@ func managedDoltDataDirLockFiles(dataDir string) []string {
 	return files
 }
 
-// managedDoltDataDirLockHolder probes each dolt store lock under dataDir with
-// a non-blocking flock and returns the path of the first lock held by a live
-// process, or "" when every lock is free. A free lock is acquired and
-// released within the probe; callers run this only before spawning or after
-// signaling a server, never while a healthy owned server should keep its
-// lock.
-func managedDoltDataDirLockHolder(dataDir string) string {
+// managedDoltDataDirHeldLocks probes each dolt store lock under dataDir with
+// a non-blocking flock and returns every lock currently held by a live
+// process, in enumeration order. A free lock is acquired and released within
+// the probe; callers run this only before spawning or after signaling a
+// server, never while a healthy owned server should keep its lock.
+func managedDoltDataDirHeldLocks(dataDir string) []string {
+	var held []string
 	for _, path := range managedDoltDataDirLockFiles(dataDir) {
 		f, err := os.Open(path) //nolint:gosec // path derives from the managed data dir layout
 		if err != nil {
@@ -97,11 +93,22 @@ func managedDoltDataDirLockHolder(dataDir string) string {
 		}
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return path
+			held = append(held, path)
+			continue
 		}
 		fmt.Fprintf(os.Stderr, "warning: cannot probe dolt store lock %s: %v; treating as free (gastownhall/gascity#3174)\n", path, err)
 	}
-	return ""
+	return held
+}
+
+// managedDoltDataDirLockHolder returns the path of the first dolt store lock
+// under dataDir held by a live process, or "" when every lock is free.
+func managedDoltDataDirLockHolder(dataDir string) string {
+	held := managedDoltDataDirHeldLocks(dataDir)
+	if len(held) == 0 {
+		return ""
+	}
+	return held[0]
 }
 
 // waitForManagedDoltDataDirLockFree blocks until no live process holds a dolt
@@ -131,89 +138,6 @@ func waitForManagedDoltDataDirLockFree(dataDir string, timeout time.Duration) er
 	return fmt.Errorf("dolt exclusive store lock %s is still held by a live process after %s; a prior dolt sql-server has not released the data dir", holder, timeout)
 }
 
-type managedDoltProcLock struct {
-	pid                 int
-	major, minor, inode uint64
-}
-
-func parseManagedDoltProcFlock(line string) (managedDoltProcLock, bool, error) {
-	fields := strings.Fields(line)
-	if len(fields) < 2 || fields[1] != "FLOCK" {
-		return managedDoltProcLock{}, false, nil
-	}
-	if len(fields) < 8 {
-		return managedDoltProcLock{}, true, fmt.Errorf("expected at least 8 fields")
-	}
-	pid, err := strconv.Atoi(fields[4])
-	if err != nil {
-		return managedDoltProcLock{}, true, fmt.Errorf("pid %q: %w", fields[4], err)
-	}
-	deviceInode := strings.Split(fields[5], ":")
-	if len(deviceInode) != 3 {
-		return managedDoltProcLock{}, true, fmt.Errorf("device and inode %q", fields[5])
-	}
-	major, err := strconv.ParseUint(deviceInode[0], 16, 64)
-	if err != nil {
-		return managedDoltProcLock{}, true, fmt.Errorf("major %q as hexadecimal: %w", deviceInode[0], err)
-	}
-	minor, err := strconv.ParseUint(deviceInode[1], 16, 64)
-	if err != nil {
-		return managedDoltProcLock{}, true, fmt.Errorf("minor %q as hexadecimal: %w", deviceInode[1], err)
-	}
-	inode, err := strconv.ParseUint(deviceInode[2], 10, 64)
-	if err != nil {
-		return managedDoltProcLock{}, true, fmt.Errorf("inode %q as decimal: %w", deviceInode[2], err)
-	}
-	return managedDoltProcLock{pid: pid, major: major, minor: minor, inode: inode}, true, nil
-}
-
-// managedDoltLockHolderPIDs returns the PIDs whose FLOCK rows in procLocksPath
-// match lockPath's device and inode. Linux prints the device major and minor in
-// hexadecimal but the inode in decimal, so the three components are parsed
-// with their respective bases before comparison.
-func managedDoltLockHolderPIDs(lockPath, procLocksPath string) ([]int, error) {
-	info, err := os.Stat(lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("stat lock file %s: %w", lockPath, err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return nil, fmt.Errorf("stat lock file %s: unsupported file metadata %T", lockPath, info.Sys())
-	}
-	f, err := os.Open(procLocksPath) //nolint:gosec // fixed procfs path in production; injectable only for tests
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", procLocksPath, err)
-	}
-	defer f.Close() //nolint:errcheck
-
-	wantMajor := uint64(unix.Major(stat.Dev))
-	wantMinor := uint64(unix.Minor(stat.Dev))
-	wantInode := stat.Ino
-	holders := make(map[int]struct{})
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		lock, flock, err := parseManagedDoltProcFlock(scanner.Text())
-		if err != nil {
-			return nil, fmt.Errorf("parse %s FLOCK row %q: %w", procLocksPath, scanner.Text(), err)
-		}
-		if !flock {
-			continue
-		}
-		if lock.major == wantMajor && lock.minor == wantMinor && lock.inode == wantInode {
-			holders[lock.pid] = struct{}{}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read %s: %w", procLocksPath, err)
-	}
-	pids := make([]int, 0, len(holders))
-	for pid := range holders {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	return pids, nil
-}
-
 // waitManagedDoltSIGKILLLockGate gates a SIGKILL on the dolt exclusive store
 // lock being free or held solely by the process being terminated. It blocks
 // until the gate is safe, pid exits, or lockWindow elapses. A measurement
@@ -224,30 +148,31 @@ func waitManagedDoltSIGKILLLockGate(pid int, dataDir string, alive func(int) boo
 	return waitManagedDoltSIGKILLLockGateWithProcLocks(pid, dataDir, alive, gracePeriod, lockWindow, pollInterval, "/proc/locks")
 }
 
+// waitManagedDoltSIGKILLLockGateWithProcLocks evaluates the gate against
+// every held lock under dataDir, not just the first: with several databases
+// in one data dir, keying on a single lock would let os.ReadDir ordering
+// decide whether the sole-holder exception applies. SIGKILL is permitted only
+// once every held lock resolves to exactly pid.
 func waitManagedDoltSIGKILLLockGateWithProcLocks(pid int, dataDir string, alive func(int) bool, gracePeriod, lockWindow, pollInterval time.Duration, procLocksPath string) error {
 	lockDeadline := time.Now().Add(lockWindow)
 	for {
 		if !alive(pid) {
 			return nil
 		}
-		holder := managedDoltDataDirLockHolder(dataDir)
-		if holder == "" {
-			return nil
-		}
-		holderPIDs, measureErr := managedDoltLockHolderPIDs(holder, procLocksPath)
-		if measureErr == nil && len(holderPIDs) == 1 && holderPIDs[0] == pid {
+		blocker, blockerPIDs, measureErr := managedDoltSIGKILLLockBlocker(dataDir, pid, procLocksPath)
+		if blocker == "" {
 			return nil
 		}
 		if !time.Now().Before(lockDeadline) {
-			base := fmt.Sprintf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, holder)
+			base := fmt.Sprintf("pid %d did not exit within %s and a live process still holds dolt exclusive store lock %s; refusing SIGKILL mid-journal-write (gastownhall/gascity#3174)", pid, gracePeriod, blocker)
 			if measureErr != nil {
 				return fmt.Errorf("%s; could not measure lock ownership: %w", base, measureErr)
 			}
-			if len(holderPIDs) == 0 {
+			if len(blockerPIDs) == 0 {
 				return fmt.Errorf("%s; could not measure lock ownership: flock probe reports held but %s has no matching FLOCK row", base, procLocksPath)
 			}
-			otherPIDs := make([]int, 0, len(holderPIDs))
-			for _, holderPID := range holderPIDs {
+			otherPIDs := make([]int, 0, len(blockerPIDs))
+			for _, holderPID := range blockerPIDs {
 				if holderPID != pid {
 					otherPIDs = append(otherPIDs, holderPID)
 				}
@@ -256,6 +181,24 @@ func waitManagedDoltSIGKILLLockGateWithProcLocks(pid int, dataDir string, alive 
 		}
 		time.Sleep(pollInterval)
 	}
+}
+
+// managedDoltSIGKILLLockBlocker returns the first held lock under dataDir
+// that does not resolve to pid alone, along with its measured holders and any
+// measurement failure. An empty path means every held lock (if any) is held
+// solely by pid, so SIGKILL is safe.
+func managedDoltSIGKILLLockBlocker(dataDir string, pid int, procLocksPath string) (string, []int, error) {
+	for _, held := range managedDoltDataDirHeldLocks(dataDir) {
+		holderPIDs, err := managedDoltLockHolderPIDs(held, procLocksPath)
+		if err != nil {
+			return held, nil, err
+		}
+		if len(holderPIDs) == 1 && holderPIDs[0] == pid {
+			continue
+		}
+		return held, holderPIDs, nil
+	}
+	return "", nil, nil
 }
 
 // resolveManagedDoltLockReleaseTimeout returns the configured wait window for
