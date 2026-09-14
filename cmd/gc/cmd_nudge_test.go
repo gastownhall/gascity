@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -3372,6 +3373,103 @@ func TestCmdNudgeDrainStampsLastNudgeDeliveredAt(t *testing.T) {
 				t.Fatalf("%s timestamp drift %s is outside the 1-minute test window (raw=%q)", session.MetadataLastNudgeDeliveredAt, drift, raw)
 			}
 		})
+	}
+}
+
+// TestCmdNudgeDrainReValidatesMailAgainstRealProvider drives the drain root
+// end to end against the mail provider the delivery path builds for itself,
+// rather than injecting a fake into splitQueuedNudgesForDelivery. That is the
+// only way to cover the two lines that decide WHICH provider the #5321 gate
+// gets: the leaf-predicate tests above would pass just as happily if the drain
+// handed the gate an empty provider or one over the wrong class store, in
+// which case every mail nudge would be withdrawn as "mail-missing" instead of
+// delivered. Two real beadmail messages, one read; the unread one must reach
+// the agent and the read one must be withdrawn as "mail-already-read".
+func TestCmdNudgeDrainReValidatesMailAgainstRealProvider(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+
+	mp := beadmail.New(store)
+	unread, err := mp.Send("alice", "worker", "still unread", "body")
+	if err != nil {
+		t.Fatalf("Send(alice): %v", err)
+	}
+	readMsg, err := mp.Send("bob", "worker", "read in the meantime", "body")
+	if err != nil {
+		t.Fatalf("Send(bob): %v", err)
+	}
+	if _, err := mp.Read(readMsg.ID); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	queued := time.Now().Add(-time.Minute)
+	unreadItem := newQueuedNudgeWithOptions("worker", "You have mail from alice", "mail", queued, queuedNudgeOptions{
+		SessionID: created.ID,
+		Reference: &nudgeReference{Kind: "mail", ID: unread.ID},
+	})
+	readItem := newQueuedNudgeWithOptions("worker", "You have mail from bob", "mail", queued, queuedNudgeOptions{
+		SessionID: created.ID,
+		Reference: &nudgeReference{Kind: "mail", ID: readMsg.ID},
+	})
+	for _, item := range []queuedNudge{unreadItem, readItem} {
+		if err := enqueueQueuedNudgeWithStore(cityDir, beads.NudgesStore{Store: store}, item); err != nil {
+			t.Fatalf("enqueueQueuedNudgeWithStore(%s): %v", item.ID, err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat([]string{created.ID}, false, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "You have mail from alice") {
+		t.Fatalf("stdout = %q, want the unread mail nudge delivered", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "You have mail from bob") {
+		t.Fatalf("stdout = %q, want the already-read mail nudge withheld", stdout.String())
+	}
+
+	after, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt (after drain): %v", err)
+	}
+	front := nudgeFrontDoor(beads.NudgesStore{Store: after})
+	withdrawn, ok, err := front.FindIncludingTerminal(readItem.ID)
+	if err != nil {
+		t.Fatalf("FindIncludingTerminal(read): %v", err)
+	}
+	if !ok {
+		t.Fatal("FindIncludingTerminal(read) returned not found")
+	}
+	if withdrawn.Open {
+		t.Fatal("already-read mail nudge is still open, want terminal")
+	}
+	if withdrawn.TerminalReason != "mail-already-read" {
+		t.Fatalf("terminal_reason = %q, want mail-already-read", withdrawn.TerminalReason)
 	}
 }
 

@@ -542,7 +542,10 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var deliveryMailProvider mail.Provider
 	if deliveryStore.Store != nil {
 		deliverySessFront = sessionFrontDoor(deliverySessStore)
-		deliveryMailProvider = newMailProvider(deliveryStore.Store)
+		// Same split for the mail gate: the message re-read in
+		// splitQueuedNudgesForDelivery is messaging-class (cliMailStore), while the
+		// provider's session-addressing half reuses the session store resolved above.
+		deliveryMailProvider = newMailProviderWithSessionStore(cliMailStore(deliveryStore.Store, target.cfg, target.cityPath).Store, deliverySessStore)
 	}
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
@@ -1564,7 +1567,10 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	var deliveryMailProvider mail.Provider
 	if deliveryStore != nil {
 		deliverySessFront = sessionFrontDoor(deliverySessStore)
-		deliveryMailProvider = newMailProvider(deliveryStore)
+		// Same split for the mail gate: the message re-read in
+		// splitQueuedNudgesForDelivery is messaging-class (cliMailStore), while the
+		// provider's session-addressing half reuses the session store resolved above.
+		deliveryMailProvider = newMailProviderWithSessionStore(cliMailStore(deliveryStore, target.cfg, target.cityPath).Store, deliverySessStore)
 	}
 	// Bookkeeping for fence-mismatched and blocked items is best-effort: a
 	// failure there must not abort delivery of the remaining claimable items.
