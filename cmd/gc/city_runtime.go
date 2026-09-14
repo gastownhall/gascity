@@ -825,9 +825,14 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// through the one-shot CLI funnel: cliStorageRoutes attaches a bead.* emit
 	// target meant for a process with no emitter of its own, and this one has
 	// the CachingStore's (class_store_emit.go). Both class stores come from the
-	// city store, never from each other; see nudgeDispatchStores.
-	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func() (beads.NudgesStore, beads.Store) {
-		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)
+	// city store, never from each other; see nudgeDispatchStores. cfg arrives as
+	// a PARAMETER because the pass runs on its own goroutine: cr.cfg is
+	// reassigned on reload under serviceStateMu, and every off-reconciler reader
+	// of it in this package takes RLock. The pass already holds one it read
+	// under the dispatcher's own lock, so nothing here reaches for mutable
+	// runtime state; cr.storageRoutes, cr.cs and cr.rec are all boot-latched.
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func(cfg *config.City) (beads.NudgesStore, beads.Store) {
+		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)
 	})
 	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
 
@@ -4170,6 +4175,26 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
+// awaitNudgeEventsDown waits for the nudge event dispatcher's scheduler to
+// return, which includes its bounded delivery drain.
+//
+// The wait is itself bounded, a little past that drain's grace. A dispatcher
+// that will not come down must not be able to hold city shutdown open: that
+// would trade the failure the drain's own bound exists to avoid for the same
+// failure one level up.
+func (cr *CityRuntime) awaitNudgeEventsDown() {
+	if cr.nudgeEvents == nil {
+		return
+	}
+	timer := time.NewTimer(nudgeEventDeliveryDrainGrace + 2*time.Second)
+	defer timer.Stop()
+	select {
+	case <-cr.nudgeEvents.workerDone:
+	case <-timer.C:
+		fmt.Fprintf(cr.stderr, "%s: nudge event dispatcher did not come down within its drain grace; continuing shutdown\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		// The storage binding's engine is opened once per process and closed
@@ -4196,6 +4221,16 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		// Before anything below stops a session or tears down the provider:
+		// the nudge event dispatcher bounds its own delivery drain, but that
+		// bound only means something if shutdown waits for it. Its context is
+		// already canceled by the time shutdown runs (the supervisor cancels
+		// the city ctx first, and the standalone path reaches here only after
+		// run returns on ctx.Done), so the worker is on its way down. Without
+		// this wait the drain ran CONCURRENTLY with the teardown, and a
+		// delivery lost its provider immediately rather than after the grace
+		// the drain advertises.
+		cr.awaitNudgeEventsDown()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
