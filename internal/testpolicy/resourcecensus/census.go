@@ -125,7 +125,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   664,
+			BaselineCalls:   663,
 			BaselineFiles:   192,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -138,8 +138,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   481,
-			BaselineFiles:   172,
+			BaselineCalls:   484,
+			BaselineFiles:   173,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   451,
+			BaselineCalls:   450,
 			BaselineFiles:   130,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -193,7 +193,7 @@ var bootstrapPolicy = Ledger{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
 			BaselineCalls:   122,
-			BaselineFiles:   13,
+			BaselineFiles:   14,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-cp3hwi",
@@ -309,7 +309,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   10,
+			BaselineCalls:   9,
 			BaselineFiles:   4,
 			ReportedCalls:   7,
 			ReportedFiles:   3,
@@ -488,7 +488,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   442,
+			BaselineCalls:   441,
 			BaselineFiles:   124,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
@@ -514,8 +514,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   116,
-			BaselineFiles:   13,
+			BaselineCalls:   117,
+			BaselineFiles:   14,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-cp3hwi",
@@ -631,7 +631,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   4,
+			BaselineCalls:   3,
 			BaselineFiles:   2,
 			ReportedCalls:   1,
 			ReportedFiles:   1,

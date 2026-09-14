@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -740,6 +741,237 @@ func TestReconcileSessionBeads_FailedDependencyBlocksDependentButNotSibling(t *t
 	}
 	if !env.sp.IsRunning("cache") {
 		t.Fatal("cache should still start despite db failure")
+	}
+}
+
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       templateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: templateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+// TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath
+// is the symlink twin of the repair test above: the stale template work_dir is
+// stamped on the bead through a symlinked spelling of the city path, so a
+// lexical filepath.Clean comparison would miss it and the repair would
+// silently no-op. Worktree roots reached through a symlink are exactly where
+// this fix has to hold.
+func TestPrepareStartCandidateRepairsConcretePoolTemplateWorkDir_SymlinkedCityPath(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlinked city paths are not exercised on Windows")
+	}
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedCityPath := filepath.Join(root, "city-link")
+	if err := os.Symlink(cityPath, linkedCityPath); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	linkedTemplateWorkDir := filepath.Join(linkedCityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       linkedTemplateWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: linkedTemplateWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, "aot", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)}, io.Discard, nil)
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != concreteWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want concrete alias work_dir %q", prepared.cfg.WorkDir, concreteWorkDir)
+	}
+	persisted, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persisted.Metadata[beadmeta.WorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("gc.work_dir = %q, want %q", got, concreteWorkDir)
+	}
+	if got := persisted.Metadata[beadmeta.LegacyWorkDirMetadataKey]; got != concreteWorkDir {
+		t.Fatalf("work_dir = %q, want %q", got, concreteWorkDir)
+	}
+}
+
+func TestBuildPreparedStartRejectsConcretePoolTemplateWorkDir(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "repos", "aot-mobile")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		template      = "aot-mobile/gastown.polecat"
+		concreteAlias = "aot-mobile/gastown.capable"
+		sessionName   = "capable-session"
+	)
+	templateWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.polecat")
+	concreteWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "aot-mobile", "polecats", "gastown.capable")
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  concreteAlias,
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + concreteAlias},
+		Metadata: map[string]string{
+			"template":                        template,
+			"agent_name":                      concreteAlias,
+			"alias":                           concreteAlias,
+			"session_name":                    sessionName,
+			"session_origin":                  "ephemeral",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           string(sessionpkg.StateStartPending),
+			beadmeta.WorkDirMetadataKey:       concreteWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: concreteWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "aot"},
+		Rigs:      []config.Rig{{Name: "aot-mobile", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:          "gastown.polecat",
+			Dir:           "aot-mobile",
+			Provider:      "test-agent",
+			StartCommand:  "true",
+			WorkDir:       ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			NamepoolNames: []string{"gastown.capable", "gastown.furiosa"},
+		}},
+	}
+
+	_, _, err = buildPreparedStartWithWorkDirResolver(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: template,
+			InstanceName: concreteAlias,
+			SessionName:  sessionName,
+			WorkDir:      concreteWorkDir,
+		},
+	}, cityPath, cfg, store, func(startCandidate, *config.City) string {
+		return templateWorkDir
+	})
+	if err == nil {
+		t.Fatal("buildPreparedStartWithWorkDirResolver error = nil, want template work_dir rejection")
+	}
+	if !strings.Contains(err.Error(), "resolved template work_dir") {
+		t.Fatalf("error = %v, want template work_dir rejection", err)
 	}
 }
 

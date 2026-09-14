@@ -55,7 +55,24 @@ func beadPriority(b beads.Bead) int {
 	if b.Priority != nil {
 		return *b.Priority
 	}
-	return 0
+	// nil Priority round-trips through native_dolt_store as bd's documented
+	// mid default (P2), not "highest" — match that semantics here so an
+	// unset-priority bead cannot out-schedule an explicitly-labeled P1 bead.
+	return 2
+}
+
+// beadPriorityRankOffset is the base of the scheduler's descending rank scale.
+// It sits above every bd priority (0-4) so a rank-bearing request always sorts
+// ahead of the "new"/floor-guarantee requests that leave SessionRequest.
+// BeadPriority at its zero value.
+const beadPriorityRankOffset = 10
+
+// beadPriorityRank converts a bd priority — ascending-urgent, where P0 is the
+// most urgent — into the descending rank SessionRequest.BeadPriority is sorted
+// by, where a larger value is scheduled first. Without this inversion a P4 bead
+// would out-schedule a P0 one.
+func beadPriorityRank(p int) int {
+	return beadPriorityRankOffset - p
 }
 
 // legacyWorkDirNoticeSeen deduplicates the unmanaged-workspace notice keyed by
@@ -398,7 +415,7 @@ func computePoolDesiredStatesAt(
 					wakeRequestedTemplates[template] = struct{}{}
 					resumeRequests = append(resumeRequests, SessionRequest{
 						Template:     template,
-						BeadPriority: beadPriority(wb),
+						BeadPriority: beadPriorityRank(beadPriority(wb)),
 						Tier:         "wake-known-identity",
 						// SessionBeadID intentionally empty: the stale asleep
 						// bead must not be reused, so realizePoolDesiredSessions
@@ -420,7 +437,7 @@ func computePoolDesiredStatesAt(
 				}
 				resumeRequests = append(resumeRequests, SessionRequest{
 					Template:       template,
-					BeadPriority:   beadPriority(wb),
+					BeadPriority:   beadPriorityRank(beadPriority(wb)),
 					Tier:           "resume",
 					SessionBeadID:  sessionBeadID,
 					WorkBeadID:     wb.ID,
@@ -455,7 +472,7 @@ func computePoolDesiredStatesAt(
 			wakeRequestedTemplates[template] = struct{}{}
 			resumeRequests = append(resumeRequests, SessionRequest{
 				Template:       template,
-				BeadPriority:   beadPriority(wb),
+				BeadPriority:   beadPriorityRank(beadPriority(wb)),
 				Tier:           "wake-known-identity",
 				WorkBeadID:     wb.ID,
 				WorkBeadTitle:  strings.TrimSpace(wb.Title),

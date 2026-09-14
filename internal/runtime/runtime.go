@@ -265,6 +265,27 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// IdleSnapshotProvider is an optional extension for runtimes that can report,
+// in a single non-blocking observation, whether a session is at an idle
+// interactive boundary right now (a ready prompt with no active-processing
+// indicator).
+//
+// It is the point-in-time sibling of [IdleWaitProvider]: WaitForIdle blocks
+// until idle (or timeout), whereas SnapshotIdle takes one look and returns.
+// The idle-timeout reconciler uses it to measure the duration of true
+// idleness for interactive TUIs whose coarse activity clock (last pane
+// output) cannot distinguish an idle-but-repainting TUI from a working one —
+// a TUI that continuously repaints its status line keeps the activity clock
+// perpetually fresh even while genuinely idle.
+//
+// idle reports whether the session currently looks idle. A non-nil err means
+// the observation could not be made (the caller must not treat the session as
+// idle on error); a session that has gone away is reported as an error, not as
+// idle.
+type IdleSnapshotProvider interface {
+	SnapshotIdle(name string) (idle bool, err error)
+}
+
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
 // output and exit code. It is the op a [Carrier] drives the session-interaction
