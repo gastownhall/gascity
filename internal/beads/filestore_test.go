@@ -131,6 +131,38 @@ func TestFileStoreIDPrefix(t *testing.T) {
 	}
 }
 
+// TestFileStoreIDPrefixOnExistingStore pins the upgrade case: a store that
+// already holds unprefixed gc-* beads keeps resolving them, and mints new
+// ids under the configured prefix without aliasing an existing id.
+func TestFileStoreIDPrefixOnExistingStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	pre, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := pre.Create(beads.Bead{Title: "old"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s, err := beads.OpenFileStore(fsys.OSFS{}, path, beads.WithFileStoreIDPrefix("asv2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.Create(beads.Bead{Title: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID != "asv2-4" {
+		t.Errorf("minted id = %q, want asv2-4", next.ID)
+	}
+	// The pre-existing unprefixed ids must still resolve.
+	if _, err := s.Get("gc-1"); err != nil {
+		t.Errorf("Get(gc-1) after re-prefix: %v", err)
+	}
+}
+
 func TestFileStore(t *testing.T) {
 	factory := func() beads.Store {
 		path := filepath.Join(t.TempDir(), "beads.json")
