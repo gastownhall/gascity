@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
 // atomicCloserHiddenStoreDraft embeds the Store INTERFACE, so neither
@@ -176,6 +178,87 @@ func TestWorkerCloseCarriesTheTypedWorkRecord(t *testing.T) {
 	}
 }
 
+// TestWorkerCloseRejectsAnUnreachableShippedCommitUnderEnforcement pins the
+// remote door to the same ancestry gate as local closes. The remote endpoint
+// must not accept a record merely because commit and branch are present.
+func TestWorkerCloseRejectsAnUnreachableShippedCommitUnderEnforcement(t *testing.T) {
+	t.Setenv(workrecord.EnforceEnvVar, "1")
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	created, rigStore := newWorkerClaimedBead(t, state, h)
+	expectedRepo := t.TempDir()
+	state.cfg.Rigs[0].Path = expectedRepo
+
+	previous := workRecordCommitReachable
+	var gotRepo, gotCommit, gotBranch string
+	workRecordCommitReachable = func(_ context.Context, repoDir, commit, branch string) bool {
+		gotRepo, gotCommit, gotBranch = repoDir, commit, branch
+		return false
+	}
+	t.Cleanup(func() { workRecordCommitReachable = previous })
+
+	commit := "0000000000000000000000000000000000000000"
+	rec := workerClose(t, h, state, `{"assignee":"worker-local-3-pool","bead_id":"`+created.ID+`","outcome":"shipped","commit":"`+commit+`","branch":"main","reason":"landed the fix"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unreachable shipped close = %d, want 409, body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not reachable") {
+		t.Fatalf("unreachable shipped close body %q does not name the ancestry refusal", rec.Body.String())
+	}
+	if gotRepo != expectedRepo || gotCommit != commit || gotBranch != "main" {
+		t.Fatalf("ancestry gate args = (%q, %q, %q), want (%q, %q, %q)", gotRepo, gotCommit, gotBranch, expectedRepo, commit, "main")
+	}
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store Get: %v", err)
+	}
+	if stored.Status != "in_progress" {
+		t.Fatalf("a refused remote close moved status to %q", stored.Status)
+	}
+	if _, ok := stored.Metadata[beadmeta.WorkOutcomeMetadataKey]; ok {
+		t.Fatalf("a refused remote close wrote %s", beadmeta.WorkOutcomeMetadataKey)
+	}
+}
+
+// TestWorkerCloseAllowsShippedCommitWhenTheRigCheckoutIsUnknown pins the
+// shared gate's degrade rule on the remote door: no checkout means no ancestry
+// question can be asked, so the server warns and proceeds rather than judging
+// the commit against its own working directory.
+func TestWorkerCloseAllowsShippedCommitWhenTheRigCheckoutIsUnknown(t *testing.T) {
+	t.Setenv(workrecord.EnforceEnvVar, "1")
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	created, rigStore := newWorkerClaimedBead(t, state, h)
+	state.cfg.Rigs[0].Path = " "
+	logged := captureWorkRecordGateLog(t)
+
+	previous := workRecordCommitReachable
+	called := false
+	workRecordCommitReachable = func(_ context.Context, _, _, _ string) bool {
+		called = true
+		return false
+	}
+	t.Cleanup(func() { workRecordCommitReachable = previous })
+
+	rec := workerClose(t, h, state, `{"assignee":"worker-local-3-pool","bead_id":"`+created.ID+`","outcome":"shipped","commit":"0000000000000000000000000000000000000000","branch":"main","reason":"landed the fix"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("shipped close without a hosted rig checkout = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("ancestry oracle was called without a hosted rig checkout")
+	}
+	if !strings.Contains(logged.String(), "reachability unverified") {
+		t.Fatalf("gate log %q does not record the unknown-checkout degrade", logged.String())
+	}
+	stored, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("store Get: %v", err)
+	}
+	if stored.Status != "closed" {
+		t.Fatalf("status = %q, want closed", stored.Status)
+	}
+}
+
 // TestWorkerCloseRejectsAnUntypedClose: the verb refuses rather than persisting
 // the bare status flip that the current POST /bead/{id}/close is content to
 // write. The bead must still be open and still be held, so the caller can retry
@@ -221,11 +304,9 @@ func TestWorkerCloseRejectsAnOutcomeOutsideTheEnum(t *testing.T) {
 	}
 }
 
-// TestWorkerCloseShippedRequiresCommitAndBranch mirrors the client gate's second
-// rule server-side: "shipped" must point at an artifact. Presence is what the
-// HTTP layer can check; REACHABILITY of the commit on the branch is a git
-// question, and the PR must state in its doc where that check lives (the local
-// gate does it in cmd/gc/work_record_gate.go) — see README open question 3.
+// TestWorkerCloseShippedRequiresCommitAndBranch keeps the transport-level
+// presence checks separate from the shared ancestry gate: "shipped" must point
+// at both a commit and a branch before the server asks git about reachability.
 func TestWorkerCloseShippedRequiresCommitAndBranch(t *testing.T) {
 	for _, body := range []string{
 		`{"assignee":"worker-local-3-pool","bead_id":"BEAD","outcome":"shipped","branch":"main","reason":"shipped it"}`,

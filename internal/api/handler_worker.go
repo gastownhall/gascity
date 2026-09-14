@@ -289,6 +289,14 @@ func (s *Server) humaHandleWorkerRelease(_ context.Context, input *WorkerRelease
 // release, a re-claim, or any other move between the read and the close makes
 // the revision differ and the close fails with 409 writing nothing.
 //
+// Before that write, the submitted record also runs through the shared
+// ADR-0009 gate (gateWorkRecordClose). With GC_WORK_RECORD_ENFORCE enabled,
+// that gate checks that a shipped commit is an ancestor of its branch in the
+// checkout owned by the bead; with enforcement off it preserves the existing
+// warn-only behavior. An owning scope with no hosted checkout logs an honest
+// reachability-unverified warning and proceeds, rather than checking whatever
+// directory happens to be the API process's cwd.
+//
 // The record and the status flip land in ONE write through
 // beads.AtomicConditionalCloser, whose contract is "the metadata and the close
 // commit together, or neither". A store that cannot prove that gets a 501; the
@@ -296,13 +304,7 @@ func (s *Server) humaHandleWorkerRelease(_ context.Context, input *WorkerRelease
 // closed bead with no work record. The close reason rides in that same map
 // under "close_reason" (see workerCloseReasonMetadataKey), which is how the
 // reason becomes durable in a store whose Bead row has no reason column.
-//
-// WHAT THIS HANDLER DOES NOT CHECK: that a shipped commit is an ancestor of
-// its branch. That is a git question and the API server may not host the rig
-// the commit lives in (README open question 3). Presence is the server's rule,
-// reachability stays with the caller's git until the review lane decides
-// otherwise.
-func (s *Server) humaHandleWorkerClose(_ context.Context, input *WorkerCloseInput) (*WorkerCloseOutput, error) {
+func (s *Server) humaHandleWorkerClose(ctx context.Context, input *WorkerCloseInput) (*WorkerCloseOutput, error) {
 	id := strings.TrimSpace(input.Body.BeadID)
 	if id == "" {
 		return nil, apierr.InvalidRequest.Msg("worker close requires bead_id")
@@ -320,6 +322,9 @@ func (s *Server) humaHandleWorkerClose(_ context.Context, input *WorkerCloseInpu
 		return nil, err
 	}
 	if err := workerOwnership(bead, assignee, strings.TrimSpace(input.Body.SessionID), "worker close"); err != nil {
+		return nil, err
+	}
+	if err := s.gateWorkRecordClose(ctx, id, store, bead, record); err != nil {
 		return nil, err
 	}
 	closer, ok := beads.AtomicConditionalCloserFor(store)
