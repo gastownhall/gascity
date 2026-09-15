@@ -931,6 +931,48 @@ func TestNudgeEventDispatcherSweepMakesNoProviderCall(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherFullKickDuringPassIsNotLost pins the window that
+// made TestNudgeEventDispatcherSweepMakesNoProviderCall flaky, and the reason
+// that one was flaky rather than simply wrong.
+//
+// pass() fires the observer BEFORE the spawned goroutine clears d.inflight, and
+// worker() clears fullPassDue BEFORE it ever calls spawnPass. A full kick that
+// lands between those two points finds the slot still marked, so spawnPass
+// returns early while the flag recording "a sweep is owed" has already been
+// consumed. The sweep is not deferred and not coalesced. It is dropped, and
+// nothing re-arms it.
+//
+// Racing the worker for that window reproduces roughly one run in eight, which
+// is a flake, not a test. So this drives worker()'s own two steps by hand from
+// inside the observer, where d.inflight is provably still held: consume the
+// flag, then offer the pass. That is the identical call sequence with the
+// timing removed, so the case is deterministic and carries no sleeps.
+func TestNudgeEventDispatcherFullKickDuringPassIsNotLost(t *testing.T) {
+	fake := newNudgeEventedFake()
+	_, d, _, seen := newNudgeDispatcherFixture(t, fake)
+
+	var once sync.Once
+	d.mu.Lock()
+	prev := d.passObserver
+	d.passObserver = func(filter string) {
+		once.Do(func() {
+			d.kickAll()
+			d.mu.Lock()
+			d.fullPassDue = false
+			d.mu.Unlock()
+			d.spawnPass("", 0)
+		})
+		if prev != nil {
+			prev(filter)
+		}
+	}
+	d.mu.Unlock()
+
+	d.kickAll()
+	seen.next(t, "the first sweep")
+	seen.next(t, "the sweep that was kicked while the first pass still held the slot")
+}
+
 // TestNudgeEventDispatcherBoundsUnattributedSweeps keeps the fix for the
 // dropped unattributed event from becoming its own poll loop. One sweep covers
 // every session, so a wave of unattributable events and a single one need the

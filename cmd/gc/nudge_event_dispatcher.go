@@ -119,11 +119,23 @@ type nudgeEventDispatcher struct {
 	// inflight holds the passes running, keyed by session name, with the empty
 	// key reserved for the enumerating sweep. Because the sweep only fans out,
 	// every key that names a delivery is a session name, so the set really does
-	// bound deliveries to one per session. A kick for a session already in here
-	// is dropped rather than queued: the running pass re-reads the queue and
-	// the live observation when it gets there, so it will see whatever the
-	// dropped kick would have told it.
+	// bound deliveries to one per session. A kick for a key already in here is
+	// deferred rather than run concurrently, and declined records it so the
+	// pass that owns the key re-arms it on the way out.
 	inflight map[string]bool
+
+	// declined holds the kicks spawnPass turned away because a pass for the
+	// same key was already running, keyed the same way as inflight and valued
+	// by the largest retry budget any of them carried.
+	//
+	// This map is the fix for a lost wake-up, not an optimization. A kick that
+	// arrives while a pass holds the key is NOT covered by that pass: worker
+	// consumes fullPassDue (or deletes the pending entry) before it calls
+	// spawnPass, and pass runs the observer before the deferred clear, so a
+	// kick landing in that window found the key held and left no record that a
+	// sweep was owed. Nothing rescheduled it. Recording it here and re-arming
+	// from the clear turns the decline back into a deferral.
+	declined map[string]int
 	delivery sync.WaitGroup
 
 	// passSlots throttles how many passes run at once. A sweep hands off one
@@ -523,20 +535,28 @@ func (d *nudgeEventDispatcher) acquirePassSlot() func() {
 }
 
 // spawnPass runs one pass on a goroutine of its own, unless a pass for the
-// same session is already running. It returns as soon as the goroutine is
-// started (or declined), so the scheduler loop never blocks on a delivery.
+// same key is already running. It returns as soon as the goroutine is started
+// (or deferred), so the scheduler loop never blocks on a delivery.
 //
-// Declining a duplicate is not a lost wake-up. The running pass re-reads the
-// queue and the live observation for its session, so anything the dropped
-// kick would have carried is already in what that pass reads; and the patrol
-// tick's full pass is the backstop if the running pass finishes just before
-// the item lands.
+// A kick for a key already running is deferred, not dropped. The caller has
+// already consumed the record that the work was owed — worker clears
+// fullPassDue and deletes the pending entry before it calls here — so there is
+// no other copy of that kick anywhere, and the running pass cannot be relied
+// on to cover it: pass calls the observer before the goroutine's deferred
+// clear, which leaves a window where the key reads as held by a pass that is
+// finished. Anything turned away in that window is re-armed by the clear.
 func (d *nudgeEventDispatcher) spawnPass(sessionFilter string, retriesLeft int) {
 	d.mu.Lock()
 	if d.inflight == nil {
 		d.inflight = map[string]bool{}
 	}
 	if d.inflight[sessionFilter] {
+		if d.declined == nil {
+			d.declined = map[string]int{}
+		}
+		if prev, ok := d.declined[sessionFilter]; !ok || retriesLeft > prev {
+			d.declined[sessionFilter] = retriesLeft
+		}
 		d.mu.Unlock()
 		return
 	}
@@ -549,14 +569,33 @@ func (d *nudgeEventDispatcher) spawnPass(sessionFilter string, retriesLeft int) 
 		defer func() {
 			d.mu.Lock()
 			delete(d.inflight, sessionFilter)
+			budget, deferred := d.declined[sessionFilter]
+			delete(d.declined, sessionFilter)
 			d.mu.Unlock()
+			if deferred {
+				d.rearmDeclined(sessionFilter, budget)
+			}
 		}()
 		defer d.acquirePassSlot()()
 		d.pass(sessionFilter, retriesLeft)
 	}()
 }
 
-// not "a pass delivered something".
+// rearmDeclined re-schedules a kick spawnPass deferred, through the same
+// scheduler path the original kick took, so the worker stays the only place
+// that decides what runs. It is called after the key has been released, which
+// is what keeps the re-arm from being declined again and spinning.
+func (d *nudgeEventDispatcher) rearmDeclined(sessionFilter string, retriesLeft int) {
+	if sessionFilter == "" {
+		d.kickAll()
+		return
+	}
+	d.kickSessionAfter(sessionFilter, 0, retriesLeft)
+}
+
+// pass runs one delivery pass and then reports it to passObserver, if one is
+// set. The observer means "a pass ran under this filter", not "a pass
+// delivered something".
 func (d *nudgeEventDispatcher) pass(sessionFilter string, retriesLeft int) {
 	d.runPass(sessionFilter, retriesLeft)
 	d.mu.Lock()
