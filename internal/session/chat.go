@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -279,10 +280,16 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	cfg runtime.Config,
 	unroute func(),
 ) (bool, error) {
-	if b.Metadata["session_key"] == "" {
-		return false, nil
-	}
+	// An empty session_key does not mean there is nothing to recover. The
+	// command can still carry a generated resume shape, because it was built
+	// while the key was present and the key was cleared before this start ran.
+	// Refusing the recovery on an empty key is what made that launch
+	// unrecoverable: the caller returned the start error, the supervisor
+	// retried the identical doomed command, and the loop never converged.
+	// stripResumeFlag is an exact no-op on an empty key, so this case falls
+	// through to the value-agnostic strip below.
 	resumeFlag := b.Metadata["resume_flag"]
+	sessionKey := b.Metadata["session_key"]
 	freshCmd := stripResumeFlag(resumeCommand, resumeFlag, b.Metadata["session_key"])
 	// A first start carries "<session_id_flag> <key>", not the resume flag, so
 	// the strip above cannot touch it. Remove it here or the retry replays the
@@ -300,12 +307,6 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionIDFlag != "" && freshCmd == beforeSessionIDStrip {
 		freshCmd = stripSessionIDFlagArg(freshCmd, sessionIDFlag)
 	}
-	if err := m.clearStaleResumeMetadata(id, b); err != nil {
-		if unroute != nil {
-			unroute()
-		}
-		return false, err
-	}
 	// An empty resume_flag means the command was never resume-capable
 	// (e.g. a named-always session whose start command carries no
 	// --resume-style flag). stripResumeFlag is intentionally a no-op in
@@ -322,13 +323,39 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	// killExistingOrphans. If even the generic strip finds nothing, the
 	// command carries no resume flag and is itself a fresh-start command.
 	if resumeFlag != "" && freshCmd == resumeCommand {
+		// With no key on the bead there is nothing a command could have diverged
+		// from, and the decline below returns without starting anything, so the
+		// supervisor re-enters this path once per reconcile tick. Log the
+		// divergence only when a key actually exists to diverge.
+		divergedFromKey := sessionKey != ""
 		if b.Metadata["resume_command"] != "" {
-			log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			if divergedFromKey {
+				log.Printf("session: resume key for %q diverged from explicit resume_command; falling back to stored start command", id)
+			}
 			freshCmd = freshStartCommandFromMetadata(b.Metadata, resumeCommand)
 		} else {
-			log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			if divergedFromKey {
+				log.Printf("session: resume key for %q diverged from bead metadata; falling back to generated resume strip", id)
+			}
 			freshCmd = stripResumeFlagArg(resumeCommand, resumeFlag, b.Metadata["resume_style"])
 		}
+	}
+	// On the empty-key path there is no stale key to clear and no orphan of our
+	// own to sweep, so a command that the strips left untouched carries no
+	// resume shape at all. Relaunching it verbatim repeats the same failure at the
+	// same cost, which is the loop this recovery exists to end. Report "not
+	// retried" and let the caller propagate the original start error. Paths that
+	// still hold a key keep their prior behavior: there the metadata clear and
+	// the orphan sweep below are themselves the recovery, so an unchanged
+	// command is still worth relaunching.
+	if sessionKey == "" && freshCmd == resumeCommand {
+		return false, nil
+	}
+	if err := m.clearStaleResumeMetadata(id, b); err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return false, err
 	}
 	cfg.Command = freshCmd
 	// Refuse the fresh start if a prior escaped process for this session could
@@ -545,6 +572,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if gcProvider := providerKind(b); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	// Refuse to resume if a prior escaped process for this session could not be
@@ -559,10 +587,20 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
-			if err != nil {
-				return err
+		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if retryErr != nil {
+				return retryErr
+			}
+			if !retried {
+				// The recovery declined: the command carries no resume shape to
+				// strip, so a relaunch would repeat this failure verbatim.
+				// Propagate the original start error rather than reporting a
+				// start that never happened.
+				if unroute != nil {
+					unroute()
+				}
+				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
 		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
@@ -662,6 +700,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	// Refuse to respawn if a prior escaped process for this session could not
@@ -676,10 +715,18 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
-			if err != nil {
-				return err
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup):
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
+			if retryErr != nil {
+				return retryErr
+			}
+			if !retried {
+				// The recovery declined: nothing to strip, so a relaunch would
+				// repeat this failure verbatim. Propagate the original error.
+				if unroute != nil {
+					unroute()
+				}
+				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
 		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
@@ -1189,12 +1236,14 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
 	// would leave every pooled worker transcript-dark. Its mirror is keyed by
-	// the identity the bead does hold.
+	// the identity the bead does hold: its name, its own id (the seat — two
+	// seats can share a name and epoch), and its continuation epoch.
 	if path := workertranscript.DiscoverScopedPath(
 		searchPaths,
 		provider,
 		workDir,
 		b.Metadata["session_name"],
+		b.ID,
 		b.Metadata["continuation_epoch"],
 	); path != "" {
 		return path, TranscriptFound, nil

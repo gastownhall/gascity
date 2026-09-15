@@ -1023,10 +1023,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 	)
 
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores); len(released) > 0 {
+	// Same protection as the daemon tick: wake candidates computed before the
+	// release, so the one-shot path cannot reopen work this run is about to wake.
+	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -1049,7 +1052,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads,
+			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 		)
 	}
 
@@ -1068,7 +1071,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.AssignedWorkStores)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
@@ -1079,6 +1082,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withAssignedWorkStores(awakeAssignedStores),
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.
@@ -1103,7 +1107,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads,
+		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads, nil,
 	)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
@@ -1416,18 +1420,24 @@ func resolveAgentDir(cityPath, dir string) (string, error) {
 func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) SessionSetupContext {
 	ctx := workdirutil.PathContextForQualifiedName(cityPath, cityName, qualifiedName, *a, rigs)
 	return SessionSetupContext{
-		Agent:     qualifiedName,
-		AgentBase: ctx.AgentBase,
-		Rig:       ctx.Rig,
-		RigRoot:   ctx.RigRoot,
-		CityRoot:  cityPath,
-		CityName:  cityName,
+		Agent:         qualifiedName,
+		AgentBase:     ctx.AgentBase,
+		Rig:           ctx.Rig,
+		RigRoot:       ctx.RigRoot,
+		CityRoot:      cityPath,
+		CityName:      cityName,
+		DefaultBranch: ctx.DefaultBranch,
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+// resolveConfiguredWorkDirPath resolves an agent's working directory without
+// creating it. Pure computations — metadata patch building, dry-run previews,
+// display — must use this variant so that resolving a path never mutates the
+// filesystem (gc-r9fx). Session-start paths that need the directory to exist
+// use resolveConfiguredWorkDir.
+func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	if a == nil {
-		return resolveAgentDir(cityPath, "")
+		return resolveAgentDirPath(cityPath, ""), nil
 	}
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
@@ -1444,7 +1454,21 @@ func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *confi
 	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
 		return "", err
 	}
-	return resolveAgentDir(cityPath, workDir)
+	return resolveAgentDirPath(cityPath, workDir), nil
+}
+
+// resolveConfiguredWorkDir resolves an agent's working directory and creates
+// it. Only session-start paths may call this; pure computations use
+// resolveConfiguredWorkDirPath.
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating agent dir %q: %w", dir, err)
+	}
+	return dir, nil
 }
 
 // configuredRigName returns the rig associated with an agent, preferring the

@@ -23,7 +23,7 @@ func initTestRepo(t *testing.T) string {
 
 // runGit runs a git command in dir and fails the test on error.
 // Strips git env vars to prevent interference from pre-commit hooks.
-func runGit(t *testing.T, dir string, args ...string) {
+func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -38,6 +38,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)
 	}
+	return string(out)
 }
 
 // runGitAllowFail runs a git command in dir and returns its combined output
@@ -906,5 +907,19 @@ func TestUntrustedRemoteGitConfigArgs(t *testing.T) {
 		if args[i] != "-c" {
 			t.Fatalf("arg %d = %q, want -c; full: %v", i, args[i], args)
 		}
+	}
+}
+
+// git quotes paths containing non-ASCII or control characters in porcelain
+// output. Consuming the quoted text verbatim makes a live registration
+// unmatchable, which the worktree safety scans read as "absent".
+func TestParseWorktreeListUnquotesCQuotedPaths(t *testing.T) {
+	out := "worktree \"/tmp/caf\\303\\251\"\nHEAD abc123\nbranch refs/heads/main\n\n"
+	got := parseWorktreeList(out)
+	if len(got) != 1 {
+		t.Fatalf("parseWorktreeList returned %d entries, want 1", len(got))
+	}
+	if got[0].Path != "/tmp/café" {
+		t.Errorf("Path = %q, want %q", got[0].Path, "/tmp/café")
 	}
 }

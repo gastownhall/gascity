@@ -283,6 +283,19 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 //     Reordering on a comparison we could not actually make would be worse than
 //     the behavior it replaces.
 //
+// Ranking is applied in two passes, grouped by store dir (see
+// bestRankedCandidate): raw tier stays meaningful WITHIN a dir — more than one
+// hookStore entry can share a dir when they are different query legs over the
+// SAME backing store (e.g. the claim-time class-routing front door's assigned
+// and routed legs), and there the assigned tier must still win deterministically
+// or a relocated graph step flip-flops onto a consolation bead every other tick,
+// recreating the re-serve/re-skip treadmill ga-601v2 closed. Only ACROSS
+// distinct dirs does tier collapse so priority decides (crossStoreRank) — that
+// cross-dir collapse is what ga-t922vm fixed. In real deployments every
+// hookWorkQueryStores entry already has a distinct dir, so the two passes
+// coincide with a flat cross-store comparison; the dir grouping only matters for
+// same-dir multi-leg callers like the class-routing front door's test harness.
+//
 // When no store has ready work, an error on the agent's OWN store (identified by
 // primary, not by slice position) is surfaced so emitCityWorkQueryFailure can
 // classify it — preserving the single-store emit-on-timeout contract (a
@@ -303,9 +316,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	firstHit := false
 	unrankable := false
 
-	var bestRank hookCandidateRank
-	var bestTied []hookRankedStore
-	haveBest := false
+	var ranked []hookRankedCandidate
 
 	// When the federated reader is pinned to the primary leg, that leg is the
 	// only one whose answer covers the whole city; the extras run the
@@ -354,21 +365,10 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		if rank.tier == hookTierInProgress && sameHookStore(st, primary) {
 			return out, st, nil
 		}
-		switch {
-		case !haveBest || rank.less(bestRank):
-			bestRank, haveBest = rank, true
-			bestTied = append(bestTied[:0], hookRankedStore{out: out, store: st, id: id})
-		case rank == bestRank && !hookTiedIDSeen(bestTied, id):
-			// A migrated bead (`gc storage migrate` copies, never deletes) can be
-			// ready from more than one store under the SAME id: the same row, not
-			// two tied pieces of work. Rotating across a duplicate would put a
-			// later store ahead of the primary for no reason — nothing about the
-			// work differs — and breaks the rig-first-city-last fan-out order the
-			// class-escalation claim loop depends on. An empty id (unidentifiable
-			// row) is never treated as a duplicate, so unranked-id fixtures keep
-			// rotating exactly as before.
-			bestTied = append(bestTied, hookRankedStore{out: out, store: st, id: id})
-		}
+		// Collected raw (uncollapsed) so bestRankedCandidate can compare same-dir
+		// candidates on full tier before collapsing across dirs. See its doc
+		// comment and the package doc comment above.
+		ranked = append(ranked, hookRankedCandidate{out: out, store: st, id: id, rank: rank})
 	}
 
 	// A failed federated primary is terminal for the invocation: the surviving
@@ -383,11 +383,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 	if unrankable && firstHit {
 		return firstHitOut, firstHitStore, nil
 	}
-	if haveBest {
-		winner := bestTied[0]
-		if len(bestTied) > 1 {
-			winner = bestTied[hookTieBreakIndex(len(bestTied), hookTieBreakClock())]
-		}
+	if winner, ok := bestRankedCandidate(ranked); ok {
 		return winner.out, winner.store, nil
 	}
 	if firstHit {
@@ -397,6 +393,77 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	return lastOut, hookStore{}, nil
+}
+
+// hookRankedCandidate is one store's best candidate together with its RAW
+// (uncollapsed) rank, gathered by bestStoreWithWork's per-store loop before
+// bestRankedCandidate's dir-grouped reduction.
+type hookRankedCandidate struct {
+	out   string
+	store hookStore
+	id    string
+	rank  hookCandidateRank
+}
+
+// bestRankedCandidate reduces every store's ranked candidate to the one
+// bestStoreWithWork should return. See bestStoreWithWork's doc comment for
+// why this is a two-pass reduction rather than a flat cross-store comparison:
+// candidates are grouped by store dir first, reduced to one winner per dir
+// using RAW (uncollapsed) rank — the same comparison bestHookCandidateRank
+// already applies within one store's row array, because a shared dir means
+// these ARE, in effect, rows of the same store — and only then compared
+// ACROSS dirs via crossStoreRank, where an exact tie rotates using
+// hookTieBreakClock rather than always keeping the first tied dir (ga-kbbg9a).
+//
+// Reports ok=false when ranked is empty (no store had a rankable candidate),
+// letting the caller fall through to its first-hit/own-error/last-output
+// fallbacks.
+func bestRankedCandidate(ranked []hookRankedCandidate) (hookRankedStore, bool) {
+	groups := make(map[string][]hookRankedCandidate, len(ranked))
+	var dirOrder []string
+	for _, c := range ranked {
+		if _, seen := groups[c.store.dir]; !seen {
+			dirOrder = append(dirOrder, c.store.dir)
+		}
+		groups[c.store.dir] = append(groups[c.store.dir], c)
+	}
+
+	var bestRank hookCandidateRank
+	var bestTied []hookRankedStore
+	haveBest := false
+	for _, dir := range dirOrder {
+		group := groups[dir]
+		winner := group[0]
+		for _, c := range group[1:] {
+			if c.rank.less(winner.rank) {
+				winner = c
+			}
+		}
+		crossRank := winner.rank.crossStoreRank()
+		switch {
+		case !haveBest || crossRank.less(bestRank):
+			bestRank, haveBest = crossRank, true
+			bestTied = append(bestTied[:0], hookRankedStore{out: winner.out, store: winner.store, id: winner.id})
+		case crossRank == bestRank && !hookTiedIDSeen(bestTied, winner.id):
+			// A migrated bead (`gc storage migrate` copies, never deletes) can be
+			// ready from more than one store under the SAME id: the same row, not
+			// two tied pieces of work. Rotating across a duplicate would put a
+			// later store ahead of the primary for no reason — nothing about the
+			// work differs — and breaks the rig-first-city-last fan-out order the
+			// class-escalation claim loop depends on. An empty id (unidentifiable
+			// row) is never treated as a duplicate, so unranked-id fixtures keep
+			// rotating exactly as before.
+			bestTied = append(bestTied, hookRankedStore{out: winner.out, store: winner.store, id: winner.id})
+		}
+	}
+	if !haveBest {
+		return hookRankedStore{}, false
+	}
+	winner := bestTied[0]
+	if len(bestTied) > 1 {
+		winner = bestTied[hookTieBreakIndex(len(bestTied), hookTieBreakClock())]
+	}
+	return winner, true
 }
 
 // hookRankedStore pairs one store's work-query output with the store it came
@@ -524,6 +591,25 @@ func (r hookCandidateRank) less(other hookCandidateRank) bool {
 		return r.tier < other.tier
 	}
 	return r.priority < other.priority
+}
+
+// crossStoreRank collapses r for comparison AGAINST A DIFFERENT STORE. Tier
+// alone is not comparable across stores: hookTierAssigned only means "this
+// agent's identity is already on the row" — a bookkeeping fact of the store
+// that happens to hold it — not that the work is more urgent than routed
+// work sitting in another store. Left uncollapsed, an assigned-but-open row
+// in the primary store permanently outranked every routed rig row on tier
+// alone regardless of priority, and #5491's tie rotation never got a chance
+// to fire because the two candidates were never at equal rank (ga-t922vm).
+// hookTierInProgress is different: it is a live, unconditional resume claim
+// (see the short-circuit in bestStoreWithWork below), so it passes through
+// unchanged. Within a single store, tier stays fully meaningful — this is
+// only for ranks being compared against a rank from another store.
+func (r hookCandidateRank) crossStoreRank() hookCandidateRank {
+	if r.tier == hookTierInProgress {
+		return r
+	}
+	return hookCandidateRank{tier: hookTierRouted, priority: r.priority}
 }
 
 // bestHookCandidateRank returns the rank of the most urgent candidate in one

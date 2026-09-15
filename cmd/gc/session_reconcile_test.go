@@ -39,7 +39,7 @@ type testStore struct {
 }
 
 func newTestStore() *testStore {
-	return &testStore{metadata: make(map[string]map[string]string)}
+	return &testStore{Store: beads.NewMemStore(), metadata: make(map[string]map[string]string)}
 }
 
 func (s *testStore) SetMetadata(id, key, value string) error {
@@ -2735,6 +2735,27 @@ func TestFindAgentByTemplate(t *testing.T) {
 	if a := findAgentByTemplate(legacyCfg, "gascity-packs/gc.implementation-worker"); a == nil || a.QualifiedName() != "gascity-packs/implementation-worker" {
 		t.Fatalf("expected persisted bound template to resolve to current unbound agent, got %#v", a)
 	}
+	importedBindingCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "refinery", Dir: "gascity", BindingName: "gastown"},
+			{Name: "mayor", BindingName: "gastown"},
+		},
+	}
+	if a := findAgentByTemplate(importedBindingCfg, "gascity/refinery"); a == nil || a.QualifiedName() != "gascity/gastown.refinery" {
+		t.Fatalf("expected persisted unbound rig template to resolve to current imported binding agent, got %#v", a)
+	}
+	if a := findAgentByTemplate(importedBindingCfg, "mayor"); a == nil || a.QualifiedName() != "gastown.mayor" {
+		t.Fatalf("expected persisted unbound HQ template to resolve to current imported binding agent, got %#v", a)
+	}
+	ambiguousImportedBindingCfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig", BindingName: "alpha"},
+			{Name: "worker", Dir: "rig", BindingName: "bravo"},
+		},
+	}
+	if a := findAgentByTemplate(ambiguousImportedBindingCfg, "rig/worker"); a != nil {
+		t.Fatalf("expected ambiguous imported binding fallback to be refused, got %#v", a)
+	}
 	boundCfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "rig"},
@@ -2772,6 +2793,31 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 		t.Error("equivalence should be symmetric")
 	}
 
+	boundOnly := &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "rig", BindingName: "gc"}},
+	}
+	if !agentTemplateIdentitiesEquivalent(boundOnly, "rig/worker", "rig/gc.worker") {
+		t.Error("legacy unbound identity should be equivalent to the imported binding agent")
+	}
+	if !agentTemplateIdentitiesEquivalent(boundOnly, "rig/gc.worker", "rig/worker") {
+		t.Error("imported binding equivalence should be symmetric")
+	}
+	hqBoundOnly := &config.City{
+		Agents: []config.Agent{{Name: "worker", BindingName: "gc"}},
+	}
+	if !agentTemplateIdentitiesEquivalent(hqBoundOnly, "worker", "gc.worker") {
+		t.Error("legacy unbound HQ identity should be equivalent to the imported binding agent")
+	}
+	ambiguousBoundOnly := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "rig", BindingName: "alpha"},
+			{Name: "worker", Dir: "rig", BindingName: "bravo"},
+		},
+	}
+	if agentTemplateIdentitiesEquivalent(ambiguousBoundOnly, "rig/worker", "rig/alpha.worker") {
+		t.Error("ambiguous legacy unbound identity must not normalize to one imported binding arbitrarily")
+	}
+
 	bothPresent := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "rig"},
@@ -2790,6 +2836,35 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 	}
 	if !agentTemplateIdentitiesEquivalent(nil, "rig/worker", "rig/worker") {
 		t.Error("identical strings are equivalent even without config")
+	}
+}
+
+// TestLegacyUnboundSessionBeadResolvesForPoolClassification pins the widened
+// resolver's nearest downstream consumers. A pool session bead persisted under
+// the legacy unbound identity now resolves to the imported binding agent, so
+// pool eligibility and excess must be computed against the canonical template
+// rather than treated as unknown.
+func TestLegacyUnboundSessionBeadResolvesForPoolClassification(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+	}}
+	const canonical = "gascity/gastown.refinery"
+	sess := beads.Bead{
+		ID: "sess-legacy", Type: sessionBeadType, Status: "open",
+		Metadata: map[string]string{
+			"template": "gascity/refinery", "session_name": "refinery-gc-1", "state": "active",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	// With demand, the legacy-identity bead is config-eligible under the
+	// canonical template.
+	if agent, ok := sessionWithinDesiredConfig(sess, cfg, map[string]int{canonical: 1}); !ok {
+		t.Errorf("legacy unbound session bead should be config-eligible under the imported binding agent (agent=%#v)", agent)
+	}
+	// With zero demand it is now classifiable as excess, where it previously
+	// resolved to no agent and was never excess.
+	if !isPoolExcess(sess, cfg, map[string]int{canonical: 0}) {
+		t.Error("legacy unbound pool session bead should be excess when canonical demand is zero")
 	}
 }
 

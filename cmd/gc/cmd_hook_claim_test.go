@@ -179,6 +179,52 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 	}
 }
 
+func TestHookClaimEnvMapUsesOnlyTheQueryEnvironment(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-dolt.example.com")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient_database")
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+	t.Setenv("BEADS_POSTGRES_HOST", "ambient-postgres.example.com")
+
+	got := hookClaimEnvMap([]string{
+		"BEADS_DOLT_SERVER_PORT=30778",
+		"BEADS_POSTGRES_PORT=5432",
+	}, "/rig", "worker")
+
+	if value, ok := got["BEADS_DOLT_SERVER_HOST"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want absent ambient value", value)
+	}
+	if value, ok := got["BEADS_POSTGRES_HOST"]; ok {
+		t.Fatalf("BEADS_POSTGRES_HOST = %q, want absent ambient value", value)
+	}
+	if value, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want absent ambient value", value)
+	}
+	if value, ok := got["BEADS_DOLT_SERVER_TLS"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_TLS = %q, want absent ambient value", value)
+	}
+	if got["BEADS_DOLT_SERVER_PORT"] != "30778" {
+		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want 30778", got["BEADS_DOLT_SERVER_PORT"])
+	}
+	if got["BEADS_POSTGRES_PORT"] != "5432" {
+		t.Fatalf("BEADS_POSTGRES_PORT = %q, want 5432", got["BEADS_POSTGRES_PORT"])
+	}
+}
+
+// TestHookClaimRunnerIsTheExactEnvRunner pins the wiring at the top of this
+// file. Every other test in the package replaces
+// hookClaimCommandRunnerWithEnvContext with a stub, so reverting it to the
+// layered ExecCommandRunnerWithEnvContext would silently restore #5142
+// (ambient BEADS_DOLT_* / BEADS_POSTGRES_* selectors reappearing in the claim
+// mutation) with the suite still green.
+func TestHookClaimRunnerIsTheExactEnvRunner(t *testing.T) {
+	got := reflect.ValueOf(hookClaimCommandRunnerWithEnvContext).Pointer()
+	want := reflect.ValueOf(beads.ExecCommandRunnerWithExactEnvContext).Pointer()
+	if got != want {
+		t.Fatal("hookClaimCommandRunnerWithEnvContext must be beads.ExecCommandRunnerWithExactEnvContext; " +
+			"the layered runner re-admits ambient store selectors into the claim mutation (#5142)")
+	}
+}
+
 // TestDoHookClaimSkipsBlockedRoutedHeadAndClaimsReadyBehindIt guards the
 // widened-routed-tier fix: a routed tier's oldest candidate can be
 // is_blocked (e.g. gated on a PR), and the hook must fall through to a

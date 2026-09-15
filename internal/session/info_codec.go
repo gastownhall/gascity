@@ -151,6 +151,7 @@ var infoKeyCodec = []infoKeySpec{
 	}},
 	{"continuity_eligible", func(i *Info, v string) { i.ContinuityEligible = v }},
 	{"last_woke_at", func(i *Info, v string) { i.LastWokeAt = v }},
+	{"slept_at", func(i *Info, v string) { i.SleptAt = v }},
 	{"awake_started_at", func(i *Info, v string) { i.AwakeStartedAt = v }},
 	{"usage_compute_emitted_at", func(i *Info, v string) { i.UsageComputeEmittedAt = v }},
 	{"state_reason", func(i *Info, v string) { i.StateReason = v }},
@@ -192,6 +193,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"template_overrides", func(i *Info, v string) { i.TemplateOverrides = v }},
 	{"provider_kind", func(i *Info, v string) { i.ProviderKind = v }},
 	{"builtin_ancestor", func(i *Info, v string) { i.BuiltinAncestor = v }},
+	{"wake_refused_event_at", func(i *Info, v string) { i.WakeRefusedEventAt = v }},
 
 	// sleep-policy cluster (raw mirrors). Single-field string setters; the
 	// cmd/gc sleep helpers read these projected fields (W6). Byte-identical to

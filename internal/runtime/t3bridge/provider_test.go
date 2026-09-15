@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,68 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gorilla/websocket"
 )
+
+type t3SessionStatusExpectation struct {
+	name            string
+	status          string
+	includeStatus   bool
+	malformed       bool
+	wantLive        bool
+	wantUnavailable bool
+}
+
+func t3SessionStatusExpectations() []t3SessionStatusExpectation {
+	return []t3SessionStatusExpectation{
+		{name: "idle", status: "idle", includeStatus: true, wantLive: true},
+		{name: "starting", status: "starting", includeStatus: true, wantLive: true},
+		{name: "running", status: "running", includeStatus: true, wantLive: true},
+		{name: "ready", status: "ready", includeStatus: true, wantLive: true},
+		{name: "interrupted", status: "interrupted", includeStatus: true},
+		{name: "stopped", status: "stopped", includeStatus: true},
+		{name: "error", status: "error", includeStatus: true},
+		{name: "legacy none", status: "none", includeStatus: true},
+		{name: "legacy gone", status: "gone", includeStatus: true},
+		{name: "unknown", status: "future-state", includeStatus: true, wantUnavailable: true},
+		{name: "missing", wantUnavailable: true},
+	}
+}
+
+func t3SessionStatusSnapshot(name string, tc t3SessionStatusExpectation) map[string]interface{} {
+	session := map[string]interface{}{}
+	if tc.includeStatus {
+		session["status"] = tc.status
+	}
+	thread := map[string]interface{}{
+		"id":             "thread-" + name,
+		"customMetadata": map[string]interface{}{"gc.sessionName": name},
+		"session":        session,
+	}
+	if !tc.malformed {
+		thread["projectId"] = "project-1"
+	}
+	return map[string]interface{}{"threads": []interface{}{thread}}
+}
+
+func newSeamBackedSnapshotTestProvider(t *testing.T, wsURL string) (*seamBackedProvider, runtime.Provider) {
+	t.Helper()
+	resetBridgeAuthCacheForTest(t)
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+
+	t.Setenv("GC_EXEC_STATE_DIR", t.TempDir())
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("T3_WS_URL", wsURL)
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	sp := NewSeamBacked()
+	backed, ok := sp.(*seamBackedProvider)
+	if !ok {
+		t.Fatalf("NewSeamBacked() type = %T, want *seamBackedProvider", sp)
+	}
+	return backed, sp
+}
 
 func TestResolveProviderModel_PrefersCurrentConfigOverStoredEnvelope(t *testing.T) {
 	cfg := runtime.Config{
@@ -132,6 +195,41 @@ func TestResolveWsURLCandidates_PrefersRuntimeStateOverStaleWSURL(t *testing.T) 
 	}
 }
 
+func TestResolveWsURLCandidates_DiscoversDesktopUserdataRuntimeState(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("T3_HOME", "")
+	t.Setenv("T3_BASE_DIR", "")
+	t.Setenv("T3CODE_HOME", "")
+	t.Setenv("T3_WS_URL", "")
+	userdataDir := filepath.Join(tempHome, ".t3", "userdata")
+	if err := os.MkdirAll(userdataDir, 0o755); err != nil {
+		t.Fatalf("mkdir userdata dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(tempHome, ".t3", "server-runtime.json"),
+		[]byte(`{"origin":"http://127.0.0.1:4999"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write stale root server-runtime.json: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(userdataDir, "server-runtime.json"),
+		[]byte(`{"origin":"http://127.0.0.1:4888"}`),
+		0o644,
+	); err != nil {
+		t.Fatalf("write userdata server-runtime.json: %v", err)
+	}
+
+	candidates := resolveWsURLCandidates()
+	if len(candidates) == 0 {
+		t.Fatal("resolveWsURLCandidates returned no candidates")
+	}
+	if candidates[0] != "ws://127.0.0.1:4888/ws" {
+		t.Fatalf("first candidate = %q, want ws://127.0.0.1:4888/ws", candidates[0])
+	}
+}
+
 func TestProcessAlive_ReadyCountsAsAlive(t *testing.T) {
 	server := newT3BridgeTestServer(t, map[string]interface{}{
 		"threads": []interface{}{
@@ -233,24 +331,279 @@ func TestIsRunning_UsesCachedSnapshotWithinTTL(t *testing.T) {
 	if !p.IsRunning("mayor") {
 		t.Fatal("IsRunning(second) = false, want true")
 	}
-	if calls := server.wsCalls(); calls != 1 {
-		t.Fatalf("ws calls = %d, want 1", calls)
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot HTTP calls = %d, want 1", calls)
 	}
 }
 
-func TestAuthenticatedWsURL_UsesBearerTokenForNonLoopback(t *testing.T) {
+func TestAuthenticatedWsURL_ExchangesBearerForShortLivedLoopbackWebSocketTicket(t *testing.T) {
 	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	defer server.Close()
 	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
 	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
-	wsURL, headers, err := authenticatedWsURL("wss://remote.example/ws")
+	wsURL, headers, err := authenticatedWsURL(server.wsURL())
 	if err != nil {
 		t.Fatalf("authenticatedWsURL: %v", err)
 	}
-	if wsURL != "wss://remote.example/ws" {
-		t.Fatalf("wsURL = %q, want wss://remote.example/ws", wsURL)
+	if !strings.Contains(wsURL, "wsTicket=test-ws-ticket") {
+		t.Fatalf("wsURL = %q, want short-lived wsTicket", wsURL)
+	}
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("websocket authorization = %q, want ticket-only upgrade", got)
+	}
+	if got := server.lastAuthAuthorization(); got != "Bearer test-bearer" {
+		t.Fatalf("ticket authorization = %q, want Bearer test-bearer", got)
+	}
+}
+
+func TestAuthenticatedWsURL_RedactsBearerEchoedByTicketEndpoint(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setAuthFailures(1, http.StatusUnauthorized, "rejected test-bearer")
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	_, _, err := authenticatedWsURL(server.wsURL())
+	if err == nil {
+		t.Fatal("authenticatedWsURL error = nil, want ticket rejection")
+	}
+	if strings.Contains(err.Error(), "test-bearer") {
+		t.Fatalf("authenticatedWsURL leaked bearer in error: %v", err)
+	}
+}
+
+func TestAuthenticatedWsURL_FallsBackToBearerHeaderWhenTicketEndpointUnsupported(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setAuthFailures(1, http.StatusNotFound, "not found")
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	if err != nil {
+		t.Fatalf("authenticatedWsURL: %v", err)
+	}
+	if wsURL != server.wsURL() {
+		t.Fatalf("wsURL = %q, want legacy URL %q", wsURL, server.wsURL())
 	}
 	if got := headers.Get("Authorization"); got != "Bearer test-bearer" {
 		t.Fatalf("authorization = %q, want Bearer test-bearer", got)
+	}
+}
+
+func TestAuthenticatedWsURL_FallsBackToBearerHeaderWhenTicketEndpointReturnsHTML(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setAuthRawBody("text/html", "<!doctype html><html><body>t3</body></html>")
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	wsURL, headers, err := authenticatedWsURL(server.wsURL())
+	if err != nil {
+		t.Fatalf("authenticatedWsURL: %v", err)
+	}
+	if wsURL != server.wsURL() {
+		t.Fatalf("wsURL = %q, want legacy URL %q", wsURL, server.wsURL())
+	}
+	if got := headers.Get("Authorization"); got != "Bearer test-bearer" {
+		t.Fatalf("authorization = %q, want Bearer test-bearer", got)
+	}
+}
+
+func TestRPCSnapshot_UsesAuthenticatedHTTPForStockT3(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	defer server.Close()
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot: %v", err)
+	}
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot HTTP calls = %d, want 1", calls)
+	}
+	if got := server.lastSnapshotAuthorization(); got != "Bearer test-bearer" {
+		t.Fatalf("snapshot authorization = %q, want Bearer test-bearer", got)
+	}
+	if calls := server.wsCalls(); calls != 0 {
+		t.Fatalf("snapshot websocket calls = %d, want 0", calls)
+	}
+}
+
+func TestRPCSnapshot_RedactsBearerEchoedByHTTP(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{})
+	server.setSnapshotFailure(http.StatusUnauthorized, "rejected test-bearer")
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	_, err := p.rpcSnapshot()
+	if err == nil {
+		t.Fatal("rpcSnapshot error = nil, want HTTP rejection")
+	}
+	if strings.Contains(err.Error(), "test-bearer") {
+		t.Fatalf("rpcSnapshot leaked bearer in error: %v", err)
+	}
+}
+
+func TestRPCSnapshot_FallsBackToLegacyWebSocketWhenHTTPEndpointUnsupported(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	server.setSnapshotFailure(http.StatusNotFound, "not found")
+	server.setAuthFailures(1, http.StatusNotFound, "not found")
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot legacy fallback: %v", err)
+	}
+	if calls := server.wsCalls(); calls != 1 {
+		t.Fatalf("legacy snapshot websocket calls = %d, want 1", calls)
+	}
+}
+
+func TestRPCSnapshot_TriesNextCandidateBeforeLegacyFallback(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	stale := newT3BridgeTestServer(t, map[string]interface{}{})
+	stale.setSnapshotFailure(http.StatusNotFound, "not found")
+	defer stale.Close()
+	current := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	defer current.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t3Home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(t3Home, "ws-url"), []byte(current.wsURL()), 0o644); err != nil {
+		t.Fatalf("write ws-url: %v", err)
+	}
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", stale.wsURL())
+	t.Setenv("T3_HOME", t3Home)
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot current candidate: %v", err)
+	}
+	if calls := stale.snapshotCalls(); calls != 1 {
+		t.Fatalf("stale snapshot HTTP calls = %d, want 1", calls)
+	}
+	if calls := stale.wsCalls(); calls != 0 {
+		t.Fatalf("stale snapshot websocket calls = %d, want 0", calls)
+	}
+	if calls := current.snapshotCalls(); calls != 1 {
+		t.Fatalf("current snapshot HTTP calls = %d, want 1", calls)
+	}
+}
+
+func TestRPCSnapshot_FallsBackToLegacyWebSocketWhenHTTPSnapshotReturnsHTML(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"threads": []interface{}{},
+	})
+	server.setSnapshotRawBody("text/html", "<!doctype html><html><body>t3</body></html>")
+	server.setAuthFailures(1, http.StatusNotFound, "not found")
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if _, err := p.rpcSnapshot(); err != nil {
+		t.Fatalf("rpcSnapshot legacy fallback: %v", err)
+	}
+	if calls := server.wsCalls(); calls != 1 {
+		t.Fatalf("legacy snapshot websocket calls = %d, want 1", calls)
+	}
+}
+
+func TestRPCSnapshot_HandlesResultWrappedHTTPSnapshot(t *testing.T) {
+	resetBridgeAuthCacheForTest(t)
+	server := newT3BridgeTestServer(t, map[string]interface{}{
+		"result": map[string]interface{}{
+			"threads": []interface{}{
+				map[string]interface{}{
+					"id":        "thread-1",
+					"projectId": "project-1",
+					"customMetadata": map[string]interface{}{
+						"gc.agent":       "mayor",
+						"gc.sessionName": "mayor",
+					},
+					"session": map[string]interface{}{
+						"status": "ready",
+					},
+				},
+			},
+		},
+	})
+	defer server.Close()
+	oldDefaults := defaultWSURLCandidates
+	defaultWSURLCandidates = nil
+	t.Cleanup(func() { defaultWSURLCandidates = oldDefaults })
+	t.Setenv("T3_BEARER_TOKEN", "test-bearer")
+	t.Setenv("T3_WS_URL", server.wsURL())
+	t.Setenv("T3_HOME", t.TempDir())
+	t.Setenv("GC_T3BRIDGE_STATE_DIR", t.TempDir())
+
+	p := &Provider{
+		watchers:     make(map[string]context.CancelFunc),
+		recentStarts: make(map[string]time.Time),
+	}
+	if !p.IsRunning("mayor") {
+		t.Fatal("IsRunning(result-wrapped HTTP snapshot) = false, want true")
+	}
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot HTTP calls = %d, want 1", calls)
+	}
+	if calls := server.wsCalls(); calls != 0 {
+		t.Fatalf("snapshot websocket calls = %d, want 0", calls)
 	}
 }
 
@@ -674,17 +1027,26 @@ func TestCopyTo_RejectsRelDstEscapingWorkDir(t *testing.T) {
 }
 
 type t3BridgeTestServer struct {
-	t                 *testing.T
-	server            *httptest.Server
-	mu                sync.Mutex
-	commands          []string
-	snapshot          map[string]interface{}
-	authFailures      int
-	authFailureStatus int
-	authFailureBody   string
-	authRequestCount  int
-	wsAuthorization   []string
-	wsRequestCount    int
+	t                  *testing.T
+	server             *httptest.Server
+	mu                 sync.Mutex
+	commands           []string
+	snapshot           map[string]interface{}
+	authFailures       int
+	authFailureStatus  int
+	authFailureBody    string
+	authRequestCount   int
+	authAuthorization  []string
+	authRawType        string
+	authRawBody        string
+	snapshotRequests   int
+	snapshotAuth       []string
+	snapshotFailStatus int
+	snapshotFailBody   string
+	snapshotRawType    string
+	snapshotRawBody    string
+	wsAuthorization    []string
+	wsRequestCount     int
 }
 
 func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3BridgeTestServer {
@@ -692,15 +1054,18 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot}
 	upgrader := websocket.Upgrader{}
 	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" {
+		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
+			ts.authAuthorization = append(ts.authAuthorization, r.Header.Get("Authorization"))
 			failuresRemaining := ts.authFailures
 			if ts.authFailures > 0 {
 				ts.authFailures--
 			}
 			failureStatus := ts.authFailureStatus
 			failureBody := ts.authFailureBody
+			rawType := ts.authRawType
+			rawBody := ts.authRawBody
 			ts.mu.Unlock()
 			if failuresRemaining > 0 {
 				if failureStatus == 0 {
@@ -712,8 +1077,42 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 				http.Error(w, failureBody, failureStatus)
 				return
 			}
+			if rawBody != "" {
+				w.Header().Set("Content-Type", rawType)
+				_, _ = io.WriteString(w, rawBody)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/auth/websocket-ticket" {
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"ticket":    "test-ws-ticket",
+					"expiresAt": "2099-01-01T00:00:00Z",
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"token": "test-ws-token"})
+			return
+		}
+		if r.URL.Path == "/api/orchestration/snapshot" {
+			ts.mu.Lock()
+			ts.snapshotRequests++
+			ts.snapshotAuth = append(ts.snapshotAuth, r.Header.Get("Authorization"))
+			failureStatus := ts.snapshotFailStatus
+			failureBody := ts.snapshotFailBody
+			rawType := ts.snapshotRawType
+			rawBody := ts.snapshotRawBody
+			ts.mu.Unlock()
+			if failureStatus != 0 {
+				http.Error(w, failureBody, failureStatus)
+				return
+			}
+			if rawBody != "" {
+				w.Header().Set("Content-Type", rawType)
+				_, _ = io.WriteString(w, rawBody)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ts.snapshot)
 			return
 		}
 		ts.mu.Lock()
@@ -793,10 +1192,60 @@ func (ts *t3BridgeTestServer) setAuthFailures(count, status int, body string) {
 	ts.authFailureBody = body
 }
 
+func (ts *t3BridgeTestServer) setSnapshotFailure(status int, body string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.snapshotFailStatus = status
+	ts.snapshotFailBody = body
+}
+
+// setAuthRawBody makes the auth routes answer 200 with a verbatim body and
+// content type, standing in for a bridge whose SPA catch-all serves HTML at an
+// unknown API path.
+func (ts *t3BridgeTestServer) setAuthRawBody(contentType, body string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.authRawType = contentType
+	ts.authRawBody = body
+}
+
+// setSnapshotRawBody makes the orchestration-snapshot route answer 200 with a
+// verbatim body and content type.
+func (ts *t3BridgeTestServer) setSnapshotRawBody(contentType, body string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.snapshotRawType = contentType
+	ts.snapshotRawBody = body
+}
+
 func (ts *t3BridgeTestServer) authCalls() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.authRequestCount
+}
+
+func (ts *t3BridgeTestServer) lastAuthAuthorization() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.authAuthorization) == 0 {
+		return ""
+	}
+	return ts.authAuthorization[len(ts.authAuthorization)-1]
+}
+
+func (ts *t3BridgeTestServer) snapshotCalls() int {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.snapshotRequests
+}
+
+func (ts *t3BridgeTestServer) lastSnapshotAuthorization() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if len(ts.snapshotAuth) == 0 {
+		return ""
+	}
+	return ts.snapshotAuth[len(ts.snapshotAuth)-1]
 }
 
 func (ts *t3BridgeTestServer) wsCalls() int {
@@ -1036,5 +1485,329 @@ func TestListRunningSoftUnavailableIsRuntimeUnavailable(t *testing.T) {
 	}
 	if len(names) != 0 {
 		t.Fatalf("ListRunning names = %v, want none alongside total observation failure", names)
+	}
+}
+
+// The production seam-backed provider must distinguish a reachable empty T3
+// snapshot from a snapshot failure. Cached snapshots keep the positive and
+// confirmed-absent cases deterministic; the unreachable loopback endpoint owns
+// the transport-failure edge.
+func TestSeamBackedLivenessObservationPreservesSnapshotUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		wsURL       string
+		recentStart bool
+	}{
+		{name: "unreachable snapshot is unknown", wsURL: "ws://127.0.0.1:1/ws"},
+		{name: "hard snapshot setup error is unknown", wsURL: "not-a-websocket-url"},
+		{name: "unreachable snapshot during recent start is provisionally live", wsURL: "ws://127.0.0.1:1/ws", recentStart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, tc.wsURL)
+			if tc.recentStart {
+				backed.raw.setRecentStart("worker", time.Now())
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if tc.recentStart {
+				if err != nil {
+					t.Fatalf("ObserveLivenessWithError: %v", err)
+				}
+				if obs != (runtime.Liveness{Running: true, Alive: true}) {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want provisional liveness", obs)
+				}
+				return
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+			}
+			if obs != (runtime.Liveness{}) {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with unknown result", obs)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name        string
+		recentStart bool
+		wantLive    bool
+	}{
+		{name: "ordinary reachable empty snapshot confirms absence"},
+		{name: "reachable empty snapshot during recent start is provisionally live", recentStart: true, wantLive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(map[string]interface{}{"threads": []interface{}{}})
+			if tc.recentStart {
+				backed.raw.setRecentStart("worker", time.Now())
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			want := runtime.Liveness{Running: tc.wantLive, Alive: tc.wantLive}
+			if obs != want {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want %+v", obs, want)
+			}
+			if got := backed.raw.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := backed.raw.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+
+	for _, tc := range t3SessionStatusExpectations() {
+		t.Run("reachable matching thread with "+tc.name+" status", func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(t3SessionStatusSnapshot("worker", tc))
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if tc.wantUnavailable {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+				}
+				if obs != (runtime.Liveness{}) {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with unknown result", obs)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ObserveLivenessWithError: %v", err)
+				}
+				want := runtime.Liveness{Running: tc.wantLive, Alive: tc.wantLive}
+				if obs != want {
+					t.Fatalf("ObserveLivenessWithError observation = %+v, want %+v", obs, want)
+				}
+			}
+
+			if got := backed.raw.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := backed.raw.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+
+	for _, status := range []string{"none", "gone"} {
+		t.Run("recent start keeps legacy "+status+" provisionally live", func(t *testing.T) {
+			backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+			backed.raw.cacheSnapshot(map[string]interface{}{
+				"threads": []interface{}{map[string]interface{}{
+					"id":        "thread-1",
+					"projectId": "project-1",
+					"customMetadata": map[string]interface{}{
+						"gc.sessionName": "worker",
+					},
+					"session": map[string]interface{}{"status": status},
+				}},
+			})
+			backed.raw.setRecentStart("worker", time.Now())
+
+			obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			if obs != (runtime.Liveness{Running: true, Alive: true}) {
+				t.Fatalf("ObserveLivenessWithError observation = %+v, want provisional liveness", obs)
+			}
+			if !backed.raw.IsRunning("worker") {
+				t.Fatal("IsRunning = false, want startup grace for legacy pre-session status")
+			}
+		})
+	}
+
+	t.Run("reachable matching malformed thread is unknown", func(t *testing.T) {
+		backed, sp := newSeamBackedSnapshotTestProvider(t, "ws://127.0.0.1:1/ws")
+		backed.raw.cacheSnapshot(map[string]interface{}{
+			"threads": []interface{}{map[string]interface{}{
+				"id": "thread-1",
+				"customMetadata": map[string]interface{}{
+					"gc.sessionName": "worker",
+				},
+				"session": map[string]interface{}{"status": "ready"},
+			}},
+		})
+
+		obs, err := runtime.ObserveLivenessWithError(sp, "worker", nil)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("ObserveLivenessWithError error = %v, want runtime unavailable", err)
+		}
+		if obs != (runtime.Liveness{}) {
+			t.Fatalf("ObserveLivenessWithError observation = %+v, want zero with malformed binding", obs)
+		}
+		if backed.raw.IsRunning("worker") {
+			t.Fatal("IsRunning = true, want legacy false for malformed binding")
+		}
+		if backed.raw.ProcessAlive("worker", nil) {
+			t.Fatal("ProcessAlive = true, want legacy false for malformed binding")
+		}
+	})
+}
+
+func TestListRunningClassifiesT3SessionStatuses(t *testing.T) {
+	cases := append(t3SessionStatusExpectations(), t3SessionStatusExpectation{
+		name: "malformed binding", status: "ready", includeStatus: true, malformed: true, wantUnavailable: true,
+	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{}
+			p.cacheSnapshot(t3SessionStatusSnapshot("worker", tc))
+
+			names, err := p.ListRunning("")
+			if tc.wantUnavailable {
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("ListRunning error = %v, want runtime unavailable", err)
+				}
+				if runtime.IsPartialListError(err) {
+					t.Fatalf("ListRunning error = %v, want total failure with no usable names", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ListRunning: %v", err)
+			}
+			wantNames := []string(nil)
+			if tc.wantLive {
+				wantNames = []string{"worker"}
+			}
+			if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+				t.Fatalf("ListRunning names = %v, want %v", names, wantNames)
+			}
+		})
+	}
+}
+
+func TestT3LivenessSurfacesSelectNewestEligibleDuplicateThread(t *testing.T) {
+	thread := func(id, status, updatedAt, state string, deleted bool) map[string]interface{} {
+		meta := map[string]interface{}{"gc.sessionName": "worker"}
+		if state != "" {
+			meta["gc.state"] = state
+		}
+		got := map[string]interface{}{
+			"id":             id,
+			"projectId":      "project-1",
+			"updatedAt":      updatedAt,
+			"customMetadata": meta,
+			"session":        map[string]interface{}{"status": status},
+		}
+		if deleted {
+			got["deletedAt"] = "2026-08-23T00:03:00Z"
+		}
+		return got
+	}
+
+	olderStopped := thread("thread-old", "stopped", "2026-08-23T00:01:00Z", "", false)
+	newerReady := thread("thread-new", "ready", "2026-08-23T00:02:00Z", "", false)
+	olderReady := thread("thread-live", "ready", "2026-08-23T00:01:00Z", "", false)
+	newerArchived := thread("thread-archived", "stopped", "2026-08-23T00:02:00Z", "archived", false)
+	newerDeleted := thread("thread-deleted", "stopped", "2026-08-23T00:02:00Z", "", true)
+
+	for _, tc := range []struct {
+		name     string
+		threads  []interface{}
+		wantLive bool
+	}{
+		{name: "newest live after stale stopped", threads: []interface{}{olderStopped, newerReady}, wantLive: true},
+		{name: "snapshot order does not change selection", threads: []interface{}{newerReady, olderStopped}, wantLive: true},
+		{name: "archived replacement is ineligible", threads: []interface{}{olderReady, newerArchived}, wantLive: true},
+		{name: "deleted replacement is ineligible", threads: []interface{}{olderReady, newerDeleted}, wantLive: true},
+		{name: "archived and deleted only are absent", threads: []interface{}{newerArchived, newerDeleted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{}
+			p.cacheSnapshot(map[string]interface{}{"threads": tc.threads})
+
+			names, err := p.ListRunning("")
+			if err != nil {
+				t.Fatalf("ListRunning: %v", err)
+			}
+			listed := strings.Join(names, ",") == "worker"
+			if listed != tc.wantLive {
+				t.Fatalf("ListRunning names = %v, want live=%v", names, tc.wantLive)
+			}
+
+			obs, err := runtime.ObserveLivenessWithError(p, "worker", nil)
+			if err != nil {
+				t.Fatalf("ObserveLivenessWithError: %v", err)
+			}
+			if obs.Running != tc.wantLive || obs.Alive != tc.wantLive {
+				t.Fatalf("ObserveLivenessWithError = %+v, want live=%v", obs, tc.wantLive)
+			}
+			if got := p.IsRunning("worker"); got != tc.wantLive {
+				t.Fatalf("IsRunning = %v, want %v", got, tc.wantLive)
+			}
+			if got := p.ProcessAlive("worker", nil); got != tc.wantLive {
+				t.Fatalf("ProcessAlive = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+}
+
+func TestListRunningIncludesRecentStartsBeforeSnapshotMaterialization(t *testing.T) {
+	p := &Provider{recentStarts: map[string]time.Time{
+		"worker":       time.Now(),
+		"other-worker": time.Now(),
+	}}
+	p.cacheSnapshot(map[string]interface{}{"threads": []interface{}{}})
+
+	names, err := p.ListRunning("work")
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if strings.Join(names, ",") != "worker" {
+		t.Fatalf("ListRunning names = %v, want recent prefix-matching worker", names)
+	}
+}
+
+func TestListRunningReturnsLiveNamesWithPartialErrorForUnknownStatus(t *testing.T) {
+	p := &Provider{}
+	p.cacheSnapshot(map[string]interface{}{
+		"threads": []interface{}{
+			map[string]interface{}{
+				"id":             "thread-live",
+				"projectId":      "project-1",
+				"customMetadata": map[string]interface{}{"gc.sessionName": "live-worker"},
+				"session":        map[string]interface{}{"status": "idle"},
+			},
+			map[string]interface{}{
+				"id":             "thread-unknown",
+				"projectId":      "project-1",
+				"customMetadata": map[string]interface{}{"gc.sessionName": "unknown-worker"},
+				"session":        map[string]interface{}{},
+			},
+		},
+	})
+
+	names, err := p.ListRunning("")
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ListRunning error = %v, want runtime unavailable", err)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning error = %v, want partial-list classification", err)
+	}
+	if strings.Join(names, ",") != "live-worker" {
+		t.Fatalf("ListRunning names = %v, want live-worker partial result", names)
+	}
+}
+
+func TestSeamBackedLastActivityPreservesSnapshotUncertainty(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wsURL string
+	}{
+		{name: "soft transport outage", wsURL: "ws://127.0.0.1:1/ws"},
+		{name: "hard snapshot setup error", wsURL: "not-a-websocket-url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sp := newSeamBackedSnapshotTestProvider(t, tc.wsURL)
+			lastActivity, err := sp.GetLastActivity("worker")
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("GetLastActivity error = %v, want runtime unavailable", err)
+			}
+			if !lastActivity.IsZero() {
+				t.Fatalf("GetLastActivity = %v, want zero with unknown result", lastActivity)
+			}
+		})
 	}
 }

@@ -599,6 +599,34 @@ func SessionUnknownStatePayloadJSON(sessionID, sessionName, state string, firstS
 	return b
 }
 
+// SessionWakeRefusedPayload is the typed payload for session.wake_refused: a
+// durable explicit wake request refused before the session reached a live
+// runtime (held, quarantined, or asleep past its idle-sleep window).
+type SessionWakeRefusedPayload struct {
+	SessionID   string `json:"session_id" doc:"Session bead ID."`
+	SessionName string `json:"session_name,omitempty" doc:"Session display name, if known."`
+	Template    string `json:"template,omitempty" doc:"Resolved session template."`
+	Reason      string `json:"reason" doc:"Refusal reason: held, quarantined, or idle-sleep."`
+	WakeRequest string `json:"wake_request" doc:"The wake_request metadata value that triggered this check (explicit)."`
+	Attempts    int    `json:"attempts" doc:"wake_attempts recorded after this refusal."`
+}
+
+// IsEventPayload marks SessionWakeRefusedPayload as an events.Payload variant.
+func (SessionWakeRefusedPayload) IsEventPayload() {}
+
+// SessionWakeRefusedPayloadJSON builds the session.wake_refused payload.
+func SessionWakeRefusedPayloadJSON(sessionID, sessionName, template, reason, wakeRequest string, attempts int) json.RawMessage {
+	b, _ := json.Marshal(SessionWakeRefusedPayload{
+		SessionID:   sessionID,
+		SessionName: sessionName,
+		Template:    template,
+		Reason:      reason,
+		WakeRequest: wakeRequest,
+		Attempts:    attempts,
+	})
+	return b
+}
+
 func init() {
 	// mail.* — all seven types share one payload shape.
 	events.RegisterPayload(events.MailSent, MailEventPayload{})
@@ -635,8 +663,10 @@ func init() {
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
+	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})
 	events.RegisterPayload(events.SessionResetStalled, events.SessionResetStalledPayload{})
 	events.RegisterPayload(events.SessionWorkQueryFailed, SessionLifecyclePayload{})
+	events.RegisterPayload(events.SessionDrainFenceUnavailable, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionColdStartTimeout, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyCreated, events.NoPayload{})
 	events.RegisterPayload(events.ConvoyClosed, events.NoPayload{})

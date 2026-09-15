@@ -24,6 +24,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Release Gate Criteria Conventions](release-gate-criteria-conventions.md)
   when signing off the "Tests pass" criterion on a `release-gates/*.md`
   deploy gate — it must cite the CI jobs `ci-required` actually gates on
+- [Contributor Response and Attribution Conventions](contributor-response-conventions.md)
+  when replying to, superseding, adopting, or closing someone else's issue or
+  PR — what the contributor is owed and how credit is recorded
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
