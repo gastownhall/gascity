@@ -6,6 +6,31 @@ runs in scheduled mode: it skips any database below the commit-count threshold
 (default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`), flattens the rest, verifies
 row preservation, and runs `CALL DOLT_GC('--full')`.
 
+## Runtime guards
+
+Every invocation reads the target city's resolved `[maintenance.dolt] enabled`
+flag using `gc --city "$GC_CITY_PATH" config show --json` (parsed with `jq`).
+When false, compact exits successfully with
+`compact: maintenance.dolt enabled=false, skipping` before any Dolt operation.
+This includes `--gc-only`, `--dry-run`, and `GC_DOLT_COMPACT_BARE_GC`.
+An omitted flag resolves to false under the existing maintenance config default.
+An unreadable config or non-boolean flag fails closed. Set
+`GC_DOLT_COMPACT_FORCE=1` for a manual announced run that overrides this flag.
+
+Flatten mode also skips any database with **any configured Dolt remote**, naming
+the database and a remote in its output. This protects shared history even with
+`.no-sync`, `--skip-fetch`, or `--dry-run`, and leaves deferred GC/push markers
+untouched. Remote probe failures fail closed. Set
+`GC_DOLT_COMPACT_ALLOW_FEDERATED=1` only during an announced compaction window
+coordinated with every city sharing that history. FORCE does not bypass this
+guard, and ALLOW_FEDERATED does not bypass the maintenance flag; a disabled city
+needs both switches to flatten a federated database.
+
+The remote guard does not apply to bare working-set GC
+(`GC_DOLT_COMPACT_BARE_GC=1`) or `--gc-only`, which reclaim chunks without
+flattening history or pushing remotes. Both still honor the maintenance flag
+and quarantine checks.
+
 ## Flags
 
 - `--gc-only` — Reclaim orphaned chunks via `CALL DOLT_GC('--full')` on each
