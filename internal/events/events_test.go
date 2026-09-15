@@ -317,6 +317,108 @@ func TestFileRecorderPreservesTimestamp(t *testing.T) {
 	}
 }
 
+// TestFileRecorderNormalizesExplicitTsToLocalZone is a regression test for
+// #5300: writeRecordLocked only filled Ts when zero, so a caller-supplied Ts
+// serialized in whatever zone the caller happened to construct it in --
+// three cmd/gc emitters pass .UTC() while every other row on the host goes
+// through the IsZero() branch and gets local-with-offset. The log ends up
+// mixing "...Z" and "...-04:00" rows for the same instant, which silently
+// breaks lexical/window filters over ts (a filter written against one form
+// drops every row in the other).
+func TestFileRecorderNormalizesExplicitTsToLocalZone(t *testing.T) {
+	// Force a non-UTC local zone for the test's duration -- per the issue's
+	// own note, "on a UTC host the bug is invisible", so a host-dependent
+	// zone would make this test meaningless on CI runners set to UTC.
+	origLocal := time.Local
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("America/New_York tzdata not available: %v", err)
+	}
+	time.Local = loc
+	defer func() { time.Local = origLocal }()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	var stderr bytes.Buffer
+	rec, err := NewFileRecorder(path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close() //nolint:errcheck // test cleanup
+
+	// A caller-supplied Ts, explicitly UTC -- the exact shape of the three
+	// buggy emitters (now.UTC() / time.Now().UTC()).
+	explicitUTC := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	rec.Record(Event{Type: BeadCreated, Actor: "human", Ts: explicitUTC})
+
+	// A zero Ts on the same host, going through the recorder's own default --
+	// this is the format every other row in a real log actually has.
+	rec.Record(Event{Type: BeadCreated, Actor: "human"})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), raw)
+	}
+
+	events, err := ReadAll(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+
+	// The instant must survive normalization exactly (TestFileRecorderPreservesTimestamp's
+	// invariant) -- only the zone representation should change.
+	if !events[0].Ts.Equal(explicitUTC) {
+		t.Errorf("Ts instant changed: got %v, want %v", events[0].Ts, explicitUTC)
+	}
+
+	// Every row on this host must serialize in the same zone form. Decode the
+	// ts field itself -- it is the third key in the marshaled line, so a
+	// suffix check against the whole line can never observe it.
+	tsOf := func(line string) string {
+		t.Helper()
+		var row struct {
+			Ts string `json:"ts"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimRight(line, "\r")), &row); err != nil {
+			t.Fatalf("decoding ts from %q: %v", line, err)
+		}
+		return row.Ts
+	}
+	explicitTs, zeroTs := tsOf(lines[0]), tsOf(lines[1])
+	if strings.HasSuffix(explicitTs, "Z") {
+		t.Errorf("caller-supplied UTC Ts was not normalized to local -- ts is still %q", explicitTs)
+	}
+	if !strings.HasSuffix(explicitTs, "-04:00") {
+		t.Errorf("expected the explicit-Ts row normalized to America/New_York's offset, got ts %q", explicitTs)
+	}
+	if strings.HasSuffix(zeroTs, "Z") {
+		t.Fatalf("test invariant broken: the zero-Ts row (recorder's own default) serialized as UTC-Z: %q", zeroTs)
+	}
+
+	// marshalBatch carries the same normalization on the AppendBatch path.
+	if err := rec.AppendBatch([]Event{{Type: BeadCreated, Actor: "human", Ts: explicitUTC}}); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines after AppendBatch, want 3:\n%s", len(lines), raw)
+	}
+	if batchTs := tsOf(lines[2]); strings.HasSuffix(batchTs, "Z") || !strings.HasSuffix(batchTs, "-04:00") {
+		t.Errorf("AppendBatch did not normalize caller-supplied Ts: ts is %q", batchTs)
+	}
+}
+
 func TestFakeRecordsEvents(t *testing.T) {
 	f := NewFake()
 	f.Record(Event{Type: BeadCreated, Actor: "human", Subject: "gc-1"})
@@ -748,6 +850,114 @@ func TestReadFilteredTailScansBackwardsAcrossChunks(t *testing.T) {
 	}
 	if got[0].Subject != "cross-chunk" || got[1].Subject != "tail-match" {
 		t.Fatalf("subjects = [%s %s], want [cross-chunk tail-match]", got[0].Subject, got[1].Subject)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesBoundsBackwardWalk is the regression for
+// #4418: a Filter.Type that never matches near EOF (the common case for a
+// rare/optional event type) otherwise forces readFilteredTailFromFile to
+// walk the entire file backward, at the same cost as an unfiltered forward
+// scan. MaxScanBytes caps that walk; "not found within the window" must be
+// the result rather than an unbounded scan.
+func TestReadFilteredTailMaxScanBytesBoundsBackwardWalk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	// The only matching event sits near the start of the file.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	// Pad well past a 64KB scan window with non-matching events before EOF —
+	// this is what a rare/optional Type filter looks like against a long,
+	// otherwise-unrelated event stream.
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; i < 40; i++ { // ~160KB of padding, several chunks past 64KB
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: 64 * 1024}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the 64KB window)", len(bounded))
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
+	}
+}
+
+// TestReadFilteredTailMaxScanBytesNonAlignedLimit pins the per-chunk clamp:
+// a MaxScanBytes that is not a multiple of the 64KB chunk size must stop the
+// backward walk at exactly that byte, not at the next chunk boundary. The
+// file is sized so the only match sits in the dead zone between the two —
+// past the 100KB window, but inside the 128KB an unclamped walk would read
+// as two whole chunks — so a bound checked only between chunks returns the
+// match and fails this test.
+func TestReadFilteredTailMaxScanBytesNonAlignedLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
+	var buf bytes.Buffer
+	appendEvent := func(e Event) {
+		t.Helper()
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(raw)
+		buf.WriteString("\n")
+	}
+
+	const window = 100 * 1024 // deliberately not a multiple of the 64KB chunk
+
+	// The only matching event is the first line in the file, so its distance
+	// from EOF is simply the file size.
+	appendEvent(Event{Seq: 1, Type: "target.type", Actor: "api", Ts: base})
+	padding := string(bytes.Repeat([]byte("x"), 4*1024))
+	for i := 0; buf.Len() < 108*1024; i++ {
+		appendEvent(Event{Seq: uint64(i + 2), Type: "other.type", Actor: "api", Ts: base.Add(time.Duration(i) * time.Second), Message: padding})
+	}
+	if size := int64(buf.Len()); size <= window || size >= 128*1024 {
+		t.Fatalf("file is %d bytes, want in (%d, %d) so the match lands between the window and the next chunk boundary", size, window, 128*1024)
+	}
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bounded, err := ReadFilteredTail(path, Filter{Type: "target.type", MaxScanBytes: window}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bounded) != 0 {
+		t.Fatalf("bounded scan got %d events, want 0 (match sits outside the %d-byte window; the chunk read must be clamped to it)", len(bounded), window)
+	}
+
+	unbounded, err := ReadFilteredTail(path, Filter{Type: "target.type"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 || unbounded[0].Seq != 1 {
+		t.Fatalf("unbounded scan got %+v, want the seq-1 match (proves the bound, not the filter, caused the empty result)", unbounded)
 	}
 }
 

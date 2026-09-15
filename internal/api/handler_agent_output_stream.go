@@ -32,13 +32,11 @@ func (s *Server) handleAgentOutputStream(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Try session log streaming first, fall back to peek polling.
+	// Try session log streaming first, fall back to peek polling. The
+	// provider the reader dispatches on comes from resolveAgentTranscript,
+	// which resolves the builtin family rather than the config name.
 	workDir := s.resolveAgentWorkDir(agentCfg, name)
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
-	}
-	var logPath string
+	var provider, logPath string
 	resolveLogPath := func() string { return "" }
 	if workDir != "" {
 		transcriptState, err := s.resolveAgentTranscript(name, agentCfg)

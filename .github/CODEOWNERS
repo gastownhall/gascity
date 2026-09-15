@@ -19,14 +19,3 @@
 # The rollout-gate registry is the only human gate on flag Expires extensions
 # and Category classification (an agent-authored repo); admin review is required.
 /internal/rollout/registry.go @gastownhall/gascity-admin
-
-# Specific docs/ content folders are owned by csells (auto-requests review on
-# matching PRs). Intentionally scoped to authored-content areas, excluding
-# /docs/reference and top-level docs files.
-/docs/diagrams/ @csells
-/docs/getting-started/ @csells
-/docs/guides/ @csells
-/docs/images/ @csells
-/docs/runbooks/ @csells
-/docs/troubleshooting/ @csells
-/docs/tutorials/ @csells

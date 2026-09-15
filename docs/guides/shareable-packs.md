@@ -135,6 +135,13 @@ gc pack registry show main:gastown      # prints a paste-ready import command
 gc pack registry publish .              # submit a pack (after gc pack registry login)
 ```
 
+Registry pack names are scoped as `<github-owner>/<pack>`. Before you publish,
+`[pack].name` must already carry that scoped name, and its scope must equal the
+lowercased GitHub owner of the source repository: publish submits the name
+`pack.toml` declares, and the registry compares the two byte-for-byte. Unscoped
+names are reserved — the registry accepts one only when it already holds a
+claim for it, which is what `--allow-unscoped-name` is for.
+
 See [Public Registry Packs](/guides/registry-showcase) for the first-party
 catalog and cache-freshness controls (`--refresh`, `GC_REGISTRY_FRESHNESS`), and
 [Understanding Packs](/guides/understanding-packs#registries-handles-and-sources)

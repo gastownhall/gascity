@@ -215,6 +215,76 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 				"pool_slot":    "2",
 			},
 		},
+		// asleep+sleep_reason=max-session-age is freeable (isPoolSessionSlotFreeable*):
+		// covers the Info-form production path (isPoolSessionSlotFreeableInfo), which
+		// previously had no equivalence-oracle coverage for this reason.
+		"asleep-max-session-age-freeable": {
+			ID:     "ga-maxage",
+			Type:   session.BeadType,
+			Title:  "maxage",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonMaxSessionAge),
+				"pool_slot":    "2",
+			},
+		},
+		// The remaining freeable sleep reasons. Each arm of the
+		// isPoolSessionSlotFreeable allowlist needs its own fixture: the oracle
+		// compares the bead form against the Info form per fixture, so a reason
+		// with no fixture lets the two classifiers drift apart on that reason
+		// alone. failed-create appears here in its asleep+sleep_reason spelling,
+		// which is distinct from the "failed-create" fixture below (state=
+		// failed-create) and reaches a different arm.
+		"asleep-city-stop-freeable": {
+			ID:     "ga-citystop",
+			Type:   session.BeadType,
+			Title:  "citystop",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonCityStop),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-failed-create-freeable": {
+			ID:     "ga-failedasleep",
+			Type:   session.BeadType,
+			Title:  "failedasleep",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonFailedCreate),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-runtime-missing-freeable": {
+			ID:     "ga-runtimemissing",
+			Type:   session.BeadType,
+			Title:  "runtimemissing",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonRuntimeMissing),
+				"pool_slot":    "2",
+			},
+		},
+		"asleep-provider-terminal-error-freeable": {
+			ID:     "ga-providerterm",
+			Type:   session.BeadType,
+			Title:  "providerterm",
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"template":     "worker",
+				"state":        "asleep",
+				"sleep_reason": string(session.SleepReasonProviderTerminalError),
+				"pool_slot":    "2",
+			},
+		},
 		"asleep-wait-hold-not-freeable": {
 			ID:     "ga-wait",
 			Type:   session.BeadType,
@@ -1739,12 +1809,47 @@ func TestLifecycleTimerBlockerInfo(t *testing.T) {
 		{"hold wins", map[string]string{"held_until": future, "quarantined_until": future}, "user_hold"},
 		{"expired hold", map[string]string{"held_until": past}, ""},
 		{"expired quarantine", map[string]string{"quarantined_until": past}, ""},
+		{"pinned", map[string]string{"pin_awake": "true"}, "pinned"},
+		{"pinned whitespace", map[string]string{"pin_awake": " true "}, "pinned"},
+		{"hold wins over pinned", map[string]string{"held_until": future, "pin_awake": "true"}, "user_hold"},
+		{"quarantine wins over pinned", map[string]string{"quarantined_until": future, "pin_awake": "true"}, "quarantine"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			info := seedSessionInfo(makeBead("b1", tt.md))
 			if got := lifecycleTimerBlockerInfo(info, now); got != tt.want {
 				t.Errorf("lifecycleTimerBlockerInfo = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The max-session-age timer takes the same blocker ladder minus the durable
+// pin: a pinned session is exempt from the idle kill but must still get its
+// age-based credential restart, which the pin override then re-wakes it from.
+func TestMaxSessionAgeBlockerInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour).Format(time.RFC3339)
+	past := now.Add(-time.Hour).Format(time.RFC3339)
+	tests := []struct {
+		name string
+		md   map[string]string
+		want string
+	}{
+		{"none", map[string]string{}, ""},
+		{"hold", map[string]string{"held_until": future}, "user_hold"},
+		{"quarantine", map[string]string{"quarantined_until": future}, "quarantine"},
+		{"expired hold", map[string]string{"held_until": past}, ""},
+		{"pinned does not block max session age", map[string]string{"pin_awake": "true"}, ""},
+		{"pinned whitespace does not block max session age", map[string]string{"pin_awake": " true "}, ""},
+		{"hold still blocks a pinned session", map[string]string{"held_until": future, "pin_awake": "true"}, "user_hold"},
+		{"quarantine still blocks a pinned session", map[string]string{"quarantined_until": future, "pin_awake": "true"}, "quarantine"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := seedSessionInfo(makeBead("b1", tt.md))
+			if got := maxSessionAgeBlockerInfo(info, now); got != tt.want {
+				t.Errorf("maxSessionAgeBlockerInfo = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -585,6 +585,13 @@ metadata (for example `opt_model`), validated against the provider's
 options schema at spawn; `gc.model` is a deprecated spelling that the
 `gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
 
+**Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
+semantic role alias used by imported role packs. The resolver first treats the
+complete value as an exact configured agent identity; this preserves an agent
+actually named or bound as `gc.<role>`. Only when that exact identity is absent
+does it retry the bare `<role>` within the workflow's rig context. This value
+alias does not change the separate reservation of `gc.*` *metadata keys*.
+
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the
 gated step to it: the step stays blocked until the gate bead is closed.
@@ -922,6 +929,17 @@ still run. A teardown step may therefore read the run's final
 workspace on fail" expressible. Its own outcome never re-grades the root;
 a teardown that fails after settlement is a relic to sweep, not a failed
 run.
+
+**Close-ownership invariant.** A compiled graph never blocks a node on the
+control bead that closes it. A scope body is not blocked by any of its
+scope-checks (the body's authored `needs` keep naming the raw members), and
+a workflow root is not blocked by its `workflow-finalize` (the root reaches
+its finalizer through an informational `tracks` edge instead). Such an edge
+is a permanent deadlock — the store refuses to close a blocked issue, and
+the only bead that could clear the blocker is the one being refused. The
+compiler rejects any recipe that contains one. Downstream ordering is
+unaffected: the scope-check still blocks on its member, and the finalizer
+still blocks on every graph sink including the scope body.
 
 ## 4. Accepted But Inert
 

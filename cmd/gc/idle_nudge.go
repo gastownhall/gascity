@@ -46,6 +46,8 @@ const (
 	idleClaimNudgeMaxAttempts = 3                // then give up and log (manual re-nudge remains)
 )
 
+const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -94,10 +96,9 @@ func nudgeStalledPoolClaims(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	// The shared engine keys work by bead ID alone, which cannot tell two
-	// same-ID beads in different stores apart, so this predicate carries its own
-	// store-scoped snapshot and leaves the engine's ID map empty.
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
+	// A bead ID alone cannot tell two same-ID beads in different stores apart,
+	// so this predicate carries its own store-scoped snapshot of the work.
+	runNudgeBackstop(sp, store, sessionBeads, now, stdout, "idle-claim-nudge", poolClaimBackstop{
 		cfg:  cfg,
 		work: newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
 	})
@@ -136,7 +137,6 @@ func nudgeStalledPoolContinuations(
 		sp,
 		store,
 		sessionBeads,
-		nil,
 		now,
 		stdout,
 		"continuation-claim-nudge",
@@ -168,7 +168,7 @@ func (p poolContinuationBackstop) governs(s beads.Bead) bool {
 	return strings.TrimSpace(s.Metadata["pool_managed"]) == "true"
 }
 
-func (p poolContinuationBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, _ string) (backstopTarget, backstopResolution) {
+func (p poolContinuationBackstop) resolve(s beads.Bead, _ string) (backstopTarget, backstopResolution) {
 	if p.candidates.holdBySessionID[s.ID] {
 		return backstopTarget{}, backstopResolutionHold
 	}
@@ -214,9 +214,20 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	}
 	// Assigned-work snapshots normally carry a CachingStore. A plain Get can
 	// therefore return the pre-claim row after another process has already
-	// claimed it. Both revalidation reads must use the exact store scope's
-	// authoritative live handle or this last-moment guard can deliver a stale
-	// continuation nudge.
+	// claimed it, so both revalidation reads must go through the live handle
+	// rather than the snapshot's cached view. That handle belongs to
+	// target.Store — the leg the row was read from, which is not necessarily
+	// the scope target.StoreRef names (see the owner note below). planClass
+	// (internal/storeref/resolve.go) is the PLACEMENT contract, not a residency
+	// one: `gc storage migrate` preserves ids and never deletes back
+	// (cmd/gc/census_residency.go), so a relocated row stays co-resident in the
+	// work ledger beside its binding. Both legs canonicalize to city:<name>, so
+	// the copies share a group, and — sameContinuationClaimCandidate not
+	// comparing Store — the fold keeps the first leg in census order, which is
+	// the work ledger. This guard therefore re-reads that leg, and on a
+	// pre-relocation residue it can still pass on a stale row. Pre-existing and
+	// unchanged by the owner-ref split; tracked with the rest of the
+	// leg-vs-owner grouping work in ga-m4sj2.
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
 		return backstopResolutionHold
@@ -225,6 +236,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || current.ID != target.ID {
 		return backstopResolutionHold
 	}
+	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
+	// proved for this row, not the leg it was read from: inside a class binding a
+	// rig-scoped workflow's steps carry gc.root_store_ref=rig:<name> (ga-erfca).
+	// Both re-reads below compare against that owner, so this mirror of the
+	// evaluator cannot disqualify a row the evaluator admitted.
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "open") ||
 		!strings.EqualFold(strings.TrimSpace(current.Type), "task") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee ||
@@ -238,12 +254,17 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	if err != nil || root.ID != target.RootID {
 		return backstopResolutionHold
 	}
+	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
+	// live, not who owns this step. gc.session_name on the root is a dashboard
+	// stamp, last-writer-wins across the molecule's steps, so requiring it to
+	// equal target.Assignee is unsatisfiable for any formula that routes steps to
+	// more than one agent template. current.Assignee above is the authoritative
+	// pin.
 	if !strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
-		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" ||
-		strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != target.Assignee {
+		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return backstopResolutionClear
 	}
 	return backstopResolutionOutstanding
@@ -383,10 +404,9 @@ func (p poolClaimBackstop) governs(s beads.Bead) bool {
 // job and must not be disturbed. If the bead is absent from the work snapshot
 // it's been claimed/closed/moved.
 //
-// The engine's ID-keyed map is ignored: resolution goes through the
-// store-scoped snapshot so a slot bound to a rig bead is matched against that
-// rig's copy, not a same-ID bead in another store.
-func (p poolClaimBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, sessName string) (backstopTarget, backstopResolution) {
+// Resolution goes through the store-scoped snapshot so a slot bound to a rig
+// bead is matched against that rig's copy, not a same-ID bead in another store.
+func (p poolClaimBackstop) resolve(s beads.Bead, sessName string) (backstopTarget, backstopResolution) {
 	triggerID := strings.TrimSpace(s.Metadata[beadmeta.TriggerBeadIDMetadataKey])
 	if triggerID == "" {
 		return backstopTarget{}, backstopResolutionClear
@@ -404,7 +424,7 @@ func (p poolClaimBackstop) state(s beads.Bead, target backstopTarget) (same bool
 }
 
 func (p poolClaimBackstop) content(s beads.Bead) string {
-	return claimNudgeFor(p.cfg, s)
+	return stalledPoolClaimNudgeFor(p.cfg, s)
 }
 
 func (p poolClaimBackstop) revalidate(_ backstopTarget) backstopResolution {
@@ -507,15 +527,31 @@ func isUnclaimedTrigger(w beads.Bead, sessName string) bool {
 // claimNudgeFor resolves the slot's configured startup nudge (the worker's
 // `gc hook --claim` line) from the agent template behind this session bead.
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, _ := configuredClaimNudgeFor(cfg, session)
+	return nudge
+}
+
+func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if !known {
+		return ""
+	}
+	if nudge == "" {
+		return defaultPoolClaimNudge
+	}
+	return nudge
+}
+
+func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {
-		return ""
+		return "", false
 	}
 	agent := findAgentByTemplate(cfg, template)
 	if agent == nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(agent.Nudge)
+	return strings.TrimSpace(agent.Nudge), true
 }
 
 // writeIdleClaimMarker persists the backstop state machine onto the session

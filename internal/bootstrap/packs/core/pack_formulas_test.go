@@ -54,6 +54,76 @@ func formulaStep(t *testing.T, f formulaFile, id string) string {
 	return ""
 }
 
+// TestMolDoWorkDrainClaimsCurrentContinuation pins the distinction between a
+// process's immutable startup bead and the continuation that became ready
+// while that process was running.
+func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+
+	if !strings.Contains(step, "gc ready --json --limit=2") {
+		t.Fatal("drain must resolve the current continuation from ready work")
+	}
+	if !strings.Contains(step, "--include-ephemeral") {
+		t.Fatal("drain must include ephemeral rows; a wisp-tier continuation is invisible to bd ready without it")
+	}
+	if !strings.Contains(step, `--metadata-field "gc.root_bead_id=$ROOT_BEAD_ID"`) || !strings.Contains(step, `--metadata-field "gc.step_ref=mol-do-work.drain"`) {
+		t.Fatal("drain must select the ready drain step from the current workflow root")
+	}
+	if strings.Contains(step, `DRAIN_BEAD_ID="${GC_BEAD_ID`) {
+		t.Fatal("drain must not treat the immutable startup bead as the continuation bead")
+	}
+	if !strings.Contains(step, "if [ -z \"$ROOT_BEAD_ID\" ]") {
+		t.Fatal("drain must fail closed when the startup bead has no workflow root")
+	}
+	if !strings.Contains(step, "if length == 1") || !strings.Contains(step, "could not resolve one ready continuation bead") {
+		t.Fatal("drain must fail closed unless exactly one matching continuation is ready")
+	}
+	// The current-claim branch must stay gated on gc.step_ref. An unguarded
+	// `gc hook current` re-introduces gh-5141 on the deferred path, where the
+	// claim stamp still names the do-work step rather than the drain step.
+	currentAt := strings.Index(step, "gc hook current --id-only")
+	if currentAt < 0 {
+		t.Fatal("drain must consult the current claim before falling back to a ready query")
+	}
+	readyAt := strings.Index(step, "gc ready --json --limit=2")
+	if readyAt < currentAt {
+		t.Fatal("drain must consult the current claim before the ready query, not after it")
+	}
+	if !strings.Contains(step[currentAt:readyAt], `.metadata["gc.step_ref"] == "mol-do-work.drain"`) {
+		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
+	}
+	// The startup-bead id is only needed by the ready-query fallback. Requiring
+	// it up front aborts drain on any seat that is not demand-spawned:
+	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
+	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
+	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
+	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
+	if startupAt < 0 || startupAt < currentAt {
+		t.Fatal("drain must not require a startup bead id before consulting the current claim")
+	}
+	// The current claim carries gc.root_bead_id, and on a warm seat it is the
+	// ONLY source of it: GC_BEAD_ID never reaches a session shell and
+	// GC_TRIGGER_BEAD_ID is demand-spawn-only (cmd/gc/cmd_hook_current.go).
+	// Reading the root off the startup bead first strands every warm seat on
+	// the deferred path — the ga-2q2r0 failure, one layer in.
+	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
+	if rootFromCurrent < 0 {
+		t.Fatal("drain must derive the workflow root from the current claim it already fetched")
+	}
+	if rootFromCurrent > startupAt {
+		t.Fatal("drain must try the current claim's root before falling back to startup env vars")
+	}
+
+	updateAt := strings.Index(step, "gc bd update")
+	drainAckAt := strings.Index(step, "gc runtime drain-ack")
+	if drainAckAt < 0 {
+		t.Fatal("drain must still acknowledge runtime drain after closing its continuation bead")
+	}
+	if updateAt < 0 || !strings.Contains(step[updateAt:drainAckAt], "|| exit 1") {
+		t.Fatal("drain must not acknowledge runtime drain after a failed bead close")
+	}
+}
+
 // TestPolecatPreflightSearchesLedgerBeforeFiling pins the search-before-file
 // contract in the polecat preflight step.
 //
@@ -205,5 +275,86 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("walking embedded core pack: %v", err)
+	}
+}
+
+// TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree pins the fix for a
+// stranded-worktree bug: `git worktree remove` resolves the repo from cwd,
+// and this step `cd`s away from the worktree before removing it, so the bare
+// form exits 128 having unregistered nothing while `rm -rf` deletes the
+// directory anyway, leaving the registration behind forever. These are
+// bootstrap templates, so every city seeded by `gc city init` inherited the
+// defect (ga-x1u5cr; contributing cause of ga-lc9yx's 396 dead worktrees).
+func TestMolPolecatCommitResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-polecat-commit.toml"), "commit-and-push")
+
+	if strings.Contains(step, `git worktree remove "$WORKTREE_PATH" --force`) {
+		t.Error("commit-and-push calls bare `git worktree remove` after `cd ..`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error("commit-and-push must resolve REPO via `git rev-parse --path-format=absolute --git-common-dir` before `cd ..`, so worktree removal does not depend on cwd")
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`commit-and-push must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+
+	// `git -C ""` is a no-op that silently resolves the repo from cwd, and this
+	// step has already `cd ..`'d away from the worktree by then. An unresolved
+	// REPO must short-circuit rather than degrade back to cwd-dependent removal.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`commit-and-push must bail on an empty $REPO; git -C "" silently resolves from cwd, which is exactly the bug this step fixes`)
+	}
+
+	// WORKTREE_PATH is $(pwd), and `git worktree remove` exits 128 on a main
+	// working tree. Without the guard the failure path rm -rf's the whole repo.
+	guardAt := strings.Index(step, `[ -f "$WORKTREE_PATH/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`commit-and-push must guard the rm -rf fallback with [ -f "$WORKTREE_PATH/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	// Match the delete command itself, not the word: the surrounding comment and
+	// the refusal message both mention `rm -rf` and would otherwise be found first.
+	if got := strings.Count(step, `rm -rf "$WORKTREE_PATH"`); got != 1 {
+		t.Fatalf(`commit-and-push must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE_PATH"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE_PATH"`)
+	if guardAt > removeAt {
+		t.Error("commit-and-push runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
+	}
+}
+
+// TestMolScopedWorkResolvesRepoBeforeRemovingWorktree pins the same fix for
+// mol-scoped-work's cleanup step, which is worse than mol-polecat-commit's:
+// its `|| rm -rf` fallback makes the stranded git registration the designed
+// outcome of the bare form's failure path, not just an incidental risk.
+func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-scoped-work.toml"), "cleanup-worktree")
+
+	if strings.Contains(step, `git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"`) {
+		t.Error("cleanup-worktree calls bare `git worktree remove --force ... || rm -rf`; resolve the repo via --git-common-dir first and remove via `git -C \"$REPO\" worktree remove`")
+	}
+	if !strings.Contains(step, "--git-common-dir") {
+		t.Error(`cleanup-worktree must resolve REPO via git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir; cwd is not guaranteed inside the repo at this step`)
+	}
+	if !strings.Contains(step, `git -C "$REPO" worktree remove`) {
+		t.Error(`cleanup-worktree must remove the worktree via git -C "$REPO" worktree remove, not a bare invocation`)
+	}
+
+	// A stale directory that still passes [ -d ], or a git too old for
+	// --path-format, leaves REPO empty; `git -C ""` then resolves from a cwd
+	// this step explicitly does not guarantee is inside the repo.
+	if !strings.Contains(step, `[ -z "$REPO" ]`) {
+		t.Error(`cleanup-worktree must bail on an empty $REPO; git -C "" silently resolves from cwd, which this step cannot assume`)
+	}
+
+	guardAt := strings.Index(step, `[ -f "$WORKTREE/.git" ]`)
+	if guardAt < 0 {
+		t.Fatal(`cleanup-worktree must guard the rm -rf fallback with [ -f "$WORKTREE/.git" ]; a linked worktree's .git is a file, a main checkout's is a directory`)
+	}
+	if got := strings.Count(step, `rm -rf "$WORKTREE"`); got != 1 {
+		t.Fatalf(`cleanup-worktree must delete the worktree exactly once behind the guard; found %d occurrences of rm -rf "$WORKTREE"`, got)
+	}
+	removeAt := strings.Index(step, `rm -rf "$WORKTREE"`)
+	if guardAt > removeAt {
+		t.Error("cleanup-worktree runs rm -rf before the linked-worktree check; the check must gate the delete, not follow it")
 	}
 }

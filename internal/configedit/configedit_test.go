@@ -463,6 +463,38 @@ func TestAddOrUpdateAgentPatch_Existing(t *testing.T) {
 	}
 }
 
+// TestAddOrUpdateAgentPatch_ExistingRigKeyed verifies an existing patch
+// authored with the new rig= key is updated in place when addressed by its
+// qualified identity, rather than shadowed by a new dir-keyed duplicate. The
+// pre-fix match keyed on Dir only, so a rig-keyed patch (Dir empty) never
+// matched "my-rig/polecat" and a second, conflicting block was appended.
+func TestAddOrUpdateAgentPatch_ExistingRigKeyed(t *testing.T) {
+	suspended := false
+	cfg := &config.City{
+		Patches: config.Patches{
+			Agents: []config.AgentPatch{
+				{Rig: "my-rig", Name: "polecat", Suspended: &suspended},
+			},
+		},
+	}
+	err := configedit.AddOrUpdateAgentPatch(cfg, "my-rig/polecat", func(p *config.AgentPatch) {
+		s := true
+		p.Suspended = &s
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Patches.Agents) != 1 {
+		t.Fatalf("expected 1 patch (updated in place), got %d: %#v", len(cfg.Patches.Agents), cfg.Patches.Agents)
+	}
+	if cfg.Patches.Agents[0].Rig != "my-rig" || cfg.Patches.Agents[0].Dir != "" {
+		t.Errorf("patch identity = {Dir:%q Rig:%q}, want the rig-keyed patch updated in place, not a dir-keyed duplicate", cfg.Patches.Agents[0].Dir, cfg.Patches.Agents[0].Rig)
+	}
+	if cfg.Patches.Agents[0].Suspended == nil || !*cfg.Patches.Agents[0].Suspended {
+		t.Error("expected suspended=true after update")
+	}
+}
+
 func TestAddOrUpdateRigPatch(t *testing.T) {
 	cfg := &config.City{}
 	err := configedit.AddOrUpdateRigPatch(cfg, "my-rig", func(p *config.RigPatch) {
@@ -2547,6 +2579,122 @@ func TestDeleteAgentPatch_NotFound(t *testing.T) {
 
 	if err := ed.DeleteAgentPatch("nonexistent"); err == nil {
 		t.Error("expected error for nonexistent agent patch")
+	}
+}
+
+// TestSetAndDeleteAgentPatch_Rig verifies the editor stores, upserts, and
+// deletes rig-targeted patches (including the "*" wildcard) by their resolved
+// qualified identity rather than by Dir alone — which is empty for rig-keyed
+// patches. Two distinct rig-only patches sharing a name must not collide on
+// their empty Dir, and each must be deletable by its rig-qualified name.
+func TestSetAndDeleteAgentPatch_Rig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity())
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	suspended := true
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "rigA", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch rigA: %v", err)
+	}
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "*", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch wildcard: %v", err)
+	}
+	cfg := readTOML(t, path)
+	if len(cfg.Patches.Agents) != 2 {
+		t.Fatalf("patches.agent count = %d, want 2 (rig-only patches must not collide on empty Dir)", len(cfg.Patches.Agents))
+	}
+
+	// Upsert on the same identity replaces in place; it must not append a
+	// third block nor disturb the other rig's patch.
+	suspended = false
+	if err := ed.SetAgentPatch(config.AgentPatch{Rig: "rigA", Name: "worker", Suspended: &suspended}); err != nil {
+		t.Fatalf("SetAgentPatch rigA replace: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if len(cfg.Patches.Agents) != 2 {
+		t.Fatalf("patches.agent count after upsert = %d, want 2 (should replace, not append)", len(cfg.Patches.Agents))
+	}
+
+	// Each patch deletes by its rig-qualified identity.
+	if err := ed.DeleteAgentPatch("rigA/worker"); err != nil {
+		t.Fatalf("DeleteAgentPatch rigA/worker: %v", err)
+	}
+	if err := ed.DeleteAgentPatch("*/worker"); err != nil {
+		t.Fatalf("DeleteAgentPatch */worker: %v", err)
+	}
+	cfg = readTOML(t, path)
+	if len(cfg.Patches.Agents) != 0 {
+		t.Errorf("patches.agent count after deletes = %d, want 0", len(cfg.Patches.Agents))
+	}
+}
+
+// TestSetAgentPatch_RejectsDirPlusRig verifies the editor write boundary
+// rejects a patch that sets both the legacy dir key and the new rig key
+// (including the "*" wildcard) — a mutually-exclusive combination that would
+// hard-fail the next config load. Rejection happens inside Edit before the
+// write step, so city.toml is left untouched and carries no invalid patch.
+func TestSetAgentPatch_RejectsDirPlusRig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rig  string
+	}{
+		{name: "dir and specific rig", rig: "rigB"},
+		{name: "dir and wildcard rig", rig: "*"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTOML(t, dir, minimalCity())
+			ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+			err := ed.SetAgentPatch(config.AgentPatch{Dir: "rigA", Rig: tc.rig, Name: "worker"})
+			if err == nil {
+				t.Fatal("SetAgentPatch(dir+rig) = nil, want error")
+			}
+			if !strings.Contains(err.Error(), "use only one of dir or rig") {
+				t.Fatalf("error = %q, want 'use only one of dir or rig'", err)
+			}
+			cfg := readTOML(t, path)
+			if len(cfg.Patches.Agents) != 0 {
+				t.Errorf("patches.agent count = %d, want 0 (invalid patch must not be written)", len(cfg.Patches.Agents))
+			}
+		})
+	}
+}
+
+// TestStripAgentPatchSuspended_RigKeyedIdentity verifies the suspend-strip
+// cleanup keys on the canonical patch identity for rig= and rig="*" patches,
+// not on Dir alone. A patch authored with the new rig key must be reachable by
+// its rig-qualified identity ("rigA/worker", "*/worker") so a durable
+// agent.toml write can clear a stale suspend override without leaving a
+// shadowing [[patches.agent]] block behind.
+func TestStripAgentPatchSuspended_RigKeyedIdentity(t *testing.T) {
+	cfg := &config.City{
+		Patches: config.Patches{
+			Agents: []config.AgentPatch{
+				{Rig: "rigA", Name: "worker", Suspended: boolPtrTest(true)},
+				{Rig: "*", Name: "worker", Suspended: boolPtrTest(true)},
+				{Dir: "", Name: "worker", Suspended: boolPtrTest(true)},
+			},
+		},
+	}
+	// Strip the rig="*" wildcard patch by its "*/worker" identity only.
+	if !configedit.StripAgentPatchSuspended(cfg, "*/worker") {
+		t.Fatal("StripAgentPatchSuspended should report a change for */worker")
+	}
+	if got := len(cfg.Patches.Agents); got != 2 {
+		t.Fatalf("Patches.Agents len = %d, want 2; got %#v", got, cfg.Patches.Agents)
+	}
+	for _, p := range cfg.Patches.Agents {
+		if p.Rig == "*" {
+			t.Errorf("wildcard patch should be removed; remaining: %#v", p)
+		}
+	}
+	// Strip the rig="rigA" patch by its "rigA/worker" identity.
+	if !configedit.StripAgentPatchSuspended(cfg, "rigA/worker") {
+		t.Fatal("StripAgentPatchSuspended should report a change for rigA/worker")
+	}
+	if got := len(cfg.Patches.Agents); got != 1 || cfg.Patches.Agents[0].Dir != "" || cfg.Patches.Agents[0].Rig != "" {
+		t.Fatalf("after stripping rigA, expected only the city-scoped patch, got %#v", cfg.Patches.Agents)
 	}
 }
 

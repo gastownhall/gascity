@@ -3856,7 +3856,7 @@ func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lock helper: %v", err)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for lock helper")
 	}
 	root, err := openStorageRootMutable(inspection)

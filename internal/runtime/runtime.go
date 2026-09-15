@@ -265,6 +265,27 @@ type IdleWaitProvider interface {
 	WaitForIdle(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// IdleSnapshotProvider is an optional extension for runtimes that can report,
+// in a single non-blocking observation, whether a session is at an idle
+// interactive boundary right now (a ready prompt with no active-processing
+// indicator).
+//
+// It is the point-in-time sibling of [IdleWaitProvider]: WaitForIdle blocks
+// until idle (or timeout), whereas SnapshotIdle takes one look and returns.
+// The idle-timeout reconciler uses it to measure the duration of true
+// idleness for interactive TUIs whose coarse activity clock (last pane
+// output) cannot distinguish an idle-but-repainting TUI from a working one —
+// a TUI that continuously repaints its status line keeps the activity clock
+// perpetually fresh even while genuinely idle.
+//
+// idle reports whether the session currently looks idle. A non-nil err means
+// the observation could not be made (the caller must not treat the session as
+// idle on error); a session that has gone away is reported as an error, not as
+// idle.
+type IdleSnapshotProvider interface {
+	SnapshotIdle(name string) (idle bool, err error)
+}
+
 // ExecProvider is an optional extension for runtimes that expose the RPP
 // connection primitive: run a command inside the box and return its standard
 // output and exit code. It is the op a [Carrier] drives the session-interaction
@@ -291,6 +312,42 @@ type ExecProvider interface {
 // rate-limit prompts) on an already-running session.
 type DialogProvider interface {
 	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
+}
+
+// SessionRosterProvider is an optional extension for providers whose
+// per-session attribute reads are otherwise expensive (e.g. one subprocess
+// fork per call). Callers iterating a full session roster should prefer
+// this over per-name IsAttached/GetLastActivity reads when available.
+//
+// The roster is an ATTRIBUTES source, not a liveness source. Callers must
+// keep using [Provider.IsRunning] to decide whether a session is live and
+// read the roster only for the attributes of a session already known to be
+// running. Roster membership is derived from the runtime's session listing,
+// which still reports a session whose pane has exited (tmux keeps such a
+// corpse listed under remain-on-exit); IsRunning excludes it. Treating
+// presence in the roster as "running" therefore reports crashed agents as
+// idle.
+type SessionRosterProvider interface {
+	// SessionRoster returns attributes for every session currently known
+	// to the runtime, keyed by session name. A name absent from the
+	// result is not running, but the converse does not hold: a name
+	// present in the result is not necessarily running. See the
+	// interface doc.
+	SessionRoster() (map[string]SessionRosterEntry, error)
+}
+
+// SessionRosterEntry holds the batch-readable attributes of a single
+// session, as returned by [SessionRosterProvider.SessionRoster].
+type SessionRosterEntry struct {
+	Attached     bool
+	LastActivity time.Time
+}
+
+// EnvironmentBatchProvider is an optional extension exposing a single-exec
+// full-environment read for a session, letting callers that need multiple
+// keys avoid one subprocess fork per key.
+type EnvironmentBatchProvider interface {
+	GetAllEnvironment(name string) (map[string]string, error)
 }
 
 // TransportCapabilityProvider is an optional extension for providers that can
@@ -565,6 +622,20 @@ type Config struct {
 
 	// Env is additional environment variables set in the session.
 	Env map[string]string
+
+	// OperatorEnv carries the effective operator-authored environment values
+	// captured from config — [workspace].env, [providers.*].env, [[agent]].env,
+	// and [[rigs.patches]].env — before passthrough, generated, or
+	// resolved-credential values are merged into Env. It is the dedicated
+	// Launch-tier identity surface decided by Option A' (ga-3a42sp): distinct
+	// from Env (the fully merged process environment, allow-list-filtered in
+	// the fingerprint) and from FingerprintExtra (opaque non-behavioral extra
+	// data) — widening either would misclassify config-authored env as
+	// Provision-tier. Hashed into the LAUNCH half of the fingerprint, so a
+	// change relaunches the agent in the existing warm box rather than
+	// triggering a reprovision. Nil and empty are equivalent (no keys set
+	// contributes nothing to the hash).
+	OperatorEnv map[string]string
 
 	// MCPServers is the effective ACP session/new MCP server list for this
 	// session. Non-ACP providers ignore it.

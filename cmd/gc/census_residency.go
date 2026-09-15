@@ -83,7 +83,43 @@ func censusStoreCandidates(
 	suspendedRigPaths map[string]bool,
 	style censusRefStyle,
 ) ([]classStoreCandidate, error) {
-	return censusLegCandidates(storeref.Census{}, cityPath, cfg, leading, rigStores, suspendedRigPaths, style)
+	return censusLegCandidates(storeref.Census{}, storeref.PlaneReconcile, cityPath, cfg, leading, rigStores, suspendedRigPaths, style)
+}
+
+// routedWorkStoreCandidates resolves the ROUTED-WORK leg set for a
+// runtime-plane reader: Plan(RoutedWork) narrowed to the infra bindings.
+//
+// Two things make it a different question from censusStoreCandidates rather
+// than a cheaper version of it.
+//
+// The INTENT is RoutedWork, which is the surface `gc ready` and the hook claim
+// through. Sharing it is the reader-agreement property (internal/storeref's
+// TestSweepAndDemandReadTheSameStores): a bead the controller counts as demand
+// must be a bead a worker can claim, and the fastest way to break that is for
+// one of them to resolve its own leg list.
+//
+// The PLANE is runtime, and it narrows to the bindings because the operator
+// ruling is that routed work lives only in the graph store — "gc ready work will
+// never be in the work db" (ga-4qdfn) — so the ledger leg this arm used to read
+// SEQUENTIALLY, once per census leg, could not hold the answer. It was 8.1s of a
+// 24.2s demand leg on maintainer-city.
+//
+// The narrowing is the resolver's, not this file's: storeref.Narrow keeps the
+// plan's order, roles and per-leg error policies and only drops legs, so a
+// consumer cannot accidentally answer the latency question by reordering the
+// plan (#5148 co-residence — binding-LAST is deliberate).
+//
+// A city that relocates nothing narrows to its one work store, which there IS
+// its infra store.
+func routedWorkStoreCandidates(
+	cityPath string,
+	cfg *config.City,
+	leading beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+	style censusRefStyle,
+) ([]classStoreCandidate, error) {
+	return censusLegCandidates(storeref.RoutedWork{}, storeref.PlaneRuntime, cityPath, cfg, leading, rigStores, suspendedRigPaths, style)
 }
 
 // sessionCensusStoreCandidates resolves the SESSION census leg set. It differs
@@ -104,11 +140,12 @@ func sessionCensusStoreCandidates(
 	rigStores map[string]beads.Store,
 	suspendedRigPaths map[string]bool,
 ) ([]classStoreCandidate, error) {
-	return censusLegCandidates(storeref.Session{}, cityPath, cfg, leading, rigStores, suspendedRigPaths, censusRefScoped)
+	return censusLegCandidates(storeref.Session{}, storeref.PlaneReconcile, cityPath, cfg, leading, rigStores, suspendedRigPaths, censusRefScoped)
 }
 
 func censusLegCandidates(
 	intent storeref.Intent,
+	plane storeref.Plane,
 	cityPath string,
 	cfg *config.City,
 	leading beads.Store,
@@ -126,6 +163,12 @@ func censusLegCandidates(
 	topo := residencyTopologyForCity(cityPath, cfg, work, servingRigStores(cfg, rigStores, suspendedRigPaths))
 	plan, err := storeref.Plan(intent, topo)
 	if err != nil {
+		return nil, err
+	}
+	// The plane is the CALLER's contract, applied after the residency question is
+	// answered: the census sweep converges and never narrows, the tick's
+	// routed-demand read is a latency contract and narrows to the infra binding.
+	if plan, err = storeref.Narrow(plan, plane); err != nil {
 		return nil, err
 	}
 	// Enumerated through the resolver rather than executed through it: the arms

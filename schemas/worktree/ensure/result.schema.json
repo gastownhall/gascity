@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc worktree ensure --json result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "action",
+    "path",
+    "branch",
+    "created",
+    "branch_created"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "worktree ensure" },
+    "action": { "const": "ensure" },
+    "path": { "type": "string" },
+    "branch": { "type": "string" },
+    "head": { "type": "string" },
+    "created": { "type": "boolean" },
+    "branch_created": { "type": "boolean" },
+    "planned": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "provenance": { "$ref": "#/$defs/provenance" }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "bead_id",
+        "store_ref",
+        "repo_identity",
+        "path",
+        "branch",
+        "base_ref",
+        "base_sha",
+        "creator",
+        "owner",
+        "generation",
+        "lifecycle"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "bead_id": { "type": "string" },
+        "store_ref": { "type": "string" },
+        "repo_identity": { "type": "string" },
+        "path": { "type": "string" },
+        "branch": { "type": "string" },
+        "base_ref": { "type": "string" },
+        "base_sha": { "type": "string" },
+        "creator": { "type": "string" },
+        "owner": { "type": "string" },
+        "generation": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "lifecycle": { "type": "string" },
+        "attempt_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

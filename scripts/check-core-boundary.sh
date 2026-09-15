@@ -52,10 +52,44 @@ COMMERCIAL_MODULES="github.com/gastownhall/gascity-hosted"
 failed=0
 note() { echo "check-core-boundary: $*" >&2; }
 
-# Non-test core .go surface (whole module tree minus vendor/testdata/tests).
+# Non-test core .go surface: TRACKED .go files only (vendor/testdata
+# excluded), never an untracked directory. Scanning `git ls-files` instead of
+# walking the working tree means any in-tree Go build-cache or artifact
+# directory is invisible to the scan regardless of its name — the prior
+# --exclude-dir=vendor --exclude-dir=testdata walk false-positived on
+# third-party module sources under a project-local GOMODCACHE (the GitLab CI
+# convention is $CI_PROJECT_DIR/.cache/go-mod, but any in-tree cache layout
+# hit the same bug; gascity#4479).
+#
+# The surface is enumerated ONCE, here, and NUL-delimited so that a tracked
+# path containing whitespace survives the hand-off to grep. Enumeration fails
+# CLOSED per this script's header contract: if the tracked set cannot be
+# listed at all, that is a violation, not a pass.
+CORE_GO_LIST=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles.XXXXXX") || exit 1
+CORE_GO_RAW=$(mktemp "${TMPDIR:-/tmp}/ccb-gofiles-raw.XXXXXX") || exit 1
+trap 'rm -f "$CORE_GO_LIST" "$CORE_GO_RAW"' EXIT
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	note "BLOCKED — not a git work tree; cannot enumerate the tracked .go surface (fail-closed)"
+	failed=1
+elif ! git ls-files -z -- '*.go' >"$CORE_GO_RAW" 2>/dev/null; then
+	note "BLOCKED — git ls-files failed; cannot enumerate the tracked .go surface (fail-closed)"
+	failed=1
+else
+	while IFS= read -r -d '' f; do
+		case "$f" in
+		vendor/* | */vendor/* | testdata/* | */testdata/* | *_test.go) continue ;;
+		esac
+		printf '%s\0' "$f"
+	done <"$CORE_GO_RAW" >"$CORE_GO_LIST"
+fi
+
+# scan <regex>: grep the pre-enumerated core surface. -H is mandatory — a
+# single-file xargs batch would otherwise omit the filename, stripping the
+# location from every BLOCKED report.
 scan() {
-	grep -rn --include='*.go' --exclude-dir=vendor --exclude-dir=testdata "$1" . 2>/dev/null \
-		| grep -v '_test\.go:'
+	[ -s "$CORE_GO_LIST" ] || return 0
+	xargs -0 grep -Hn -e "$1" <"$CORE_GO_LIST" 2>/dev/null
 }
 
 # (a) source-level import of a commercial module. This is a source-level HINT

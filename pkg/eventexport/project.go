@@ -77,8 +77,9 @@ import (
 // v2 replaced the cleartext city_id with a salted, non-reversible city_hash so
 // an operator-chosen city name no longer leaves the box. v3 adds native
 // execution-step dependencies to the envelope. v4 adds fail-closed execution
-// work-association and step-definition facts.
-const SchemaVersion = 5
+// work-association and step-definition facts. v6 adds the execution run-anchor
+// fact.
+const SchemaVersion = 6
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -123,6 +124,7 @@ var allowedTypes = map[string]bool{
 	"execution.step_defined":                 true,
 	"execution.step_started":                 true,
 	"execution.step_completed":               true,
+	"execution.run_anchored":                 true,
 	"execution.work_associated":              true,
 	"session.drain_acked_with_assigned_work": true,
 	"session.reset_stalled":                  true,
@@ -148,6 +150,7 @@ var refTypes = map[string]bool{
 	"execution.step_defined":    true,
 	"execution.step_started":    true,
 	"execution.step_completed":  true,
+	"execution.run_anchored":    true,
 	"execution.work_associated": true,
 }
 
@@ -326,6 +329,7 @@ func ProjectEvent(te TaggedEvent, opt Options) (Envelope, bool) {
 
 var executionFactTypes = map[string]bool{
 	"execution.work_associated": true,
+	"execution.run_anchored":    true,
 	"execution.step_defined":    true,
 	"execution.step_started":    true,
 	"execution.step_completed":  true,
@@ -348,7 +352,7 @@ func projectExecutionFact(te TaggedEvent, opt Options) (Envelope, bool) {
 		RunID:     runID,
 	}
 	switch te.Type {
-	case "execution.work_associated":
+	case "execution.work_associated", "execution.run_anchored":
 		if te.SessionID != "" || te.StepID != "" || te.DependsOnStepIDs != nil {
 			return Envelope{}, false
 		}
@@ -450,7 +454,7 @@ func validateExecutionFact(env Envelope) error {
 		return fmt.Errorf("eventexport: %q must not carry content", env.Type)
 	}
 	switch env.Type {
-	case "execution.work_associated":
+	case "execution.work_associated", "execution.run_anchored":
 		if env.SessionID != "" || env.StepID != "" || env.DependsOnStepIDs != nil {
 			return fmt.Errorf("eventexport: %q must not carry step topology", env.Type)
 		}

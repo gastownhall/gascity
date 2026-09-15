@@ -16,9 +16,9 @@ const (
 	maxBytes      = 100 << 10 // default per-call stdout cap (100 KB)
 	maxConcurrent = 4         // simultaneous subprocesses
 
-	gitLogTimeout   = 10 * time.Second
-	bdDoctorTimeout = 15 * time.Second
-	gitLogRecentN   = "200"
+	gitLogTimeout = 10 * time.Second
+	bdPingTimeout = 15 * time.Second
+	gitLogRecentN = "200"
 )
 
 // execErrKind classifies why a sandboxed subprocess failed.
@@ -153,12 +153,12 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // environment is inherited; PATH/HOME/LANG are assigned intentionally.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
-// read-only probes (git log/diff, bd doctor, version probes) need it, and
-// leaking it into a git invocation whose cwd is request-influenced would be
-// needless credential exposure (least privilege). The GIT_* settings neutralize
-// attacker-authored repo config in a probed cwd — no transport protocols and no
-// terminal credential prompt — so a hostile repo cannot drive an out-of-band
-// helper that inherits this environment.
+// credential-free probes (git log/diff, Beads connectivity, version probes)
+// need it, and leaking it into a git invocation whose cwd is
+// request-influenced would be needless credential exposure (least privilege).
+// The GIT_* settings neutralize attacker-authored repo config in a probed cwd
+// — no transport protocols and no terminal credential prompt — so a hostile
+// repo cannot drive an out-of-band helper that inherits this environment.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -259,12 +259,26 @@ func (r *execRunner) execGitLog(ctx context.Context, view string) (*execResult, 
 	return r.run(ctx, "git", gitArgs(gitRepoPath(), args...), gitLogTimeout, maxBytes)
 }
 
-// execBdDoctor runs a read-only `bd doctor` health probe of a rig's embedded
-// dolt .beads store. The path is supervisor-reported and validated here; --fix
-// is never passed, so the probe only inspects.
-func (r *execRunner) execBdDoctor(ctx context.Context, beadsPath string) (*execResult, error) {
+// execBdPing runs Beads' provider-neutral connectivity probe against a rig
+// store. Ping is supported by embedded, direct-server, and proxied-server
+// stores alike. It is read-only of the store — it resolves the store and
+// executes one bounded query — but it is not a passive observation: on bd
+// v1.3.0-rc.2 every ordinary command short-circuits to the UOW provider
+// (cmd/bd/main.go:1758-1791), so pinging a proxied scope whose proxy is
+// stopped STARTS that proxy and its Dolt child. What bounds that is the
+// sampler's own gate, not shutdown ordering: refresh abandons the tick when a
+// city's status read fails, so a city that has been stopped is never reached
+// by the probe fan-out. Do not weaken that early return believing teardown
+// order protects this — the supervisor hosting the sampler serves every
+// registered city and outlives any one city's `gc stop`, and that stop closes
+// workspace-service proxies before it stops sessions rather than last. A ping
+// already in flight while a city's proxies close can re-warm one; that window
+// is bounded by context cancellation and the 5-minute probe cadence. Do not
+// pass --readonly: the proxied-server provider owns its read-only policy and
+// rejects that flag in the RC.
+func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execResult, error) {
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
 	}
-	return r.run(ctx, "bd", []string{"doctor", "--readonly", "--db", beadsPath, "--json"}, bdDoctorTimeout, maxBytes)
+	return r.run(ctx, "bd", []string{"ping", "--db", beadsPath, "--json"}, bdPingTimeout, maxBytes)
 }

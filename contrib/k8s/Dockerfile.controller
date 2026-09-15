@@ -18,7 +18,10 @@ FROM ${BASE}
 USER root
 
 # kubectl for agent attach and beads/events exec providers.
-ARG KUBECTL_VERSION=v1.36.0
+# v1.36.3 is the newest 1.36 patch and the newest kubectl on a patched Go
+# stdlib (1.26.5, against 1.26.2 in v1.36.0). Its x/net and x/text stay behind
+# the fixed versions, so those keep waivers in .trivyignore.yaml.
+ARG KUBECTL_VERSION=v1.36.3
 RUN curl -fsSL \
     "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     -o /tmp/kubectl \
