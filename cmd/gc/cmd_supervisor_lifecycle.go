@@ -1231,6 +1231,15 @@ var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // context need to survive launchd/systemd startup; arbitrary shell state can
 // be opted in with GC_SUPERVISOR_ENV.
 var supervisorServiceEnvKeys = map[string]bool{
+	// beads' pooled per-I/O deadline overrides (#1861 rationale, like the
+	// GC_DOLT_* keys). The supervisor's in-process store opens honor ONLY the
+	// env rung — the config.yaml rung reads a viper only cmd/bd initializes,
+	// .beads/.env is bd-main-only — so on a shared/hub-bound Dolt store where
+	// the 10s default is too tight these must survive plist regeneration.
+	// Scope: the storebinding workspace open withholds the BEADS_ namespace
+	// by design and keeps its defaults either way.
+	"BEADS_DOLT_POOL_READ_TIMEOUT":             true,
+	"BEADS_DOLT_POOL_WRITE_TIMEOUT":            true,
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
 	"CLAUDE_CODE_EFFORT_LEVEL":                 true,
 	"CLAUDE_CODE_OAUTH_TOKEN":                  true,

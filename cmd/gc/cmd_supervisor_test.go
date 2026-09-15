@@ -7449,3 +7449,73 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Errorf("stdout = %q, want API listening message for low port", stdout.String())
 	}
 }
+
+// TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile pins
+// the survival path for beads' pooled per-I/O deadline overrides: the
+// supervisor's in-process store opens honor only the env rung, so the two
+// keys must persist into the service env from ${GC_HOME}/secrets.env without
+// a GC_SUPERVISOR_ENV opt-in — that is what the allowlist entry buys. Red on
+// base by construction (the keys were not allowlisted).
+func TestBuildSupervisorServiceDataMergesPoolTimeoutKeysFromSecretsEnvFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	// Ensure the keys are NOT present in the calling shell's environment.
+	t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "")
+	t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "")
+
+	writeSupervisorSecretsEnvFile(t, `# machine-local store deadlines
+BEADS_DOLT_POOL_READ_TIMEOUT=90s
+BEADS_DOLT_POOL_WRITE_TIMEOUT=90s
+`)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for _, key := range []string{"BEADS_DOLT_POOL_READ_TIMEOUT", "BEADS_DOLT_POOL_WRITE_TIMEOUT"} {
+		if got[key] != "90s" {
+			t.Fatalf("ExtraEnv[%s] = %q, want 90s (all env: %#v)", key, got[key], got)
+		}
+	}
+}
+
+// TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl pins the
+// launchctl fallback tier for the same two keys, mirroring the GC_DOLT_*
+// credential test above.
+func TestBuildSupervisorServiceDataReadsPoolTimeoutKeysFromLaunchctl(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
+	for _, key := range []string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT",
+	} {
+		t.Setenv(key, "")
+	}
+
+	stub := map[string]string{
+		"BEADS_DOLT_POOL_READ_TIMEOUT":  "120s",
+		"BEADS_DOLT_POOL_WRITE_TIMEOUT": "120s",
+	}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string { return stub[key] }
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key, want := range stub {
+		if got[key] != want {
+			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+		}
+	}
+}
