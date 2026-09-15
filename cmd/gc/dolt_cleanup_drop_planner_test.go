@@ -185,12 +185,37 @@ func TestPlanDoltDrops_EmptyInputsProduceEmptyPlan(t *testing.T) {
 	}
 }
 
+func TestPlanDoltDrops_RecognizesGCSideTestScopeOverrideMarker(t *testing.T) {
+	// ga-szv0ge: TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess
+	// exercises the real finalizeCanonicalBdScopeInit store-open path and
+	// leaks a database named "beads_test_gsp" (its doltDatabase override).
+	// Confirm the planner actually treats that literal name as stale, and
+	// that it never collides with a name a real prefix-named rig (or the
+	// beads_t protocol-test negative fixtures) could plausibly use.
+	all := []string{"beads_test_gsp", "gsp", "beads_team", "beads_tenant", "beads_tmp_prod"}
+
+	plan := planDoltDrops(all, defaultStaleDatabasePrefixes, nil)
+
+	wantDrop := []string{"beads_test_gsp"}
+	if !equalStringSlice(plan.ToDrop, wantDrop) {
+		t.Errorf("ToDrop = %v, want %v", plan.ToDrop, wantDrop)
+	}
+	if len(plan.Skipped) != 0 {
+		t.Errorf("Skipped = %v, want empty", plan.Skipped)
+	}
+}
+
 func TestDefaultStaleDatabasePrefixes_MirrorsBeadsCleanDatabases(t *testing.T) {
 	// be-hjj-3 is the beads-side bead that converges these prefixes; until
 	// then we mirror beads/cmd/bd/dolt.go:staleDatabasePrefixes.
+	//
+	// "beads_test" is a gc-side-only addition (ga-szv0ge) with no beads-side
+	// counterpart: it marks a gc test's explicit doltDatabase scope override
+	// rather than a beads-generated name, so it is not part of the mirror
+	// and be-hjj-3 convergence does not need to add it upstream.
 	want := []string{
 		"testdb_", "test_guard_", "test_federation_",
-		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_",
+		"doctest_", "doctortest_", "beads_pt", "beads_vr", "beads_t", "beads_test_bench_", "beads_test",
 	}
 	if !equalStringSlice(defaultStaleDatabasePrefixes, want) {
 		t.Errorf("defaultStaleDatabasePrefixes = %v, want %v", defaultStaleDatabasePrefixes, want)
