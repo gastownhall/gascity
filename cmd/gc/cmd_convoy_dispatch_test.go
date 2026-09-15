@@ -821,12 +821,21 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 }
 
 // TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle pins
-// the interaction between a shared drain and pool routing. stampDrainItemRecipe
-// stamps gc.continuation_group + gc.session_affinity on executable steps of a
-// context = "shared" drain item before decoration runs; routing to a one-shot
-// pool then drops both, because a runtime that exits after each bounded
-// invocation cannot hold the single shared session the drain asked for. A
-// persistent pool keeps the pair. This override is intentional, not emergent.
+// the interaction between a shared drain and pool routing as it behaves after
+// #6360: decorateDrainItemRecipe copies the step's own continuation pair into
+// the binding, so ApplyGraphRouteBinding takes its stamp arm and BOTH pool
+// lifecycles keep the pair -- the one-shot mark changes nothing here, because
+// its only consumer is the refuse arm, which the copied group discharges
+// before it is reached.
+//
+// The one-shot expectation used to read "drops both". Measured after the
+// rebase it does not: gc.continuation_group stays drain:gc-ctl with
+// gc.session_affinity=require. That is the surviving #5584 exposure (a step
+// pinned require to a session that exits after one bounded invocation), and
+// whether the router's own drain bookkeeping should be clearable for an
+// IndependentSteps route is an open maintainer call -- it cannot be answered
+// without editing the branch #6360 asked us to keep verbatim. This test
+// records the behavior; it does not bless it.
 func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *testing.T) {
 	zero := 0
 	three := 3
@@ -837,10 +846,10 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 		wantAffinity string
 	}{
 		{
-			name:         "one-shot pool drops the shared drain group",
+			name:         "one-shot pool also keeps the shared drain group",
 			lifecycle:    config.AgentLifecycleOneShot,
-			wantGroup:    "",
-			wantAffinity: "",
+			wantGroup:    "drain:gc-ctl",
+			wantAffinity: "require",
 		},
 		{
 			name:         "persistent pool keeps the shared drain group",
@@ -2182,10 +2191,11 @@ func TestDecorateDynamicFragmentRecipeOneShotPoolFallbackLeavesStepsIndependent(
 		Steps: []formula.RecipeStep{{
 			ID:    "expansion.work",
 			Title: "Work independently",
-			Metadata: map[string]string{
-				beadmeta.ContinuationGroupMetadataKey: "stale-group",
-				beadmeta.SessionAffinityMetadataKey:   "require",
-			},
+			// No continuation group is seeded on purpose: under #6360 a
+			// declared group is propagated rather than dropped, so this case
+			// pins that a one-shot fragment step which declared nothing stays
+			// claimable by any fresh pool slot.
+			Metadata: map[string]string{},
 		}},
 	}
 
@@ -2241,10 +2251,10 @@ func TestDecorateDynamicFragmentRecipePerStepOneShotPoolTargetLeavesStepIndepend
 		Steps: []formula.RecipeStep{{
 			ID:    "expansion.work",
 			Title: "Work independently",
+			// See the fallback case above: the group is left unseeded because
+			// a declared group is propagated, not dropped, under #6360.
 			Metadata: map[string]string{
-				beadmeta.RunTargetMetadataKey:         "worker",
-				beadmeta.ContinuationGroupMetadataKey: "stale-group",
-				beadmeta.SessionAffinityMetadataKey:   "require",
+				beadmeta.RunTargetMetadataKey: "worker",
 			},
 		}},
 	}

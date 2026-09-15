@@ -1429,6 +1429,56 @@ func TestDecorateGraphWorkflowRecipe_PoolContinuationGroupOptIn(t *testing.T) {
 	}
 }
 
+// TestGraphRouteBindingForAgent_LifecycleMarksIndependentSteps pins the wiring
+// this change exists to add: the agent lifecycle, not each caller, decides
+// whether a pool route is an independent-step route, and every pool-flavored
+// routing entrypoint derives its binding from here.
+func TestGraphRouteBindingForAgent_LifecycleMarksIndependentSteps(t *testing.T) {
+	zero := 0
+	one := 1
+	two := 2
+	tests := []struct {
+		name             string
+		agent            config.Agent
+		wantMetadataOnly bool
+		wantIndependent  bool
+	}{
+		{
+			name:             "one-shot pool marks independent steps",
+			agent:            config.Agent{Name: "worker", Lifecycle: config.AgentLifecycleOneShot, MinActiveSessions: &zero, MaxActiveSessions: &two},
+			wantMetadataOnly: true,
+			wantIndependent:  true,
+		},
+		{
+			name:             "persistent pool keeps continuation available",
+			agent:            config.Agent{Name: "worker", MinActiveSessions: &zero, MaxActiveSessions: &two},
+			wantMetadataOnly: true,
+			wantIndependent:  false,
+		},
+		{
+			// max_active_sessions = 1 with no min_active_sessions or
+			// scale_check is a named session, not a pool: the lifecycle
+			// mark never applies to it.
+			name:  "named-session agent is neither pool-routed nor independent",
+			agent: config.Agent{Name: "architect", MaxActiveSessions: &one},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binding := GraphRouteBindingForAgent(tt.agent)
+			if got := binding.MetadataOnly; got != tt.wantMetadataOnly {
+				t.Errorf("MetadataOnly = %v, want %v", got, tt.wantMetadataOnly)
+			}
+			if got := binding.IndependentSteps; got != tt.wantIndependent {
+				t.Errorf("IndependentSteps = %v, want %v", got, tt.wantIndependent)
+			}
+			if binding.QualifiedName == "" {
+				t.Errorf("QualifiedName = %q, want the routed-to identity", binding.QualifiedName)
+			}
+		})
+	}
+}
+
 func TestApplyGraphRouting_OneShotPoolLeavesExecutableStepsIndependent(t *testing.T) {
 	zero := 0
 	two := 2
@@ -1455,13 +1505,14 @@ func TestApplyGraphRouting_OneShotPoolLeavesExecutableStepsIndependent(t *testin
 					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 				},
 			},
+			// No continuation group is seeded here on purpose. Under #6360 a
+			// formula-declared group is propagated (or refused loudly at the leaf),
+			// never silently dropped, so independence for a one-shot step means
+			// "the step declared nothing and nothing was manufactured".
 			{
-				ID:    "demo.work",
-				Title: "Work independently",
-				Metadata: map[string]string{
-					beadmeta.ContinuationGroupMetadataKey: "stale-group",
-					beadmeta.SessionAffinityMetadataKey:   "require",
-				},
+				ID:       "demo.work",
+				Title:    "Work independently",
+				Metadata: map[string]string{},
 			},
 		},
 	}
@@ -1565,13 +1616,15 @@ func TestDecorateGraphWorkflowRecipe_PerStepOneShotPoolTargetLeavesStepIndepende
 					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
 				},
 			},
+			// No continuation group is seeded here on purpose. Under #6360 a
+			// formula-declared group is propagated (or refused loudly at the leaf),
+			// never silently dropped, so independence for a one-shot step means
+			// "the step declared nothing and nothing was manufactured".
 			{
 				ID:    "demo.work",
 				Title: "Work independently",
 				Metadata: map[string]string{
-					beadmeta.RunTargetMetadataKey:         "worker",
-					beadmeta.ContinuationGroupMetadataKey: "stale-group",
-					beadmeta.SessionAffinityMetadataKey:   "require",
+					beadmeta.RunTargetMetadataKey: "worker",
 				},
 			},
 		},
