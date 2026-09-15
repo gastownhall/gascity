@@ -134,6 +134,175 @@ func TestEvaluatePullRequestsCleanWithPendingChecksIsNotRepairActionable(t *test
 	}
 }
 
+func TestEvaluatePullRequestsAuthorAllowListSkipsOtherAuthors(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "mine",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+		Authors:      []string{"alice"},
+	}
+
+	results := EvaluatePullRequests(monitor, []PullRequest{
+		{Number: 10, Author: "alice", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+		{Number: 11, Author: "bob", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("len(results) = %d, want 1 (only alice's PR)", len(results))
+	}
+	if results[0].Number != 10 || results[0].Author != "alice" {
+		t.Fatalf("kept result = %#v, want alice's PR #10", results[0])
+	}
+	if !results[0].Actionable {
+		t.Fatal("alice's dirty PR should be actionable")
+	}
+}
+
+func TestEvaluatePullRequestsAuthorAllowListFailsClosedOnUnresolvedAuthor(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "mine",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+		Authors:      []string{"alice"},
+	}
+
+	// An actionable PR with an empty/unresolved author must be skipped entirely
+	// when an allow-list is configured — never evaluated, never actionable.
+	results := EvaluatePullRequests(monitor, []PullRequest{
+		{Number: 12, Author: "", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	})
+
+	if len(results) != 0 {
+		t.Fatalf("results = %#v, want empty (unresolved author fails closed)", results)
+	}
+}
+
+func TestEvaluatePullRequestsAuthorAllowListIsCaseSensitive(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "mine",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+		Authors:      []string{"Alice"},
+	}
+
+	results := EvaluatePullRequests(monitor, []PullRequest{
+		{Number: 13, Author: "alice", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	})
+
+	if len(results) != 0 {
+		t.Fatalf("results = %#v, want empty (case-sensitive match)", results)
+	}
+}
+
+func TestEvaluatePullRequestsNoAuthorAllowListActsOnAll(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "all",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+	}
+
+	results := EvaluatePullRequests(monitor, []PullRequest{
+		{Number: 10, Author: "alice", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+		{Number: 11, Author: "", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2 (no author restriction)", len(results))
+	}
+}
+
+func TestEvaluatePullRequestsWithAllowedAuthorsFlagUnionsWithConfig(t *testing.T) {
+	monitor := config.GitHubPRMonitor{
+		Name:         "mine",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+		Authors:      []string{"alice"},
+	}
+
+	// The --author flag adds bob for this run; alice (config) stays allowed.
+	results := EvaluatePullRequestsWithAllowedAuthors(monitor, []PullRequest{
+		{Number: 10, Author: "alice", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+		{Number: 11, Author: "bob", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+		{Number: 12, Author: "carol", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	}, []string{"bob"})
+
+	if len(results) != 2 {
+		t.Fatalf("len(results) = %d, want 2 (alice ∪ bob)", len(results))
+	}
+	for _, r := range results {
+		if r.Author == "carol" {
+			t.Fatalf("carol should be excluded: %#v", r)
+		}
+	}
+}
+
+func TestEvaluatePullRequestsWithAllowedAuthorsFlagAloneRestricts(t *testing.T) {
+	// No configured allow-list, but a --author flag value must still fail-close
+	// the run to that author only.
+	monitor := config.GitHubPRMonitor{
+		Name:         "adhoc",
+		Owner:        "org",
+		Repo:         "repo",
+		BaseBranches: []string{"main"},
+		Rig:          "repo",
+		RepairRoute:  "repo/polecat",
+	}
+
+	results := EvaluatePullRequestsWithAllowedAuthors(monitor, []PullRequest{
+		{Number: 10, Author: "alice", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+		{Number: 11, Author: "bob", BaseRefName: "main", MergeStateStatus: "DIRTY"},
+	}, []string{"alice"})
+
+	if len(results) != 1 || results[0].Author != "alice" {
+		t.Fatalf("results = %#v, want only alice", results)
+	}
+}
+
+func TestGraphQLDecodePullRequestsCapturesAuthor(t *testing.T) {
+	body := strings.NewReader(`{
+		"data": {
+			"repository": {
+				"pullRequests": {
+					"pageInfo": {"hasNextPage": false, "endCursor": null},
+					"nodes": [
+						{"number": 1, "author": {"login": "alice"}, "baseRefName": "main"},
+						{"number": 2, "author": null, "baseRefName": "main"}
+					]
+				}
+			}
+		}
+	}`)
+
+	prs, _, err := DecodePullRequestsPage(body)
+	if err != nil {
+		t.Fatalf("DecodePullRequestsPage: %v", err)
+	}
+	if len(prs) != 2 {
+		t.Fatalf("len(prs) = %d, want 2", len(prs))
+	}
+	if prs[0].Author != "alice" {
+		t.Fatalf("prs[0].Author = %q, want alice", prs[0].Author)
+	}
+	if prs[1].Author != "" {
+		t.Fatalf("prs[1].Author = %q, want empty (null author actor)", prs[1].Author)
+	}
+}
+
 func TestGraphQLDecodePullRequests(t *testing.T) {
 	body := strings.NewReader(`{
 		"data": {

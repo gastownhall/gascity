@@ -358,6 +358,51 @@ func TestGitHubPRBackfillCommandFiltersCleanResultsByDefault(t *testing.T) {
 	}
 }
 
+func TestGitHubPRBackfillAuthorFlagFailsClosedToAllowedAuthor(t *testing.T) {
+	cityPath := writeGitHubMonitorTestCity(t)
+	oldToken := resolveGitHubTokenForBackfill
+	oldClient := newGitHubPRBackfillClient
+	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
+	newGitHubPRBackfillClient = func(string) githubPRLister {
+		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
+			// Allowed author, actionable.
+			{Number: 1, Author: "alice", BaseRefName: "main", HeadSHA: "a1", MergeStateStatus: "DIRTY"},
+			// Different author, actionable — must be skipped by --author.
+			{Number: 2, Author: "bob", BaseRefName: "main", HeadSHA: "b2", MergeStateStatus: "DIRTY"},
+			// Unresolved author, actionable — must fail closed and be skipped.
+			{Number: 3, Author: "", BaseRefName: "main", HeadSHA: "c3", MergeStateStatus: "DIRTY"},
+		}}
+	}
+	t.Cleanup(func() {
+		resolveGitHubTokenForBackfill = oldToken
+		newGitHubPRBackfillClient = oldClient
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "--author", "alice", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var payload struct {
+		ResultCount     int `json:"result_count"`
+		ActionableCount int `json:"actionable_count"`
+		Results         []githubmonitor.Result
+		OK              bool `json:"ok"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode stdout %q: %v", stdout.String(), err)
+	}
+	if !payload.OK {
+		t.Fatal("ok = false, want true")
+	}
+	if payload.ResultCount != 1 || payload.ActionableCount != 1 {
+		t.Fatalf("counts = results %d actionable %d, want 1/1 (only alice)", payload.ResultCount, payload.ActionableCount)
+	}
+	if payload.Results[0].Number != 1 || payload.Results[0].Author != "alice" {
+		t.Fatalf("result = %#v, want alice's PR #1 only", payload.Results[0])
+	}
+}
+
 func writeGitHubMonitorTestCity(t *testing.T) string {
 	t.Helper()
 	cityPath := t.TempDir()
