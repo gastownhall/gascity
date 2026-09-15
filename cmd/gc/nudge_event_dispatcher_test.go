@@ -931,6 +931,40 @@ func TestNudgeEventDispatcherSweepMakesNoProviderCall(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherAbandonsThePassWhenShutdownBeatsTheSlot pins the
+// shutdown contract of acquirePassSlot.
+//
+// Losing the race for a slot to shutdown is not a reason to run the pass
+// anyway. A pass started after the parent is canceled reads the stores and
+// talks to the provider while the process is tearing down, which is the work
+// shutdown exists to stop, and it does it with no throttle at all.
+//
+// Every slot is held here on purpose. acquirePassSlot selects over the slot
+// send and the parent being done, so while a slot is free the runtime may pick
+// either ready case; holding them all leaves the shutdown branch as the only
+// one, which is the branch under test.
+func TestNudgeEventDispatcherAbandonsThePassWhenShutdownBeatsTheSlot(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", testNudgeDispatchStores(dir))
+	seen := newPasses()
+	d.observePasses(seen.record)
+
+	for i := 0; i < nudgeEventPassConcurrency; i++ {
+		d.passSlots <- struct{}{}
+	}
+	cancel()
+	<-d.workerDone
+
+	d.spawnPass("", 0)
+	d.delivery.Wait()
+
+	seen.assertQuiet(t, 250*time.Millisecond, "a pass spawned after shutdown with every slot already held")
+}
+
 // TestNudgeEventDispatcherFullKickDuringPassIsNotLost pins the window that
 // made TestNudgeEventDispatcherSweepMakesNoProviderCall flaky, and the reason
 // that one was flaky rather than simply wrong.

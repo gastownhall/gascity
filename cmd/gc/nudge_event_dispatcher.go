@@ -147,13 +147,14 @@ type nudgeEventDispatcher struct {
 	// was the point of the previous commit, so the bound has to be stated.
 	//
 	// A slot is surrendered when the pass returns OR after passSlotGrace,
-	// whichever comes first, and that second half is what keeps this from
-	// being the defect it replaces. A plain semaphore would let a pass wedged
-	// inside an uncancellable provider call hold its slot forever, and enough
-	// of those would stall every other session again, which is precisely the
-	// head-of-line blocking the fan-out exists to end. Releasing on the grace
-	// means a wedged pass costs its goroutine, which is already true, and
-	// nothing else.
+	// whichever comes first, and that second half bounds HOLD TIME, not
+	// concurrency. Once the grace fires, the wedged pass is still running and
+	// its slot is available again, so the number of passes actually in flight
+	// can exceed the slot count; what cannot happen is one wedged pass holding
+	// capacity for the life of the process, which is the head-of-line blocking
+	// the fan-out exists to end. A plain semaphore would have that property
+	// and this does not. Read the count as a bound on how much work is started
+	// at once, never as a ceiling on how much is running.
 	passSlots     chan struct{}
 	passSlotGrace time.Duration
 
@@ -502,28 +503,33 @@ func (d *nudgeEventDispatcher) drainDeliveries() {
 	}
 }
 
-// nudgeEventPassConcurrency is how many delivery passes may run at once. It is
-// a throttle on the fan-out's cost, not a queue depth: a pass that does not get
-// a slot waits for one rather than being dropped, and the kick that spawned it
-// is already recorded in inflight.
+// nudgeEventPassConcurrency is how many delivery passes may be STARTED at
+// once. It throttles the fan-out's cost; it is not a queue depth and not a
+// ceiling on passes in flight (see passSlots for why the grace release makes
+// those different numbers). A pass that does not get a slot waits for one
+// rather than being dropped, and a kick turned away while a pass holds its key
+// is recorded in declined with its retry budget, so nothing rides on inflight
+// alone: inflight is a lock, it carries no queue state and no budget.
 const nudgeEventPassConcurrency = 8
 
-// acquirePassSlot blocks until a pass slot is free and returns the function
-// that gives it back. The returned function is safe to call more than once;
-// the slot is also returned automatically once passSlotGrace elapses, so a
-// pass wedged in a provider call cannot hold capacity for the life of the
-// process. See the passSlots field for why both halves are load-bearing.
-func (d *nudgeEventDispatcher) acquirePassSlot() func() {
+// acquirePassSlot blocks until a pass slot is free and reports whether the
+// caller may run its pass. The returned release is safe to call more than once
+// and is safe to call when the answer is no. The slot is also returned
+// automatically once passSlotGrace elapses; see the passSlots field for what
+// that does and does not bound.
+func (d *nudgeEventDispatcher) acquirePassSlot() (func(), bool) {
 	if d.passSlots == nil {
-		return func() {}
+		return func() {}, true
 	}
 	select {
 	case d.passSlots <- struct{}{}:
 	case <-d.parent.Done():
-		// Shutdown while waiting. Run the pass unthrottled rather than hold
-		// the delivery WaitGroup open: the drain already bounds how long
-		// shutdown waits on it.
-		return func() {}
+		// Shutdown won the race for a slot, so abandon the pass. Running it
+		// anyway would read the stores and talk to the provider while the
+		// process tears down, unthrottled, which is the work shutdown exists
+		// to stop; and the drain bounding how long shutdown waits is a bound
+		// on the wait, not a reason to start more of it.
+		return func() {}, false
 	}
 	var once sync.Once
 	release := func() { once.Do(func() { <-d.passSlots }) }
@@ -531,7 +537,7 @@ func (d *nudgeEventDispatcher) acquirePassSlot() func() {
 	return func() {
 		timer.Stop()
 		release()
-	}
+	}, true
 }
 
 // spawnPass runs one pass on a goroutine of its own, unless a pass for the
@@ -576,7 +582,11 @@ func (d *nudgeEventDispatcher) spawnPass(sessionFilter string, retriesLeft int) 
 				d.rearmDeclined(sessionFilter, budget)
 			}
 		}()
-		defer d.acquirePassSlot()()
+		release, run := d.acquirePassSlot()
+		defer release()
+		if !run {
+			return
+		}
 		d.pass(sessionFilter, retriesLeft)
 	}()
 }
