@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "ok",
+    "evaluated_at",
+    "threshold_seconds",
+    "entries",
+    "pools",
+    "total_in_progress",
+    "total_stalled",
+    "skipped"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "evaluated_at": {
+      "type": "string"
+    },
+    "threshold_seconds": {
+      "type": "number"
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "bead_id",
+          "pool",
+          "assignee",
+          "last_event_type",
+          "last_event_at",
+          "age_seconds",
+          "stalled"
+        ],
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "pool": {
+            "type": "string"
+          },
+          "assignee": {
+            "type": "string"
+          },
+          "last_event_type": {
+            "type": "string"
+          },
+          "last_event_at": {
+            "type": "string"
+          },
+          "age_seconds": {
+            "type": "number"
+          },
+          "stalled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "pools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "pool",
+          "in_progress",
+          "stalled",
+          "oldest_age_seconds"
+        ],
+        "properties": {
+          "pool": {
+            "type": "string"
+          },
+          "in_progress": {
+            "type": "integer"
+          },
+          "stalled": {
+            "type": "integer"
+          },
+          "oldest_age_seconds": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "total_in_progress": {
+      "type": "integer"
+    },
+    "total_stalled": {
+      "type": "integer"
+    },
+    "skipped": {
+      "type": "integer"
+    }
+  },
+  "additionalProperties": true
+}

@@ -224,6 +224,7 @@ gc analyze
 | Subcommand | Description |
 |------------|-------------|
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+| [gc analyze stalls](#gc-analyze-stalls) | Last-event age per in-progress bead / pool — the dispatcher-wedged signature |
 
 ## gc analyze reliability
 
@@ -258,6 +259,38 @@ gc analyze reliability [flags]
 | `--rig` | string |  | filter to a specific rig |
 | `--since` | string | `7d` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
 | `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
+
+## gc analyze stalls
+
+Stalls reports every bead last known to be status=in_progress,
+its last-event age (now minus the most recent event carrying that bead
+id as Subject), and whether that age meets or exceeds --threshold — the
+"is the dispatcher wedged" signature: a bead claimed and started with no
+event since. Results are grouped per pool (derived from the bead's
+assignee; a pool-instance identity like "polecat-2" folds into pool
+"polecat", an in-progress bead with no assignee groups under
+"unassigned") as well as listed per bead, sorted oldest-first.
+
+--since bounds how far back events.jsonl is scanned to establish each
+bead's current status and last-event time; it is not the stall
+threshold. A bead that has been in_progress longer than --since with no
+event in that window will not appear — widen --since to see it.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze stalls [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--pool` | string |  | filter to a specific pool (derived from bead assignee) |
+| `--since` | string | `24h` | start of the event lookback window — duration (1h, 7d) or RFC3339 timestamp |
+| `--threshold` | string | `15m` | no-event age at or above which an in-progress bead is reported stalled (duration, e.g. 15m, 1h) |
+| `--until` | string |  | end of the event lookback window and evaluation instant — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc bd
 
