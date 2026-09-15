@@ -380,8 +380,19 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		}
 	}
 
+	// continuation_reset_pending means "the next wake must start a fresh
+	// conversation" — it is not itself a reason to wake a Drained session.
+	// AcknowledgeDrainPatch(freshWake=true) stamps state=drained +
+	// continuation_reset_pending=true together when a wake_mode=fresh session
+	// drain-acks (e.g. it only has blocked assigned work). Without this guard
+	// that pending flag alone re-desires the session every tick, undoing the
+	// drain-ack and driving a perpetual wake/drain oscillation (each cycle a
+	// full fresh model boot). Mirrors the Drained guard on the pin arm below.
+	// A legitimate reset-pending session is asleep-but-not-drained (restart
+	// request, config-drift reset) or already carries pending-create/
+	// explicit-wake — both remain unaffected by this guard.
 	for _, bead := range input.SessionBeads {
-		if !bead.ContinuationResetPending || bead.RestartRequested || bead.WaitHold {
+		if !bead.ContinuationResetPending || bead.RestartRequested || bead.WaitHold || bead.Drained {
 			continue
 		}
 		switch desired[bead.SessionName] {
@@ -481,6 +492,12 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// because it has no idle reference. The "work done, no demand" drain
 		// still fires via the "on-demand:running" reason, which is NOT exempt.
 		// See #3413.
+		//
+		// A durable explicit wake request ("explicit-wake") is exempt for the
+		// same reason: it is a standing operator/wake-path demand for this
+		// specific session, so an idle window that predates it (e.g. from a
+		// supervisor-restart re-projection) must not silently cancel it. See
+		// #5739.
 		agent, hasAgent := lookupAgent(bead.Template)
 		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
@@ -488,7 +505,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
-			desired[name] != "work-query" &&
+			desired[name] != "work-query" && desired[name] != "explicit-wake" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			var idleTimeout time.Duration
 			switch {

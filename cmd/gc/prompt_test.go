@@ -647,6 +647,48 @@ func TestBuildTemplateDataRigAlias(t *testing.T) {
 	}
 }
 
+func TestBuildTemplateDataConfigDir(t *testing.T) {
+	// Regression for #5315: PromptContext had no ConfigDir field, so
+	// {{.ConfigDir}} silently rendered "" under Option("missingkey=zero")
+	// instead of the agent's resolved config directory (SessionSetupContext's
+	// ConfigDir, by contrast, always resolved correctly — the two template
+	// scopes disagreed).
+	ctx := PromptContext{ConfigDir: "/city"}
+	data := buildTemplateData(ctx)
+	if data["ConfigDir"] != "/city" {
+		t.Errorf("ConfigDir = %q, want %q", data["ConfigDir"], "/city")
+	}
+}
+
+func TestRenderPromptConfigDir(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("ConfigDir: {{ .ConfigDir }}")
+
+	// Plain-city case: no SourceDir override, ConfigDir resolves to cityPath.
+	ctx := PromptContext{ConfigDir: resolveConfigDir("/city", "")}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if want := "ConfigDir: /city"; got != want {
+		t.Errorf("renderPrompt(ConfigDir, plain city) = %q, want %q", got, want)
+	}
+
+	// SourceDir-override case (imported-pack agents): ConfigDir resolves to
+	// the agent's SourceDir, not cityPath.
+	ctx = PromptContext{ConfigDir: resolveConfigDir("/city", "/city/.gc/packs/example")}
+	got = renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if want := "ConfigDir: /city/.gc/packs/example"; got != want {
+		t.Errorf("renderPrompt(ConfigDir, SourceDir override) = %q, want %q", got, want)
+	}
+}
+
+func TestResolveConfigDir(t *testing.T) {
+	if got := resolveConfigDir("/city", ""); got != "/city" {
+		t.Errorf("resolveConfigDir(cityPath, \"\") = %q, want %q", got, "/city")
+	}
+	if got := resolveConfigDir("/city", "/city/.gc/packs/example"); got != "/city/.gc/packs/example" {
+		t.Errorf("resolveConfigDir(cityPath, sourceDir) = %q, want %q", got, "/city/.gc/packs/example")
+	}
+}
+
 func TestRenderPromptSharedTemplates(t *testing.T) {
 	f := fsys.NewFake()
 	// Shared template defines a named block.

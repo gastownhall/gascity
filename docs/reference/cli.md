@@ -435,7 +435,7 @@ gc beads list --status open --format=json
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include closed beads (default: open only) |
+| `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
@@ -1373,6 +1373,16 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.
+
 ```
 gc doctor [flags]
 ```
@@ -1384,10 +1394,14 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
+gc doctor --check controller
+gc doctor --check controller --check events-log
+gc doctor --check controller,events-log --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
@@ -1397,14 +1411,18 @@ gc doctor --json
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1417,7 +1435,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the
@@ -1960,7 +1979,7 @@ gc hook [agent] [flags]
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
-| `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -1976,12 +1995,13 @@ bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
 only in the controller's dispatch condition environment, never in a session
 shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
 pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
-after start) and never decides what a session claims; the pool is pull. It
-appears in the chain below only as a name fallback for work already claimed:
-for a vapor wisp the trigger IS the work bead. A formula step that must close
+after start) and never decides what a session claims; the pool is pull. Named
+singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
+lifetime, pointing at a different bead than the one currently claimed, so it
+must never be consulted ahead of the claim. A formula step that must close
 the bead it is running reads the stamp back here:
 
-    BEAD_ID="$&#123;GC_BEAD_ID:-$&#123;GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)&#125;&#125;"
+    BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
 
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity and when the session has claimed nothing, so a caller that
@@ -3752,6 +3772,11 @@ operations that are absent (exit 2) are reported but never fail the
 run; everything else that misbehaves does. Exits non-zero if any check
 fails, so a runtime pack's CI can gate on it directly.
 
+One exception: when the argument resolves to a pack-declared runtime whose
+[runtimes.&lt;name&gt;] entry declares prompt_delivery = "nudge-fallback", the
+nudge probe is reported as "required: nudge" and an absent or broken nudge
+op fails the run — the declaration is smoke-tested, not trusted.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -4560,6 +4585,7 @@ gc storage
 | Subcommand | Description |
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
@@ -4586,6 +4612,33 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage preflight
+
+Run every check gc storage migrate --from-work runs and report what it
+finds — without copying anything, creating anything, taking the migration guard,
+or publishing any event.
+
+This is for deciding whether the window you are about to take will be spent
+migrating or spent reading a refusal. It runs against a LIVE city: a controller
+serving this city is reported by PID rather than refused, because stopping it is
+the next thing you were going to do anyway.
+
+It resolves its destination from [storage.classes], so it has nothing to check
+until that section names a binding. On a city with no infrastructure split it
+reports exactly that and exits non-zero — author the split first.
+
+It exits non-zero when the migration would refuse for a reason you have to go
+and fix first. That is a different question from gc storage status,
+which exits non-zero whenever the city is not yet serving from its binding — the
+ordinary state of every city with a cutover still ahead of it.
+
+One condition is never checked here, because no process can check it:
+--fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
+
+```
+gc storage preflight
+```
 
 ## gc storage recover-stranded
 
@@ -4626,7 +4679,11 @@ open the binding's engine unless that database already exists, because opening
 it would create the very database the report is being asked about.
 
 It exits non-zero when the city is configured for a binding it has not
-converged on, so a deployment script can gate on it.
+converged on, so a deployment script can gate on it. That is the ordinary state
+of every city with a cutover still ahead of it, and it is NOT a fault report: a
+non-zero status here says the migration has not run, not that it would fail. To
+find out whether it would fail, run `gc storage preflight`, which rehearses
+every check the migration makes without migrating.
 
 ```
 gc storage status
@@ -4757,6 +4814,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.

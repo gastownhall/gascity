@@ -1508,6 +1508,7 @@ printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
 		{"whole metadata object", "update", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 		{"inline metadata object", "update", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 		{"create route target", "create", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"new alias route target", "new", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
@@ -1564,22 +1565,30 @@ printf 'called' > "$BD_CAPTURE"
 
 	for _, tc := range []struct {
 		name string
+		verb string
 		args []string
 		want string
 	}{
-		{"metadata file", []string{"--metadata", "@metadata.json"}, "@file input"},
-		{"malformed metadata", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
-		{"non-string guarded metadata", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
-		{"malformed set metadata", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
-		{"missing metadata", []string{"--metadata"}, "without a value"},
-		{"missing set metadata", []string{"--set-metadata"}, "without a value"},
+		{"metadata file", "update", []string{"--metadata", "@metadata.json"}, "@file input"},
+		{"malformed metadata", "update", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
+		{"non-string guarded metadata", "update", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
+		{"malformed set metadata", "update", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
+		{"missing metadata", "update", []string{"--metadata"}, "without a value"},
+		{"missing set metadata", "update", []string{"--set-metadata"}, "without a value"},
+		{"new alias metadata file", "new", []string{"--metadata", "@metadata.json"}, "@file input"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			args := []string{"--city", cityDir, tc.verb}
+			if tc.verb == "update" {
+				args = append(args, "scratch-1")
+			} else {
+				args = append(args, "scratch")
+			}
+			args = append(args, tc.args...)
 			if got := doBd(args, &stdout, &stderr); got == 0 {
 				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
@@ -2986,6 +2995,28 @@ prefix = "fe"
 // bound backend would reject every command. A city with neither a binding
 // nor a pin keeps the ambient lookup.
 func TestGcBdPassthroughResolvesBdBinary(t *testing.T) {
+	t.Run("managed city runs the workspace-pinned bd", func(t *testing.T) {
+		cityDir := newGcBdBinaryProbeCity(t)
+
+		pinDir := t.TempDir()
+		pinnedBD := filepath.Join(pinDir, "bd")
+		writeGcBdProbeScript(t, pinnedBD, "pinned-bd")
+		cityTOML := "[workspace]\nname = \"demo\"\n\n[workspace.env]\nBD_BIN = " +
+			strconv.Quote(pinnedBD) + "\nPATH = " +
+			strconv.Quote(pinDir+string(os.PathListSeparator)+"$PATH") + "\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"show", "gc-1"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+		}
+		if got := strings.TrimSpace(stdout.String()); got != "pinned-bd" {
+			t.Fatalf("executed bd = %q, want workspace-pinned %q", got, "pinned-bd")
+		}
+	})
+
 	t.Run("complete binding runs the workspace-pinned bd", func(t *testing.T) {
 		cityDir := newGcBdBinaryProbeCity(t)
 

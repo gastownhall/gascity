@@ -62,6 +62,7 @@ export type AgentPatch = {
     Args: Array<string> | null;
     AssignedWorkDeferLimit: number | null;
     Attach: boolean | null;
+    ContextAdvisory: ContextAdvisory;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
     Dir: string;
@@ -645,6 +646,27 @@ export type ConfigValidateOutputBody = {
     warnings: Array<string> | null;
 };
 
+export type ContextAdvisory = {
+    Enabled: boolean | null;
+    Tiers: Array<ContextAdvisoryTier> | null;
+    WindowTokens: number | null;
+};
+
+export type ContextAdvisoryTier = {
+    Enabled: boolean | null;
+    Message: string | null;
+    Threshold: number | null;
+};
+
+export type ControlRootSettleFailedPayload = {
+    error: string;
+    error_class: string;
+    finalizer_bead_id: string;
+    follow_up_bead_id?: string;
+    root_bead_id: string;
+    store_path?: string;
+};
+
 export type ControlStalledPayload = {
     attempts: number;
     bead_id: string;
@@ -882,7 +904,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -950,6 +972,13 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
+};
+
+export type ExecutionClaimStalledPayload = {
+    attempts: number;
+    bead_id: string;
+    root_bead_id?: string;
+    session_id: string;
 };
 
 export type ExecutionClaimWindowExpiredPayload = {
@@ -4924,7 +4953,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Retained bead row count used as the denominator, including open and closed beads.
+     * Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.
      */
     live_rows: number;
     /**
@@ -4932,9 +4961,13 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per retained row, including open and closed beads.
+     * Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.
      */
     ratio_mb_per_row: number;
+    /**
+     * True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.
+     */
+    rows_measured: boolean;
     /**
      * Total bytes of the store directory.
      */
@@ -4944,7 +4977,7 @@ export type StatusStoreHealth = {
      */
     threshold_mb_per_row: number;
     /**
-     * True when maintenance is overdue.
+     * True when maintenance is overdue. Meaningless unless rows_measured is true.
      */
     warning: boolean;
 };
@@ -4969,6 +5002,7 @@ export type StorageBindingOutcomePayload = {
     database: string;
     invariant: string;
     outcome: string;
+    proven_beads: number;
 };
 
 export type StoreDiskCriticalPayload = {
@@ -5232,6 +5266,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.root_settle_failed';
+} & TypedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
 } & TypedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
@@ -5248,6 +5284,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.claim_stalled';
+} & TypedEventStreamEnvelopeExecutionClaimStalled) | ({
     type: 'execution.claim_window_expired';
 } & TypedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
     type: 'execution.run_anchored';
@@ -5338,6 +5376,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
+    type: 'session.drain_fence_unavailable';
+} & TypedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
     type: 'session.draining';
 } & TypedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -5370,6 +5410,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -5662,6 +5704,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope control.root_settle_failed
+ */
+export type TypedEventStreamEnvelopeControlRootSettleFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlRootSettleFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.root_settle_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope control.stalled
  */
 export type TypedEventStreamEnvelopeControlStalled = {
@@ -5820,6 +5880,24 @@ export type TypedEventStreamEnvelopeEventsRotated = {
     subject?: string;
     ts: string;
     type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.claim_stalled
+ */
+export type TypedEventStreamEnvelopeExecutionClaimStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionClaimStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.claim_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6634,6 +6712,24 @@ export type TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
 };
 
 /**
+ * TypedEventStreamEnvelope session.drain_fence_unavailable
+ */
+export type TypedEventStreamEnvelopeSessionDrainFenceUnavailable = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_fence_unavailable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.draining
  */
 export type TypedEventStreamEnvelopeSessionDraining = {
@@ -6922,6 +7018,24 @@ export type TypedEventStreamEnvelopeStorageBindingGenesis = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope storage.binding.uncheckable
  */
 export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
@@ -7119,6 +7233,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.root_settle_failed';
+} & TypedTaggedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
 } & TypedTaggedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
@@ -7135,6 +7251,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.claim_stalled';
+} & TypedTaggedEventStreamEnvelopeExecutionClaimStalled) | ({
     type: 'execution.claim_window_expired';
 } & TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
     type: 'execution.run_anchored';
@@ -7225,6 +7343,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
+    type: 'session.drain_fence_unavailable';
+} & TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable) | ({
     type: 'session.draining';
 } & TypedTaggedEventStreamEnvelopeSessionDraining) | ({
     type: 'session.idle_killed';
@@ -7257,6 +7377,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -7564,6 +7686,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope control.root_settle_failed
+ */
+export type TypedTaggedEventStreamEnvelopeControlRootSettleFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlRootSettleFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.root_settle_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope control.stalled
  */
 export type TypedTaggedEventStreamEnvelopeControlStalled = {
@@ -7731,6 +7872,25 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
     subject?: string;
     ts: string;
     type: 'events.rotated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.claim_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionClaimStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionClaimStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.claim_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8590,6 +8750,25 @@ export type TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope session.drain_fence_unavailable
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.drain_fence_unavailable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope session.draining
  */
 export type TypedTaggedEventStreamEnvelopeSessionDraining = {
@@ -8890,6 +9069,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
     subject?: string;
     ts: string;
     type: 'storage.binding.genesis';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
@@ -16961,6 +17159,10 @@ export type GetV0CityByCityNameSessionByIdData = {
          * Number of lines to include in the last output preview when peek=true. Defaults to 5.
          */
         peek_lines?: number;
+        /**
+         * Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
+         */
+        exact_id?: boolean;
     };
     url: '/v0/city/{cityName}/session/{id}';
 };
