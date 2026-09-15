@@ -164,6 +164,9 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ColdWake overrides whether the cold-pool wake probe may override this
+	// agent's custom scale_check when it returns an authoritative 0.
+	ColdWake *bool `toml:"cold_wake,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
@@ -680,6 +683,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
+	}
+	if p.ColdWake != nil {
+		a.ColdWake = p.ColdWake
 	}
 	// OptionDefaults: additive merge (patch keys win).
 	if len(p.OptionDefaults) > 0 {

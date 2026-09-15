@@ -1116,6 +1116,7 @@ export const zAgentPatch = z.object({
     AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
     AutoReclaimStaleClaims: z.boolean().nullable(),
+    ColdWake: z.boolean().nullable(),
     ContextAdvisory: zContextAdvisory,
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
