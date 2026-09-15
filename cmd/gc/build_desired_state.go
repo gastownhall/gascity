@@ -2775,7 +2775,9 @@ func appendUnreadPoolMailUnique(cfg *config.City, dst *[]beads.Bead, stores *[]b
 }
 
 func isUnreadPoolMail(cfg *config.City, b beads.Bead) bool {
-	if cfg == nil || strings.EqualFold(strings.TrimSpace(b.Metadata[mail.ReadMetadataKey]), "true") {
+	if cfg == nil ||
+		!strings.EqualFold(strings.TrimSpace(b.Metadata[mail.NotificationIntentMetadataKey]), "true") ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[mail.ReadMetadataKey]), "true") {
 		return false
 	}
 	for _, label := range b.Labels {

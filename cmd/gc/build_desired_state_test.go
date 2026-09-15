@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -2138,7 +2139,7 @@ func TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDeman
 		Type:     "message",
 		Status:   "open",
 		Assignee: "codex-im",
-		Metadata: map[string]string{"mail.read": "false"},
+		Metadata: map[string]string{"mail.read": "false", mail.NotificationIntentMetadataKey: "true"},
 	})
 	if err != nil {
 		t.Fatalf("create unread mail: %v", err)
@@ -2163,6 +2164,12 @@ func TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDeman
 	if req.Tier != "wake-known-identity" || req.WorkBeadID != msg.ID {
 		t.Fatalf("request = %#v, want wake-known-identity for mail %q", req, msg.ID)
 	}
+	secondMessage := msg
+	secondMessage.ID = "another-notified-message"
+	states = ComputePoolDesiredStates(cfg, append(work, secondMessage), nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("multiple notified messages produced %#v, want one max-one wake", states)
+	}
 
 	// On the next tick the pending replacement is part of the snapshot. It
 	// must be reused under max-one rather than minting another pool session.
@@ -2183,6 +2190,34 @@ func TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDeman
 	}
 	if got := states[0].Requests[0].SessionBeadID; got != pending.ID {
 		t.Fatalf("second-tick SessionBeadID = %q, want existing replacement %q", got, pending.ID)
+	}
+}
+
+func TestIsUnreadPoolMailRequiresNotifyAndEligibleConfiguredAlias(t *testing.T) {
+	maxOne := 1
+	poolCfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	base := beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{
+		mail.NotificationIntentMetadataKey: "true",
+		mail.ReadMetadataKey:               "false",
+	}}
+	cases := []struct {
+		name string
+		cfg  *config.City
+		bead beads.Bead
+		want bool
+	}{
+		{name: "notified cold pool alias", cfg: poolCfg, bead: base, want: true},
+		{name: "plain unread mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.ReadMetadataKey: "false"}}},
+		{name: "read notified mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true", mail.ReadMetadataKey: "true"}}},
+		{name: "unknown recipient", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "unknown", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true"}}},
+		{name: "suspended pool", cfg: &config.City{Agents: []config.Agent{{Name: "codex-im", Suspended: true}}}, bead: base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUnreadPoolMail(tc.cfg, tc.bead); got != tc.want {
+				t.Errorf("isUnreadPoolMail() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

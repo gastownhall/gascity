@@ -1971,6 +1971,13 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "nudge failed") {
 		t.Errorf("stderr = %q, want nudge failure warning", stderr.String())
 	}
+	reply, err := store.Get("gc-2")
+	if err != nil {
+		t.Fatalf("Get reply: %v", err)
+	}
+	if got := reply.Metadata[mail.NotificationIntentMetadataKey]; got != "true" {
+		t.Errorf("mail.notify = %q, want true even when reply nudge fails", got)
+	}
 }
 
 func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
@@ -3229,6 +3236,13 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "nudge failed") {
 		t.Errorf("stderr = %q, want nudge failure warning", stderr.String())
 	}
+	msg, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get sent message: %v", err)
+	}
+	if got := msg.Metadata[mail.NotificationIntentMetadataKey]; got != "true" {
+		t.Errorf("mail.notify = %q, want true even when nudge fails", got)
+	}
 }
 
 func TestMailSendNotifyToHuman(t *testing.T) {
@@ -3267,6 +3281,38 @@ func TestMailSendWithoutNotify(t *testing.T) {
 	}
 	if stderr.Len() > 0 {
 		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+	msg, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get sent message: %v", err)
+	}
+	if got := msg.Metadata[mail.NotificationIntentMetadataKey]; got != "" {
+		t.Errorf("mail.notify = %q, want absent without --notify", got)
+	}
+}
+
+// Both human-readable wrappers delegate to the JSON implementations, so pin
+// the JSON path too: notification intent must be durable before a failed nudge.
+func TestMailNotifyJSONPersistsIntentBeforeNudgeFailure(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	failedNudge := func(_, _ string) error { return errors.New("recipient unavailable") }
+
+	if code := doMailSendJSON(mp, events.Discard, map[string]bool{"mayor": true}, "human", []string{"mayor", "wake"}, failedNudge, true, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("doMailSendJSON = %d, want 0", code)
+	}
+	if sent, err := store.Get("gc-1"); err != nil || sent.Metadata[mail.NotificationIntentMetadataKey] != "true" {
+		t.Fatalf("JSON send mail.notify = %q, err = %v, want true", sent.Metadata[mail.NotificationIntentMetadataKey], err)
+	}
+
+	if _, err := mp.Send("alice", "mayor", "thread", "original"); err != nil {
+		t.Fatalf("seed reply recipient: %v", err)
+	}
+	if code := doMailReplyJSON(mp, events.Discard, "gc-2", "mayor", "", "reply", failedNudge, true, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("doMailReplyJSON = %d, want 0", code)
+	}
+	if reply, err := store.Get("gc-3"); err != nil || reply.Metadata[mail.NotificationIntentMetadataKey] != "true" {
+		t.Fatalf("JSON reply mail.notify = %q, err = %v, want true", reply.Metadata[mail.NotificationIntentMetadataKey], err)
 	}
 }
 

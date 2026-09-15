@@ -177,6 +177,15 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	return beadToMessage(b), nil
 }
 
+// MarkNotificationIntent persists a sender's --notify request before the
+// delivery callback runs. The message itself remains ordinary unread mail.
+func (p *Provider) MarkNotificationIntent(id string) error {
+	if err := p.store.SetMetadata(id, mail.NotificationIntentMetadataKey, "true"); err != nil {
+		return beadmailError("mark notification intent", err)
+	}
+	return nil
+}
+
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks
 // mail.Message at the boundary while confining the type=message bead, the
 // stable thread label, and the handoff-specific extra labels to this
