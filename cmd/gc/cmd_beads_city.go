@@ -56,6 +56,7 @@ topology.`,
 		newBeadsCityUseManagedCmd(stdout, stderr),
 		newBeadsCityUseExternalCmd(stdout, stderr),
 		newBeadsCityMigrateProxiedCmd(stdout, stderr),
+		newBeadsCityMigrateHandoffCmd(stdout, stderr),
 	)
 	return cmd
 }

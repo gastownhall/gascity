@@ -34,7 +34,7 @@ func writeHandoffJournal(t *testing.T, scopeRoot, body string) {
 
 func TestScopeIsProviderOwnedReadsACommittedOwnershipHandoff(t *testing.T) {
 	city := t.TempDir()
-	writeHandoffJournal(t, city, `{"phase":"committed","owner":"bd","request":{"owner":"legacy-gc"}}`)
+	writeHandoffJournal(t, city, `{"schema_version":2,"phase":"committed","owner":"bd","request":{"owner":"legacy-gc"}}`)
 
 	if !scopeIsProviderOwned(city, city) {
 		t.Fatal("a city with a committed ownership handoff is bd's, but doctor still classifies it as gc-managed")
@@ -43,13 +43,20 @@ func TestScopeIsProviderOwnedReadsACommittedOwnershipHandoff(t *testing.T) {
 
 func TestScopeIsProviderOwnedIgnoresAnUnsettledOwnershipHandoff(t *testing.T) {
 	for name, body := range map[string]string{
-		"pending":        `{"phase":"old_owner_stopped","owner":"legacy-gc"}`,
-		"rolled back":    `{"phase":"rolled_back","owner":"legacy-gc"}`,
-		"wrong owner":    `{"phase":"committed","owner":"legacy-gc"}`,
-		"malformed":      `{"phase":`,
-		"empty":          ``,
-		"unknown phase":  `{"phase":"something_else","owner":"bd"}`,
-		"absent journal": "",
+		"pending":     `{"schema_version":2,"phase":"old_owner_stopped","owner":"legacy-gc"}`,
+		"rolled back": `{"schema_version":2,"phase":"rolled_back","owner":"legacy-gc"}`,
+		"wrong owner": `{"schema_version":2,"phase":"committed","owner":"legacy-gc"}`,
+		"malformed":   `{"phase":`,
+		"empty":       ``,
+		// The version is checked before the phase. A journal from another
+		// vocabulary is not a signal, however familiar its phase name looks:
+		// committed means "bd owns this" in v2 and the same word in v1 sat on
+		// a different phase order, so reading one without its version is a
+		// guess dressed as a fact.
+		"unversioned committed journal": `{"phase":"committed","owner":"bd"}`,
+		"newer committed journal":       `{"schema_version":3,"phase":"committed","owner":"bd"}`,
+		"unknown phase":                 `{"schema_version":2,"phase":"something_else","owner":"bd"}`,
+		"absent journal":                "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			city := t.TempDir()
@@ -73,7 +80,7 @@ func TestScopeIsProviderOwnedCoversARigUnderAHandedOffCity(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rig, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeHandoffJournal(t, city, `{"phase":"committed","owner":"bd","request":{"owner":"legacy-gc"}}`)
+	writeHandoffJournal(t, city, `{"schema_version":2,"phase":"committed","owner":"bd","request":{"owner":"legacy-gc"}}`)
 
 	if !scopeIsProviderOwned(city, rig) {
 		t.Fatal("a rig under a handed-off city is bd's too; the handoff is city-root only")

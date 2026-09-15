@@ -216,29 +216,29 @@ managed_runtime_port() (
 )
 
 . "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
-. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/proxied_scope.sh"
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/bd_owned_scope.sh"
 
-# On a bd-owned proxied scope there is no gc-managed Dolt server: bd starts,
-# supervises and stops it. Every command in this pack is a typed no-op there,
-# and there is no managed runtime port to resolve. A command that shapes its
-# own output (health, cleanup) sets GC_DOLT_PROXIED_HANDLED=1 before sourcing
-# this file and emits its own skip document instead.
+# On a scope bd owns there is no gc-managed Dolt server: bd starts, supervises
+# and stops it. Every command in this pack is a typed no-op there, and there is
+# no managed runtime port to resolve. A command that shapes its own output
+# (health, cleanup) sets GC_DOLT_BD_OWNED_HANDLED=1 before sourcing this file
+# and emits its own skip document instead.
 #
 # The guard runs before the commands parse their own flags, so it has to
 # honour --json itself: status, cleanup, compact and sync all have machine
 # consumers, and a plain sentence on stdout would break every one of them.
-if bd_owns_proxied_scope; then
-  GC_DOLT_SCOPE_BD_PROXIED=1
-  if [ "${GC_DOLT_PROXIED_HANDLED:-0}" != "1" ]; then
+if bd_owns_scope; then
+  GC_DOLT_SCOPE_BD_OWNED=1
+  if [ "${GC_DOLT_BD_OWNED_HANDLED:-0}" != "1" ]; then
     case " $* " in
-      *" --json "*) print_proxied_skip_json ;;
-      *) printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE" ;;
+      *" --json "*) print_bd_owned_skip_json ;;
+      *) printf '%s\n' "$GC_DOLT_BD_NOOP_MESSAGE" ;;
     esac
     exit 0
   fi
   GC_DOLT_PORT=""
 else
-  GC_DOLT_SCOPE_BD_PROXIED=0
+  GC_DOLT_SCOPE_BD_OWNED=0
   # Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
   # runtime state over stale inherited env, then falls back to GC_DOLT_PORT as
   # an operator seed, and exits 78 if neither yields a port.

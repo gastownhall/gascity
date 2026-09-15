@@ -132,6 +132,15 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// Port selection is the dolt pack's first step and it is not
+			// read-only: the repair arms publish runtime state on the way
+			// through. Without the same admission every other managed verb
+			// carries, a scope bd owns was handed a gc-managed port and
+			// everything downstream treated it as gc's to run.
+			if err := admitLegacyManagedDoltLifecycle(cityPath); err != nil {
+				fmt.Fprintf(stderr, "gc dolt-state allocate-port: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			port, err := chooseManagedDoltPort(cityPath, stateFile)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state allocate-port: %v\n", err) //nolint:errcheck

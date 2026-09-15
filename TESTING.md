@@ -503,9 +503,9 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 485 calls / 174 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 487 calls / 175 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 689 calls / 197 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 696 calls / 198 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-01 |
@@ -530,7 +530,7 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
-| Small debt ratchet | all untagged test source | subprocess: 450 calls / 125 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 454 calls / 125 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
@@ -542,7 +542,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 468 calls / 132 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 472 calls / 132 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
 
@@ -969,6 +969,43 @@ GC_ACCEPTANCE_BD_BIN=... TMPDIR=/data/tmp make test-acceptance \
 
 Never point `TMPDIR` at tmpfs: these tests start real Dolt servers, and their
 data directories have to survive on a real filesystem.
+
+##### M8, the journaled ownership handoff
+
+`TestBeadsOwnershipHandoffLegacyCityToBd`,
+`TestBeadsOwnershipHandoffLegacyAliveThenRollsBack` and
+`TestBeadsOwnershipHandoffInterruptedAfterStop`
+(`test/acceptance/beads_ownership_handoff_test.go`) are the same legacy shape as
+M5, handed to bd through `gc beads city migrate-handoff` — which drives bd's
+journaled `migrate ownership-handoff` verbs — instead of migrated by gc. They
+need the same two variables plus a `bd` that has those verbs at all; the probe
+is for `--legacy-endpoint`, the flag that exists because bd no longer asks gc
+anything, so every `bd` through `v1.3.0-rc.2` skips them typed and they cost CI
+nothing today:
+
+```bash
+GC_ACCEPTANCE_BD_BIN=/path/to/bd-with-ownership-handoff \
+GC_ACCEPTANCE_LEGACY_GC_BIN=/path/to/gc-pre-journal \
+TMPDIR=/data/tmp make test-acceptance \
+  ACCEPTANCE_TIMEOUT=60m \
+  ACCEPTANCE_GO_TEST_FLAGS='-count=1 -v -run TestBeadsOwnershipHandoff'
+```
+
+These are the RC gate for the handoff: they assert that the artifact bd writes
+is the artifact gc reads — at the path gc reads it from and at the schema
+version gc will interpret — so a `bd` that performs a technically successful
+handoff gc cannot see fails them rather than passing.
+
+Neither fault is a shim. `LegacyAliveThenRollsBack` holds Dolt's exclusive store
+lock under the city's data dir, which is the genuine "a prior instance has not
+released the data dir" condition both gc's stop and bd's `legacy-gone` are
+written for: gc's stop fails, bd refuses `legacy_alive`, and the compensation
+runs because a journal stuck mid-transfer fences every gc lifecycle command on
+the city. Releasing the lock and re-running settles the rollback, archives the
+journal and hands the city back to gc. `InterruptedAfterStop` SIGKILLs the
+orchestrator's process group once bd's journal records the legacy owner gone,
+and asserts the retry converges. There is no `GC_BIN` anywhere in the file: the
+protocol that needed one is withdrawn.
 
 ##### The legacy shapes' one init path
 

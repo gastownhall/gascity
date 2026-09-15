@@ -9,19 +9,19 @@
 set -e
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}"
-. "$PACK_DIR/assets/scripts/proxied_scope.sh"
+. "$PACK_DIR/assets/scripts/bd_owned_scope.sh"
 
 report=$(cat)
 printf '%s\n' "$report"
 
-# A bd-owned proxied scope has no gc-managed server, so `gc dolt health` sends
-# a skip document instead of a server section. Recognize both the document and
-# the scope itself: the order pipes the two commands together, and either end
-# alone is enough to prove there is nothing to fail on.
-case "$report" in
-  *'"'"$GC_DOLT_PROXIED_SKIP_REASON"'"'*) exit 0 ;;
-esac
-if bd_owns_proxied_scope; then
+# A scope bd owns has no gc-managed server, so `gc dolt health` sends a skip
+# document instead of a server section. Recognize both the document and the
+# scope itself: the order pipes the two commands together, and either end alone
+# is enough to prove there is nothing to fail on.
+if bd_owned_skip_document_seen "$report"; then
+  exit 0
+fi
+if bd_owns_scope; then
   exit 0
 fi
 

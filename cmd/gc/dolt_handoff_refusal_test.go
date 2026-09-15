@@ -2,53 +2,9 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// writeCommittedHandoffJournal puts a genuinely committed journal at the path
-// gc's ownership projection reads — the full checkpoint, the strict-launch
-// target identity and the authenticated legacy inspect proof, because the
-// projection fails closed on anything less and a fail-closed error is a
-// different refusal than the one these tests are about.
-func writeCommittedHandoffJournal(t *testing.T, city string) string {
-	t.Helper()
-	beadsDir := filepath.Join(city, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	var journal handoffProjectionJournal
-	journal.Request.CityRoot, journal.Request.Root = city, city
-	journal.Request.Database, journal.Request.Workspace = "hq", "workspace"
-	journal.Request.Endpoint.Host, journal.Request.Endpoint.Port = "127.0.0.1", 3307
-	journal.Request.Owner = "legacy-gc"
-	journal.Phase, journal.Owner = "committed", "bd"
-	journal.SnapshotCaptured, journal.MutationOccurred, journal.CommitHookRan = true, true, true
-	setProjectionEligibleSnapshot(t, &journal)
-	journal.Snapshot.TargetPID = 42
-	journal.Snapshot.TargetBirth = "birth"
-	journal.Snapshot.TargetDataDir = filepath.Join(city, ".beads", "dolt")
-	journal.Snapshot.TargetLaunchID = "0123456789abcdef0123456789abcdef"
-	journal.Snapshot.TargetLaunchConfig = filepath.Join(city, ".beads", "dolt-handoff-"+journal.Snapshot.TargetLaunchID+".yaml")
-	journal.Snapshot.TargetLaunchExecutable = "/usr/local/bin/dolt"
-
-	body, err := json.Marshal(journal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(beadsDir, "ownership-handoff.json")
-	if err := os.WriteFile(path, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if owned, err := committedBeadsHandoffOwnsScope(city); err != nil || !owned {
-		t.Fatalf("fixture journal is not read as a committed handoff: (%t, %v)", owned, err)
-	}
-	return path
-}
 
 // A refusal an operator cannot read is not a refusal. `gc dolt-state
 // start-managed` on a handed-off city must say, on stderr, that a committed

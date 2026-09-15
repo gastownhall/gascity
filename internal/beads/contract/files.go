@@ -331,6 +331,31 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadMetadataProjectID reads the project_id recorded in metadata.json at path.
+//
+// It is the same tolerant reader ReadDoltDatabase is. The one caller that needs
+// it — the ownership handoff orchestrator — is passing the value to bd as the
+// workspace identity bd will then verify against this very file, so a reader
+// that refused a metadata.json bd is about to read for itself would only move
+// the failure somewhere less informative.
+func ReadMetadataProjectID(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["project_id"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // ReadDoltMode reports the dolt_mode recorded in metadata.json at path, if any.
 //
 // It is the tolerant reader ReadDoltDatabase is, for the same reason: a caller

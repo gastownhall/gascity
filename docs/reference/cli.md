@@ -354,9 +354,42 @@ gc beads city
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city migrate-handoff](#gc-beads-city-migrate-handoff) | Hand a legacy GC-managed city's Dolt lifecycle to bd |
 | [gc beads city migrate-proxied](#gc-beads-city-migrate-proxied) | Migrate a legacy GC-managed city to bd's proxied-server topology |
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city migrate-handoff
+
+Hand a legacy GC-managed city's Dolt lifecycle to the beads provider.
+
+The city keeps its direct `dolt sql-server` topology; what changes is who
+runs the process. gc stops its own server and bd starts and owns the
+replacement, journaling every step in `.beads/ownership-handoff.json`,
+which is what every later gc command reads to see that the scope is no longer
+gc's to manage.
+
+bd owns the journal, the replacement server and the rollback. This command
+drives bd's phases in order and supplies the two things bd cannot observe for
+itself: where gc's server listens, and that gc has stopped it. Nothing here
+asks bd to call gc back.
+
+A failure after gc's server is stopped rolls the transfer back: bd restores the
+workspace byte-exact, gc restarts its own server, and bd admits it back. The
+command is idempotent — re-running it resumes from bd's journal, forward or
+backward, whichever the journal is on.
+
+City root only. A rig shares its city's server and is handed over with it.
+
+```
+gc beads city migrate-handoff [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the plan without handing anything over |
+| `--json` | bool |  | emit the per-step report as JSON |
+| `--rig` | stringArray |  | not supported: the handoff is city-root only |
 
 ## gc beads city migrate-proxied
 

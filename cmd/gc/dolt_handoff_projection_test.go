@@ -8,78 +8,65 @@ import (
 	"testing"
 )
 
-func setProjectionEligibleSnapshot(t *testing.T, journal *handoffProjectionJournal) {
-	t.Helper()
-	r := journal.Request
-	identity := handoffProtocolIdentity{
-		CityRoot: r.CityRoot, ScopeRoot: r.Root, Database: r.Database, Workspace: r.Workspace,
-		Endpoint: handoffProtocolEndpoint{Host: r.Endpoint.Host, Port: r.Endpoint.Port, Socket: r.Endpoint.Socket},
-		DataDir:  filepath.Join(r.Root, ".beads", "dolt"), ConfigFile: filepath.Join(r.CityRoot, ".gc", "dolt.yaml"),
-		PID: 7, StartIdentity: "birth", StartTimeTicks: 1, PortHolderPID: 7,
+// The version gate is the first thing the reader does, and these are the two
+// halves of why it has to be.
+//
+// The phase names overlap between journal versions and do not survive the
+// translation: old_owner_stopped means "bd's replacement is already configured"
+// under v1 and "the legacy server is gone, nothing has replaced it yet" under
+// v2. A reader that recognizes the name and skips the version will, on exactly
+// one phase, believe a server exists that does not — or license a second one
+// over a live target. So a journal that is not this version is refused by
+// version, with no phase interpreted at all.
+func TestProjectionRefusesAJournalItCannotVersion(t *testing.T) {
+	for name, body := range map[string]string{
+		// A v1 journal: no schema_version at all, and a phase name this reader
+		// also has.
+		"v1 journal": `{"request":{"city_root":"CITY","root":"CITY","database":"beads","workspace":"w",` +
+			`"endpoint":{"host":"127.0.0.1","port":3307},"owner":"legacy-gc"},"phase":"old_owner_stopped","owner":"legacy-gc"}`,
+		"future journal": `{"schema_version":3,"request":{"root":"CITY","database":"beads","workspace":"w",` +
+			`"endpoint":{"host":"127.0.0.1","port":3307},"owner":"legacy-gc"},"phase":"committed","owner":"bd"}`,
+		// A v1 journal whose phase this reader would have admitted as owned.
+		"v1 committed journal": `{"request":{"city_root":"CITY","root":"CITY","database":"beads","workspace":"w",` +
+			`"endpoint":{"host":"127.0.0.1","port":3307},"owner":"legacy-gc"},"phase":"committed","owner":"bd"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := handoffFixtureCity(t)
+			if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(city, ".beads", "ownership-handoff.json")
+			if err := os.WriteFile(path, []byte(strings.ReplaceAll(body, "CITY", city)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			owned, err := committedBeadsHandoffOwnsScope(city)
+			if err == nil {
+				t.Fatalf("a journal of another version was interpreted (owned=%t)", owned)
+			}
+			if owned {
+				t.Fatal("a journal of another version reported the scope as bd's")
+			}
+			if !strings.Contains(err.Error(), "unsupported handoff journal version") {
+				t.Fatalf("refusal does not name the version as the reason: %v", err)
+			}
+		})
 	}
-	token := handoffIdentityToken(identity)
-	body, err := json.Marshal(handoffProtocolResponse{SchemaVersion: handoffProtocolSchemaVersion, Operation: "handoff-inspect", Result: "eligible", Owner: "legacy-gc", Identity: identity, IdentityToken: token})
-	if err != nil {
-		t.Fatal(err)
-	}
-	journal.Snapshot.Metadata, journal.Snapshot.Sentinel = body, token
 }
 
 func TestCommittedBeadsHandoffOwnsScopeProjection(t *testing.T) {
-	city := handoffGuardTestCity(t)
-	beadsDir := filepath.Join(city, ".beads")
-	if err := os.Mkdir(beadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(beadsDir, "ownership-handoff.json")
-	write := func(phase, owner string) {
-		t.Helper()
-		var journal handoffProjectionJournal
-		journal.Request.CityRoot = city
-		journal.Request.Root = city
-		journal.Request.Database = "beads"
-		journal.Request.Workspace = "test"
-		journal.Request.Endpoint.Host = "127.0.0.1"
-		journal.Request.Endpoint.Port = 3307
-		journal.Request.Owner = "legacy-gc"
-		journal.Phase, journal.Owner = phase, owner
-		if phase == "committed" || phase == "rolled_back" {
-			journal.SnapshotCaptured = true
-			setProjectionEligibleSnapshot(t, &journal)
-		}
-		if phase == "committed" || phase == "rolled_back" {
-			journal.MutationOccurred = true
-		}
-		if phase == "committed" {
-			journal.CommitHookRan = true
-			journal.Snapshot.TargetPID = 42
-			journal.Snapshot.TargetBirth = "birth"
-			journal.Snapshot.TargetDataDir = filepath.Join(city, ".beads", "dolt")
-			journal.Snapshot.TargetLaunchID = "0123456789abcdef0123456789abcdef"
-			journal.Snapshot.TargetLaunchConfig = filepath.Join(city, ".beads", "dolt-handoff-"+journal.Snapshot.TargetLaunchID+".yaml")
-			journal.Snapshot.TargetLaunchExecutable = "/usr/local/bin/dolt"
-		}
-		body, err := json.Marshal(journal)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("committed", "bd")
+	city := handoffFixtureCity(t)
+
+	writeCommittedHandoffJournal(t, city)
 	if got, err := committedBeadsHandoffOwnsScope(city); err != nil || !got {
 		t.Fatalf("committed projection = %t, %v; want true, nil", got, err)
 	}
-	write("target_configured", "legacy-gc")
+
+	writeHandoffJournal(t, city, pendingHandoffJournal(city, "target_configured"))
 	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
 		t.Fatal("pending projection did not fail closed")
 	}
-	write("rolled_back", "legacy-gc")
-	if got, err := committedBeadsHandoffOwnsScope(city); err != nil || got {
-		t.Fatalf("restored rollback projection = %t, %v; want false, nil", got, err)
-	}
-	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+
+	if err := os.WriteFile(filepath.Join(city, ".beads", "ownership-handoff.json"), []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
@@ -87,13 +74,75 @@ func TestCommittedBeadsHandoffOwnsScopeProjection(t *testing.T) {
 	}
 }
 
+// old_owner_stopped is the phase the version gate exists for, so it gets its
+// own case rather than riding along in a table.
+//
+// Under v2 it means the legacy server has been proven gone and bd has not yet
+// launched a replacement: the scope has no running Dolt at all, and no owner
+// has been settled. gc must read that as neither "bd's" nor "mine" — it is a
+// transfer in flight, and the only safe answer is to fail closed, which is what
+// fences gc's managed start out of the window where starting a server would
+// race bd's own configure.
+func TestOldOwnerStoppedIsATransferInFlightNotAnOwnership(t *testing.T) {
+	city := handoffFixtureCity(t)
+	writeHandoffJournal(t, city, pendingHandoffJournal(city, "old_owner_stopped"))
+
+	owned, err := committedBeadsHandoffOwnsScope(city)
+	if owned {
+		t.Fatal("old_owner_stopped was read as bd owning the scope; under v2 there is no target yet")
+	}
+	if err == nil {
+		t.Fatal("old_owner_stopped was admitted as the legacy condition; gc would start a second server mid-transfer")
+	}
+	if !strings.Contains(err.Error(), "in progress") {
+		t.Fatalf("refusal does not say the transfer is in flight: %v", err)
+	}
+	if err := handoffJournalBlocksManagedDoltStart(city); err == nil {
+		t.Fatal("gc's managed start was admitted over a handoff that had already stopped the legacy server")
+	}
+}
+
+// A rollback that ran to completion archives its journal. gc sees the scope the
+// way the legacy condition looks — no journal — and must not go looking for the
+// archive, which is bd's own history and not a record of current ownership.
+func TestArchivedRolledBackJournalsAreIgnored(t *testing.T) {
+	city := handoffFixtureCity(t)
+	beadsDir := filepath.Join(city, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(committedHandoffJournal(city))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"ownership-handoff.json.rolled-back-1757000000000000000",
+		"ownership-handoff.json.rolled-back-1757000000000000001",
+	} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owned, err := committedBeadsHandoffOwnsScope(city)
+	if err != nil {
+		t.Fatalf("an archived rollback was read as a live journal: %v", err)
+	}
+	if owned {
+		t.Fatal("an archived rollback reported the scope as bd's")
+	}
+	if err := handoffJournalBlocksManagedDoltStart(city); err != nil {
+		t.Fatalf("gc refused to manage a city whose handoff was rolled back and archived: %v", err)
+	}
+}
+
 func TestCommittedBeadsHandoffRejectsIncompleteCheckpoint(t *testing.T) {
-	city := handoffGuardTestCity(t)
-	if err := os.Mkdir(filepath.Join(city, ".beads"), 0o755); err != nil {
+	city := handoffFixtureCity(t)
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(city, ".beads", "ownership-handoff.json")
-	if err := os.WriteFile(path, []byte(`{"request":{"city_root":"`+city+`","root":"`+city+`"},"phase":"committed","owner":"bd"}`), 0o600); err != nil {
+	body := `{"schema_version":2,"request":{"root":"` + city + `"},"phase":"committed","owner":"bd"}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
@@ -102,7 +151,7 @@ func TestCommittedBeadsHandoffRejectsIncompleteCheckpoint(t *testing.T) {
 }
 
 func TestCommittedBeadsHandoffRejectsSymlinkedJournal(t *testing.T) {
-	city := handoffGuardTestCity(t)
+	city := handoffFixtureCity(t)
 	beadsDir := filepath.Join(city, ".beads")
 	if err := os.Mkdir(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -122,123 +171,104 @@ func TestCommittedBeadsHandoffRejectsSymlinkedJournal(t *testing.T) {
 }
 
 func TestRestoredProjectionPreservesAbsentAndModeZeroArtifacts(t *testing.T) {
-	city := handoffGuardTestCity(t)
+	city := handoffFixtureCity(t)
 	beadsDir := filepath.Join(city, ".beads")
 	if err := os.Mkdir(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	metadata := []byte(`{"backend":"dolt","dolt_database":"beads"}`)
 	config := []byte("legacy: true\n")
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), config, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(filepath.Join(beadsDir, "config.yaml"), 0); err != nil {
 		t.Fatal(err)
 	}
-	var journal handoffProjectionJournal
-	journal.Request.CityRoot, journal.Request.Root = city, city
-	journal.Request.Database, journal.Request.Workspace = "beads", "test"
-	journal.Request.Endpoint.Host, journal.Request.Endpoint.Port = "127.0.0.1", 3307
-	journal.Request.Owner, journal.Phase, journal.Owner = "legacy-gc", "rolled_back", "legacy-gc"
-	journal.SnapshotCaptured, journal.MutationOccurred = true, true
-	setProjectionEligibleSnapshot(t, &journal)
-	journal.Snapshot.WorkspaceConfig, journal.Snapshot.WorkspaceConfigPresent, journal.Snapshot.WorkspaceConfigMode = config, true, 0
-	body, err := json.Marshal(journal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Mode 000 is checked exactly rather than treated as an unspecified mode.
-	// The current process cannot read it, so admission fails closed instead of
-	// silently accepting an artifact whose bytes it cannot verify.
+	journal := pendingHandoffJournal(city, "rolled_back")
+	journal.Snapshot.Metadata = handoffProjectionArtifact{Present: true, Data: metadata, Mode: 0o600}
+	// The captured mode is 0o600 while the file on disk is 000. Mode 000 is
+	// checked exactly rather than treated as unspecified: the current process
+	// cannot read it, so admission fails closed instead of silently accepting
+	// an artifact whose bytes it cannot verify.
+	journal.Snapshot.Config = handoffProjectionArtifact{Present: true, Data: config, Mode: 0o600}
+	// dolt-server.port was absent when bd captured it and must still be absent.
+	writeHandoffJournal(t, city, journal)
+
 	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
 		t.Fatal("unreadable mode-zero restored artifact admitted")
 	}
-	if err := os.Chmod(filepath.Join(beadsDir, "config.yaml"), 0o600); err != nil {
+	if err := os.Chmod(filepath.Join(beadsDir, "config.yaml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
 		t.Fatal("restored mode drift admitted")
 	}
-}
-
-func TestCommittedBeadsHandoffProjectionRejectsCorruptIdentityProof(t *testing.T) {
-	city := handoffGuardTestCity(t)
-	beadsDir := filepath.Join(city, ".beads")
-	if err := os.Mkdir(beadsDir, 0o755); err != nil {
+	if err := os.Chmod(filepath.Join(beadsDir, "config.yaml"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	base := func() handoffProjectionJournal {
-		var journal handoffProjectionJournal
-		journal.Request.CityRoot, journal.Request.Root = city, city
-		journal.Request.Database, journal.Request.Workspace = "beads", "test"
-		journal.Request.Endpoint.Host, journal.Request.Endpoint.Port = "127.0.0.1", 3307
-		journal.Request.Owner, journal.Phase, journal.Owner = "legacy-gc", "committed", "bd"
-		journal.SnapshotCaptured, journal.MutationOccurred, journal.CommitHookRan = true, true, true
-		setProjectionEligibleSnapshot(t, &journal)
-		journal.Snapshot.TargetPID, journal.Snapshot.TargetBirth = 42, "strict-birth"
-		journal.Snapshot.TargetDataDir = filepath.Join(city, ".beads", "dolt")
-		journal.Snapshot.TargetLaunchID = "0123456789abcdef0123456789abcdef"
-		journal.Snapshot.TargetLaunchConfig = filepath.Join(beadsDir, "dolt-handoff-"+journal.Snapshot.TargetLaunchID+".yaml")
-		journal.Snapshot.TargetLaunchExecutable = "/usr/local/bin/dolt"
-		return journal
+	if owned, err := committedBeadsHandoffOwnsScope(city); err != nil || owned {
+		t.Fatalf("byte- and mode-exact restoration = (%t, %v); want (false, nil)", owned, err)
+	}
+	// The absent artifact stayed absent. A restoration that put a
+	// dolt-server.port back that the legacy city never had is not a
+	// restoration.
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte("3307\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(rolledBackHandoffAdmissionPath(city)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
+		t.Fatal("a restoration that produced a file the journal recorded absent was admitted")
+	}
+}
+
+// The committed journal is the license for gc to stop running a Dolt server for
+// this city. What gc can hold it to is that bd's replacement is bound to THIS
+// workspace and identified strictly enough to be stopped again — so every way
+// that binding can be broken is a refusal.
+func TestCommittedProjectionRejectsAnUnboundReplacement(t *testing.T) {
+	city := handoffFixtureCity(t)
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	for name, corrupt := range map[string]func(*handoffProjectionJournal){
-		"snapshot sentinel": func(j *handoffProjectionJournal) {
-			j.Snapshot.Sentinel = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		"another scope's data directory": func(j *handoffProjectionJournal) {
+			j.Target.DataDir = filepath.Join(city, "other")
 		},
-		"legacy token":              func(j *handoffProjectionJournal) { j.Snapshot.Metadata = []byte(`{"schema_version":1}`) },
-		"historical data directory": func(j *handoffProjectionJournal) { j.Snapshot.TargetDataDir = filepath.Join(city, "other") },
-		"launch nonce":              func(j *handoffProjectionJournal) { j.Snapshot.TargetLaunchID = "bad" },
+		"launch nonce": func(j *handoffProjectionJournal) { j.Target.LaunchID = "bad" },
+		"launch config from another nonce": func(j *handoffProjectionJournal) {
+			j.Target.LaunchConfig = filepath.Join(city, ".beads", "dolt-handoff-ffffffffffffffffffffffffffffffff.yaml")
+		},
+		"launch config outside the workspace": func(j *handoffProjectionJournal) {
+			j.Target.LaunchConfig = filepath.Join("/tmp", "dolt-handoff-"+handoffFixtureLaunchID+".yaml")
+		},
+		"no process birth":          func(j *handoffProjectionJournal) { j.Target.Birth = "" },
+		"a pid restated as a birth": func(j *handoffProjectionJournal) { j.Target.Birth = "4242" },
+		"no pid":                    func(j *handoffProjectionJournal) { j.Target.PID = 0 },
+		"relative executable":       func(j *handoffProjectionJournal) { j.Target.Executable = "dolt" },
+		"a replacement on no port":  func(j *handoffProjectionJournal) { j.Target.Port = 0 },
+		"a replacement off loopback": func(j *handoffProjectionJournal) {
+			j.Target.Host = "10.0.0.4"
+		},
+		"an unfinished write set":                  func(j *handoffProjectionJournal) { j.Reservations.CommitWriteSet = "in_progress" },
+		"an unfinished launch":                     func(j *handoffProjectionJournal) { j.Reservations.TargetLaunch = "" },
+		"the legacy side still claiming ownership": func(j *handoffProjectionJournal) { j.Owner = "legacy-gc" },
+		"another scope's root":                     func(j *handoffProjectionJournal) { j.Request.Root = filepath.Join(city, "elsewhere") },
 	} {
 		t.Run(name, func(t *testing.T) {
-			journal := base()
+			journal := committedHandoffJournal(city)
 			corrupt(&journal)
-			body, err := json.Marshal(journal)
-			if err != nil {
-				t.Fatal(err)
+			writeHandoffJournal(t, city, journal)
+			owned, err := committedBeadsHandoffOwnsScope(city)
+			if err == nil {
+				t.Fatal("an unbound replacement was admitted as a committed handoff")
 			}
-			if err := os.WriteFile(filepath.Join(beadsDir, "ownership-handoff.json"), body, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := committedBeadsHandoffOwnsScope(city); err == nil {
-				t.Fatal("corrupt committed proof was admitted")
-			}
-		})
-	}
-}
-
-// The sentinel has to bind the identity it is stored beside: a journal whose
-// proof was minted for a different process must not authenticate. gc no longer
-// mints these records, so this is all that keeps the digest honest.
-func TestHandoffIdentityTokenChangesWithProcessIdentity(t *testing.T) {
-	identity := handoffProtocolIdentity{
-		CityRoot: "/city", ScopeRoot: "/city", Database: "beads", Workspace: "test",
-		Endpoint: handoffProtocolEndpoint{Host: "127.0.0.1", Port: 3307}, DataDir: "/city/.beads/dolt", ConfigFile: "/city/.gc/dolt.yaml",
-		PID: 42, StartTimeTicks: 100,
-	}
-	first := handoffIdentityToken(identity)
-	identity.PID = 43
-	if second := handoffIdentityToken(identity); second == first {
-		t.Fatalf("identity token did not change when PID changed: %q", first)
-	}
-}
-
-func TestValidateIdentityTokenValueRejectsMalformedSentinels(t *testing.T) {
-	if err := validateIdentityTokenValue(handoffIdentityToken(handoffProtocolIdentity{PID: 1})); err != nil {
-		t.Fatalf("a well-formed sentinel was rejected: %v", err)
-	}
-	for name, token := range map[string]string{
-		"empty":        "",
-		"unprefixed":   strings.Repeat("a", 64),
-		"short":        "sha256:abcd",
-		"non-hex":      "sha256:" + strings.Repeat("z", 64),
-		"wrong digest": "sha512:" + strings.Repeat("a", 64),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := validateIdentityTokenValue(token); err == nil {
-				t.Fatalf("malformed sentinel %q was admitted", token)
+			if owned {
+				t.Fatal("an unbound replacement reported the scope as bd's")
 			}
 		})
 	}

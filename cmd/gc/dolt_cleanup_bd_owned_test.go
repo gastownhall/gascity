@@ -27,8 +27,8 @@ func TestProxiedScopeCleanupStillReapsHostOrphans(t *testing.T) {
 		ActiveTestRoots: []string{},
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runProxiedScopeDoltCleanup(opts, &stdout, &stderr); code != 0 {
-		t.Fatalf("runProxiedScopeDoltCleanup exit = %d, stderr = %s", code, stderr.String())
+	if code := runBdOwnedScopeDoltCleanup(true, opts, &stdout, &stderr); code != 0 {
+		t.Fatalf("runBdOwnedScopeDoltCleanup exit = %d, stderr = %s", code, stderr.String())
 	}
 
 	var report CleanupReport
@@ -63,8 +63,8 @@ func TestProxiedScopeCleanupDoesNotReapBdOwnedProxy(t *testing.T) {
 		ActiveTestRoots: []string{},
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runProxiedScopeDoltCleanup(opts, &stdout, &stderr); code != 0 {
-		t.Fatalf("runProxiedScopeDoltCleanup exit = %d, stderr = %s", code, stderr.String())
+	if code := runBdOwnedScopeDoltCleanup(true, opts, &stdout, &stderr); code != 0 {
+		t.Fatalf("runBdOwnedScopeDoltCleanup exit = %d, stderr = %s", code, stderr.String())
 	}
 	var report CleanupReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {

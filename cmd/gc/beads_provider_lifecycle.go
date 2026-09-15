@@ -1443,6 +1443,9 @@ func ensureBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
+		if err := retireManagedDoltRuntimePublication(cityPath); err != nil {
+			return err
+		}
 		return runProviderOwnedLifecycleOp(cityPath, "start")
 	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
@@ -1513,6 +1516,9 @@ func shutdownBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
+		if err := retireManagedDoltRuntimePublication(cityPath); err != nil {
+			return err
+		}
 		return runProviderOwnedScopesLifecycleOp(cityPath, "stop")
 	}
 	if ownedRig, err := hasProviderOwnedRigScope(cityPath, "stop"); err != nil {

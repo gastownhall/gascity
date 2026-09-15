@@ -67,9 +67,14 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
-	_, providerOwned, err := providerScopeOwnership(cityPath, cityPath)
+	// The R1 classification, not the ownership journal alone. A city handed to
+	// bd by the ownership handoff has no .gc record — bd's journal is the
+	// record — and keeps dolt_mode "server" because the transport did not
+	// change, so asking only the journal answered "gc's" for a scope whose
+	// Dolt process belongs to bd, and every publication path below believed it.
+	providerOwned, err := scopeProviderOwned(cityPath, cityPath)
 	if err != nil {
-		return false, fmt.Errorf("read provider scope ownership journal: %w", err)
+		return false, fmt.Errorf("classify provider scope ownership: %w", err)
 	}
 	if providerOwned {
 		return false, nil
@@ -233,6 +238,30 @@ func clearManagedDoltRuntimeStateUnlessBound(cityPath string) error {
 		}
 	}
 	return clearManagedDoltRuntimeState(cityPath)
+}
+
+// retireManagedDoltRuntimePublication drops gc's own managed-Dolt runtime
+// state for a city bd now owns.
+//
+// `gc dolt-state handoff-stop` stops the legacy server but deliberately leaves
+// the published state alone: the rollback restores the workspace artifacts it
+// captured, and rewriting endpoint controls under it would put bytes back that
+// no longer match. The published state is not one of those artifacts, though —
+// it is gc's own record of a process gc runs — and left behind it still says
+// running:true for a pid that is gone. The dolt pack reads it as "this city is
+// gc-managed", and the acceptance assertion that gc raised no second server
+// reads it as exactly that second server.
+//
+// It removes only the two files under .gc. The .beads workspace is bd's now,
+// and the port mirror sync that clearManagedDoltRuntimeState performs would
+// rewrite the very dolt-server.port a rollback has to be able to restore.
+func retireManagedDoltRuntimePublication(cityPath string) error {
+	for _, path := range []string{managedDoltStatePath(cityPath), providerManagedDoltStatePath(cityPath)} {
+		if err := removeDoltRuntimeStateFile(path); err != nil {
+			return fmt.Errorf("retire managed dolt runtime state %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func publishManagedDoltRuntimeStateIfOwned(cityPath string) error {

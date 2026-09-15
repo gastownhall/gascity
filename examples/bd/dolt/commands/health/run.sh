@@ -12,8 +12,8 @@ set -e
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
 # --json callers get a skip document rather than runtime.sh's plain line, so
-# this command handles the bd-owned proxied case itself (after flag parsing).
-GC_DOLT_PROXIED_HANDLED=1
+# this command handles the bd-owned case itself (after flag parsing).
+GC_DOLT_BD_OWNED_HANDLED=1
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
 metadata_files() {
@@ -75,11 +75,11 @@ while [ $# -gt 0 ]; do
 done
 
 # bd owns this scope's Dolt lifecycle: nothing here is ours to probe.
-if [ "${GC_DOLT_SCOPE_BD_PROXIED:-0}" = "1" ]; then
+if [ "${GC_DOLT_SCOPE_BD_OWNED:-0}" = "1" ]; then
   if [ "$json_output" = true ]; then
-    print_proxied_skip_json
+    print_bd_owned_skip_json
   else
-    printf '%s\n' "$GC_DOLT_PROXIED_NOOP_MESSAGE"
+    printf '%s\n' "$GC_DOLT_BD_NOOP_MESSAGE"
   fi
   exit 0
 fi

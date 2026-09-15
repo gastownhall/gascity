@@ -304,6 +304,23 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 				}
 				return nil
 			}
+			// A rig that tracks no endpoint at all is inheriting, which is what
+			// the origin says, and the resolver derives its target from the
+			// city. Requiring a mirror here refused a shape nothing wrote and
+			// nothing could repair: a legacy rig under a city the ownership
+			// handoff republished as city_canonical over bd's replacement
+			// server. bd is city-root only by design and must not rewrite a rig
+			// config, so the rig keeps the endpoint-less inherited config the
+			// legacy gc gave it — and the refusal took down the whole city,
+			// because this validator gates the canonical resolver every gc
+			// command goes through.
+			//
+			// A rig that does claim an endpoint still has to claim the city's:
+			// a half or divergent endpoint is a broken mirror, not an
+			// inheritance, and is refused below.
+			if !configTracksEndpoint(cfg) {
+				return nil
+			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("canonical inherited rig config requires both dolt.host and dolt.port")
 			}
@@ -688,6 +705,26 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string
 		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
 		if err != nil {
+			// The city's own arm has always fallen through to bd's record
+			// here; this one demanded gc's runtime state and failed without
+			// it. That is the shape the ownership handoff leaves behind: the
+			// transfer changes who RUNS the city's Dolt process, not who
+			// configured its endpoint, so the origin stays managed_city while
+			// the publication is retired and bd's .beads/dolt-server.pid/.port
+			// names the server. A rig inherits the city's endpoint; which
+			// process is serving it is not the rig's business, and demanding
+			// one particular record made `gc doctor` fail a rig on a city that
+			// was working perfectly.
+			//
+			// The city's record is read, not the rig's: a rig with a server of
+			// its own is not inheriting, and that case is answered above.
+			// Order matters — gc's publication first — so a rollback that
+			// republishes it takes the rig back onto the managed server.
+			if IsManagedRuntimeUnavailable(err) {
+				if bdPort, ok := readProviderOwnedServerPort(fs, cityRoot); ok {
+					return localServerTarget(target, bdPort), nil
+				}
+			}
 			return DoltConnectionTarget{}, err
 		}
 		target.Host = managedCityHost()

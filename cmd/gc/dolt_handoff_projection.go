@@ -1,124 +1,114 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 )
 
-// The types below are the shape of the legacy-inspect proof a committed
-// ownership-handoff journal embeds. gc no longer mints one — bd never calls gc,
-// so the hidden protocol that produced these records is gone (see
-// engdocs/design/beads-proxied-local-default.md) — but gc still has to
-// recognize a journal bd wrote, so the reader keeps the shape it authenticates.
-const handoffProtocolSchemaVersion = 1
+// handoffJournalSchemaVersion is the only ownership-handoff journal schema gc
+// reads.
+//
+// Version-gating is not a formality here, it is the whole safety of the reader.
+// v1 and v2 share phase NAMES and order them differently: old_owner_stopped
+// means "bd's replacement server is already configured" under v1 and "the
+// legacy server is gone and there is no target yet" under v2. Interpreting a v1
+// journal with v2's table — or the reverse — is the single worst misread
+// available, because it is the phase that decides whether a second sql-server
+// may be raised over a live one. So the version is checked before any phase is
+// looked at, and anything that is not this version is refused by name rather
+// than probed for familiar fields.
+const handoffJournalSchemaVersion = 2
 
-type handoffProtocolEndpoint struct {
-	Host   string `json:"host"`
-	Port   int    `json:"port"`
-	Socket string `json:"socket"`
+const handoffJournalName = "ownership-handoff.json"
+
+// handoffProjectionEndpoint is the loopback endpoint the legacy owner served.
+// v2 has no socket field: the transfer is TCP-only by contract.
+type handoffProjectionEndpoint struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
 }
 
-type handoffProtocolIdentity struct {
-	CityRoot       string                  `json:"city_root"`
-	ScopeRoot      string                  `json:"scope_root"`
-	Database       string                  `json:"database"`
-	Workspace      string                  `json:"workspace"`
-	Endpoint       handoffProtocolEndpoint `json:"endpoint"`
-	DataDir        string                  `json:"data_dir"`
-	ConfigFile     string                  `json:"config_file"`
-	PID            int                     `json:"pid"`
-	StartIdentity  string                  `json:"start_identity"`
-	StartTimeTicks int64                   `json:"start_time_ticks"`
-	PortHolderPID  int                     `json:"port_holder_pid"`
+// handoffProjectionArtifact is one file bd captured byte- and mode-exact before
+// it touched anything. Present distinguishes "was empty" from "was absent",
+// which is the difference between restoring a file and removing one.
+type handoffProjectionArtifact struct {
+	Present bool   `json:"present"`
+	Data    []byte `json:"data,omitempty"`
+	Mode    uint32 `json:"mode,omitempty"`
 }
 
-type handoffProtocolResponse struct {
-	SchemaVersion int                     `json:"schema_version"`
-	Operation     string                  `json:"operation"`
-	Result        string                  `json:"result"`
-	Owner         string                  `json:"owner"`
-	Mutates       bool                    `json:"mutates"`
-	Identity      handoffProtocolIdentity `json:"identity"`
-	IdentityToken string                  `json:"identity_token"`
-	ErrorCode     string                  `json:"error_code"`
-}
-
-// handoffIdentityToken is the sentinel a journal carries: the digest of the
-// identity its proof asserts. The digest is taken over the JSON encoding of
-// the struct above, so the shape and the sentinel cannot drift apart.
-func handoffIdentityToken(identity handoffProtocolIdentity) string {
-	b, _ := json.Marshal(identity)
-	sum := sha256.Sum256(b)
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-func validateIdentityTokenValue(token string) error {
-	if len(token) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(token, "sha256:") {
-		return errors.New("identity token must be sha256 encoded")
-	}
-	if _, err := hex.DecodeString(token[len("sha256:"):]); err != nil {
-		return errors.New("identity token is not hexadecimal")
-	}
-	return nil
-}
-
+// handoffProjectionJournal is gc's view of bd's journal. It is deliberately a
+// subset: bd owns the format, and every field named here is one gc's lifecycle
+// decisions actually rest on.
+//
+// Two shapes moved in v2 and both matter to this reader. The request carries no
+// city_root — bd knows about workspaces and nothing about cities — and the
+// replacement server's identity moved out of the snapshot into its own target
+// object, because the snapshot is what bd must put BACK and the target is what
+// bd made. Mixing them made the snapshot's meaning ambiguous.
 type handoffProjectionJournal struct {
-	Request struct {
-		CityRoot  string `json:"city_root"`
-		Root      string `json:"root"`
-		Database  string `json:"database"`
-		Workspace string `json:"workspace"`
-		Endpoint  struct {
-			Host   string `json:"host"`
-			Port   int    `json:"port"`
-			Socket string `json:"socket"`
-		} `json:"endpoint"`
-		Owner string `json:"owner"`
+	SchemaVersion int `json:"schema_version"`
+	Request       struct {
+		Root      string                    `json:"root"`
+		Database  string                    `json:"database"`
+		Workspace string                    `json:"workspace"`
+		Endpoint  handoffProjectionEndpoint `json:"endpoint"`
+		Owner     string                    `json:"owner"`
 	} `json:"request"`
+	Target struct {
+		PID          int    `json:"pid"`
+		Birth        string `json:"birth"`
+		DataDir      string `json:"data_dir"`
+		LaunchID     string `json:"launch_id"`
+		LaunchConfig string `json:"launch_config"`
+		Executable   string `json:"executable"`
+		Host         string `json:"host"`
+		Port         int    `json:"port"`
+	} `json:"target"`
 	Snapshot struct {
-		Metadata                 []byte `json:"metadata"`
-		TargetPID                int    `json:"target_pid"`
-		TargetBirth              string `json:"target_birth"`
-		TargetDataDir            string `json:"target_data_dir"`
-		TargetLaunchID           string `json:"target_launch_id"`
-		TargetLaunchConfig       string `json:"target_launch_config"`
-		TargetLaunchExecutable   string `json:"target_launch_executable"`
-		WorkspaceMetadata        []byte `json:"workspace_metadata"`
-		WorkspaceConfig          []byte `json:"workspace_config"`
-		WorkspacePort            []byte `json:"workspace_port"`
-		WorkspaceMetadataPresent bool   `json:"workspace_metadata_present"`
-		WorkspaceConfigPresent   bool   `json:"workspace_config_present"`
-		WorkspacePortPresent     bool   `json:"workspace_port_present"`
-		WorkspaceMetadataMode    uint32 `json:"workspace_metadata_mode"`
-		WorkspaceConfigMode      uint32 `json:"workspace_config_mode"`
-		WorkspacePortMode        uint32 `json:"workspace_port_mode"`
-		Sentinel                 string `json:"sentinel"`
+		Metadata handoffProjectionArtifact `json:"metadata"`
+		Config   handoffProjectionArtifact `json:"config"`
+		PortFile handoffProjectionArtifact `json:"port_file"`
 	} `json:"snapshot"`
-	SnapshotCaptured     bool   `json:"snapshot_captured"`
-	CommitHookInProgress bool   `json:"commit_hook_in_progress"`
-	CommitHookRan        bool   `json:"commit_hook_ran"`
-	MutationOccurred     bool   `json:"mutation_occurred"`
-	Phase                string `json:"phase"`
-	Owner                string `json:"owner"`
+	Reservations struct {
+		TargetLaunch   string `json:"target_launch"`
+		CommitWriteSet string `json:"commit_write_set"`
+	} `json:"reservations"`
+	Phase     string `json:"phase"`
+	Owner     string `json:"owner"`
+	UpdatedAt string `json:"updated_at"`
 }
 
-// committedBeadsHandoffOwnsScope is the read-only ownership projection used
-// by GC's normal lifecycle resolver. A committed direct-local handoff is
-// provider-owned. Only a byte-exact restored rollback is legacy-owned;
-// pending, corrupt, and conflicting records fail closed.
+// handoffBirthTokenPattern is the shape of a process-birth identity: a
+// platform-versioned scheme and a payload. gc deliberately does not know how to
+// mint or compare one — that is bd's, and only bd's, because only bd started
+// the process it names. What gc can prove is that the committed journal carries
+// one at all, in the versioned form bd writes, rather than an empty string or a
+// pid restated as a birth.
+var handoffBirthTokenPattern = regexp.MustCompile(`^[a-z0-9]+-v[0-9]+:[^\s]+$`)
+
+// committedBeadsHandoffOwnsScope is the ownership projection used by GC's
+// normal lifecycle resolver. A committed handoff is provider-owned. Only an
+// admitted restored rollback is legacy-owned; pending, corrupt, and conflicting
+// records fail closed.
+//
+// It is read-only but for one thing: the first time a rolled-back journal's
+// artifacts are found byte-exact, that admission is recorded. See
+// admitRolledBackHandoff for why the comparison cannot be a standing invariant.
 func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	// A missing journal is the legacy condition. Do not impose physical-path
 	// requirements on a fresh scope until there is a handoff record to admit.
-	path := filepath.Join(scopeRoot, ".beads", "ownership-handoff.json")
+	// A rollback that ran to completion archives its journal under a
+	// `.rolled-back-<nanos>` suffix as its last act, so a settled rollback
+	// arrives here as exactly this case: an absent journal, which is what the
+	// legacy condition is.
+	path := filepath.Join(scopeRoot, ".beads", handoffJournalName)
 	info, err := os.Lstat(path)
 	// ENOTDIR is the same answer as ENOENT here: a .beads that is not a
 	// directory cannot hold a journal, so there is no handoff record to admit.
@@ -149,7 +139,7 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	if !beadsInfo.IsDir() || beadsInfo.Mode()&os.ModeSymlink != 0 {
 		return false, fmt.Errorf("ownership handoff beads directory is not a physical directory")
 	}
-	path = filepath.Join(beadsDir, "ownership-handoff.json")
+	path = filepath.Join(beadsDir, handoffJournalName)
 	info, err = os.Lstat(path)
 	if err != nil {
 		return false, fmt.Errorf("ownership handoff journal is not a regular file: %w", err)
@@ -164,6 +154,11 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 	var journal handoffProjectionJournal
 	if err := json.Unmarshal(data, &journal); err != nil {
 		return false, fmt.Errorf("parse ownership handoff journal: %w", err)
+	}
+	// Version first. Nothing below this line may look at a phase name.
+	if journal.SchemaVersion != handoffJournalSchemaVersion {
+		return false, fmt.Errorf("unsupported handoff journal version %d at %s: gc reads version %d, and the phase names mean different things across versions",
+			journal.SchemaVersion, path, handoffJournalSchemaVersion)
 	}
 	if err := validateProjectionRequest(scopeRoot, journal); err != nil {
 		return false, err
@@ -181,135 +176,139 @@ func committedBeadsHandoffOwnsScope(scopeRoot string) (bool, error) {
 		if err := validateRestoredProjection(journal); err != nil {
 			return false, err
 		}
-		if err := handoffJournalRestoredArtifactsMatch(scopeRoot, journal.Snapshot.WorkspaceMetadata, journal.Snapshot.WorkspaceConfig, journal.Snapshot.WorkspacePort, journal.Snapshot.WorkspaceMetadataPresent, journal.Snapshot.WorkspaceConfigPresent, journal.Snapshot.WorkspacePortPresent, journal.Snapshot.WorkspaceMetadataMode, journal.Snapshot.WorkspaceConfigMode, journal.Snapshot.WorkspacePortMode); err != nil {
+		if err := admitRolledBackHandoff(scopeRoot, journal); err != nil {
 			return false, err
 		}
 		return false, nil
-	case "prepared", "target_configured", "old_owner_stopped", "verified", "rollback_started":
+	case "prepared", "old_owner_stopped", "target_configured", "verified", "rollback_started":
+		// Every one of these is a transfer in flight, and none of them is
+		// bd-owned. old_owner_stopped is worth naming: under v2 it means the
+		// legacy server has been proven gone and bd has NOT yet configured a
+		// replacement, so the scope has no running server at all. gc must not
+		// read that as ownership of any kind, and must not start its own
+		// server over the transfer — which is what failing closed here does.
 		if journal.Owner != "legacy-gc" {
 			return false, errors.New("ownership handoff journal has invalid pending owner")
 		}
-		return false, errors.New("ownership handoff journal is pending")
+		return false, fmt.Errorf("ownership handoff journal is %s; the transfer is in progress", journal.Phase)
 	default:
 		return false, errors.New("ownership handoff journal has unknown phase")
 	}
 }
 
+// validateRestoredProjection rejects a rollback checkpoint that captured
+// nothing. Every legacy GC-managed city has a metadata.json — it is what makes
+// it a beads scope at all — so a snapshot that records it absent is not a
+// restoration of this city, and admitting one would let an empty journal hand
+// the scope back on the strength of two files that are also absent.
 func validateRestoredProjection(journal handoffProjectionJournal) error {
-	if !journal.SnapshotCaptured || !journal.MutationOccurred || journal.CommitHookInProgress || journal.CommitHookRan {
+	if !journal.Snapshot.Metadata.Present || len(journal.Snapshot.Metadata.Data) == 0 {
 		return errors.New("ownership handoff journal has incomplete restored checkpoint")
-	}
-	return validateProjectionSnapshotIdentity(journal)
-}
-
-// validateProjectionSnapshotIdentity authenticates the durable GC inspect proof
-// instead of treating its JSON fields as advisory. It intentionally never
-// consults a live legacy PID or config file: a committed transfer has already
-// retired that process, while a rolled-back transfer records a fresh inspect.
-func validateProjectionSnapshotIdentity(journal handoffProjectionJournal) error {
-	decoder := json.NewDecoder(bytes.NewReader(journal.Snapshot.Metadata))
-	decoder.DisallowUnknownFields()
-	var response handoffProtocolResponse
-	if err := decoder.Decode(&response); err != nil {
-		return fmt.Errorf("decode legacy protocol snapshot: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("ownership handoff legacy protocol snapshot must contain one object")
-	}
-	if response.SchemaVersion != handoffProtocolSchemaVersion || response.Operation != "handoff-inspect" || response.Result != "eligible" ||
-		response.Owner != "legacy-gc" || response.Mutates || strings.TrimSpace(response.ErrorCode) != "" {
-		return errors.New("ownership handoff journal has invalid legacy protocol snapshot")
-	}
-	r := journal.Request
-	i := response.Identity
-	if i.CityRoot != r.CityRoot || i.ScopeRoot != r.Root || i.Database != r.Database || i.Workspace != r.Workspace ||
-		i.Endpoint.Host != r.Endpoint.Host || i.Endpoint.Port != r.Endpoint.Port || i.Endpoint.Socket != r.Endpoint.Socket ||
-		i.PID <= 0 || strings.TrimSpace(i.StartIdentity) == "" || i.StartTimeTicks < 0 || i.PortHolderPID != i.PID {
-		return errors.New("ownership handoff legacy identity does not match its request")
-	}
-	for _, path := range []string{i.DataDir, i.ConfigFile} {
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-			return errors.New("ownership handoff legacy identity has noncanonical path")
-		}
-		rel, err := filepath.Rel(r.CityRoot, path)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return errors.New("ownership handoff legacy identity path is outside its city root")
-		}
-	}
-	if err := validateIdentityTokenValue(response.IdentityToken); err != nil || response.IdentityToken != handoffIdentityToken(response.Identity) || response.IdentityToken != journal.Snapshot.Sentinel {
-		return errors.New("ownership handoff legacy protocol token does not match its identity")
 	}
 	return nil
 }
 
 func validateProjectionRequest(scopeRoot string, journal handoffProjectionJournal) error {
 	r := journal.Request
-	if r.Owner != "legacy-gc" || r.Database == "" || r.Workspace == "" || r.Endpoint.Socket != "" ||
-		(r.Endpoint.Host != "127.0.0.1" && r.Endpoint.Host != "localhost" && r.Endpoint.Host != "::1") || r.Endpoint.Port < 1 || r.Endpoint.Port > 65535 {
+	if r.Owner != "legacy-gc" || r.Database == "" || r.Workspace == "" ||
+		(r.Endpoint.Host != "127.0.0.1" && r.Endpoint.Host != "localhost" && r.Endpoint.Host != "::1") ||
+		r.Endpoint.Port < 1 || r.Endpoint.Port > 65535 {
 		return errors.New("ownership handoff journal has invalid request identity")
 	}
-	if filepath.Clean(r.CityRoot) != scopeRoot || filepath.Clean(r.Root) != scopeRoot {
+	if !samePath(r.Root, scopeRoot) {
 		return errors.New("ownership handoff journal does not bind this scope root")
 	}
 	return nil
 }
 
+// validateCommittedProjection authenticates the one thing a committed journal
+// asserts that gc acts on: that bd is running a replacement server for this
+// scope, identified strictly enough that bd can stop it again.
+//
+// There is no countersigned proof to verify here, and there deliberately never
+// will be. Under v1 the journal embedded a typed response gc itself had minted,
+// so the reader could recompute its digest; that protocol existed only so bd
+// could spawn gc, which is the shape the inverted design removes. What is left
+// is bd's own record, and what gc can hold it to is internal consistency: the
+// target must be bound to THIS workspace (its data dir and its nonce-bound
+// launch config both under this scope's .beads), it must carry the strict
+// launch identity bd needs to stop it by identity rather than by pid, and its
+// endpoint must be a real loopback endpoint. A journal that cannot satisfy
+// those is not a transfer gc can safely stand down for.
 func validateCommittedProjection(scopeRoot string, journal handoffProjectionJournal) error {
-	if journal.Owner != "bd" || !journal.SnapshotCaptured || !journal.MutationOccurred || !journal.CommitHookRan || journal.CommitHookInProgress {
+	if journal.Owner != "bd" {
+		return errors.New("ownership handoff journal has invalid committed owner")
+	}
+	if journal.Reservations.TargetLaunch != "done" || journal.Reservations.CommitWriteSet != "done" {
 		return errors.New("ownership handoff journal has incomplete committed checkpoint")
 	}
-	s := journal.Snapshot
-	if s.TargetPID <= 0 || strings.TrimSpace(s.TargetBirth) == "" || filepath.Clean(s.TargetDataDir) != filepath.Join(scopeRoot, ".beads", "dolt") {
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	t := journal.Target
+	if t.PID <= 0 || !handoffBirthTokenPattern.MatchString(strings.TrimSpace(t.Birth)) {
+		return errors.New("ownership handoff journal has invalid replacement server identity")
+	}
+	if !samePath(t.DataDir, filepath.Join(beadsDir, "dolt")) {
 		return errors.New("ownership handoff journal has invalid direct target identity")
 	}
-	if len(s.TargetLaunchID) != 32 || strings.Trim(s.TargetLaunchID, "0123456789abcdef") != "" ||
-		s.TargetLaunchConfig != filepath.Join(scopeRoot, ".beads", "dolt-handoff-"+s.TargetLaunchID+".yaml") ||
-		!filepath.IsAbs(s.TargetLaunchExecutable) || filepath.Clean(s.TargetLaunchExecutable) != s.TargetLaunchExecutable {
+	if len(t.LaunchID) != 32 || strings.Trim(t.LaunchID, "0123456789abcdef") != "" ||
+		!samePath(t.LaunchConfig, filepath.Join(beadsDir, "dolt-handoff-"+t.LaunchID+".yaml")) ||
+		!filepath.IsAbs(t.Executable) || filepath.Clean(t.Executable) != t.Executable {
 		return errors.New("ownership handoff journal has incomplete strict launch identity")
 	}
-	return validateProjectionSnapshotIdentity(journal)
+	if (t.Host != "127.0.0.1" && t.Host != "localhost" && t.Host != "::1") || t.Port < 1 || t.Port > 65535 {
+		return errors.New("ownership handoff journal has invalid replacement endpoint")
+	}
+	return nil
 }
 
 // handoffJournalRestoredArtifactsMatch is deliberately byte-exact. The
 // rollback checkpoint is the permission for GC to resume legacy management.
-func handoffJournalRestoredArtifactsMatch(cityPath string, metadata, config, port []byte, metadataPresent, configPresent, portPresent bool, metadataMode, configMode, portMode uint32) error {
-	for _, artifact := range []struct {
-		name    string
-		want    []byte
-		present bool
-		mode    uint32
-	}{
-		{name: "metadata.json", want: metadata, present: metadataPresent, mode: metadataMode},
-		{name: "config.yaml", want: config, present: configPresent, mode: configMode},
-		{name: "dolt-server.port", want: port, present: portPresent, mode: portMode},
-	} {
-		path := filepath.Join(cityPath, ".beads", artifact.name)
+func handoffJournalRestoredArtifactsMatch(cityPath string, artifacts map[string]handoffProjectionArtifact) error {
+	for _, name := range legacyHandoffArtifactNames {
+		artifact := artifacts[name]
+		path := filepath.Join(cityPath, ".beads", name)
 		info, err := os.Lstat(path)
-		if !artifact.present {
+		if !artifact.Present {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			if err != nil {
-				return fmt.Errorf("stat restored handoff %s: %w", artifact.name, err)
+				return fmt.Errorf("stat restored handoff %s: %w", name, err)
 			}
-			return fmt.Errorf("restored handoff %s unexpectedly exists", artifact.name)
+			return fmt.Errorf("restored handoff %s unexpectedly exists", name)
 		}
 		if err != nil {
-			return fmt.Errorf("stat restored handoff %s: %w", artifact.name, err)
+			return fmt.Errorf("stat restored handoff %s: %w", name, err)
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("restored handoff %s is not a regular file", artifact.name)
+			return fmt.Errorf("restored handoff %s is not a regular file", name)
 		}
 		got, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read restored handoff %s: %w", artifact.name, err)
+			return fmt.Errorf("read restored handoff %s: %w", name, err)
 		}
-		if string(got) != string(artifact.want) {
-			return fmt.Errorf("restored handoff %s does not match its journal", artifact.name)
+		if string(got) != string(artifact.Data) {
+			return fmt.Errorf("restored handoff %s does not match its journal", name)
 		}
-		if uint32(info.Mode().Perm()) != artifact.mode {
-			return fmt.Errorf("restored handoff %s mode does not match its journal", artifact.name)
+		if uint32(info.Mode().Perm()) != artifact.Mode {
+			return fmt.Errorf("restored handoff %s mode does not match its journal", name)
 		}
 	}
 	return nil
+}
+
+// legacyHandoffArtifactNames are the three files the rollback checkpoint covers
+// and gc's projection compares byte for byte before resuming legacy management.
+// dolt-server.pid is deliberately absent: gc's own restart rewrites it, so it
+// cannot be part of an admission gate that has to survive that restart.
+var legacyHandoffArtifactNames = []string{"metadata.json", "config.yaml", "dolt-server.port"}
+
+// restoredHandoffArtifacts maps the journal's snapshot onto the file names it
+// restored.
+func restoredHandoffArtifacts(journal handoffProjectionJournal) map[string]handoffProjectionArtifact {
+	return map[string]handoffProjectionArtifact{
+		"metadata.json":    journal.Snapshot.Metadata,
+		"config.yaml":      journal.Snapshot.Config,
+		"dolt-server.port": journal.Snapshot.PortFile,
+	}
 }

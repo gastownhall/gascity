@@ -275,6 +275,114 @@ run is finished by running it again; `--dry-run` prints the exact per-scope plan
 and writes nothing. Procedure, refusals and recovery:
 `engdocs/runbooks/beads-migrate-proxied.md`.
 
+## The journaled ownership handoff (M8)
+
+The interim path above has gc rewrite bd's binding while bd is not looking. The
+handoff is the intended one: gc stops its own server and bd takes the scope over,
+journaling every step.
+
+**bd never calls gc.** An earlier shape had bd spawn gc through a pinned
+`GC_BIN` and take its typed JSON as proof; that protocol is withdrawn, and with
+it the hidden `gc dolt-state handoff-inspect` and `handoff-stop`. The
+responsibilities invert instead:
+
+- **bd owns** the journal, the replacement server, the fences and the rollback.
+  Its verbs are `bd migrate ownership-handoff prepare | legacy-gone | configure
+  | verify | commit | rollback | rollback-finish | status`, one journaled phase
+  per invocation, each idempotent. bd spawns nothing but `dolt`.
+- **gc owns** its own server — starting it, stopping it, and knowing whether it
+  did — and drives the sequence. `gc beads city migrate-handoff`
+  (`cmd/gc/cmd_beads_city_migrate_handoff.go`) is the front door, a sibling of
+  `migrate-proxied` with the same `--json` / `--dry-run` / refusal conventions.
+
+Everything bd needs to know about gc arrives as a command-line argument, and
+none of it is taken on trust: bd handshakes the endpoint gc publishes, resolves
+the legacy process identity from the port holder itself, and records gc's pid
+belief as a hint beside what it found. That is what lets gc be honest about the
+one thing it cannot prove — whether its own stop worked — and still hand over
+safely. It asks bd, and bd's `legacy_alive` is the answer.
+
+The ordering is the whole design. `prepare` snapshots the workspace while gc's
+server is still serving; gc's stop happens between `prepare` and `legacy-gone`,
+because bd cannot stop it and must not be asked to; and everything after the
+stop compensates on failure — `rollback`, gc restarts its own server, then
+`rollback-finish`, re-run while it refuses, because it cannot admit the legacy
+owner back until that owner answers.
+
+The journal is schema v2 and `cmd/gc/dolt_handoff_projection.go` reads it
+**version first**. v1 and v2 share phase names and order them differently:
+`old_owner_stopped` meant "bd's replacement is already configured" under v1 and
+means "the legacy server is gone and nothing has replaced it yet" under v2 — the
+one phase whose misreading licenses a second `sql-server` over a live one. Every
+reader of that journal — the projection, doctor's shallow copy, and the dolt
+pack's sh predicate — checks `schema_version` before it looks at a phase, and
+refuses any other version by name.
+
+### What "bd owns this scope" has to mean everywhere
+
+A committed handoff changes no transport. The city keeps `dolt_mode: server`,
+keeps a direct `sql-server`, and grows no `.gc/scope-ownership.json` record —
+bd's journal is the record. Every predicate that asked "is this proxied?"
+therefore answered "gc's" for a city bd runs, and each one was a separate way
+for gc to take the scope back:
+
+- `gc dolt-state allocate-port` carried no admission check at all, and it is the
+  dolt pack's first step;
+- `managedDoltLifecycleOwned`, which gates every managed runtime publication
+  including the reconcile tick's, read gc's ownership journal alone;
+- the dolt pack's order guard (`assets/scripts/bd_owned_scope.sh`, and its Go
+  twin behind `gc dolt-cleanup`) was keyed on the proxied binding;
+- and gc projected `BEADS_DOLT_AUTO_START=0` into every bd invocation, which is
+  the right guard for a server gc runs and a veto on the owner's own lifecycle
+  for one bd runs: after `gc stop` retires bd's direct server, the `bd ping`
+  that `gc start` uses for readiness could not bring it back.
+
+The shell guard and `gc dolt-cleanup` answer on two arms — the proxied binding
+or a committed handoff — not three. gc's own ownership journal records that gc
+delegated a scope's *initialisation* to bd, and the topology matrix pins the
+pack's managed verbs as still running for a journaled direct-local city;
+widening that arm is a separate decision with its own re-qualification.
+
+gc's own runtime publication is retired rather than merely not rewritten, and
+`migrate-handoff` does it in the same step as the stop. The stop itself
+deliberately leaves it alone — clearing it syncs the port mirrors under
+`.beads`, and those are artifacts bd has already snapshotted for the rollback to
+restore — so the orchestrator removes exactly
+`.gc/runtime/packs/dolt/dolt-state.json` and its provider-state twin, and
+nothing under `.beads`. The provider-owned `gc start` and `gc stop` retire them
+too, for a city handed over by an older path.
+
+Nothing republishes a canonical endpoint for the city, and nothing needs to.
+bd's commit points `.beads/dolt-server.pid` and `.beads/dolt-server.port` at its
+replacement, and gc's managed-city resolver already falls through to those when
+its own runtime state is absent — which, after the retirement, it is. The city
+keeps `gc.endpoint_origin: managed_city`, because the origin records who
+configured the endpoint and gc did; what changed is who runs the process.
+
+### A rollback is an admission, not a standing invariant
+
+The compensation half of M8 is what proves this. A transfer that gets past gc's
+stop and then cannot finish must put the city back rather than leave it owned by
+nobody: bd restores metadata.json, config.yaml and the published port from its
+checkpoint, and gc restarts the legacy owner.
+
+gc's projection admits that restore only if the three files match the journal
+byte for byte. That is the correct rule for *deciding* the scope is legacy-owned
+again, and the wrong lifetime for it: the restart bd just asked for publishes
+gc's managed runtime state, which reconciles the scope's canonical config, which
+merges this build's bead vocabulary into `types.custom` — a byte the journal's
+snapshot cannot contain because it predates the restart. Re-checking on every
+later command refused `gc start` and `gc stop` forever on a city with a healthy
+legacy server.
+
+So the gate answers once. The first byte-exact match is recorded in
+`<city>/.gc/beads-handoff-rollback-admitted.json`, keyed by a digest of the
+request identity and the restored artifacts, and the scope follows the ordinary
+rules from then on. A journal whose artifacts never matched is refused and stays
+refused: nothing has proven the rollback completed. bd's own archive rename of a
+journal that reaches `rolled_back` is the other way out and needs nothing from
+gc — an archived journal is an absent journal, which is the legacy condition.
+
 ## Deliberately not done
 
 - **Native SQL over the proxy.** Proxied scopes read and write through the bd
@@ -283,25 +391,20 @@ and writes nothing. Procedure, refusals and recovery:
   connection-lifetime ownership, idle semantics and proxy identity are a
   separate design. The CLI front door costs a fork per operation, which is a
   real regression for controller-heavy cities.
-- **The journaled legacy→bd ownership handoff.** Not available on rc.2, and no
-  part of it ships here. An earlier revision of this branch carried a hidden
-  `gc dolt-state handoff-inspect`/`handoff-stop` protocol for bd to drive gc as
-  a subprocess. That shape is withdrawn: **bd never calls gc.** bd spawns
-  nothing but `dolt`, it has no provider, hook or callback into its caller, and
-  everything it needs about the caller arrives as command-line input. A
-  transfer built the other way round makes bd's ownership journal depend on a
-  binary it cannot verify, and makes gc's refusals reachable only through bd.
-
-  When the handoff does land it will be **gc-orchestrated over bd verbs**: bd
-  grows a phased, journal-driven `bd migrate ownership-handoff`
-  (`prepare` → `legacy-gone` → `configure` → `verify` → `commit`, with
-  `rollback`/`rollback-finish` and a non-mutating `status`), bd owns the
-  journal, the replacement server, the fences and the rollback, and gc calls
-  those verbs in order — stopping and restarting only its own legacy server in
-  between. No such beads tag exists yet, so gc ships no driver for it. What gc
-  keeps here is the reading half: the committed-journal projection and the
-  three-arm ownership classification, so that a scope bd has taken over is
-  recognised as bd's the moment such a journal exists.
+- **The journaled legacy→bd ownership handoff.** `gc beads city migrate-handoff`
+  is present and needs bd's verbs (beads ≥ rc.3) to do anything; against any
+  older bd the first phase refuses and nothing is touched. Its acceptance
+  coverage is written and skips typed until such a bd exists — see "The
+  journaled ownership handoff (M8)" above.
+  Until then the migration path for an existing direct city is explicit and
+  operator-driven: `gc stop` → `gc beads city migrate-proxied` → `gc start`.
+  That command orchestrates bd's own
+  `bd migrate from-server-to-proxied-server` per scope and fences the one thing
+  bd cannot see — a running Gas City server — because bd's precondition
+  consults only its own pid file and would otherwise commit the mode flip onto
+  a data dir Dolt still holds locked. Procedure, refusals and recovery:
+  `engdocs/runbooks/beads-migrate-proxied.md`. It is an interim path; the
+  journaled handoff supersedes it.
 - **Remote hosted proxies and Windows/macOS proxied lifecycle.** rc.2 defines
   but does not implement the latter.
 

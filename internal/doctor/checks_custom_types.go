@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // RequiredCustomTypes lists the bead types that Gas City requires
@@ -52,6 +53,10 @@ type CustomTypesCheck struct {
 	// missing is populated by Run for use by Fix. It lists required types
 	// absent from the store's types.custom CSV config.
 	missing []string
+	// cityPath is captured by Run so Fix resolves the same endpoint Run did.
+	// A check that read the store through one server and repaired it through
+	// another would report drift it then failed to fix.
+	cityPath string
 	// tableMissing is populated by Run for use by Fix. It lists required
 	// types absent from the store's normalized custom_types table. bd's
 	// create validation reads this table, not the CSV, so the two can
@@ -77,8 +82,11 @@ func (c *CustomTypesCheck) Name() string {
 // independently: a store can pass the CSV check yet still reject
 // `bd create --type <t>` if the table row is missing (see
 // TestCustomTypesCheck_TableDrift).
-func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
+func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if ctx != nil {
+		c.cityPath = ctx.CityPath
+	}
 
 	// Check if .beads directory exists — if not, skip (no store here).
 	beadsDir := filepath.Join(c.Dir, ".beads")
@@ -89,7 +97,7 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// Get current custom types from the CSV config.
-	current, err := getCustomTypes(c.Dir)
+	current, err := getCustomTypes(c.cityPath, c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read types.custom: %v", err)
@@ -103,7 +111,7 @@ func (c *CustomTypesCheck) Run(_ *CheckContext) *CheckResult {
 
 	// Get registered types from the normalized custom_types table — the
 	// source of truth bd's create validation checks.
-	registered, err := getRegisteredTypes(c.Dir)
+	registered, err := getRegisteredTypes(c.cityPath, c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
@@ -165,30 +173,34 @@ func (c *CustomTypesCheck) CanFix() bool { return true }
 // complete): re-issuing `bd config set types.custom` with the same CSV
 // value is what reconciles a drifted custom_types table, since bd's set
 // path is what keeps the table in sync with the CSV.
-func (c *CustomTypesCheck) Fix(_ *CheckContext) error {
+func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
+	if ctx != nil && strings.TrimSpace(c.cityPath) == "" {
+		c.cityPath = ctx.CityPath
+	}
 	if len(c.missing) == 0 && len(c.tableMissing) == 0 {
 		return nil
 	}
 	// Read the current list so we can preserve user-added types.
 	// If we cannot read it, return the error rather than overwriting —
 	// silently dropping user types is worse than failing loud.
-	current, err := getCustomTypes(c.Dir)
+	current, err := getCustomTypes(c.cityPath, c.Dir)
 	if err != nil {
 		return fmt.Errorf("reading current custom types: %w", err)
 	}
 	merged := contract.MergeCustomTypes(current, RequiredCustomTypes)
-	return setCustomTypes(c.Dir, strings.Join(merged, ","))
+	return setCustomTypes(c.cityPath, c.Dir, strings.Join(merged, ","))
 }
 
 // getCustomTypes reads the current types.custom config from a bd store.
 // Uses --json so an unset key returns an empty string value rather than
 // the human-readable "types.custom (not set)" sentinel (which would
 // otherwise be persisted as a fake custom type when Fix() merges).
-func getCustomTypes(dir string) ([]string, error) {
+func getCustomTypes(cityPath, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"config", "get", "--json", "types.custom"}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	applyScopeDoltEnv(cmd, cityPath, dir)
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -225,11 +237,12 @@ func parseCustomTypesJSON(out []byte) ([]string, error) {
 // getRegisteredTypes reads the bd store's normalized custom_types table —
 // the source of truth bd's create validation checks — as opposed to
 // getCustomTypes, which reads the types.custom CSV config value.
-func getRegisteredTypes(dir string) ([]string, error) {
+func getRegisteredTypes(cityPath, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"types", "--json"}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	applyScopeDoltEnv(cmd, cityPath, dir)
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -261,11 +274,12 @@ func parseRegisteredTypesJSON(out []byte) ([]string, error) {
 }
 
 // setCustomTypes writes the types.custom config to a bd store.
-func setCustomTypes(dir, types string) error {
+func setCustomTypes(cityPath, dir, types string) error {
 	start := time.Now()
 	args := []string{"config", "set", "types.custom", types}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	applyScopeDoltEnv(cmd, cityPath, dir)
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {
@@ -284,4 +298,45 @@ func setCustomTypes(dir, types string) error {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// scopeDoltEnv returns the Dolt coordinates a bd invocation for scopeRoot needs,
+// resolved the same way every other reader of a scope's endpoint resolves it.
+//
+// Without this the check ran bare `bd` on the ambient process environment,
+// which is an accident that held for a city and never held for an inherited
+// rig: a legacy rig records no endpoint of its own, because under a gc-managed
+// city the endpoint is gc's to resolve. The accident stops holding the moment
+// the city's owner changes — after an ownership handoff gc's runtime
+// publication is retired — and the check then reported unreadable types on a
+// city that was working. The resolver answers for all three states: gc's
+// published server, bd's replacement after a handoff, and gc's again after a
+// rollback.
+//
+// An endpoint that does not resolve yields nothing rather than a guess. A
+// proxied scope resolves to no host and port at all, and is meant to: bd finds
+// its own proxy, and an override would send it somewhere else.
+func scopeDoltEnv(cityPath, scopeRoot string) []string {
+	if strings.TrimSpace(cityPath) == "" || strings.TrimSpace(scopeRoot) == "" {
+		return nil
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return nil
+	}
+	host, port := strings.TrimSpace(target.Host), strings.TrimSpace(target.Port)
+	if host == "" || port == "" {
+		return nil
+	}
+	return []string{"BEADS_DOLT_SERVER_HOST=" + host, "BEADS_DOLT_SERVER_PORT=" + port}
+}
+
+// applyScopeDoltEnv points one bd invocation at the scope's resolved endpoint,
+// leaving the ambient environment alone when there is nothing to resolve.
+func applyScopeDoltEnv(cmd *exec.Cmd, cityPath, scopeRoot string) {
+	resolved := scopeDoltEnv(cityPath, scopeRoot)
+	if len(resolved) == 0 {
+		return
+	}
+	cmd.Env = append(cmd.Environ(), resolved...)
 }

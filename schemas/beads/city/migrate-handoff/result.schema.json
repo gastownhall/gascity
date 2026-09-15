@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gc://schemas/beads/city/migrate-handoff/result.schema.json",
+  "title": "gc beads city migrate-handoff result",
+  "description": "Per-step outcome of handing a legacy GC-managed city's Dolt lifecycle to bd. ok:true means the report is complete; status carries the verdict for the city and failed counts the steps that did not succeed. The process exit code carries the verdict too.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "city", "dry_run", "status", "steps", "failed"],
+  "properties": {
+    "ok": {
+      "description": "True when the command produced a complete report.",
+      "const": true
+    },
+    "city": {
+      "description": "Absolute path of the city whose lifecycle was considered.",
+      "type": "string",
+      "minLength": 1
+    },
+    "dry_run": {
+      "description": "True when nothing was stopped, started or written.",
+      "type": "boolean"
+    },
+    "legacy_endpoint": {
+      "description": "host:port where gc's own Dolt server was listening, taken from gc's published runtime state.",
+      "type": "string"
+    },
+    "database": {
+      "description": "The Dolt database gc's server serves for this city.",
+      "type": "string"
+    },
+    "status": {
+      "description": "What happened to the city. \"rolled-back\" means the transfer was compensated and gc owns the lifecycle again.",
+      "type": "string",
+      "enum": ["handed-off", "already-handed-off", "would-hand-off", "rolled-back", "failed"]
+    },
+    "failed": {
+      "description": "Number of steps whose status is \"failed\".",
+      "type": "integer",
+      "minimum": 0
+    },
+    "steps": {
+      "description": "One entry per step attempted, in the order they ran.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step", "actor", "status"],
+        "properties": {
+          "step": {
+            "description": "The phase or action this row reports.",
+            "type": "string",
+            "enum": [
+              "status",
+              "prepare",
+              "stop-legacy",
+              "legacy-gone",
+              "configure",
+              "verify",
+              "commit",
+              "rollback",
+              "restart-legacy",
+              "rollback-finish",
+              "resume-rollback"
+            ]
+          },
+          "actor": {
+            "description": "Which program performed the step. bd owns the journal and the replacement server; gc owns its own server.",
+            "type": "string",
+            "enum": ["bd", "gc"]
+          },
+          "status": {
+            "description": "What happened to this step.",
+            "type": "string",
+            "enum": ["ok", "skipped", "would-run", "failed"]
+          },
+          "phase": {
+            "description": "The phase bd's journal is on after this step.",
+            "type": "string"
+          },
+          "error_code": {
+            "description": "bd's typed refusal code. Present only when a bd step failed.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Human-readable note about what was done, would be done, or why the step was skipped.",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why this step failed. Present only with status \"failed\".",
+            "type": "string"
+          },
+          "evidence": {
+            "description": "The gate outcomes bd journaled for this phase, so a refusal names which gate said no. \"unavailable\" is a gate this platform could not evaluate.",
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

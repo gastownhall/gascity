@@ -1073,6 +1073,32 @@ func clearProjectedDoltEnv(env map[string]string) {
 	}
 }
 
+// applyBdDoltAutoStartPolicy decides whether gc forbids bd's built-in Dolt
+// auto-start for this city's bd invocations.
+//
+// gc suppresses it to protect a server of its own: bd's CLI auto-start would
+// raise a second sql-server from the caller's cwd with the wrong data_dir
+// beside the one gc supervises. A scope bd owns has no such server to protect.
+// There the suppression is not a guard but a veto on the owner's own
+// lifecycle: after `gc stop` retires bd's direct server, the `bd ping` that
+// `gc start` uses for readiness cannot bring it back, and the city comes up
+// with an open circuit breaker against a port nothing is listening on.
+//
+// The value is written either way rather than left unset. An ambient
+// BEADS_DOLT_AUTO_START=0 — a supervisor's own projection, an operator's
+// shell — would otherwise survive into the child and reimpose the veto.
+//
+// An unreadable ownership record keeps the suppression: that is the behavior
+// every gc-managed city has always had, and the failure belongs to whichever
+// command actually needs the classification, not to an environment builder.
+func applyBdDoltAutoStartPolicy(env map[string]string, cityPath string) {
+	if owned, err := scopeProviderOwned(cityPath, cityPath); err == nil && owned {
+		env["BEADS_DOLT_AUTO_START"] = ""
+		return
+	}
+	env["BEADS_DOLT_AUTO_START"] = "0"
+}
+
 // clearManagedDoltLifecycleEnv removes Gas City's direct sql-server control
 // plane when beads owns a proxied server and its child Dolt process.
 func clearManagedDoltLifecycleEnv(env map[string]string) {
@@ -1806,7 +1832,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// so a proxied scope's proxy comes back on the next bd read regardless.
 	// applyProxiedDoltEnv drops the variable for those scopes rather than
 	// projecting a promise bd does not keep.
-	env["BEADS_DOLT_AUTO_START"] = "0"
+	applyBdDoltAutoStartPolicy(env, cityPath)
 	// Suppress bd's auto-export of issues.jsonl on every write. The canonical
 	// config also persists export.auto:false (see internal/beads/contract/files.go),
 	// but the env var is the bulletproof per-invocation guard: it covers fresh
@@ -1906,7 +1932,8 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 		if err != nil {
 			projectionErr = err
 		}
-		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		source := map[string]string{}
+		applyBdDoltAutoStartPolicy(source, cityPath)
 		applyBdContributorRoutingOptOut(source)
 		applyBdCLIRemoteSyncOptOut(source)
 		applyBdAutoBackupOptOut(source)

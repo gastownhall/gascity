@@ -13,10 +13,47 @@ import (
 	"testing"
 )
 
-// proxiedNoOpMessage is the one line every managed-Dolt verb prints on a
-// bd-owned proxied scope. It is duplicated here on purpose: the test asserts
-// the contract text, not a shared constant that could drift with the scripts.
-const proxiedNoOpMessage = "dolt lifecycle is owned by bd for proxied scopes; nothing to do"
+// proxiedNoOpMessage and bdOwnedNoOpMessage are the two lines a managed-Dolt
+// verb prints on a scope bd owns, one per shape. They are duplicated here on
+// purpose: the test asserts the contract text, not a shared constant that could
+// drift with the scripts.
+const (
+	proxiedNoOpMessage = "dolt lifecycle is owned by bd for proxied scopes; nothing to do"
+	bdOwnedNoOpMessage = "dolt lifecycle is owned by bd for this scope; nothing to do"
+)
+
+// writeHandedOffScope lays out what a committed ownership handoff leaves
+// behind: the city's Dolt server is bd's, but the transport never changed, so
+// metadata still says dolt_mode "server" and bd's journal is the only record
+// that the scope moved.
+func writeHandedOffScope(t *testing.T, cityPath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{
+  "backend": "dolt",
+  "database": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "hq",
+  "project_id": "p"
+}`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("issue_prefix: hq\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal := `{
+  "schema_version": 2,
+  "request": {"root": "` + cityPath + `"},
+  "phase": "committed",
+  "owner": "bd"
+}`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "ownership-handoff.json"), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // writeProxiedScope lays out the on-disk shape `bd init --proxied-server`
 // leaves behind: the mode lives only in metadata.json, and the proxy root
@@ -58,7 +95,7 @@ func hostileToolPath(t *testing.T) string {
 	binDir := t.TempDir()
 	for _, tool := range []string{"dolt", "bd", "lsof", "nc", "mysql", "pkill"} {
 		writeExecutable(t, filepath.Join(binDir, tool),
-			"#!/bin/sh\necho \"FAIL: "+tool+" was invoked on a bd-owned proxied scope\" >&2\nexit 97\n")
+			"#!/bin/sh\necho \"FAIL: "+tool+" was invoked on a bd-owned scope\" >&2\nexit 97\n")
 	}
 	return binDir + string(os.PathListSeparator) + os.Getenv("PATH")
 }
@@ -118,7 +155,7 @@ func assertScopeUnchanged(t *testing.T, before, after map[string]string) {
 	}
 	if len(diffs) > 0 {
 		sort.Strings(diffs)
-		t.Fatalf("proxied scope mutated:\n%s", strings.Join(diffs, "\n"))
+		t.Fatalf("bd-owned scope mutated:\n%s", strings.Join(diffs, "\n"))
 	}
 }
 
@@ -299,7 +336,7 @@ func TestProxiedOwnershipPredicateMatchesCanonicalBackends(t *testing.T) {
 			}
 
 			cmd := exec.Command("sh", "-c", //nolint:gosec // fixed pack script path
-				". "+filepath.Join(root, "assets/scripts/proxied_scope.sh")+"; bd_owns_proxied_scope && echo owned || echo not-owned")
+				". "+filepath.Join(root, "assets/scripts/bd_owned_scope.sh")+"; bd_owns_proxied_scope && echo owned || echo not-owned")
 			cmd.Env = proxiedScopeEnv(t, root, cityPath)
 			out, err := cmd.Output()
 			if err != nil {
@@ -385,5 +422,143 @@ func TestServerModeScopeIsNotBdOwned(t *testing.T) {
 	out, _ := cmd.CombinedOutput()
 	if strings.Contains(string(out), proxiedNoOpMessage) {
 		t.Fatalf("a server-mode city was treated as bd-owned:\n%s", out)
+	}
+}
+
+// TestDoltPackOrderEntryPointsNoOpOnAHandedOffScope is the same R4 front-door
+// case for the shape the ownership handoff produces. A handed-off city keeps
+// dolt_mode "server" — the transfer changes no transport — so every guard keyed
+// on the proxied binding alone let the orders run the managed-Dolt verbs
+// against a server bd owns.
+func TestDoltPackOrderEntryPointsNoOpOnAHandedOffScope(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct {
+		name   string
+		script string
+		args   []string
+	}{
+		{"dolt-health order: gc dolt health", "commands/health/run.sh", nil},
+		{"mol-dog-doctor order", "assets/scripts/mol-dog-doctor.sh", nil},
+		{"mol-dog-stale-db order: gc dolt cleanup", "commands/cleanup/run.sh", nil},
+		{"mol-dog-phantom-db order", "assets/scripts/mol-dog-phantom-db.sh", nil},
+		{"mol-dog-backup order", "assets/scripts/mol-dog-backup.sh", nil},
+		{"mol-dog-compactor order: gc dolt compact", "commands/compact/run.sh", nil},
+		{"dolt-remotes-patrol order: gc dolt sync", "commands/sync/run.sh", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeHandedOffScope(t, cityPath)
+			before := snapshotScope(t, cityPath)
+
+			cmd := exec.Command(filepath.Join(root, tc.script), tc.args...) //nolint:gosec // fixed pack script path
+			cmd.Env = proxiedScopeEnv(t, root, cityPath)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s exited non-zero: %v\n%s", tc.script, err, out)
+			}
+			if !strings.Contains(string(out), bdOwnedNoOpMessage) {
+				t.Fatalf("%s did not report the typed no-op:\n%s", tc.script, out)
+			}
+			if strings.Contains(string(out), "proxied scopes") {
+				t.Errorf("%s told the operator a handed-off direct city is proxied:\n%s", tc.script, out)
+			}
+			assertScopeUnchanged(t, before, snapshotScope(t, cityPath))
+		})
+	}
+}
+
+// The machine-readable half: a handed-off scope's skip document carries its own
+// reason, so automation can tell the two bd-owned shapes apart.
+func TestHealthJSONEmitsBdOwnedSkipDocumentOnAHandedOffScope(t *testing.T) {
+	root := repoRoot(t)
+	cityPath := t.TempDir()
+	writeHandedOffScope(t, cityPath)
+
+	cmd := exec.Command("sh", filepath.Join(root, "commands/health/run.sh"), "--json")
+	cmd.Env = proxiedScopeEnv(t, root, cityPath)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health --json exited non-zero: %v\n%s", err, out)
+	}
+	var doc struct {
+		Skipped *struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"skipped"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("health --json is not valid JSON: %v\n%s", err, out)
+	}
+	if doc.Skipped == nil || doc.Skipped.Reason != "bd-owned-scope" {
+		t.Fatalf("skip document = %+v, want reason bd-owned-scope\n%s", doc.Skipped, out)
+	}
+	if doc.Skipped.Message != bdOwnedNoOpMessage {
+		t.Errorf("skip message = %q, want %q", doc.Skipped.Message, bdOwnedNoOpMessage)
+	}
+}
+
+// The dolt-health order pipes health into health-check. The parser must accept
+// the handed-off scope's skip document too, or the order records order.failed
+// for a city that has nothing to fail on.
+func TestHealthCheckAcceptsTheHandedOffSkipDocument(t *testing.T) {
+	root := repoRoot(t)
+	cityPath := t.TempDir()
+	writeHandedOffScope(t, cityPath)
+
+	pipeline := exec.Command("sh", "-c", //nolint:gosec // fixed pack script paths
+		"sh "+filepath.Join(root, "commands/health/run.sh")+" --json | sh "+filepath.Join(root, "commands/health-check/run.sh"))
+	pipeline.Env = proxiedScopeEnv(t, root, cityPath)
+	out, err := pipeline.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dolt-health order pipeline failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "bd-owned-scope") {
+		t.Fatalf("pipeline lost the skip document:\n%s", out)
+	}
+}
+
+// TestHandoffOwnershipPredicateAdmitsOnlyACommittedTransfer keeps the sh guard
+// in step with cmd/gc's projection at the level it reads: only a committed
+// journal owned by bd moves the scope. A pending, rolled-back or foreign-owned
+// journal keeps the managed lens, where the gc verbs behind it refuse on their
+// own authenticated read.
+func TestHandoffOwnershipPredicateAdmitsOnlyACommittedTransfer(t *testing.T) {
+	root := repoRoot(t)
+	for _, tc := range []struct {
+		name    string
+		journal string
+		bdOwned bool
+	}{
+		{"committed to bd", `{"schema_version":2,"phase":"committed","owner":"bd"}`, true},
+		{"still pending", `{"schema_version":2,"phase":"target_configured","owner":"legacy-gc"}`, false},
+		{"rolled back", `{"schema_version":2,"phase":"rolled_back","owner":"legacy-gc"}`, false},
+		{"committed but owned by the legacy side", `{"schema_version":2,"phase":"committed","owner":"legacy-gc"}`, false},
+		// The version is read before the phase, for the same reason cmd/gc
+		// reads it first: the phase names are shared across journal versions
+		// and do not mean the same thing in them.
+		{"committed with no version at all", `{"phase":"committed","owner":"bd"}`, false},
+		{"committed by a newer bd", `{"schema_version":3,"phase":"committed","owner":"bd"}`, false},
+		{"malformed", `not json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cityPath, ".beads", "ownership-handoff.json"), []byte(tc.journal), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("sh", "-c", //nolint:gosec // fixed pack script path
+				". "+filepath.Join(root, "assets/scripts/bd_owned_scope.sh")+"; bd_owns_scope && echo owned || echo not-owned")
+			cmd.Env = proxiedScopeEnv(t, root, cityPath)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("predicate probe failed: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)) == "owned"; got != tc.bdOwned {
+				t.Fatalf("bd_owns_scope(%s) = %v, want %v", tc.journal, got, tc.bdOwned)
+			}
+		})
 	}
 }

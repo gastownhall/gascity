@@ -533,6 +533,28 @@ func cityScopeProviderOwned(cityPath string) (bool, error) {
 	return scopeProviderOwned(cityPath, cityPath)
 }
 
+// cityDoltLifecycleOwnedByBd reports whether bd — not gc — starts, supervises
+// and stops the `dolt sql-server` behind this city, which is what the dolt
+// pack's managed verbs need to know before they probe, drop or reap anything.
+//
+// Two of the three ownership arms answer here. bd's proxied binding and a
+// committed ownership handoff both mean the process under .beads/dolt is bd's;
+// the handoff arm matters on its own because the transfer changes no transport,
+// so a handed-off city still records dolt_mode "server" and reads as gc's to
+// every predicate keyed on the proxied binding alone.
+//
+// gc's own scope-ownership journal deliberately does not answer here. It
+// records that gc delegated a scope's initialization to bd, and the topology
+// matrix pins the pack's managed verbs as still running for a journaled
+// direct-local city (assertDoltCleanupOutcome in the matrix acceptance test).
+// Widening that arm is a separate decision with its own re-qualification.
+func cityDoltLifecycleOwnedByBd(cityPath string) (bool, error) {
+	if transferred, err := committedBeadsHandoffOwnsScope(cityPath); err != nil || transferred {
+		return transferred, err
+	}
+	return scopeBindingIsProviderOwnedProxied(cityPath)
+}
+
 func validateProviderScopeOwnership(cityPath string, cfg *config.City) error {
 	journal, exists, err := loadProviderScopeOwnershipJournal(cityPath)
 	if err != nil {

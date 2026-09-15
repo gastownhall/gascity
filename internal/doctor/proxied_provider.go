@@ -113,20 +113,35 @@ func scopeIsProviderOwned(cityPath, scopeRoot string) bool {
 // sql-server over a scope bd owns — and a forged record would be a second
 // owner. Here the answer only chooses which lens to report through, and every
 // unreadable, malformed or unsettled journal falls back to the ordinary one.
+//
+// Shallow does not mean version-blind. The schema version is checked before the
+// phase, for the same reason cmd/gc checks it: the phase names are shared
+// between journal versions and do not mean the same thing in them, so a phase
+// read without its version is a guess. A journal of any other version is not a
+// signal, and doctor reports through the ordinary lens.
 func cityHandedToProvider(cityPath string) bool {
 	data, err := os.ReadFile(filepath.Join(pathutil.NormalizePathForCompare(cityPath), ".beads", "ownership-handoff.json"))
 	if err != nil {
 		return false
 	}
 	var journal struct {
-		Phase string `json:"phase"`
-		Owner string `json:"owner"`
+		SchemaVersion int    `json:"schema_version"`
+		Phase         string `json:"phase"`
+		Owner         string `json:"owner"`
 	}
 	if err := json.Unmarshal(data, &journal); err != nil {
 		return false
 	}
+	if journal.SchemaVersion != handoffJournalSchemaVersion {
+		return false
+	}
 	return journal.Phase == "committed" && journal.Owner == "bd"
 }
+
+// handoffJournalSchemaVersion mirrors cmd/gc's constant of the same name. The
+// journal is bd's format and cmd/gc owns gc's reading of it; doctor reads the
+// file directly because that reader lives in package main.
+const handoffJournalSchemaVersion = 2
 
 // scopeOwnershipJournal mirrors the fields doctor needs from
 // .gc/scope-ownership.json. cmd/gc owns the schema and its validation; doctor
