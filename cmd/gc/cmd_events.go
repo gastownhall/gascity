@@ -1106,11 +1106,16 @@ const cityEventsPageLimit = int64(500)
 // --since window is walked across however many pages it takes (#4385) and the
 // two failures they catch are not the same failure:
 //
-//   - cityEventsPageTimeout bounds ONE page request. It catches a server that
-//     has stopped answering.
+//   - cityEventsPageTimeout bounds ONE page request, so a walk is bounded per
+//     request rather than in aggregate.
 //   - cityEventsWalkBudget bounds the WHOLE walk. It is the ceiling on how
 //     long `gc events --since ...` may run, so that a wide window degrades
 //     instead of hanging.
+//
+// Both default to 30s, and the page context is derived from the walk context,
+// so today the page bound coincides with the walk bound: it is a per-request
+// floor that becomes independently live if either value is retuned. The walk
+// budget is what bites in the shipped configuration.
 //
 // A single budget cannot do both jobs. Charging the whole walk to one
 // per-request deadline is what made a wide window fail on its size rather

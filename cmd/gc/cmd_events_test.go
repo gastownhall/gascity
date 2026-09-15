@@ -1943,7 +1943,7 @@ func TestFetchCityEventsWalkBudgetTruncatesInsteadOfDiscarding(t *testing.T) {
 		total     = 2000
 		pageSize  = 250 // 8 pages: the budget must land mid-walk, not at a seam
 		pageDelay = 120 * time.Millisecond
-		walk      = 300 * time.Millisecond // enough for ~2 pages, not 8
+		walk      = 600 * time.Millisecond // enough for ~4 pages, not 8
 	)
 	restore := cityEventsPageTimeout
 	cityEventsPageTimeout = 5 * time.Second // page budget must not be what bites
