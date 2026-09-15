@@ -1019,6 +1019,10 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 	if pid > 0 {
 		ownership = supervisorDetermineUnitOwnership(pid)
 	}
+	// A live process is not proof of supervision: on macOS the stop path
+	// leaves a persistent launchd override behind, so the supervisor can
+	// answer every liveness probe while nothing restarts it after logout.
+	supervisionWarning := supervisorLaunchdSupervisionWarning()
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
@@ -1044,10 +1048,17 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		if supervisionWarning != "" {
+			payload["supervised"] = false
+			payload["supervision_warning"] = supervisionWarning
+		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
 		return 0
+	}
+	if supervisionWarning != "" {
+		fmt.Fprintf(stderr, "gc supervisor status: warning: %s\n", supervisionWarning) //nolint:errcheck
 	}
 	switch {
 	case pid > 0:
