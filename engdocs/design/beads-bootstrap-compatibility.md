@@ -53,8 +53,8 @@ The issue reports no observed record loss: the earlier embedded store remained p
 | ------------------------------------------------------------------------------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------- |
 | [Accepted Beads–Dolt redesign](beads-dolt-contract-redesign.md) | Accepted | Owns scope, topology, provenance, journal, and lifecycle authority. |
 | [Beads–Gas City cross-version contract-test system](beads-gascity-contract-test-system.md) | Proposed | Defines broader CLI/wire compatibility matrices and schema canaries. It does not define the pre-`bd init` migration-ceiling proof or the no-publication invariant in this companion design. |
-| [Gas City PR #5421](https://github.com/gastownhall/gascity/pull/5421)                                                           | Open and conflicting | Includes a related `BD_BIN` projection change. An exact path is necessary but does not prove compatibility. |
-| [Gas City PR #5518](https://github.com/gastownhall/gascity/pull/5518)                                                           | Open and conflicting | Proposes a schema-v65-capable linked dependency. It repairs one snapshot but does not prevent later skew.   |
+| [Gas City PR #5421](https://github.com/gastownhall/gascity/pull/5421)                                                           | Merged 2026-09-03 | Pins `BD_BIN` through a `workspace.env` projection. An exact path is necessary but does not prove compatibility. |
+| [Gas City PR #5518](https://github.com/gastownhall/gascity/pull/5518)                                                           | Closed without merge 2026-09-13 | Proposed a schema-v65-capable linked dependency. It would have repaired one snapshot but not prevented later skew. |
 | [Beads PR #6048](https://github.com/gastownhall/beads/pull/6048)                                                                | Merged               | Existing shared SQL-server stores refuse version-bump migration without explicit consent.                   |
 | [Beads PR #6055](https://github.com/gastownhall/beads/pull/6055)                                                                | Merged               | Applies the migration gate to the proxied-server open path.                                                 |
 
@@ -259,6 +259,10 @@ This would unnecessarily govern independent Beads projects and still would not p
    immediately for Gas City bootstrap?
 4. Which `bd` build should Gas City recommend when the selected initializer is
    too new?
+5. What evidence establishes that a selected artifact's migration numbers
+   belong to the canonical, append-only Beads main series — canonical build
+   provenance, a series-identity field, or something else — and should Gas City
+   fail closed when that evidence is unavailable?
 
 A warn-only transition preserves the #5348 exposure for the mixed-version
 cohorts described above; fail-closed is the safer default unless maintainers
