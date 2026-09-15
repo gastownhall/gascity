@@ -1241,20 +1241,90 @@ if [ -d "$CITY_BEADS_DIR" ]; then
             *-*) SESSION_PRUNE_ANOMALY_SCOPE="${SESSION_BEAD_PATTERN%%-*}" ;;
         esac
 
-        # Backup-age gate: skip bulk prune unless the canonical state written
-        # after every required Dolt database sync is recent.
+        # Backup-age gate: skip bulk prune when no recent backup exists.
+        # Which state file decides freshness mirrors doctor's
+        # scanBackupFreshness: a scope with a registered Dolt destination is
+        # judged on its Dolt sync state, and only a scope that never migrated is
+        # judged on the legacy embedded-store state. `bd backup sync` writes
+        # only dolt-backup-state.json, so reading the legacy file on a migrated
+        # scope would pin the gate to a stale timestamp forever. An explicit
+        # state path overrides pipeline detection for managed callers.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        _BACKUP_STATE="${GC_DOLT_BACKUP_STATE_FILE:-$CITY_BEADS_DIR/dolt-backup-state.json}"
-        _BACKUP_FIELD="last_sync"
+        if [ -n "${GC_DOLT_BACKUP_STATE_FILE:-}" ]; then
+            _BACKUP_STATE="$GC_DOLT_BACKUP_STATE_FILE"
+            _BACKUP_FIELD="last_sync"
+        elif [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+            _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
+            _BACKUP_FIELD="last_sync"
+        else
+            _BACKUP_STATE="$CITY_BEADS_DIR/backup/backup_state.json"
+            _BACKUP_FIELD="timestamp"
+        fi
+        # Third case: a Dolt-native backup destination. Backups registered
+        # directly in the `dolt_backups` table (synced by a city order calling
+        # DOLT_BACKUP) never pass through bd, so bd writes neither state file
+        # and `bd backup status` reports "No backup has been performed yet"
+        # against a backup that is minutes old. Both branches above then take
+        # the absent path and the gate latches closed with no backup action able
+        # to clear it — a permanent per-tick escalation against real, current
+        # backups. This is consulted only as a SECOND OPINION, after the bd or
+        # legacy state file has already failed: it can rescue that false
+        # positive, and can never permit a prune the primary evidence refused.
+        dolt_native_backup_epoch() {
+            local urls url dir newest best=""
+            [ -n "$CITY_DB" ] || return 0
+            command -v dolt_sql >/dev/null 2>&1 || return 0
+            urls=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT url FROM dolt_backups;" 2>/dev/null \
+                | tail -n +2 | tr -d '\r' | grep -v '^$') || urls=""
+            while IFS= read -r url; do
+                url="${url%\"}"; url="${url#\"}"
+                # Only a file:// destination can be dated from here. A remote
+                # one (DoltHub &c.) carries no locally observable timestamp, so
+                # it is no evidence either way and is passed over. A scope whose
+                # ONLY destination is remote therefore yields nothing and the
+                # primary verdict stands.
+                case "$url" in
+                    file://*) dir="${url#file://}" ;;
+                    *) continue ;;
+                esac
+                [ -d "$dir" ] || continue
+                # Freshness is the newest object written into the backup, never
+                # `now`: if the syncing order stops, this ages out on its own
+                # and the gate correctly starts complaining again.
+                # Reduced with awk rather than `sort -rn | head -1`: under
+                # `set -o pipefail`, `head` exiting early SIGPIPEs `sort`, the
+                # pipeline reports 141 and the `|| newest=""` then discards a
+                # correct answer. That happens once the listing exceeds the pipe
+                # buffer — a few hundred files — which is exactly the busy
+                # destination this gate exists to read.
+                newest=$(find "$dir" -type f -printf '%T@\n' 2>/dev/null \
+                    | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
+                if [ -z "$newest" ]; then
+                    newest=$(find "$dir" -type f -exec stat -f '%m' {} + 2>/dev/null \
+                        | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
+                fi
+                case "$newest" in ''|*[!0-9.]*) continue ;; esac
+                newest="${newest%%.*}"
+                if [ -z "$best" ] || [ "$newest" -gt "$best" ]; then
+                    best="$newest"
+                fi
+            done <<EOF
+$urls
+EOF
+            [ -n "$best" ] && printf '%s\n' "$best"
+            return 0
+        }
+
         _PRUNE_SKIP=0
+        _PRUNE_SKIP_REASON=""
         if [ ! -f "$_BACKUP_STATE" ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=absent threshold=${_PRUNE_MAX_AGE}s)"
+            _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=absent"
             _PRUNE_SKIP=1
         else
             _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
             if [ -z "$_BACKUP_TS" ]; then
-                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
                 _PRUNE_SKIP=1
             else
                 # Real on-disk timestamps are RFC3339Nano. Truncate to whole
@@ -1267,16 +1337,33 @@ if [ -d "$CITY_BEADS_DIR" ]; then
                     || echo "")
                 _NOW_EPOCH=$(date -u '+%s')
                 if [ -z "$_BACKUP_EPOCH" ]; then
-                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                    _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
                     _PRUNE_SKIP=1
                 else
                     _BACKUP_AGE=$(( _NOW_EPOCH - _BACKUP_EPOCH ))
                     if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                        record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=${_BACKUP_AGE}s threshold=${_PRUNE_MAX_AGE}s)"
+                        _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=${_BACKUP_AGE}s"
                         _PRUNE_SKIP=1
                     fi
                 fi
             fi
+        fi
+
+        if [ "$_PRUNE_SKIP" -eq 1 ]; then
+            _DOLT_BACKUP_EPOCH="$(dolt_native_backup_epoch)"
+            if [ -n "$_DOLT_BACKUP_EPOCH" ]; then
+                _DOLT_BACKUP_AGE=$(( $(date -u '+%s') - _DOLT_BACKUP_EPOCH ))
+                if [ "$_DOLT_BACKUP_AGE" -le "$_PRUNE_MAX_AGE" ]; then
+                    _PRUNE_SKIP=0
+                    _PRUNE_SKIP_REASON=""
+                else
+                    _PRUNE_SKIP_REASON="$_PRUNE_SKIP_REASON dolt_backups=${_DOLT_BACKUP_AGE}s"
+                fi
+            fi
+        fi
+
+        if [ "$_PRUNE_SKIP" -eq 1 ]; then
+            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
         fi
 
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")

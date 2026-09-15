@@ -1041,7 +1041,9 @@ func TestAssignGraphStepRoute_ControlBindingUsesRoutedQueueWithoutAssignee(t *te
 		SessionName:   "gascity--control-dispatcher",
 	}
 
-	AssignGraphStepRoute(step, execution, &control)
+	if err := AssignGraphStepRoute(step, execution, &control); err != nil {
+		t.Fatalf("AssignGraphStepRoute: unexpected error: %v", err)
+	}
 
 	if step.Assignee != "" {
 		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
@@ -1069,7 +1071,9 @@ func TestAssignGraphStepRoute_ControlBindingPreservesDirectExecutionRoute(t *tes
 		SessionName:   "gascity--control-dispatcher",
 	}
 
-	AssignGraphStepRoute(step, execution, &control)
+	if err := AssignGraphStepRoute(step, execution, &control); err != nil {
+		t.Fatalf("AssignGraphStepRoute: unexpected error: %v", err)
+	}
 
 	if step.Assignee != "" {
 		t.Fatalf("control assignee = %q, want empty routed control-dispatcher queue", step.Assignee)
@@ -1237,11 +1241,13 @@ func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *te
 				metadata = map[string]string{}
 			}
 			step := &formula.RecipeStep{Metadata: metadata}
-			ApplyGraphRouteBinding(step, GraphRouteBinding{
+			if err := ApplyGraphRouteBinding(step, GraphRouteBinding{
 				QualifiedName:     "gascity/polecat",
 				MetadataOnly:      true,
 				ContinuationGroup: tt.bindingGroup,
-			})
+			}); err != nil {
+				t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+			}
 
 			if got := step.Metadata["gc.continuation_group"]; got != tt.wantGroup {
 				t.Errorf("gc.continuation_group = %q, want %q", got, tt.wantGroup)
@@ -1256,6 +1262,115 @@ func TestApplyGraphRouteBinding_PoolRouted_ContinuationGroupIsFormulaOptIn(t *te
 				t.Errorf("Assignee = %q, want empty (pool slots claim at runtime)", step.Assignee)
 			}
 		})
+	}
+}
+
+// TestApplyGraphRouteBinding_IndependentSteps locks the interim fail-loudly
+// guard (ga-sj2h8f): IndependentSteps means the pool step gets a fresh
+// session per claim, so a formula-declared continuation group can never be
+// honored there. Silently dropping it -- as the unconditional clear does for
+// every other pool step -- would destroy a drain contract with no signal.
+// The guard only fires for a value the router doesn't own itself: its own
+// "drain:"-prefixed bookkeeping value (sharedDrainContinuationGroup in
+// internal/dispatch/drain.go) is still cleared and replaced, same as before.
+func TestApplyGraphRouteBinding_IndependentSteps(t *testing.T) {
+	tests := []struct {
+		name          string
+		staleGroup    string
+		staleAffinity string
+		wantErr       bool
+	}{
+		{
+			name: "no stale group: no error, nothing to lose",
+		},
+		{
+			name:          "drain-owned value: no error, router's own bookkeeping",
+			staleGroup:    "drain:ga-control1",
+			staleAffinity: "require",
+		},
+		{
+			name:          "drain-owned value with suffix: no error",
+			staleGroup:    "drain:ga-control1:fanout",
+			staleAffinity: "require",
+		},
+		{
+			name:          "formula-declared group: error, not silently dropped",
+			staleGroup:    "review-chain",
+			staleAffinity: "require",
+			wantErr:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := map[string]string{}
+			if tt.staleGroup != "" {
+				metadata["gc.continuation_group"] = tt.staleGroup
+				metadata["gc.session_affinity"] = tt.staleAffinity
+			}
+			step := &formula.RecipeStep{ID: "wf.pooled-step", Metadata: metadata}
+			err := ApplyGraphRouteBinding(step, GraphRouteBinding{
+				QualifiedName:    "gascity/polecat",
+				MetadataOnly:     true,
+				IndependentSteps: true,
+			})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ApplyGraphRouteBinding: want error, got nil")
+				}
+				if !strings.Contains(err.Error(), step.ID) {
+					t.Errorf("error %q does not name step ID %q", err.Error(), step.ID)
+				}
+				if !strings.Contains(err.Error(), tt.staleGroup) {
+					t.Errorf("error %q does not name dropped group %q", err.Error(), tt.staleGroup)
+				}
+				// Left untouched on error, not partially cleared -- the caller
+				// sees exactly what would have been lost.
+				if got := step.Metadata["gc.continuation_group"]; got != tt.staleGroup {
+					t.Errorf("gc.continuation_group = %q, want untouched %q", got, tt.staleGroup)
+				}
+				if got := step.Metadata["gc.session_affinity"]; got != tt.staleAffinity {
+					t.Errorf("gc.session_affinity = %q, want untouched %q", got, tt.staleAffinity)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+			}
+			if got := step.Metadata["gc.continuation_group"]; got != "" {
+				t.Errorf("gc.continuation_group = %q, want cleared", got)
+			}
+			if got := step.Metadata["gc.session_affinity"]; got != "" {
+				t.Errorf("gc.session_affinity = %q, want cleared", got)
+			}
+		})
+	}
+}
+
+// TestAssignGraphStepRoute_PropagatesIndependentStepsError confirms the
+// execution-binding path surfaces ApplyGraphRouteBinding's new error instead
+// of swallowing it -- the guard is pointless if callers can't see it fire.
+func TestAssignGraphStepRoute_PropagatesIndependentStepsError(t *testing.T) {
+	step := &formula.RecipeStep{
+		ID: "wf.pooled-step",
+		Metadata: map[string]string{
+			"gc.continuation_group": "review-chain",
+			"gc.session_affinity":   "require",
+		},
+	}
+	execution := GraphRouteBinding{
+		QualifiedName:    "gascity/polecat",
+		MetadataOnly:     true,
+		IndependentSteps: true,
+	}
+
+	err := AssignGraphStepRoute(step, execution, nil)
+	if err == nil {
+		t.Fatalf("AssignGraphStepRoute: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "review-chain") {
+		t.Errorf("error %q does not name dropped group", err.Error())
 	}
 }
 
@@ -1323,7 +1438,9 @@ func TestApplyGraphRouteBinding_SingleSession_NoAffinityKeys(t *testing.T) {
 		SessionName:   "gascity--architect",
 		MetadataOnly:  false,
 	}
-	ApplyGraphRouteBinding(step, binding)
+	if err := ApplyGraphRouteBinding(step, binding); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
 
 	if got := step.Metadata["gc.continuation_group"]; got != "" {
 		t.Errorf("gc.continuation_group = %q, want empty for single-session step", got)
@@ -1344,7 +1461,9 @@ func TestApplyGraphRouteBinding_PoolRouted_DoesNotSetSessionName(t *testing.T) {
 		QualifiedName: "gascity/polecat",
 		MetadataOnly:  true,
 	}
-	ApplyGraphRouteBinding(step, binding)
+	if err := ApplyGraphRouteBinding(step, binding); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
 
 	if got := step.Metadata["gc.session_name"]; got != "" {
 		t.Errorf("gc.session_name = %q, want cleared for pool step", got)

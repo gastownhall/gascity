@@ -2,11 +2,20 @@
 # Test: reaper Step 6 bd-prune backup-age guard
 #
 # Acceptance criteria:
-#   1. No canonical backup state present → bd NOT called, anomaly recorded
-#   2. Fresh canonical backup state      → bd IS called, no anomaly
-#   3. Stale canonical backup state      → bd NOT called, anomaly recorded
-#   4. RFC3339Nano fresh timestamp       → bd IS called, no anomaly
-#   5. Malformed canonical backup state  → bd NOT called, anomaly recorded
+#   1. No backup state present       → bd NOT called, anomaly recorded
+#   2. Fresh backup state            → bd IS called, no anomaly
+#   3. Stale backup state            → bd NOT called, anomaly recorded
+#   4. RFC3339Nano fresh timestamp   → bd IS called, no anomaly
+#   5. Dolt registered + fresh sync  → bd IS called even when the legacy file is stale
+#   6. Dolt registered, never synced → bd NOT called even when the legacy file is fresh
+#   7. Malformed backup state        → bd NOT called, anomaly recorded
+#   8. Dolt-native file:// backup, fresh, no bd state → bd IS called
+#   9. Dolt-native file:// backup, stale             → bd NOT called, anomaly names dolt_backups
+#  10. Dolt-native remote (non-file) destination     → bd NOT called, primary verdict stands
+#  11. Fresh legacy state + stale Dolt-native backup → bd IS called (second opinion never overrides)
+#  12. Dolt-native destination registered but empty  → bd NOT called, primary verdict stands
+#  13. Two destinations, remote listed first + file:// → the datable one is used
+#  14. Dolt-native destination holding many objects  → the newest is still found
 
 set -euo pipefail
 
@@ -50,13 +59,49 @@ ts_ago() {
     printf '%s%sZ\n' "$base" "$frac"
 }
 
-# run_prune_scenario <backup_age_seconds|"absent"|"malformed"> [max_age_seconds] [frac]
+# touch_ago <path> <seconds_in_past> [extra_path...]
+# Backdates a file's mtime. The Dolt-native branch dates a backup by the newest
+# object inside it, so the fixture has to be a real mtime, not a JSON string.
+touch_ago() {
+    local path="$1" age="$2" epoch
+    shift 2
+    epoch=$(( $(date -u '+%s') - age ))
+    touch -d "@$epoch" "$path" "$@" 2>/dev/null \
+        || TZ=UTC touch -t "$(date -u -r "$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null)" "$path" "$@"
+}
+
+# run_prune_scenario <backup_age_seconds|"absent"|"malformed"> [max_age_seconds] [pipeline] [legacy_age] [frac] [dolt_native]
+#
+#   pipeline    "legacy" (default) writes .beads/backup/backup_state.json;
+#               "dolt" registers .beads/dolt-backup.json and writes
+#               .beads/dolt-backup-state.json; "override" writes a distinct
+#               state file selected through GC_DOLT_BACKUP_STATE_FILE.
+#   legacy_age  only meaningful for pipeline=dolt: age of an ADDITIONAL legacy
+#               backup_state.json, used to prove the guard consults the active
+#               pipeline and does not fall back. "absent" (default) writes none.
+#   frac        optional fractional-seconds suffix for the active state file.
+#   dolt_native what the `dolt_backups` table reports for the city database:
+#               "absent" (default) — no row, and dolt_sql is left undefined,
+#               exactly as on a city with no Dolt-layer backup;
+#               "<seconds>" — a file:// destination whose newest object was
+#               written that many seconds ago;
+#               "empty" — a file:// destination that exists but holds nothing;
+#               "remote" — a DoltHub-style https destination, which carries no
+#               locally observable timestamp;
+#               "mixed:<seconds>" — two rows, an undatable remote listed FIRST
+#               and a file:// destination second;
+#               "many:<seconds>" — a file:// destination holding ~1500 objects,
+#               only the newest of which was written that many seconds ago.
 #
 # Returns: <bd_called>|<anomaly_called>|<exit_status>|<anomaly_msg>
 run_prune_scenario() {
     local backup_age="$1"
     local max_age="${2:-86400}"
-    local frac="${3:-}"
+    local pipeline="${3:-legacy}"
+    local legacy_age="${4:-absent}"
+    local frac="${5:-}"
+    local dolt_native="${6:-absent}"
+    local override_env=""
     local tmpdir bd_flag anomaly_flag anomaly_msg_file step6_file run_script
     tmpdir=$(mktemp -d)
     bd_flag="$tmpdir/bd_called"
@@ -66,8 +111,27 @@ run_prune_scenario() {
     run_script="$tmpdir/run.sh"
 
     mkdir -p "$tmpdir/.beads"
-    local state_file="$tmpdir/.beads/dolt-backup-state.json"
-    local state_field="last_sync"
+
+    local state_file state_field
+    if [ "$pipeline" = "dolt" ]; then
+        # A registered destination is what flips the guard to the Dolt pipeline.
+        printf '{"destination":"test-remote"}\n' > "$tmpdir/.beads/dolt-backup.json"
+        state_file="$tmpdir/.beads/dolt-backup-state.json"
+        state_field="last_sync"
+        if [ "$legacy_age" != "absent" ]; then
+            mkdir -p "$tmpdir/.beads/backup"
+            printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$(ts_ago "$legacy_age")" \
+                > "$tmpdir/.beads/backup/backup_state.json"
+        fi
+    elif [ "$pipeline" = "override" ]; then
+        state_file="$tmpdir/explicit-backup-state.json"
+        state_field="last_sync"
+        override_env="GC_DOLT_BACKUP_STATE_FILE='$state_file'"
+    else
+        mkdir -p "$tmpdir/.beads/backup"
+        state_file="$tmpdir/.beads/backup/backup_state.json"
+        state_field="timestamp"
+    fi
 
     case "$backup_age" in
         absent)
@@ -82,6 +146,50 @@ run_prune_scenario() {
             ;;
     esac
 
+    # Dolt-native destination: a `dolt_backups` row for the city database.
+    # dolt_sql stays UNDEFINED for "absent" so the guard sees what it sees on a
+    # city that has no Dolt-layer backup at all.
+    local dolt_stub=""
+    if [ "$dolt_native" != "absent" ]; then
+        local dest_rows="file://$tmpdir/dolt-backup"
+        case "$dolt_native" in
+            remote)
+                dest_rows="https://doltremoteapi.dolthub.com/example/city"
+                ;;
+            empty)
+                mkdir -p "$tmpdir/dolt-backup"
+                ;;
+            mixed:*)
+                mkdir -p "$tmpdir/dolt-backup"
+                : > "$tmpdir/dolt-backup/manifest"
+                touch_ago "$tmpdir/dolt-backup/manifest" "${dolt_native#mixed:}"
+                dest_rows="https://doltremoteapi.dolthub.com/example/city
+file://$tmpdir/dolt-backup"
+                ;;
+            many:*)
+                # Enough objects to overrun the pipe buffer, which is what makes
+                # `sort -rn | head -1` lose the answer. The bulk are backdated a
+                # further day, so only the maximum clears the threshold: a
+                # reduction that returns any OTHER object reads as stale and
+                # fails this case just as an empty one does.
+                local fresh="${dolt_native#many:}" obj
+                mkdir -p "$tmpdir/dolt-backup"
+                for obj in $(seq 1 1500); do : > "$tmpdir/dolt-backup/obj-$obj"; done
+                touch_ago "$tmpdir/dolt-backup/obj-1" "$(( fresh + 86400 ))" \
+                    "$tmpdir/dolt-backup"/obj-*
+                : > "$tmpdir/dolt-backup/manifest"
+                touch_ago "$tmpdir/dolt-backup/manifest" "$fresh"
+                ;;
+            *)
+                mkdir -p "$tmpdir/dolt-backup"
+                : > "$tmpdir/dolt-backup/manifest"
+                touch_ago "$tmpdir/dolt-backup/manifest" "$dolt_native"
+                ;;
+        esac
+        dolt_stub="dolt_sql() { printf 'url\n%s\n' '$dest_rows'; }
+export -f dolt_sql"
+    fi
+
     printf '%s\n' "$STEP6" > "$step6_file"
 
     cat > "$run_script" << RUNEOF
@@ -90,6 +198,9 @@ set -euo pipefail
 gc()            { touch '$bd_flag'; printf '{"pruned_count":3}'; }
 record_anomaly(){ touch '$anomaly_flag'; printf '%s\n' "\$*" >> '$anomaly_msg_file'; }
 export -f gc record_anomaly
+$dolt_stub
+unset GC_DOLT_BACKUP_STATE_FILE
+$override_env
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 SESSION_BEAD_PATTERN='gm-*'
@@ -115,15 +226,15 @@ RUNEOF
     printf '%s|%s|%s|%s\n' "$bd_result" "$anomaly_result" "$rc" "$anomaly_msg_val"
 }
 
-# ── T1: no canonical state → bd NOT called, anomaly recorded ─────────────────
+# ── T1: no backup_state.json → bd NOT called, anomaly recorded ────────────────
 result=$(run_prune_scenario "absent")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
-    pass "T1: absent canonical backup state → bd skipped, anomaly recorded"
+    pass "T1: absent backup_state.json → bd skipped, anomaly recorded"
 else
-    fail "T1: absent canonical backup state → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc"
+    fail "T1: absent backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc"
 fi
 
 # ── T2: fresh backup (60s old, well within 86400s) → bd IS called ────────────
@@ -153,7 +264,7 @@ fi
 # ── T4: fresh backup with RFC3339Nano timestamp → bd IS called ───────────────
 # Real on-disk timestamps carry nanoseconds; the strptime fallback rejects them
 # outright, so the guard must truncate before parsing.
-result=$(run_prune_scenario "60" "86400" ".765205448")
+result=$(run_prune_scenario "60" "86400" "legacy" "absent" ".765205448")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
@@ -164,17 +275,156 @@ else
     fail "T4: fresh RFC3339Nano backup (60s) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
+# ── T5: Dolt registered + fresh last_sync + STALE legacy file → bd IS called ──
+# The fleet-breaking case: `bd backup sync` only ever advances
+# dolt-backup-state.json, so a migrated scope's legacy file is frozen at
+# whatever the retired writer last recorded. Reading it would latch the guard
+# closed forever.
+result=$(run_prune_scenario "60" "86400" "dolt" "9000000")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T5: dolt registered, fresh last_sync, stale legacy file → bd called, no anomaly"
+else
+    fail "T5: dolt registered, fresh last_sync, stale legacy file → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
 
-# ── T5: malformed canonical state → bd NOT called, anomaly recorded ──────────
+# ── T6: Dolt registered but never synced → bd NOT called ─────────────────────
+# A fresh legacy file is present precisely so that falling back to it would
+# wrongly permit the prune. The registered-but-never-synced scope stays closed.
+result=$(run_prune_scenario "absent" "86400" "dolt" "60")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
+    pass "T6: dolt registered, never synced (fresh legacy present) → bd skipped, anomaly recorded"
+else
+    fail "T6: dolt registered, never synced (fresh legacy present) → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T7: malformed backup_state.json → bd NOT called, anomaly recorded ────────
 result=$(run_prune_scenario "malformed")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
 anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
-    pass "T5: malformed canonical backup state → bd skipped, anomaly recorded"
+    pass "T7: malformed backup_state.json → bd skipped, anomaly recorded"
 else
-    fail "T5: malformed canonical backup state → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+    fail "T7: malformed backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
+# ── T8: Dolt-native file:// backup, fresh, no bd state at all → bd IS called ──
+# The reported bug (ga-am89b): backups registered in `dolt_backups` never pass
+# through bd, so neither state file is ever written and the guard escalated on
+# EVERY tick against a backup minutes old — 70+ MEDIUM escalations in 24h.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "60")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T8: dolt-native file:// backup 60s old, no bd state → bd called, no anomaly"
+else
+    fail "T8: dolt-native fresh → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T9: Dolt-native backup present but stale → bd NOT called ─────────────────
+# The second opinion must age out on its own, or a stopped backup order would be
+# silenced permanently — worse than the noise it replaces.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "90000")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
+        && printf '%s' "$anomaly_msg" | grep -q "dolt_backups="; then
+    pass "T9: dolt-native backup 90000s old → bd skipped, anomaly names dolt_backups age"
+else
+    fail "T9: dolt-native stale → expected bd=no anomaly=yes+dolt_backups=; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T10: Dolt-native destination is remote → primary verdict stands ──────────
+# A DoltHub destination has no locally observable timestamp. It is no evidence
+# either way, so it must not clear the gate.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "remote")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
+    pass "T10: dolt-native remote destination → bd skipped, primary verdict stands"
+else
+    fail "T10: dolt-native remote → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T11: fresh legacy state + stale Dolt-native backup → bd IS called ────────
+# The Dolt layer is consulted only after the primary evidence has already
+# failed, so a stale one can never veto a passing gate.
+result=$(run_prune_scenario "60" "86400" "legacy" "absent" "" "90000")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T11: fresh legacy state + stale dolt-native backup → bd called, no anomaly"
+else
+    fail "T11: fresh legacy + stale dolt-native → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T12: Dolt-native destination registered but empty → primary stands ──────
+# A registered destination that has never received an object is not a backup.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "empty")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
+    pass "T12: dolt-native destination empty → bd skipped, primary verdict stands"
+else
+    fail "T12: dolt-native empty → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T13: remote row listed first, file:// row second → the datable one wins ──
+# `dolt_backups` can hold several destinations. Stopping at the first row would
+# hand back "no evidence" whenever a remote happens to sort first.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "mixed:60")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T13: remote row first + fresh file:// row → bd called, no anomaly"
+else
+    fail "T13: mixed destinations → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T14: destination with many objects → newest is still found ──────────────
+# `sort -rn | head -1` returns 141 under pipefail once head exits early and
+# sort takes SIGPIPE, and `|| newest=""` then discards a correct answer.
+# Reproduced at ~1000 files; a busy backup destination easily exceeds that.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "many:60")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T14: dolt-native destination with ~1500 objects → newest found, bd called"
+else
+    fail "T14: dolt-native many objects → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+
+# ── T15: explicit state path overrides automatic pipeline selection ──────────
+fresh_result=$(run_prune_scenario "60" "86400" "override")
+absent_result=$(run_prune_scenario "absent" "86400" "override")
+if [ "$(printf '%s' "$fresh_result" | cut -d'|' -f1-2)" = "yes|no" ] \
+        && [ "$(printf '%s' "$absent_result" | cut -d'|' -f1-2)" = "no|yes" ]; then
+    pass "T15: explicit backup state path passes when fresh and blocks when absent"
+else
+    fail "T15: explicit backup state path produced fresh=$fresh_result absent=$absent_result"
+fi
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1

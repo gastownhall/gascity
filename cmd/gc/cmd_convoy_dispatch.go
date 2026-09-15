@@ -1370,10 +1370,14 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 			if err != nil {
 				return err
 			}
-			graphroute.AssignGraphStepRoute(step, binding, &controlRoute)
+			if err := graphroute.AssignGraphStepRoute(step, binding, &controlRoute); err != nil {
+				return err
+			}
 			continue
 		}
-		graphroute.AssignGraphStepRoute(step, binding, nil)
+		if err := graphroute.AssignGraphStepRoute(step, binding, nil); err != nil {
+			return err
+		}
 	}
 	return nil
 }

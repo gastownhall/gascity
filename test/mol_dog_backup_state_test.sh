@@ -32,7 +32,7 @@ case "$1" in
             count=$((count + 1))
             printf '%s\n' "$count" >"$GC_FAKE_COUNT"
             if [ "$count" -eq 1 ]; then
-                echo 'sync failed Password=first-secret https://user:first-url-secret@example.test/repo' >&2
+                echo 'sync failed Password=first-secret postgres://user:first-url-secret@example.test/repo {"token":"json-secret"} --password cli-secret Authorization: Bearer bearer-secret' >&2
             else
                 echo 'later failure TOKEN=second-secret' >&2
             fi
@@ -95,9 +95,13 @@ else
         pass 'failed required sync returns nonzero without publishing state'
     fi
     escalation=$(cat "$failure_tmp/escalation" 2>/dev/null || true)
-    if printf '%s' "$escalation" | grep -q 'first-secret\|first-url-secret\|second-secret'; then
+    if printf '%s' "$escalation" | grep -q 'first-secret\|first-url-secret\|json-secret\|cli-secret\|bearer-secret\|second-secret'; then
         fail 'incident leaked sync credentials'
-    elif printf '%s' "$escalation" | grep -q 'sync failed Password=\[redacted\]' \
+    elif printf '%s' "$escalation" | grep -Fq 'sync failed Password=[redacted]' \
+        && printf '%s' "$escalation" | grep -Fq 'postgres://[redacted]@example.test/repo' \
+        && printf '%s' "$escalation" | grep -Fq '"token":"[redacted]"' \
+        && printf '%s' "$escalation" | grep -Fq -- '--password [redacted]' \
+        && printf '%s' "$escalation" | grep -Fq 'Authorization: Bearer [redacted]' \
         && ! printf '%s' "$escalation" | grep -q 'later failure'; then
         pass 'incident retains the first sanitized sync error'
     else

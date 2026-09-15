@@ -111,9 +111,11 @@ append_failed_detail() {
 sanitize_sync_stderr() {
     tr '\n' ' ' <"$1" \
         | sed -E \
-            -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[redacted]@#g' \
+            -e 's#([[:alpha:]][[:alnum:]+.-]*://)[^/@[:space:]]+@#\1[redacted]@#g' \
+            -e 's/("([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"[redacted]"/g' \
             -e 's/(([Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[=:][[:space:]]*)[^ ,;]+/\1[redacted]/g' \
             -e 's/(--([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii]-[Kk][Ee][Yy])[[:space:]]+)[^ ,;]+/\1[redacted]/g' \
+            -e 's/([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn][=:][[:space:]]*([Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+)?)[^ ,;]+/\1[redacted]/g' \
         | cut -c1-2000
 }
 
@@ -165,7 +167,7 @@ classify_sync_failure() {
 
 # sync_one_database <db> <db-dir> — run `dolt backup sync` with bounded retries.
 # Emits nothing on success. On total failure it echoes the classified
-# diagnostic from the LAST attempt on stdout for the caller to record.
+# diagnostic from the FIRST attempt on stdout for the caller to record.
 #
 # Stderr is captured rather than discarded. Sending it to /dev/null is what
 # reduced a real 18-hour backup outage to the single string "hq(sync failed)",
