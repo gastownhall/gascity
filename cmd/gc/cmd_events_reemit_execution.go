@@ -130,7 +130,7 @@ func openExistingExecutionReemitStore(ctx context.Context, cityPath string, cfg 
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	switch {
 	case provider == "file":
-		store, err := openExistingScopeLocalFileStore(scopeRoot)
+		store, err := openExistingScopeLocalFileStore(scopeRoot, cityPath)
 		if err != nil {
 			return nil, fmt.Errorf("opening existing file store: %w", err)
 		}
