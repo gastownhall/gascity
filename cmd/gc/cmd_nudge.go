@@ -537,8 +537,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// Two-store split: the nudge-queue delivery store stays on the nudges class
 	// (openNudgeBeadStore), while the session-class ops — wait-bead reads in
 	// splitQueuedNudgesForDelivery and the last-nudge-delivered stamp — route
-	// through the session store. Identity today (single backend).
-	deliverySessStore := cliSessionStore(deliveryStore.Store, target.cfg, target.cityPath)
+	// through the session store, resolved from the city path rather than from
+	// deliveryStore so a nudges-only relocation cannot leak into it (#6348).
+	deliverySessStore, err := cliNudgeSessionStore(deliveryStore.Store, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge drain: resolving the session store: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	var deliverySessFront *session.Store
 	var deliveryMailProvider mail.Provider
 	if deliveryStore.Store != nil {
@@ -746,8 +751,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		return 1
 	}
 	// Session-class store for the observe read (nudgeObserveTarget); the raw
-	// nudges store keeps flowing to the queue-delivery path. Identity today.
-	sessStore := cliSessionStore(store.Store, target.cfg, target.cityPath)
+	// nudges store keeps flowing to the queue-delivery path. Resolved from
+	// the city path, not from store, so a nudges-only relocation cannot leak
+	// into it (#6348). Computed once here, outside the poll loop below, and
+	// reused at every tick rather than re-derived per tick.
+	sessStore, err := cliNudgeSessionStore(store.Store, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc nudge poll: resolving the session store: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
@@ -820,7 +832,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			time.Sleep(interval)
 			continue
 		}
-		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
+		delivered, pollErr := nudgePollDeliverQueued(target, store.Store, sessStore, sp, quiescence, obs)
 		if pollErr != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", pollErr) //nolint:errcheck
 		}
@@ -916,10 +928,15 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, "", stdout, stderr)
 	}
 	// Two-store split: the raw store keeps threading the nudge-enqueue currency,
-	// while the session-class observe/handle reads below route through sessStore.
-	// nil store -> cliSessionStore returns nil (identity), preserving the
-	// store-less WithProvider path.
-	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
+	// while the session-class observe/handle reads below route through sessStore,
+	// resolved from the city path rather than from store so a nudges-only
+	// relocation cannot leak into it (#6348). A nil store preserves the
+	// store-less WithProvider path's identity behavior.
+	sessStore, err := cliNudgeSessionStore(store, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: resolving the session store: %v\n", err) //nolint:errcheck
+		return 1
+	}
 	queueManagedWake, err := shouldQueueManagedNudgeWake(target, store, sp)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
@@ -1012,9 +1029,15 @@ func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runti
 	if !canRequestManagedNudgeWake(target, store) {
 		return false, nil
 	}
-	// The observe is a session-class read; route it through the session store
-	// (identity today). The nil-check above keeps the raw store deliberately.
-	obs, err := nudgeObserveTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp)
+	// The observe is a session-class read; route it through the session store,
+	// resolved from the city path rather than from store so a nudges-only
+	// relocation cannot leak into it (#6348). The nil-check above keeps the
+	// raw store deliberately.
+	sessStore, err := cliNudgeSessionStore(store, target)
+	if err != nil {
+		return false, fmt.Errorf("resolving the session store: %w", err)
+	}
+	obs, err := nudgeObserveTarget(target, sessStore, sp)
 	if err != nil {
 		return false, fmt.Errorf("observing managed session before wake routing: %w", err)
 	}
@@ -1063,13 +1086,18 @@ func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item que
 	// store is class-mixed here: the enqueue/rollback arms are nudge-class (wrap
 	// into the typed NudgesStore), while the wake arm reads the session bead and
 	// wakes it (sessions class), so it routes through the session coordination-class
-	// store via cliSessionStore (identity today). enqueue (NudgesStore wrap) and
-	// rollback (nudgeFrontDoor) stay nudges.
+	// store, resolved from the city path rather than from store so a
+	// nudges-only relocation cannot leak into it (#6348). enqueue (NudgesStore
+	// wrap) and rollback (nudgeFrontDoor) stay nudges.
 	nudges := beads.NudgesStore{Store: store}
 	if err := enqueueQueuedNudgeWithStore(target.cityPath, nudges, item); err != nil {
 		return err
 	}
-	if err := requestManagedNudgeWake(target, cliSessionFrontDoor(store, target.cfg, target.cityPath)); err != nil {
+	sessStore, err := cliNudgeSessionStore(store, target)
+	if err != nil {
+		return fmt.Errorf("resolving the session store: %w", err)
+	}
+	if err := requestManagedNudgeWake(target, sessionFrontDoor(sessStore)); err != nil {
 		if rollbackErr := rollbackQueuedNudge(target.cityPath, nudgeFrontDoor(nudges), item, "managed wake failed: "+err.Error()); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rolling back queued nudge %q after managed wake failure: %w", item.ID, rollbackErr))
 		}
@@ -1253,10 +1281,16 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	// The observe is a session-class read; route through the session store
-	// (identity today). The enqueue above stays on its own nudge store.
-	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
-		maybeStartNudgePoller(target)
+	// The observe is a session-class read; route through the session store,
+	// resolved from the city path rather than from store so a nudges-only
+	// relocation cannot leak into it (#6348). The enqueue above stays on its
+	// own nudge store. Tolerant like the pre-existing err==nil check below:
+	// a session-store resolution failure just skips the poller start, the
+	// same as an observe failure already does.
+	if sessStore, err := cliNudgeSessionStore(store, target); err == nil {
+		if obs, err := workerObserveNudgeTarget(target, sessStore, sp); err == nil && obs.Running {
+			maybeStartNudgePoller(target)
+		}
 	}
 	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
 }
@@ -1343,9 +1377,14 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	}
 	// Session-class store for the observe/handle reads and the last-nudge stamp
 	// below; the raw store keeps flowing to canRequestManagedNudgeWake,
-	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class). nil store
-	// -> nil (identity), preserving the store-less WithProvider caller.
-	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
+	// enqueueManagedNudgeThenWake, and enqueueQueuedNudge (nudge class).
+	// Resolved from the city path rather than from store so a nudges-only
+	// relocation cannot leak into it (#6348). A nil store preserves the
+	// store-less WithProvider caller's identity behavior.
+	sessStore, err := cliNudgeSessionStore(store, target)
+	if err != nil {
+		return fmt.Errorf("resolving the session store: %w", err)
+	}
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	if err != nil {
 		return err
@@ -1409,9 +1448,14 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	store := openNudgeBeadStore(cityPath)
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
-		// reads the session bead; both route through the session-class store
-		// (identity today) while the raw store remains the nudge-queue currency.
-		sessStore := cliSessionStore(store.Store, cfg, cityPath)
+		// reads the session bead; both route through the session-class store,
+		// resolved from the city path rather than from the nudges store above
+		// so a nudges-only relocation cannot leak into it (#6348) -- the raw
+		// store remains the nudge-queue currency.
+		sessStore, err := cliSessionStoreForCity(cityPath, cfg)
+		if err != nil {
+			return nudgeTarget{}, fmt.Errorf("resolving the session store: %w", err)
+		}
 		sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, identifier)
 		if err == nil {
 			info, getErr := sessionFrontDoor(sessStore).Get(sessionID)
