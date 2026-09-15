@@ -4185,6 +4185,215 @@ func (s *fullScanFailingStore) List(query beads.ListQuery) ([]beads.Bead, error)
 	return s.Store.List(query)
 }
 
+// blockingFullPrimeStore models a native bd full scan delayed by startup Dolt
+// contention. Indexed PrimeActive reads still work, while the first full scan
+// blocks until the test releases it.
+type blockingFullPrimeStore struct {
+	beads.Store
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingFullPrimeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.AllowScan {
+		s.once.Do(func() { close(s.started) })
+		<-s.release
+	}
+	return s.Store.List(query)
+}
+
+// firstFullScanBlockingStore models a native rig store whose initial full
+// startup scan is stuck behind Dolt work. Later scans remain available, which
+// lets the cache watchdog prove it can recover external changes before that
+// original scan is released.
+type firstFullScanBlockingStore struct {
+	beads.Store
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (s *firstFullScanBlockingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.AllowScan {
+		blocked := false
+		s.once.Do(func() {
+			blocked = true
+			close(s.started)
+		})
+		if blocked {
+			<-s.release
+		}
+	}
+	return s.Store.List(query)
+}
+
+func (s *firstFullScanBlockingStore) unblock() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func cachedRigStoreForTest(t *testing.T, store beads.Store) *beads.CachingStore {
+	t.Helper()
+	cached, ok := underlyingPolicyStoreForTest(store).(*beads.CachingStore)
+	if !ok {
+		t.Fatalf("rig store = %T, want *beads.CachingStore", underlyingPolicyStoreForTest(store))
+	}
+	return cached
+}
+
+func waitForRigCacheConvergence(t *testing.T, cache *beads.CachingStore, check func([]beads.Bead) bool, want string) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		items, err := cache.List(beads.ListQuery{Status: "open"})
+		if err == nil && cache.IsLive() && check(items) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	items, err := cache.List(beads.ListQuery{Status: "open"})
+	t.Fatalf("rig cache did not converge within 60s for %s: live=%t items=%#v err=%v stats=%+v", want, cache.IsLive(), items, err, cache.Stats())
+}
+
+// TestControllerStateRigCacheReconcilesExternalNativeChangesAcrossReload
+// exercises the managed-city rig-store path (not a cache in isolation). An
+// external/native writer creates a bead while the startup full scan is stuck;
+// then a controller reload rebuilds the rig cache, and external metadata and
+// close writes each converge through the rebuilt cache within the supervisor's
+// 60-second recovery bound.
+func TestControllerStateRigCacheReconcilesExternalNativeChangesAcrossReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	prevOpenRig := controllerStateOpenRigStoreAtForCity
+	prevOpenCity := newControllerStateOpenCityStore
+	prevCloseDelay := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = 0
+	t.Cleanup(func() {
+		controllerStateOpenRigStoreAtForCity = prevOpenRig
+		newControllerStateOpenCityStore = prevOpenCity
+		controllerStateStoreCloseDelay = prevCloseDelay
+	})
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "worker")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"cache-test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"worker"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	native := beads.NewMemStore()
+	blockingNative := &firstFullScanBlockingStore{
+		Store:   native,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	controllerStateOpenRigStoreAtForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		if opts.ScopeRoot != rigDir {
+			t.Fatalf("native rig ScopeRoot = %q, want %q", opts.ScopeRoot, rigDir)
+		}
+		return beads.StoreOpenResult{Store: blockingNative, Diagnostic: beads.BeadsDiagnostic{Store: "NativeDoltStore", NativeStoreEligible: true}}, nil
+	}
+	newControllerStateOpenCityStore = func(string, gate.Mode) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		blockingNative.unblock()
+	})
+	cfg := &config.City{Workspace: config.Workspace{Name: "cache-test"}, Rigs: []config.Rig{{Name: "worker", Path: rigDir, Prefix: "wk"}}}
+	cs := &controllerState{cfg: cfg, cityName: "cache-test", cityPath: cityDir, cacheCtx: ctx}
+	cs.beadStores = cs.buildStores(cfg)
+	firstCache := cachedRigStoreForTest(t, cs.beadStores["worker"])
+	t.Cleanup(func() { _ = closeBeadStoreHandle(firstCache) })
+	// Register after the cache close cleanup so a failed convergence assertion
+	// releases the intentionally blocked Prime before StopReconciler waits for
+	// its cache-worker goroutine.
+	t.Cleanup(blockingNative.unblock)
+
+	select {
+	case <-blockingNative.started:
+	case <-time.After(time.Second):
+		t.Fatal("startup full prime did not begin")
+	}
+	created, err := native.Create(beads.Bead{Title: "external native work", Type: "task"})
+	if err != nil {
+		t.Fatalf("external native Create: %v", err)
+	}
+	waitForRigCacheConvergence(t, firstCache, func(items []beads.Bead) bool {
+		return len(items) == 1 && items[0].ID == created.ID
+	}, "external native create during blocked startup prime")
+
+	// Let the original full prime drain before replacing its cache handle.
+	blockingNative.unblock()
+	cs.update(cfg, runtime.NewFake())
+	reloadedCache := cachedRigStoreForTest(t, cs.BeadStore("worker"))
+	t.Cleanup(func() { _ = closeBeadStoreHandle(reloadedCache) })
+
+	if err := native.SetMetadata(created.ID, "gc.routed_to", "pool/worker"); err != nil {
+		t.Fatalf("external native metadata update: %v", err)
+	}
+	waitForRigCacheConvergence(t, reloadedCache, func(items []beads.Bead) bool {
+		return len(items) == 1 && items[0].ID == created.ID && items[0].Metadata["gc.routed_to"] == "pool/worker"
+	}, "external native metadata update after reload")
+
+	if err := native.Close(created.ID); err != nil {
+		t.Fatalf("external native Close: %v", err)
+	}
+	waitForRigCacheConvergence(t, reloadedCache, func(items []beads.Bead) bool {
+		return len(items) == 0
+	}, "external native close after reload")
+}
+
+// TestPrimeThenStartReconcilerArmsBeforeBlockedFullPrime proves the rig cache
+// recovery loop is live while a startup full scan is blocked. Before this
+// ordering fix, the watchdog was armed only after Prime returned, so external
+// native bd create/update/close operations had no convergence path for the
+// entire blocked-prime interval.
+func TestPrimeThenStartReconcilerArmsBeforeBlockedFullPrime(t *testing.T) {
+	backing := &blockingFullPrimeStore{
+		Store:   beads.NewMemStore(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cache := beads.NewCachingStore(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		primeThenStartReconciler(ctx, cache, "rig-cache-test")
+		close(done)
+	}()
+
+	select {
+	case <-backing.started:
+	case <-time.After(time.Second):
+		t.Fatal("full prime did not start")
+	}
+	if got := cache.Stats().StaggerOffsetMs; got <= 0 {
+		t.Fatalf("StaggerOffsetMs = %d while full prime is blocked, want watchdog armed", got)
+	}
+
+	close(backing.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("primeThenStartReconciler did not finish after full prime release")
+	}
+	cache.StopReconciler()
+}
+
 // TestPrimeThenStartReconcilerArmsReconcilerOnPrimeFailure asserts the
 // watchdog reconciler is started even when the async full prime fails.
 // Before this contract, a single failed prime at controller startup
