@@ -411,25 +411,34 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		keepRegisteredCity(entry, stderr, commandName, "supervisor did not start")
 		return 1
 	}
-	if reloadSupervisorHook(io.Discard, io.Discard) != 0 {
-		// The supervisor may be a zombie from a recent "gc supervisor stop" —
-		// alive enough to accept connections but unable to process reload
-		// because its main loop has exited. Poll for it to finish dying,
-		// start a fresh supervisor, and retry.
-		deadline := time.Now().Add(10 * time.Second)
-		for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
-			time.Sleep(250 * time.Millisecond)
-		}
-		if ensureSupervisorRunningHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
-			return 1
-		}
-		if reloadSupervisorHook(stdout, stderr) != 0 {
-			keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
-			return 1
+	reloadTimedOut := false
+	if code, timedOut := reloadSupervisorForStart(io.Discard, io.Discard); code != 0 {
+		if timedOut {
+			reloadTimedOut = true
+		} else {
+			// The supervisor may be a zombie from a recent "gc supervisor stop" —
+			// alive enough to accept connections but unable to process reload
+			// because its main loop has exited. Poll for it to finish dying,
+			// start a fresh supervisor, and retry.
+			deadline := time.Now().Add(10 * time.Second)
+			for supervisorAliveHook() != 0 && time.Now().Before(deadline) {
+				time.Sleep(250 * time.Millisecond)
+			}
+			if ensureSupervisorRunningHook(stdout, stderr) != 0 {
+				keepRegisteredCity(entry, stderr, commandName, "supervisor did not start after retry")
+				return 1
+			}
+			code, timedOut = reloadSupervisorForStart(stdout, stderr)
+			if code != 0 {
+				if !timedOut {
+					keepRegisteredCity(entry, stderr, commandName, "reconcile failed")
+					return 1
+				}
+				reloadTimedOut = true
+			}
 		}
 	}
-	if supervisorAliveHook() != 0 {
+	if reloadTimedOut || supervisorAliveHook() != 0 {
 		if showProgress {
 			logInitProgress(stdout, 8, "Waiting for supervisor to start city")
 		} else if stdout != nil {
@@ -448,6 +457,16 @@ func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stde
 		}
 	}
 	return 0
+}
+
+func reloadSupervisorForStart(stdout, stderr io.Writer) (int, bool) {
+	var captured strings.Builder
+	reloadStderr := io.Writer(&captured)
+	if stderr != nil {
+		reloadStderr = io.MultiWriter(stderr, &captured)
+	}
+	code := reloadSupervisorHook(stdout, reloadStderr)
+	return code, strings.Contains(captured.String(), supervisorReloadReconcileTimeoutMessage)
 }
 
 // registerCityForAPI is the registry-write portion of async
@@ -598,13 +617,22 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		case !known && supervisorAliveHook() == 0:
 			return fmt.Errorf("supervisor stopped before city became ready")
 		}
-		if stdout != nil && status != "" && status != lastStatus {
-			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+		if status != "" && status != lastStatus {
 			lastStatus = status
+			if wantRunning {
+				deadline = time.Now().Add(timeout)
+			}
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+			}
 		}
 		if time.Now().After(deadline) {
 			if wantRunning {
-				return fmt.Errorf("city did not become ready under supervisor within %s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", timeout)
+				msg := fmt.Sprintf("city did not become ready under supervisor within %s", timeout)
+				if lastStatus != "" {
+					msg += fmt.Sprintf("; last status: %s", lastStatus)
+				}
+				return fmt.Errorf("%s (increase [daemon].start_ready_timeout or [session].startup_timeout for cities with many or slow-starting sessions)", msg)
 			}
 			return fmt.Errorf("city did not stop under supervisor")
 		}
@@ -638,6 +666,13 @@ func supervisorCityError(cityPath string) string {
 
 // statusDisplayText maps an init status string to a human-readable display line.
 func statusDisplayText(status string) string {
+	if strings.HasPrefix(status, "running_pool_on_boot:") {
+		detail := strings.TrimPrefix(status, "running_pool_on_boot:")
+		parts := strings.SplitN(detail, ":", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return fmt.Sprintf("running_pool_on_boot %s (%s)...", parts[0], parts[1])
+		}
+	}
 	switch status {
 	case "loading_config":
 		return "Loading configuration..."
