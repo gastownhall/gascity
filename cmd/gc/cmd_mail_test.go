@@ -136,7 +136,7 @@ func TestMailSendJSON(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var stdout, stderr bytes.Buffer
-	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, true, &stdout, &stderr)
+	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, mailSendAnnotations{}, true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -569,9 +569,9 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	_ = os.Unsetenv("GC_AGENT")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "", "", "", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"recipient", "hello"}, false, false, "", "", "", "", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -641,9 +641,9 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -713,9 +713,9 @@ func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"controller/"}, false, false, "human", "", "Subject", "Body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"controller/"}, false, false, "human", "", "Subject", "Body", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("cmdMailSend() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `unknown recipient "controller/"`) {
 		t.Fatalf("stderr = %q, want unknown controller recipient", stderr.String())
@@ -762,9 +762,9 @@ func TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	store, err := openCityStoreAt(cityPath)
@@ -1290,9 +1290,9 @@ func TestCmdMailSendExactSessionIDStaysPinned(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{sessionBead.ID, "body"}, false, false, "human", "", "", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{sessionBead.ID, "body"}, false, false, "human", "", "", "", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	stored := mailSendTestFindMessage(t, cityPath)
@@ -5022,9 +5022,9 @@ func TestCmdMailSendPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5041,9 +5041,9 @@ func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5057,9 +5057,9 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "subject", "", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -5076,7 +5076,7 @@ func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -5095,7 +5095,7 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", mailSendAnnotations{}, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

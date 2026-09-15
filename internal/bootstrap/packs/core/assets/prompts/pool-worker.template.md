@@ -92,8 +92,13 @@ recipient alias that resolves in every city; if your city staffs a
 coordinator role (e.g. the gastown pack's mayor), mail that instead:
 
 ```bash
-gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue" --blocked-on <bead-id>
 ```
+
+Pass `--blocked-on` with the bead that must change before you can proceed.
+Once that bead closes, the reader's next inbox listing archives your report,
+so a resolved blocker stops occupying the mailbox. A report whose bead is
+still open stays unread until somebody answers it.
 
 ## Context Exhaustion
 
