@@ -79,14 +79,17 @@ When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
-Pass --strict to fail on debugging mistakes instead of silently falling
-back to the default prompt. Strict errors on:
+Pass --strict to fail on debugging mistakes instead of falling back to
+the default prompt. Strict errors on:
 
   - no city config found
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
   - agent's prompt_template points at a file that cannot be read
+
+Without --strict, a prompt_template that cannot be read is reported on
+stderr and the default prompt is output.
 
 Strict does NOT error on agents whose config intentionally lacks a
 prompt_template (a supported minimal config), on templates that render
@@ -463,8 +466,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, prompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 				return 0, budget
 			}
-			// File is present but rendered empty. Treat as a legitimate
-			// (if unusual) minimal config — emit the default fallback.
+			// The template rendered empty (a legitimate, if unusual, minimal
+			// config) or could not be read (reported on stderr above) — emit
+			// the default fallback.
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, resolved from the composed pack dirs.
