@@ -145,7 +145,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.57",
+		"gitpython>=3.1.59",
 		"aiohttp>=3.14.3",
 		"pillow>=12.3.0",
 	} {
@@ -160,7 +160,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.58 \\",
+		"gitpython==3.1.62 \\",
 		"aiohttp==3.14.3 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
@@ -197,6 +197,26 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
 		}
+	}
+}
+
+// TestMCPMailImagePinsPatchedDebianBase guards the base image digest itself. The
+// util-linux set is upgraded in place by TestMCPMailImageUpgradesPatchedOSPackages,
+// but --only-upgrade only reaches a package already present at a lower version: on a
+// base image digest that never received 2.41.5-0+deb13u1, apt has nothing newer to
+// install and the CVE stays open with the upgrade stanza looking complete. Pinning
+// the digest itself is what actually carries the fix.
+func TestMCPMailImagePinsPatchedDebianBase(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.mail")
+
+	const patchedDigest = "sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea"
+	if !strings.Contains(dockerfile, "FROM python:3.12-slim@"+patchedDigest) {
+		t.Errorf("contrib/k8s/Dockerfile.mail FROM line does not pin the patched base image digest %q (util-linux 2.41.5-0+deb13u1, fixes CVE-2026-53612/53613/53614)", patchedDigest)
+	}
+
+	const vulnerableDigest = "sha256:9d3abd9fc11d06998ccdbdd93b4dd49b5ad7d67fcbbc11c016eb0eb2c2194891"
+	if strings.Contains(dockerfile, vulnerableDigest) {
+		t.Errorf("contrib/k8s/Dockerfile.mail still references the pre-patch base image digest %q (util-linux 2.41-5)", vulnerableDigest)
 	}
 }
 
