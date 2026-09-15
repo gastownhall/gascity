@@ -54,8 +54,8 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 // keys its response cache on a wall-clock TTL bucket, not the event sequence,
 // so a busy city (whose sequence advances every poll) still hits the cache
 // instead of rebuilding the O(store-size) body on every request. Recording an
-// event must NOT bust the /status cache within the TTL window — unlike the
-// index-keyed endpoints (see TestHandleAgentListCachesUntilIndexChanges).
+// event must NOT bust the /status cache within the TTL window. /agents keys
+// the same way (see TestHandleAgentListCachesAcrossIndexChanges).
 func TestHandleStatusCachesAcrossIndexChanges(t *testing.T) {
 	// Pin a wide TTL so every request in this test lands in the same time
 	// bucket; this isolates the "index churn must not bust the cache" property
@@ -417,7 +417,23 @@ func TestHandleStatusBlockingBypassesTimeCache(t *testing.T) {
 	}
 }
 
-func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+// TestHandleAgentListCachesAcrossIndexChanges pins the /agents half of the
+// gascity#3186 fix. The agent list is keyed on the wall-clock bucket, so
+// recording an event must NOT bust the cache within the TTL window.
+func TestHandleAgentListCachesAcrossIndexChanges(t *testing.T) {
+	// Wide TTL so every request in this test shares one bucket, isolating
+	// "index churn must not bust the cache" from bucket-boundary timing. The
+	// floor is pinned off so the bucket lookup alone carries the assertion;
+	// the floor has its own test below.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = 0
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
@@ -429,25 +445,123 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
+	firstFanOut := store.listByAssigneeCalls
+	if firstFanOut == 0 {
+		t.Fatal("ListByAssignee calls after cold first request = 0, want the per-agent fan-out")
+	}
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
+	if store.listByAssigneeCalls != firstFanOut {
+		t.Fatalf("ListByAssignee calls after cached repeat = %d, want %d", store.listByAssigneeCalls, firstFanOut)
 	}
 
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	for i := 0; i < 5; i++ {
+		state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("agents after event %d = %d, want 200", i, rec.Code)
+		}
+	}
+	if store.listByAssigneeCalls != firstFanOut {
+		t.Fatalf("ListByAssignee calls after 5 index changes = %d, want %d (time-bucketed cache must survive sequence churn)", store.listByAssigneeCalls, firstFanOut)
+	}
+
+	// The live sequence still reaches blocking/long-poll consumers on a hit.
+	if got := rec.Header().Get("X-GC-Index"); got == "" || got == "0" {
+		t.Fatalf("X-GC-Index = %q, want live sequence on cache hit", got)
+	}
+}
+
+// TestHandleAgentListServesRecentResponseDespiteBucketRollover pins why the
+// age floor is not optional: a build slower than one bucket window finishes in
+// a later bucket than the next reader computes, so only the age-floor read can
+// hit.
+func TestHandleAgentListServesRecentResponseDespiteBucketRollover(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour // floor wide open: only it can hit
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first agents = %d, want 200", rec.Code)
+	}
+	firstFanOut := store.listByAssigneeCalls
+	if firstFanOut == 0 {
+		t.Fatal("ListByAssignee calls after cold first request = 0, want the per-agent fan-out")
+	}
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
+		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
-	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+	if store.listByAssigneeCalls != firstFanOut {
+		t.Fatalf("ListByAssignee calls after bucket rollover = %d, want %d (the age floor must make a rolled-over entry readable)", store.listByAssigneeCalls, firstFanOut)
+	}
+}
+
+// TestHandleAgentListBlockingBypassesTimeCache pins the strict-freshness
+// contract: a blocking ?index=&wait= caller waited for a specific event, so it
+// must never be served a body built before that event.
+func TestHandleAgentListBlockingBypassesTimeCache(t *testing.T) {
+	// Wide TTL and floor so a bypass failure surfaces as a cache HIT rather
+	// than a bucket-boundary miss that hides it.
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Hour
+	oldFloor := agentListResponseTTLFloor
+	agentListResponseTTLFloor = time.Hour
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		agentListResponseTTLFloor = oldFloor
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	// Advance the sequence past the waited-for index so both requests below
+	// return from waitForChange immediately. They carry identical blocking
+	// params, so they share a cache key: only an explicit bypass keeps the
+	// second one from being served the first one's body.
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+
+	blockReq := cityURL(state, "/agents?index=1&wait=1s")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, blockReq, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first blocking agents = %d, want 200", rec.Code)
+	}
+	firstFanOut := store.listByAssigneeCalls
+	if firstFanOut == 0 {
+		t.Fatal("ListByAssignee calls after first blocking request = 0, want the per-agent fan-out")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, blockReq, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second blocking agents = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != 2*firstFanOut {
+		t.Fatalf("ListByAssignee calls after second blocking request = %d, want %d (blocking must bypass the time cache)", store.listByAssigneeCalls, 2*firstFanOut)
 	}
 }
 

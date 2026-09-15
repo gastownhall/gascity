@@ -15,10 +15,19 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+// agentListResponseTTLFloor keeps a recently built body reachable to
+// non-blocking agent-list requests after its time-bucket entry has rolled
+// over, which any build slower than one bucket window needs
+// (responseCacheTimeBucket / timeBucketResponseCacheTTL in response_cache.go).
+// Var, not const, so tests can pin bucket- and floor-driven behavior
+// independently.
+var agentListResponseTTLFloor = 3 * time.Second
+
 // humaHandleAgentList is the Huma-typed handler for GET /v0/agents.
 func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput) (*ListOutput[agentResponse], error) {
 	bp := input.toBlockingParams()
-	if bp.isBlocking() {
+	blocking := bp.isBlocking()
+	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
 
@@ -37,12 +46,23 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	}
 
 	index := s.latestIndex()
+	// Keyed on a time bucket rather than the event index: the build fans out
+	// per pool-expanded agent, and the event sequence advances on nearly every
+	// poll of a busy city (gascity#3186, same treatment as /status, /beads and
+	// /formulas/feed). Strict-freshness callers (blocking ?index=&wait=) bypass
+	// the cache, so the body they receive reflects the event they waited for.
 	cacheKey := ""
-	if !wantPeek {
+	if !wantPeek && !blocking {
 		// Cache key derived from input struct tags — adding a new query
 		// param to AgentListInput automatically participates in the key.
 		cacheKey = cacheKeyFor("agents", input)
-		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, index); ok {
+		if body, ok := cachedResponseAs[ListBody[agentResponse]](s, cacheKey, responseCacheTimeBucket(time.Now())); ok {
+			return &ListOutput[agentResponse]{
+				Index: index,
+				Body:  body,
+			}, nil
+		}
+		if body, ok := cachedResponseWithinAgeAs[ListBody[agentResponse]](s, cacheKey, agentListResponseTTLFloor); ok {
 			return &ListOutput[agentResponse]{
 				Index: index,
 				Body:  body,
@@ -222,7 +242,10 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 
 	body := ListBody[agentResponse]{Items: agents, Total: len(agents)}
 	if cacheKey != "" {
-		s.storeResponse(cacheKey, index, body)
+		// Store under the bucket the build finished in, so a build slower than
+		// the bucket window still lands where a later exact-bucket lookup can
+		// match it.
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), body)
 	}
 
 	return &ListOutput[agentResponse]{
