@@ -2124,6 +2124,68 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 }
 
+// TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDemand
+// covers mail sent to a configured singleton pool alias after its previous
+// session has closed.  Mail is intentionally not Ready()-claimable work, but
+// unread mail must still reach pool desired state so it can materialize one
+// replacement session.
+func TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDemand(t *testing.T) {
+	store := beads.NewMemStore()
+	maxOne := 1
+	cfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	msg, err := store.Create(beads.Bead{
+		Title:    "operator request",
+		Type:     "message",
+		Status:   "open",
+		Assignee: "codex-im",
+		Metadata: map[string]string{"mail.read": "false"},
+	})
+	if err != nil {
+		t.Fatalf("create unread mail: %v", err)
+	}
+
+	work, _, _, ready, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if len(work) != 1 || work[0].ID != msg.ID {
+		t.Fatalf("collected work = %#v, want unread mail %q", work, msg.ID)
+	}
+	if !ready[storeScopedBeadKey{ID: msg.ID}] {
+		t.Fatalf("unread mail %q was not marked ready for wake demand", msg.ID)
+	}
+
+	states := ComputePoolDesiredStates(cfg, work, nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("pool requests = %#v, want one fresh wake", states)
+	}
+	req := states[0].Requests[0]
+	if req.Tier != "wake-known-identity" || req.WorkBeadID != msg.ID {
+		t.Fatalf("request = %#v, want wake-known-identity for mail %q", req, msg.ID)
+	}
+
+	// On the next tick the pending replacement is part of the snapshot. It
+	// must be reused under max-one rather than minting another pool session.
+	pending := beads.Bead{
+		ID:     "replacement",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":             "codex-im",
+			"session_name":         "codex-im",
+			"state":                "creating",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	states = ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{pending}), nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("second-tick pool requests = %#v, want one reused session", states)
+	}
+	if got := states[0].Requests[0].SessionBeadID; got != pending.ID {
+		t.Fatalf("second-tick SessionBeadID = %q, want existing replacement %q", got, pending.ID)
+	}
+}
+
 func TestCollectAssignedWorkBeads_PreservesPartialInProgressSurvivors(t *testing.T) {
 	t.Parallel()
 
