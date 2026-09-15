@@ -71,6 +71,30 @@ func TestWriteProviderHookContextCodex(t *testing.T) {
 	}
 }
 
+func TestWriteProviderHookContextCodexPreCompact(t *testing.T) {
+	var out bytes.Buffer
+	err := writeProviderHookContextForEvent(&out, "codex", "PreCompact", "<system-reminder>\nhello\n</system-reminder>\n")
+	if err != nil {
+		t.Fatalf("writeProviderHookContextForEvent: %v", err)
+	}
+
+	// Codex's PreCompactCommandOutputWire has no HookSpecificOutputWire
+	// counterpart and sets deny_unknown_fields, accepting only
+	// continue/stopReason/suppressOutput/systemMessage -- the
+	// hookSpecificOutput envelope every other codex event accepts is
+	// rejected outright here (gastownhall/gascity#6349).
+	var raw map[string]any
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal output: %v\n%s", err, out.String())
+	}
+	if _, ok := raw["hookSpecificOutput"]; ok {
+		t.Fatalf("output = %s, want no hookSpecificOutput envelope for PreCompact", out.String())
+	}
+	if got, want := raw["systemMessage"], "<system-reminder>\nhello\n</system-reminder>"; got != want {
+		t.Fatalf("systemMessage = %q, want %q", got, want)
+	}
+}
+
 func TestWriteProviderHookContextCodexAdditionalContext(t *testing.T) {
 	var out bytes.Buffer
 	err := writeProviderHookContextForEvent(&out, "codex", "UserPromptSubmit", "<system-reminder>\nhello\n</system-reminder>\n")
