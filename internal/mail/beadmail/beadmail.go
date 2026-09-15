@@ -152,12 +152,31 @@ func (c *sessionInfoCache) isFresh(now time.Time) bool {
 // Returns an error if to is empty: blank recipients produce messages that never
 // appear in any inbox but still inflate global counts.
 func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
+	return p.SendWithMetadata(from, to, subject, body, nil)
+}
+
+// SendWithMetadata is [Provider.Send] with caller metadata merged over the
+// resolved sender-route metadata.
+//
+// When extra carries [mail.SupersedeKeyMetadataKey], the new message retires
+// the sender's earlier unread messages that repeat the same key to the same
+// recipient, so an hourly full-state digest leaves exactly one unread copy.
+// The send happens first: on an archive failure the returned message is the
+// one that was created, alongside the error, because losing a digest is worse
+// than leaving a stale one unread.
+func (p *Provider) SendWithMetadata(from, to, subject, body string, extra map[string]string) (mail.Message, error) {
 	if to == "" {
 		return mail.Message{}, fmt.Errorf("beadmail send: recipient is required")
 	}
 	from, metadata, err := p.resolveSenderRoute(from)
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
+	}
+	for k, v := range extra {
+		if metadata == nil {
+			metadata = make(map[string]string, len(extra))
+		}
+		metadata[k] = v
 	}
 	threadID := generateThreadID()
 	labels := []string{"thread:" + threadID}
@@ -174,7 +193,90 @@ func (p *Provider) Send(from, to, subject, body string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, fmt.Errorf("beadmail send: %w", err)
 	}
+	if key := strings.TrimSpace(extra[mail.SupersedeKeyMetadataKey]); key != "" {
+		if err := p.supersedePrior(b, key); err != nil {
+			return beadToMessage(b), fmt.Errorf("beadmail send: %w", err)
+		}
+	}
 	return beadToMessage(b), nil
+}
+
+// supersedePrior archives the earlier unread messages that carry exactly the
+// same supersede key, sender, and recipient route as fresh.
+//
+// Every clause of that match matters. A message with no key, a different key,
+// a different sender, or a different recipient stays untouched, so a worker's
+// one-off BLOCKED report is never retired by a later digest from an order. A
+// message already read stays untouched too: it has left the inbox on its own,
+// and archiving it would only churn its status.
+func (p *Provider) supersedePrior(fresh beads.Bead, key string) error {
+	routes := p.recipientRoutes(fresh.Assignee)
+	candidates, err := p.messageCandidatesForRoutes(routes)
+	if err != nil {
+		return fmt.Errorf("superseding %q: listing messages: %w", key, err)
+	}
+	for _, b := range candidates {
+		if b.ID == fresh.ID || b.Status != "open" || hasLabel(b.Labels, "read") {
+			continue
+		}
+		if b.Metadata[mail.SupersedeKeyMetadataKey] != key || b.From != fresh.From {
+			continue
+		}
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
+			continue
+		}
+		if err := p.Archive(b.ID); err != nil && !errors.Is(err, mail.ErrAlreadyArchived) {
+			return fmt.Errorf("superseding %q: archiving %s: %w", key, b.ID, err)
+		}
+	}
+	return nil
+}
+
+// ArchiveResolvedBlockers archives the unread messages for recipients whose
+// [mail.BlockedOnMetadataKey] bead is closed, and returns the ids it archived.
+//
+// It archives only on positive evidence that the blocker is gone. A message
+// with no named bead, a bead that is still open or in progress, or a bead this
+// store cannot read stays in the inbox, because an unanswered request from a
+// blocked worker is the one signal this mailbox exists to deliver. A named
+// message or session bead never counts either: a session bead closes when its
+// session ends, which says nothing about the blocker.
+func (p *Provider) ArchiveResolvedBlockers(recipients []string) ([]string, error) {
+	routes := p.recipientRoutesForAll(recipients)
+	candidates, err := p.messageCandidatesForRoutes(routes)
+	if err != nil {
+		return nil, fmt.Errorf("beadmail archive resolved blockers: %w", err)
+	}
+	var archived []string
+	// ponytail: one store.Get per annotated unread message. An inbox holds tens
+	// of these; batch the lookup if one ever holds thousands.
+	for _, b := range candidates {
+		if b.Status != "open" || hasLabel(b.Labels, "read") {
+			continue
+		}
+		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
+			continue
+		}
+		blocker := strings.TrimSpace(b.Metadata[mail.BlockedOnMetadataKey])
+		if blocker == "" {
+			continue
+		}
+		target, err := p.store.Get(blocker)
+		if err != nil || target.Status != "closed" {
+			continue
+		}
+		if target.Type == messageBeadType || target.Type == session.BeadType {
+			continue
+		}
+		if err := p.Archive(b.ID); err != nil {
+			if errors.Is(err, mail.ErrAlreadyArchived) {
+				continue
+			}
+			return archived, fmt.Errorf("beadmail archive resolved blockers: archiving %s: %w", b.ID, err)
+		}
+		archived = append(archived, b.ID)
+	}
+	return archived, nil
 }
 
 // SendHandoff creates a handoff message from a [mail.HandoffIntent]. It speaks

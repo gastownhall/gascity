@@ -40,6 +40,16 @@ const (
 	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
 	// sweeps query it directly (the label-based query is recipient-scoped).
 	ReadMetadataKey = "mail.read"
+	// SupersedeKeyMetadataKey names the recurring order whose digest this
+	// message carries. When a new message repeats the key, the same sender,
+	// and the same recipient, the backend archives the earlier unread one, so
+	// an hourly full-state digest keeps exactly one unread copy — the newest.
+	// Only a recurring order sets it; a worker's one-off report never does.
+	SupersedeKeyMetadataKey = "mail.supersede_key"
+	// BlockedOnMetadataKey names the bead a BLOCKED report waits on. The
+	// inbox sweep archives such a message once that bead closes, and never
+	// while it is still open or in progress.
+	BlockedOnMetadataKey = "mail.blocked_on"
 )
 
 // Message represents a mail message between agents or humans.
@@ -150,4 +160,26 @@ type Provider interface {
 // unread inbox messages for multiple recipients in one backend pass.
 type MultiRecipientInboxer interface {
 	InboxRecipients(recipients []string) ([]Message, error)
+}
+
+// MetadataSender is an optional extension for providers that can attach
+// caller metadata to a new message. gc mail send needs it for --supersede
+// and --blocked-on; a backend without it rejects those flags rather than
+// dropping the annotation silently.
+//
+// A provider that honors [SupersedeKeyMetadataKey] MUST archive the sender's
+// earlier unread messages carrying the same key to the same recipient, and
+// MUST leave every other message alone.
+type MetadataSender interface {
+	SendWithMetadata(from, to, subject, body string, metadata map[string]string) (Message, error)
+}
+
+// BlockerSweeper is an optional extension for providers that can retire a
+// BLOCKED report whose blocker is gone. gc mail inbox calls it before it
+// lists, so a resolved escalation leaves the inbox without a human reading
+// each one.
+type BlockerSweeper interface {
+	// ArchiveResolvedBlockers archives unread messages for recipients whose
+	// [BlockedOnMetadataKey] bead is closed, and returns the archived ids.
+	ArchiveResolvedBlockers(recipients []string) ([]string, error)
 }
