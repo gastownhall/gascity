@@ -209,6 +209,7 @@ type CityRuntime struct {
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
 	sessionEvents       *sessionEventPump            // provider event stream → pokeCh bridge; wired by run()
+	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
@@ -815,13 +816,36 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Bridge the provider's push session-event stream (if it has one) into
+	// queued-nudge delivery: an idle event delivers waiting nudges within
+	// seconds via the provider's verified delivery, and the sidecar poller
+	// class retires for such providers. Config reload re-points the
+	// dispatcher when it swaps the provider.
+	// The dispatcher resolves its stores through the CONTROLLER's routes, not
+	// through the one-shot CLI funnel: cliStorageRoutes attaches a bead.* emit
+	// target meant for a process with no emitter of its own, and this one has
+	// the CachingStore's (class_store_emit.go). Both class stores come from the
+	// city store, never from each other; see nudgeDispatchStores. cfg arrives as
+	// a PARAMETER because the pass runs on its own goroutine: cr.cfg is
+	// reassigned on reload under serviceStateMu, and every off-reconciler reader
+	// of it in this package takes RLock. The pass already holds one it read
+	// under the dispatcher's own lock, so nothing here reaches for mutable
+	// runtime state; cr.storageRoutes, cr.cs and cr.rec are all boot-latched.
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cr.cityPath, cr.stderr, cr.logPrefix, func(cfg *config.City) (beads.NudgesStore, beads.Store) {
+		return nudgeDispatchStores(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
 	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
 	// eventual delivery if the wake is missed (socket race, listener
-	// restart). Legacy mode skips the listener entirely; per-session
-	// pollers continue to own delivery.
-	if nudgeDispatcherIsSupervisor(cr.cfg) && cr.cityPath != "" {
+	// restart). Event-capable providers get the listener in BOTH dispatcher
+	// modes — their sidecar spawn is suppressed, so the event dispatcher
+	// (kicked by this listener and by idle events) owns queued delivery.
+	// Legacy mode on polled providers skips the listener entirely;
+	// per-session pollers continue to own delivery.
+	if (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()) && cr.cityPath != "" {
 		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
 			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		}
@@ -2270,6 +2294,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if providerChanged && cr.sessionEvents != nil {
 		cr.sessionEvents.restart(nextSp)
 	}
+	if cr.nudgeEvents != nil {
+		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
+	}
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -2771,7 +2798,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	phaseStart = time.Now()
 	if err == nil {
-		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), cr.sp, time.Now(), dispatchSessionBeads); nudgeErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
 		}
 	}
@@ -3427,6 +3454,17 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // at the end of each patrol tick so a missed wake doesn't strand a queue
 // item past the patrol interval.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
+	// Event-capable providers route every pass through the nudge event
+	// dispatcher's worker: a delivery blocks for seconds (idle wait,
+	// paste+submit confirm), which must not stall the reconciler loop, and
+	// per-session workers keep one hung pane from stalling any other
+	// session's queue. This runs in BOTH nudge_dispatcher modes — with the
+	// sidecar spawn suppressed for event-capable providers, it is the
+	// delivery engine for legacy-mode cities too.
+	if cr.nudgeEvents != nil && cr.nudgeEvents.active() {
+		cr.nudgeEvents.kickAll()
+		return
+	}
 	if !nudgeDispatcherIsSupervisor(cr.cfg) {
 		return
 	}
@@ -4127,6 +4165,26 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 // shutdown performs graceful two-pass agent shutdown for this city.
 // Safe to call multiple times (e.g., from both panic recovery and
 // normal shutdown) — only the first call takes effect.
+// awaitNudgeEventsDown waits for the nudge event dispatcher's scheduler to
+// return, which includes its bounded delivery drain.
+//
+// The wait is itself bounded, a little past that drain's grace. A dispatcher
+// that will not come down must not be able to hold city shutdown open: that
+// would trade the failure the drain's own bound exists to avoid for the same
+// failure one level up.
+func (cr *CityRuntime) awaitNudgeEventsDown() {
+	if cr.nudgeEvents == nil {
+		return
+	}
+	timer := time.NewTimer(nudgeEventDeliveryDrainGrace + 2*time.Second)
+	defer timer.Stop()
+	select {
+	case <-cr.nudgeEvents.workerDone:
+	case <-timer.C:
+		fmt.Fprintf(cr.stderr, "%s: nudge event dispatcher did not come down within its drain grace; continuing shutdown\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+	}
+}
+
 func (cr *CityRuntime) shutdown() {
 	cr.shutdownOnce.Do(func() {
 		// The storage binding's engine is opened once per process and closed
@@ -4153,6 +4211,16 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		// Before anything below stops a session or tears down the provider:
+		// the nudge event dispatcher bounds its own delivery drain, but that
+		// bound only means something if shutdown waits for it. Its context is
+		// already canceled by the time shutdown runs (the supervisor cancels
+		// the city ctx first, and the standalone path reaches here only after
+		// run returns on ctx.Done), so the worker is on its way down. Without
+		// this wait the drain ran CONCURRENTLY with the teardown, and a
+		// delivery lost its provider immediately rather than after the grace
+		// the drain advertises.
+		cr.awaitNudgeEventsDown()
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
