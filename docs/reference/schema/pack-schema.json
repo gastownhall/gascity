@@ -149,6 +149,10 @@
           "type": "string",
           "description": "ScaleCheck is a shell command template whose output reports new\nunassigned session demand. In bead-backed reconciliation this is\nadditive: assigned work is resumed separately, and ScaleCheck reports\nonly how many new generic sessions to start, still bounded by all cap\nlevels. Legacy no-store evaluation continues to treat the output as\nthe desired session count. If it contains Go template placeholders, gc\nexpands them using the same PathContext fields as work_dir and\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch) before running the command."
         },
+        "cold_wake": {
+          "type": "boolean",
+          "description": "ColdWake controls whether a cold pool (zero running sessions,\nmin_active_sessions=0) with a custom ScaleCheck can still be woken by\nthe cold-pool wake probe when that check returns an authoritative 0.\nDefaults to true (unset): the wake probe may override a 0 it believes\nis due to the check being blind to demand it cannot see (e.g. a\nrig-scoped check that cannot observe city-store routed work). Set to\nfalse when the check's 0 is itself authoritative -- for example a\ncross-rig capacity budget that deliberately holds a pool at zero -- so\nthe wake probe defers to it instead of overriding it (#6351)."
+        },
         "drain_timeout": {
           "type": "string",
           "description": "DrainTimeout is the maximum time to wait for a session to finish its\ncurrent work before force-killing it during scale-down. Duration string\n(e.g., \"5m\", \"30m\", \"1h\"). Defaults to \"5m\".",
@@ -649,6 +653,10 @@
         "scale_check": {
           "type": "string",
           "description": "ScaleCheck overrides the command template whose output reports new\nunassigned session demand for bead-backed reconciliation. Supports the\nsame Go template placeholders as Agent.scale_check."
+        },
+        "cold_wake": {
+          "type": "boolean",
+          "description": "ColdWake overrides whether the cold-pool wake probe may override this\nagent's custom scale_check when it returns an authoritative 0."
         },
         "option_defaults": {
           "additionalProperties": {

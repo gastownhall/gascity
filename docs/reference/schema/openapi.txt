@@ -181,6 +181,12 @@
               "null"
             ]
           },
+          "ColdWake": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ContextAdvisory": {
             "$ref": "#/components/schemas/ContextAdvisory"
           },
@@ -564,6 +570,7 @@
           "MaxActiveSessions",
           "MinActiveSessions",
           "ScaleCheck",
+          "ColdWake",
           "OptionDefaults"
         ],
         "type": "object"

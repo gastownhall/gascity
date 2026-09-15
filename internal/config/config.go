@@ -796,6 +796,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ColdWake overrides whether the cold-pool wake probe may override this
+	// agent's custom scale_check when it returns an authoritative 0.
+	ColdWake *bool `toml:"cold_wake,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3288,6 +3291,16 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ColdWake controls whether a cold pool (zero running sessions,
+	// min_active_sessions=0) with a custom ScaleCheck can still be woken by
+	// the cold-pool wake probe when that check returns an authoritative 0.
+	// Defaults to true (unset): the wake probe may override a 0 it believes
+	// is due to the check being blind to demand it cannot see (e.g. a
+	// rig-scoped check that cannot observe city-store routed work). Set to
+	// false when the check's 0 is itself authoritative -- for example a
+	// cross-rig capacity budget that deliberately holds a pool at zero -- so
+	// the wake probe defers to it instead of overriding it (#6351).
+	ColdWake *bool `toml:"cold_wake,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
@@ -3566,6 +3579,7 @@ func (a Agent) Clone() Agent {
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
 	out.MaxActiveSessions = copyIntPtr(a.MaxActiveSessions)
 	out.MinActiveSessions = copyIntPtr(a.MinActiveSessions)
+	out.ColdWake = copyBoolPtr(a.ColdWake)
 	out.AssignedWorkDeferLimit = copyIntPtr(a.AssignedWorkDeferLimit)
 	out.ContextAdvisory = cloneContextAdvisory(a.ContextAdvisory)
 	out.EmitsPermissionWarning = copyBoolPtr(a.EmitsPermissionWarning)
