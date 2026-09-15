@@ -4282,7 +4282,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				tick.markClosed(target.info.ID)
 				// Pool worktrees are transient by design — reclaim disk
 				// when the session bead is retired. Skipped under safety
-				// gates (uncommitted, unpushed, stashed) and overridable
+				// gates (uncommitted, unpushed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
