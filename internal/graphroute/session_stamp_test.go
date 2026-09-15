@@ -12,7 +12,9 @@ import (
 
 func TestApplyGraphRouteBinding_StampsSessionName(t *testing.T) {
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
-	ApplyGraphRouteBinding(step, GraphRouteBinding{QualifiedName: "worker", SessionName: "polecat-gc-123"})
+	if err := ApplyGraphRouteBinding(step, GraphRouteBinding{QualifiedName: "worker", SessionName: "polecat-gc-123"}); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
 
 	if got := step.Metadata["gc.session_name"]; got != "polecat-gc-123" {
 		t.Errorf("gc.session_name = %q, want polecat-gc-123 (durable session back-ref)", got)
@@ -29,7 +31,9 @@ func TestApplyGraphRouteBinding_PoolMetadataOnly_NoSessionName(t *testing.T) {
 	// Pool agents resolve MetadataOnly — no concrete session at route time,
 	// so no gc.session_name (it binds when a slot claims the step).
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
-	ApplyGraphRouteBinding(step, GraphRouteBinding{QualifiedName: "/home/ds/gascity/polecat", MetadataOnly: true})
+	if err := ApplyGraphRouteBinding(step, GraphRouteBinding{QualifiedName: "/home/ds/gascity/polecat", MetadataOnly: true}); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
 
 	if _, ok := step.Metadata["gc.session_name"]; ok {
 		t.Errorf("pool MetadataOnly step must not carry gc.session_name, got %q", step.Metadata["gc.session_name"])
@@ -44,7 +48,9 @@ func TestApplyGraphRouteBinding_PoolMetadataOnly_NoSessionName(t *testing.T) {
 
 func TestApplyGraphRouteBinding_DirectSession_StampsSessionID(t *testing.T) {
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{"gc.routed_to": "stale"}}
-	ApplyGraphRouteBinding(step, GraphRouteBinding{DirectSessionID: "gc-abc123"})
+	if err := ApplyGraphRouteBinding(step, GraphRouteBinding{DirectSessionID: "gc-abc123"}); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
 
 	if got := step.Metadata["gc.session_id"]; got != "gc-abc123" {
 		t.Errorf("gc.session_id = %q, want gc-abc123", got)

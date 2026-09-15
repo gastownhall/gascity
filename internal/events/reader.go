@@ -159,14 +159,25 @@ func seqLineAt(f *os.File, off int64) (seq uint64, start int64, ok bool) {
 // it only after each line has been unmarshalled -- the dominant cost of the
 // supervisor's per-tick order-trigger check (gcy-ocb5).
 //
-// Returns 0 (full scan) whenever the boundary cannot be established, so a log
-// that violates the ordering invariant degrades in speed, never in correctness.
+// Returns 0 (full scan) whenever the boundary cannot be established, or
+// whenever the file's own head and tail contradict the non-decreasing-seq
+// assumption sort.Search depends on, so a log that violates the ordering
+// invariant this way degrades in speed rather than silently dropping events.
+// That check is necessarily partial: it catches a reversed tail (e.g. a stale
+// post-rotation writer appending seq below the file's head) but, like any
+// sub-linear check, cannot see an out-of-order run that both starts and ends
+// within the seq range the head and tail already imply.
 func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	if afterSeq == 0 || size <= 0 {
 		return 0
 	}
 	// Nothing to skip when the log's first line is already above the cursor.
-	if first, _, ok := seqLineAt(f, 0); !ok || first > afterSeq {
+	first, _, ok := seqLineAt(f, 0)
+	if !ok || first > afterSeq {
+		return 0
+	}
+	tailSeq, err := readLatestSeqFromTail(f, size)
+	if err != nil || tailSeq < first {
 		return 0
 	}
 	i := sort.Search(int(size), func(i int) bool {
@@ -175,6 +186,11 @@ func activeScanStart(f *os.File, size int64, afterSeq uint64) int64 {
 	})
 	seq, start, ok := seqLineAt(f, int64(i))
 	if !ok || seq <= afterSeq {
+		if tailSeq > afterSeq {
+			// The file's actual last record contradicts "nothing left to
+			// see"; the search converged on a stale or corrupted region.
+			return 0
+		}
 		// Cursor is at or beyond the newest event: skip the file entirely.
 		return size
 	}
@@ -424,11 +440,43 @@ func archiveFilesIn(dir string) ([]archiveInfo, error) {
 	return archives, nil
 }
 
+// archiveSeq reads the top-level seq of a raw archive line without decoding
+// the record. FileRecorder writes seq as the first field, so the hot path is a
+// prefix scan with no allocation. Any other layout reports false and the
+// caller falls back to a full decode, which keeps a foreign writer's archive
+// readable.
+func archiveSeq(line []byte) (uint64, bool) {
+	const prefix = `{"seq":`
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return 0, false
+	}
+	digits := line[len(prefix):]
+	var seq uint64
+	i := 0
+	for ; i < len(digits) && digits[i] >= '0' && digits[i] <= '9'; i++ {
+		seq = seq*10 + uint64(digits[i]-'0')
+	}
+	if i == 0 {
+		return 0, false
+	}
+	return seq, true
+}
+
 // streamArchive gunzip-streams the file at path, decoding each line
 // as an Event and invoking fn for every event. fn returns false to
 // abort iteration early. Returns nil if iteration completed cleanly
 // or fn requested abort; errors from gzip / scanner are wrapped.
-func streamArchive(path string, _ Filter, fn func(Event) bool) error {
+//
+// Records outside filter's seq window are skipped before json.Unmarshal.
+// archiveOverlapsFilter only rules out an archive that ENDS at or below
+// AfterSeq, so an order whose cursor sits INSIDE the archive's window still
+// opens it — and without this skip every such read decoded the entire archive
+// to reach a handful of trailing records.
+//
+// The skip deliberately does not early-return on BeforeSeq. Archives come from
+// a monotonic log and should be seq-ordered, but `continue` saves the same
+// decode without depending on that.
+func streamArchive(path string, filter Filter, fn func(Event) bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -444,8 +492,17 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	scanner := bufio.NewScanner(gr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		if seq, ok := archiveSeq(line); ok {
+			if filter.AfterSeq > 0 && seq <= filter.AfterSeq {
+				continue
+			}
+			if filter.BeforeSeq > 0 && seq >= filter.BeforeSeq {
+				continue
+			}
+		}
 		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		if !fn(e) {

@@ -216,8 +216,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 	if p.Command != "cursor-agent" {
 		t.Errorf("Command = %q, want %q", p.Command, "cursor-agent")
 	}
-	if !reflect.DeepEqual(p.Args, []string{"-f"}) {
-		t.Errorf("Args = %v, want [-f]", p.Args)
+	if !reflect.DeepEqual(p.Args, []string{"-f", "--trust"}) {
+		t.Errorf("Args = %v, want [-f --trust]", p.Args)
 	}
 	rp := &ResolvedProvider{
 		Command:           p.Command,
@@ -225,8 +225,8 @@ func TestBuiltinProvidersCursor(t *testing.T) {
 		OptionsSchema:     p.OptionsSchema,
 		EffectiveDefaults: ComputeEffectiveDefaults(p.OptionsSchema, p.OptionDefaults, nil),
 	}
-	if got := rp.CommandString(); got != "cursor-agent -f" {
-		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f")
+	if got := rp.CommandString(); got != "cursor-agent -f --trust" {
+		t.Errorf("CommandString() = %q, want %q", got, "cursor-agent -f --trust")
 	}
 	if got := rp.ResolveDefaultArgs(); len(got) != 0 {
 		t.Errorf("ResolveDefaultArgs() = %v, want no MCP approval args by default", got)

@@ -23,7 +23,7 @@ func TestStartupDeadSessionErrorRedactsPaneSecrets(t *testing.T) {
 	ops := newTmuxStartOps(tm, "", 0, runtime.Config{Env: map[string]string{
 		"ANTHROPIC_API_KEY": secret,
 		"GC_RIG":            "kernel",
-	}})
+	}}, true)
 
 	err := startupDeadSessionError(ops, "gc-test-crash")
 	if err == nil {
@@ -50,7 +50,7 @@ func TestRecordStartCrashRedactsPaneSecrets(t *testing.T) {
 	dir := t.TempDir()
 	tm := NewTmux()
 	tm.exec = &fakeExecutor{}
-	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{Env: map[string]string{"ANTHROPIC_API_KEY": secret}})
+	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{Env: map[string]string{"ANTHROPIC_API_KEY": secret}}, true)
 
 	path := ops.recordStartCrash("gc-test-crash", "+ export ANTHROPIC_API_KEY="+secret+"\nboom\n")
 	if path == "" {
@@ -75,7 +75,7 @@ func TestRecordStartCrashWritesOwnerOnlyArtifact(t *testing.T) {
 	dir := t.TempDir()
 	tm := NewTmux()
 	tm.exec = &fakeExecutor{}
-	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{})
+	ops := newTmuxStartOps(tm, dir, 0, runtime.Config{}, true)
 
 	path := ops.recordStartCrash("gc-test-crash", "boom\n")
 	if path == "" {
@@ -105,7 +105,7 @@ func TestStartOpsCapturePaneJoinsWrappedLines(t *testing.T) {
 	exec := &fakeExecutor{out: "hello\n"}
 	tm := NewTmux()
 	tm.exec = exec
-	ops := newTmuxStartOps(tm, "", 0, runtime.Config{})
+	ops := newTmuxStartOps(tm, "", 0, runtime.Config{}, true)
 
 	if _, err := ops.capturePane("gc-test-crash", 80); err != nil {
 		t.Fatalf("capturePane: %v", err)

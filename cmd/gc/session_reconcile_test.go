@@ -39,7 +39,7 @@ type testStore struct {
 }
 
 func newTestStore() *testStore {
-	return &testStore{metadata: make(map[string]map[string]string)}
+	return &testStore{Store: beads.NewMemStore(), metadata: make(map[string]map[string]string)}
 }
 
 func (s *testStore) SetMetadata(id, key, value string) error {

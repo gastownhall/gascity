@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/gchome"
-	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestSpawnUploaderUsesAbsoluteExactSpecAndWaitsAsynchronously(t *testing.T) {
@@ -61,7 +60,7 @@ func TestSpawnUploaderUsesAbsoluteExactSpecAndWaitsAsynchronously(t *testing.T) 
 	}
 	select {
 	case <-waitStarted:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("asynchronous Wait was not started")
 	}
 	select {
@@ -72,7 +71,7 @@ func TestSpawnUploaderUsesAbsoluteExactSpecAndWaitsAsynchronously(t *testing.T) 
 	close(waitRelease)
 	select {
 	case <-waitFinished:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("asynchronous Wait did not reap completion")
 	}
 }
@@ -132,7 +131,7 @@ func TestStartedPrivateUploaderIsReapedWhenParentDescriptorCloseFails(t *testing
 	}
 	select {
 	case <-waitCalled:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("started child was not reaped after parent descriptor close failure")
 	}
 	if waits.Load() != 1 {
@@ -211,7 +210,7 @@ func TestRecordOnceReservesAndStartsAfterReleasingStateTransaction(t *testing.T)
 	}
 	select {
 	case <-waitCalled:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("integrated spawn was not asynchronously reaped")
 	}
 	assertSpawnThrottleRecord(t, home, spawnThrottleRecord{attemptToken: testSpawnTokenOne, attemptedAt: testRecordHour})
@@ -378,7 +377,7 @@ func TestUploadStartWaitsForActualRoundTripEntry(t *testing.T) {
 	}()
 	select {
 	case <-validationStarted:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("upload worker did not reach pre-RoundTrip validation")
 	}
 	select {
@@ -389,13 +388,13 @@ func TestUploadStartWaitsForActualRoundTripEntry(t *testing.T) {
 	releaseValidation()
 	select {
 	case <-entered:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("RoundTrip was never entered")
 	}
 	var result startResult
 	select {
 	case result = <-returned:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Start did not return after RoundTrip entry")
 	}
 	if result.err != nil || result.wait == nil {
@@ -420,7 +419,7 @@ func TestUploadStartReturnsPreEntryValidationErrorWithoutDeadlock(t *testing.T) 
 		if err == nil {
 			t.Fatal("invalid transport Start succeeded")
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("Start deadlocked before RoundTrip on transport validation error")
 	}
 }
@@ -474,7 +473,7 @@ func TestUploadStartCancellationAbortsBeforeRoundTripWithoutNetwork(t *testing.T
 	}()
 	select {
 	case <-validationStarted:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("upload worker did not reach cancellable pre-RoundTrip validation")
 	}
 	cancel()
@@ -483,13 +482,13 @@ func TestUploadStartCancellationAbortsBeforeRoundTripWithoutNetwork(t *testing.T
 		if !errors.Is(result.err, context.Canceled) || result.wait != nil {
 			t.Fatalf("canceled pre-entry Start = (%T, %v)", result.wait, result.err)
 		}
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("pre-entry Start did not return after cancellation")
 	}
 	releaseBlockedValidation()
 	select {
 	case <-validationReleased:
-	case <-time.After(testutil.GoroutineRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("canceled upload worker did not leave pre-RoundTrip validation")
 	}
 }
