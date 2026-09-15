@@ -445,9 +445,21 @@ func TestEnsureManagedWorktreePersistsAndVerifiesProvenance(t *testing.T) {
 	if rep.Provenance == nil {
 		t.Fatal("Ensure report has nil provenance")
 	}
+	// Provenance.Path is contractually the *canonical* spec path:
+	// plannedProvenance runs it through canonicalPathAllowMissing so that
+	// identity comparison is not defeated by symlinks, exactly as
+	// canonicalCommonDir does for RepoIdentity. So the expectation has to be
+	// canonicalized by the same helper rather than compared to the raw temp
+	// path — on macOS t.TempDir() hands back the /var spelling of a directory
+	// whose canonical form is /private/var, and a raw compare reads that
+	// contract-honoring value as a mismatch.
+	wantPath, err := canonicalPathAllowMissing(wt)
+	if err != nil {
+		t.Fatalf("canonicalPathAllowMissing(%q): %v", wt, err)
+	}
 	if rep.Provenance.BeadID != spec.BeadID ||
 		rep.Provenance.StoreRef != spec.StoreRef ||
-		rep.Provenance.Path != wt ||
+		rep.Provenance.Path != wantPath ||
 		rep.Provenance.Branch != spec.Branch ||
 		rep.Provenance.BaseRef != base ||
 		rep.Provenance.BaseSHA == "" ||

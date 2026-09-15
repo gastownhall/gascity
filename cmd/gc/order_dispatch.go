@@ -717,9 +717,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -867,9 +871,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -1844,12 +1852,51 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+// prepareOrderWispRecipe compiles an order's formula into a recipe and returns
+// the resolved invocation vars alongside it. The caller must thread those vars
+// into molecule.Instantiate; without them every {{var}} referencing a
+// caller-supplied value renders empty on the instantiated beads (#4668).
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	return recipe, inv.Vars, nil
+}
+
+// stampOrderWispRuntimeVars records the resolved runtime vars on a graph.v2
+// order wisp root (and any drain steps) so downstream fan-out recovers the
+// caller-supplied values, mirroring the sling path's runtime-vars stamp. It
+// deliberately omits the input-convoy and root-key identity metadata that the
+// cook/sling stamps also write: order dispatch does not dedup wisps by root
+// key, and stamping one would suppress legitimate repeat runs of a scheduled
+// or event order. No-op for non-graph recipes or when no vars are supplied.
+func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
+	if recipe == nil || len(recipe.Steps) == 0 || !graphroute.IsCompiledGraphWorkflow(recipe) {
+		return
+	}
+	runtimeVars := graphv2.RuntimeVarsMetadata(vars)
+	if runtimeVars == "" {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+			continue
+		}
+		if recipe.Steps[i].Metadata == nil {
+			recipe.Steps[i].Metadata = make(map[string]string)
+		}
+		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	}
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2127,11 +2174,8 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	var searchPaths []string
-	if a.FormulaLayer != "" {
-		searchPaths = []string{a.FormulaLayer}
-	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	searchPaths := orderFormulaSearchPaths(m.cfg, a)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2142,12 +2186,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
-	// Same fix as `gc order run` (cmd_order.go): validate against the supplied vars.
-	// An empty Options drops them and reports every required var as missing. On this
-	// path that is worse than on the manual one — the controller fires unattended, so
-	// a cooldown/cron order using a required var would fail on every tick with nobody
-	// reading the order.failed events.
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
+	// Same fix as `gc order run` (cmd_order.go): validate against the resolved
+	// invocation vars (declared defaults applied), not the caller's raw --var
+	// map. An empty Options drops them and reports every required var as
+	// missing. On this path that is worse than on the manual one — the
+	// controller fires unattended, so a cooldown/cron order using a required
+	// var would fail on every tick with nobody reading the order.failed events.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -2213,7 +2258,14 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{})
+	// Same fix as `gc order run` (cmd_order.go): thread the resolved
+	// invocation vars used for validation above into instantiation. An empty
+	// Options here falls back to formula defaults only, so every {{var}}
+	// referencing a caller-supplied value renders empty (or its default) on
+	// the created bead text instead of the caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2397,7 +2449,18 @@ func isTransientNotificationBead(b beads.Bead) bool {
 }
 
 // storeHasOpenDescendants reports whether the wisp rooted at rootID still has
-// any open descendant bead. It first consults the molecule membership index:
+// any open descendant bead. It is storeOpenDescendantIDs reduced to a bool: the
+// dispatch gate and the stale-wisp sweeper need only the answer, while the
+// workflow delete guard also needs the ids so its refusal can name the steps.
+func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+	open, err := storeOpenDescendantIDs(store, rootID, skip)
+	return len(open) > 0, err
+}
+
+// storeOpenDescendantIDs returns the ids of the open descendant beads of the
+// wisp rooted at rootID: every open member the molecule membership index
+// reports, or, when the index reports none, the first open descendant the tree
+// walk reaches. It first consults the molecule membership index:
 // every descendant created by any growth path (initial pour, convoy Attach,
 // fanout fragments, retry attempts) carries gc.root_bead_id == rootID, an
 // invariant enforced in internal/molecule. A single metadata-filtered List
@@ -2420,7 +2483,7 @@ func isTransientNotificationBead(b beads.Bead) bool {
 // on some steps while sibling ParentID-only steps are un-stamped), it falls
 // back to the authoritative tree walk before reporting the root idle, so
 // single-flight is never weakened for un-stamped or partial-stamp data.
-func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
 		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
@@ -2428,8 +2491,9 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
-		return false, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
+		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
 	}
+	var open []string
 	for _, b := range members {
 		if b.ID == rootID || b.Status == "closed" {
 			continue
@@ -2437,29 +2501,38 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 		if skip != nil && skip(b) {
 			continue
 		}
-		return true, nil
+		open = append(open, b.ID)
+	}
+	if len(open) > 0 {
+		return open, nil
 	}
 	// No OPEN stamped member found. An empty or all-closed membership set does
 	// NOT prove the root is idle, because the index may be incomplete for a
 	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
 	// ParentID-only steps do not). Confirm with the authoritative walk before
 	// reporting no open work, keeping single-flight safe. The fast path still
-	// short-circuits the common in-flight case (any open stamped member) in one
+	// answers the common in-flight case (any open stamped member) in one
 	// query; the walk runs only when no open member is found — i.e. for
 	// orphan/just-completed roots.
-	return storeHasOpenDescendantsByWalk(store, rootID, skip)
+	id, err := storeFirstOpenDescendantByWalk(store, rootID, skip)
+	if err != nil || id == "" {
+		return nil, err
+	}
+	return []string{id}, nil
 }
 
-// storeHasOpenDescendantsByWalk is the authoritative O(tree) traversal used as
+// storeFirstOpenDescendantByWalk is the authoritative O(tree) traversal used as
 // the fallback for roots whose descendants lack the gc.root_bead_id membership
-// metadata. It is the historical storeHasOpenDescendants implementation. It
+// metadata. It returns the id of the first open descendant it reaches, or ""
+// when there is none — it stops at the first hit because every level costs a
+// store read. It is the historical storeHasOpenDescendants implementation. It
 // includes closed intermediate nodes so nested molecule work remains visible
 // after a direct child step has completed. Graph-v2 workflows can link children
 // with dependency edges instead of ParentID, so descendants include
 // parent-child/tracks/blocks dependents too. When skip is non-nil, an open
 // child for which skip returns true is not treated as blocking open work (its
 // subtree is still traversed).
-func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
+func storeFirstOpenDescendantByWalk(store beads.Store, rootID string, skip func(beads.Bead) bool) (string, error) {
 	seen := map[string]struct{}{rootID: {}}
 	queue := []string{rootID}
 	// ParentID queries and closed intermediate traversal require live reads:
@@ -2471,7 +2544,7 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 
 		children, err := orderWispParentChildren(reader, parentID)
 		if err != nil {
-			return false, err
+			return "", err
 		}
 		for _, c := range children {
 			if c.ID == "" || c.ID == rootID {
@@ -2482,14 +2555,14 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 			}
 			seen[c.ID] = struct{}{}
 			if c.Status != "closed" && (skip == nil || !skip(c)) {
-				return true, nil
+				return c.ID, nil
 			}
 			queue = append(queue, c.ID)
 		}
 
 		children, err = orderWispGraphDependentChildren(reader, rootID, parentID)
 		if err != nil {
-			return false, err
+			return "", err
 		}
 		for _, c := range children {
 			if c.ID == "" || c.ID == rootID {
@@ -2500,12 +2573,12 @@ func storeHasOpenDescendantsByWalk(store beads.Store, rootID string, skip func(b
 			}
 			seen[c.ID] = struct{}{}
 			if c.Status != "closed" && (skip == nil || !skip(c)) {
-				return true, nil
+				return c.ID, nil
 			}
 			queue = append(queue, c.ID)
 		}
 	}
-	return false, nil
+	return "", nil
 }
 
 func orderWispMetadataDescendants(reader beads.LiveReader, rootID string, includeClosed bool) ([]beads.Bead, error) {
@@ -2697,20 +2770,38 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	}
 }
 
+// isGateContentionTimeout reports whether a gate error is a store-contention
+// timeout that is safe to relax for idempotent orders. Two layers produce it:
+// the per-order gate bound elapsing (errGateTimeout, #2893) and the underlying
+// store/bd query itself timing out (beads.IsTimeoutError — e.g. the wisp-tier
+// "bd list both tiers: bd query: timed out after 30s", vp-gprv). Both mean the
+// gate could not complete because the store ran out of time, not because it
+// read a definitive answer or hit a genuine failure. A canceled dispatch
+// context and a real store-read error (parse/connection/"read failed") are NOT
+// contention timeouts.
+func isGateContentionTimeout(err error) bool {
+	return errors.Is(err, errGateTimeout) || beads.IsTimeoutError(err)
+}
+
 // gateFailClosed decides whether an open-work gate error must block dispatch of
 // this order, and logs the error. The blanket "skip on any gate error" was
-// wrong: idempotent sweep orders (feeders, nudger, route-reclaim) are safe to
-// double-dispatch, so a gate that times out under store contention must not
-// starve them forever (#2893 #2'). Policy:
+// wrong: idempotent sweep orders (feeders, nudger, route-reclaim, the
+// code-review-gate) are safe to double-dispatch, so a gate that times out under
+// store contention must not starve them forever (#2893 #2', vp-gprv). Policy:
 //   - dispatch context done (shutdown / tick deadline): always block — there is
 //     no point dispatching into a canceled context.
-//   - a per-order gate TIMEOUT (errGateTimeout): a non-idempotent order fails
-//     CLOSED (block, preserving single-flight); an idempotent order fails OPEN
-//     (dispatch anyway), since its re-run is a no-op.
+//   - a gate contention TIMEOUT (the per-order bound errGateTimeout OR the
+//     underlying store/bd query timing out, isGateContentionTimeout): a
+//     non-idempotent order fails CLOSED (block, preserving single-flight); an
+//     idempotent order fails OPEN (dispatch anyway), since its re-run is a
+//     no-op. The store-query timeout is folded in here because it is the same
+//     contention signal as the bound — before vp-gprv it reached this function
+//     as a raw store error and blocked even idempotent orders, starving
+//     code-review-gate fleet-wide whenever the wisp query timed out.
 //   - any other gate error (e.g. a genuine store-read failure): always block.
-//     Only the bounded-gate timeout is the #2893 contention signal that is
-//     safe to relax; a real store/gate error is a different signal where the
-//     conservative response is to fail CLOSED, matching the pre-#2893 behavior.
+//     Only a contention timeout is safe to relax; a real store/gate error is a
+//     different signal where the conservative response is to fail CLOSED,
+//     matching the pre-#2893 behavior.
 //
 // Failing open deliberately relaxes single-flight for idempotent orders: it may
 // dispatch while a prior run is still in flight. That is safe by the
@@ -2725,8 +2816,8 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 	if ctx.Err() != nil {
 		return true
 	}
-	if a.Idempotent && errors.Is(err, errGateTimeout) {
-		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
+	if a.Idempotent && isGateContentionTimeout(err) {
+		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate timed out but order is idempotent; dispatching anyway (#2893, vp-gprv)", scoped)
 		return false
 	}
 	return true
@@ -3083,6 +3174,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
 		sort.Slice(runs, func(i, j int) bool {
@@ -3101,15 +3193,34 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				continue
 			}
 			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual.
+			// retention prune uses; it stays raw graph residual. A closed
+			// tracking root can still own OPEN steps — the delete refuses
+			// those rather than stranding them (ga-ejwo1q).
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+					retained = append(retained, run.ID)
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(retained)
 	return deleted, deleteErr
+}
+
+// logRetainedForLiveDescendants reports the candidates the retention prune
+// declined to delete because they still own live work. Retention is a
+// background sweep, so a silent skip reads exactly like "nothing was eligible";
+// naming the roots is what makes a persistently-wedged root visible, and
+// findable, instead of a slow leak nobody attributes.
+func logRetainedForLiveDescendants(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf("order-tracking retention: retained %d expired closed root(s) that still own open steps (deleting them would strand the steps): %s", len(ids), strings.Join(ids, ","))
 }
 
 // sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
@@ -3135,6 +3246,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 
 	cutoff := now.Add(-policy.deleteAfterClose)
 	deleted := 0
+	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
 		if deleted >= limit {
@@ -3159,12 +3271,17 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				continue
 			}
 			if err := deleteWorkflowBead(store, run.ID); err != nil {
+				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
+					retained = append(retained, run.ID)
+					continue
+				}
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
 			deleted++
 		}
 	}
+	logRetainedForLiveDescendants(retained)
 	return deleted, deleteErr
 }
 

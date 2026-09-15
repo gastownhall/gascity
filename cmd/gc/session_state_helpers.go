@@ -65,10 +65,14 @@ func poolSessionIsLiveInfo(i sessionpkg.Info) bool {
 // failure, so its slot must be reaped — otherwise the dead bead and its worktree
 // leak indefinitely while still excluded from pool capacity.
 //
-// An explicit sleep_reason is required: deny-by-default for unknown or
-// missing reasons so writes that land in state=asleep without a known
+// An explicit sleep_reason is normally required: deny-by-default for unknown
+// or missing reasons so writes that land in state=asleep without a known
 // reason (legacy beads, regressions, write races) cannot silently free
-// their slot.
+// their slot. The one exception is an empty reason paired with a stamped
+// slept_at (gastownhall/gascity#5739): that is what a suspended/drained bead
+// looks like once re-projected to asleep by the wake path --
+// ClearWakeBlockersPatch clears the recognized reason and stamps none -- and
+// it is a genuine ordinary sleep, not a legacy/regression/write-race record.
 func isPoolSessionSlotFreeable(session beads.Bead) bool {
 	if isDrainedSessionBead(session) {
 		return true
@@ -82,6 +86,15 @@ func isPoolSessionSlotFreeable(session beads.Bead) bool {
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
 		string(sessionpkg.SleepReasonMaxSessionAge):
+		return true
+	}
+	// A re-projected suspended->asleep bead carries no sleep_reason:
+	// ClearWakeBlockersPatch clears the recognized reason and stamps none.
+	// An EMPTY reason with a stamped slept_at is a genuine ordinary sleep,
+	// so admit it. Do not relax this to slept_at alone -- SleepPatch stamps
+	// slept_at for deliberate parks too (user-hold, wait-hold), and those
+	// must stay denied.
+	if reason == "" && strings.TrimSpace(session.Metadata["slept_at"]) != "" {
 		return true
 	}
 	return false
@@ -101,6 +114,15 @@ func isPoolSessionSlotFreeableInfo(i sessionpkg.Info) bool {
 		string(sessionpkg.SleepReasonCityStop), string(sessionpkg.SleepReasonFailedCreate),
 		string(sessionpkg.SleepReasonRuntimeMissing), string(sessionpkg.SleepReasonProviderTerminalError),
 		string(sessionpkg.SleepReasonMaxSessionAge):
+		return true
+	}
+	// A re-projected suspended->asleep bead carries no sleep_reason:
+	// ClearWakeBlockersPatch clears the recognized reason and stamps none.
+	// An EMPTY reason with a stamped slept_at is a genuine ordinary sleep,
+	// so admit it. Do not relax this to slept_at alone -- SleepPatch stamps
+	// slept_at for deliberate parks too (user-hold, wait-hold), and those
+	// must stay denied.
+	if reason == "" && strings.TrimSpace(i.SleptAt) != "" {
 		return true
 	}
 	return false

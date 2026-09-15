@@ -235,18 +235,21 @@ func ContinuationResetWakePatch(now time.Time) MetadataPatch {
 
 // ClearWakeBlockersPatch clears advisory blockers so a dormant session may be
 // selected by the normal wake path.
-func ClearWakeBlockersPatch(state State, sleepReason string) MetadataPatch {
+func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
-		"held_until":        "",
-		"quarantined_until": "",
-		"wait_hold":         "",
-		"sleep_intent":      "",
-		"wake_attempts":     "0",
-		"churn_count":       "0",
+		"held_until":            "",
+		"quarantined_until":     "",
+		"wait_hold":             "",
+		"sleep_intent":          "",
+		"wake_attempts":         "0",
+		"wake_refused_event_at": "",
+		"churn_count":           "0",
 	}
 	switch state {
 	case StateSuspended, StateDrained:
 		patch["state"] = string(StateAsleep)
+		patch["suspended_at"] = ""
+		patch["slept_at"] = now.UTC().Format(time.RFC3339)
 	}
 	switch SleepReason(sleepReason) {
 	case SleepReasonUserHold, SleepReasonWaitHold, SleepReasonQuarantine,
@@ -429,19 +432,25 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 		"pending_create_started_at": "",
 		"sleep_intent":              "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
+		"suspended_at":              "",
 	}
 }
 
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
 // compatibility state distinct from ordinary asleep: demand alone does not
-// reselect it, but explicit attach or work can.
-func AcknowledgeDrainPatch(freshWake bool) MetadataPatch {
+// reselect it, but explicit attach or work can. Like SleepPatch, it stamps
+// slept_at alongside clearing last_woke_at so a same-tick drain-ack falls
+// back to this fairness key instead of collapsing straight to CreatedAt
+// (#2574) — drain-ack is the dominant real-world drain path for
+// wake_mode=fresh roles.
+func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 	patch := MetadataPatch{
 		"state":                     string(StateDrained),
 		"state_reason":              "",
 		"last_woke_at":              "",
 		"pending_create_claim":      "",
 		"pending_create_started_at": "",
+		"slept_at":                  now.UTC().Format(time.RFC3339),
 	}
 	if freshWake {
 		patch["session_key"] = ""

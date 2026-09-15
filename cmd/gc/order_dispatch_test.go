@@ -4113,6 +4113,124 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 	}
 }
 
+// TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps is the
+// ga-ejwo1q regression: the retention prune deleted an expired CLOSED tracking
+// root without looking at its descendants, leaving live steps rootless. A
+// rootless step is unworkable by construction — it can only fail
+// an out-of-vocabulary failure class and mail an escalation — so the prune manufactured noise
+// out of live work (ga-033u0e).
+//
+// The guard is descendant-state-sensitive, not a blanket "never delete a root":
+// alpha-00 owns an OPEN step and is retained, while alpha-01 owns only a CLOSED
+// step and still prunes on the same sweep.
+func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed,
+		beads.Bead{
+			ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+		},
+		beads.Bead{
+			ID: "alpha-01-step", Title: "finished step", Status: "closed", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-01"},
+		},
+	)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var (
+		deleted int
+		err     error
+	)
+	logOutput := captureWispGCLog(t, func() {
+		deleted, err = sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+			deleteAfterClose: 24 * time.Hour,
+			retainLast:       minClosedOrderTrackingRetained,
+		}, nil)
+	})
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only; alpha-00 still owns an open step)", deleted)
+	}
+	// A retained root is only actionable if the log says WHICH root: a count
+	// alone leaves the operator to re-derive it from the store.
+	if !strings.Contains(logOutput, "alpha-00") {
+		t.Fatalf("retention log = %q, want the retained root alpha-00 named", logOutput)
+	}
+	if strings.Contains(logOutput, "alpha-01") {
+		t.Fatalf("retention log = %q, names alpha-01, which was pruned, not retained", logOutput)
+	}
+
+	// Assert the ROOT/STEP PAIR, not just the root's survival: the defect is
+	// the step outliving its root, so read the step's own pointer back and
+	// require it to still resolve.
+	step, err := store.Get("alpha-00-step")
+	if err != nil {
+		t.Fatalf("open step must not be deleted: %v", err)
+	}
+	if _, err := store.Get(step.Metadata[beadmeta.RootBeadIDMetadataKey]); err != nil {
+		t.Fatalf("open step left rootless — this is the ga-ejwo1q defect: %v", err)
+	}
+
+	if _, err := store.Get("alpha-01"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("alpha-01 owns only closed steps and must still prune: err = %v", err)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed, beads.Bead{
+		ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+		CreatedAt: beadTime, Ephemeral: true,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+	})
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil, 10)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only)", deleted)
+	}
+	if _, err := store.Get("alpha-00"); err != nil {
+		t.Fatalf("alpha-00 owns an open step and must be retained: %v", err)
+	}
+	if _, err := store.Get("alpha-00-step"); err != nil {
+		t.Fatalf("open step must not be stranded: %v", err)
+	}
+}
+
 func TestSweepClosedOrderTrackingRetentionPrunesLegacyUnscopedTracking(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)
@@ -9400,9 +9518,29 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvReservedKeysCoverProjectedEnv catches a key that the exec-env
+// projection emits but nobody added to the reserved guard. Such a key is
+// controller-owned in practice while `[order.env]` can still silently shadow it.
+//
+// The invariant is "reserved, or deliberately overridable" rather than plain
+// "reserved". projectGitHubTokenExecEnv projects the controller's ambient `gh`
+// credentials, and those keys are deliberately kept out of the reserved guard so
+// an order can scope its own token; TestOrderExecEnvGitHubTokenOrderEnvOverrideWins
+// asserts that capability. Reading the exception straight from the production
+// githubTokenExecEnvKeys list keeps the two halves from drifting apart, which is
+// how this guard went stale in the first place: it was written when every
+// projected key really was reserved, and the token projection later added the
+// first projected-but-overridable keys without updating it.
+//
+// Both tokens are pinned with t.Setenv so the projected key set never depends on
+// the ambient environment. Without that pin this test passed in CI, which
+// carries no `gh` token, and failed for every developer and agent authenticated
+// with gh.
 func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_controller_token")
+	t.Setenv("GITHUB_TOKEN", "github_pat_controller")
 
 	cityDir := t.TempDir()
 	packDir := filepath.Join(cityDir, "packs", "maintenance")
@@ -9421,10 +9559,20 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
+	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
+	for _, key := range githubTokenExecEnvKeys {
+		overridable[key] = true
+	}
+
 	var unreserved []string
+	projectedOverridable := 0
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if overridable[key] {
+			projectedOverridable++
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9433,6 +9581,18 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	}
 	if len(unreserved) > 0 {
 		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
+	}
+	// The exception above is only sound while those keys really are projected.
+	// Assert they were, so that dropping the projection surfaces as a failure
+	// here instead of being absorbed by the allowlist as an empty set.
+	//
+	// Two different mistakes land here. Either the projection stopped emitting a
+	// key it used to emit, or a key joined githubTokenExecEnvKeys without a
+	// matching t.Setenv at the top of this test, so it was never in the ambient
+	// environment to project. The env dump below tells them apart.
+	if projectedOverridable != len(githubTokenExecEnvKeys) {
+		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
+			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
 	}
 }
 
@@ -10506,4 +10666,123 @@ func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
 			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
 		}
 	}
+}
+
+// TestDispatchWispSubstitutesCallerVarsIntoBeadText is the regression guard for
+// #4668: dispatchWisp must thread the caller's runtime vars into
+// molecule.Instantiate so a caller `--var` renders into the instantiated bead
+// TEXT (Title/Description), not just into compile-time control flow. The var
+// carries a non-empty default ("DEFAULT"), so the pre-fix path — which passed
+// an empty molecule.Options and fell back to defaults — rendered "DEFAULT"
+// instead of the caller value. This test fails on exactly that bug.
+func TestDispatchWispSubstitutesCallerVarsIntoBeadText(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "e-var-text.toml"), `
+formula = "e-var-text"
+version = 1
+
+[vars.subject]
+description = "subject to work on"
+default = "DEFAULT"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+description = "Handle {{subject}} now."
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{Name: "text-order", Trigger: "manual", Formula: "e-var-text", FormulaLayer: dir}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", map[string]string{"subject": "widgets"})
+
+	// The wisp root is a legacy molecule container; the substituted text lives
+	// on the "work" step bead. Find it by its rendered title prefix.
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var work *beads.Bead
+	for i := range all {
+		if strings.HasPrefix(all[i].Title, "Work on") {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		var titles []string
+		for _, b := range all {
+			titles = append(titles, b.Title)
+		}
+		t.Fatalf("no step bead with title prefix %q created; titles=%v", "Work on", titles)
+	}
+
+	if !strings.Contains(work.Description, "widgets") {
+		t.Fatalf("step description = %q, want it to contain caller var value \"widgets\"", work.Description)
+	}
+	if !strings.Contains(work.Title, "widgets") {
+		t.Fatalf("step title = %q, want it to contain caller var value \"widgets\"", work.Title)
+	}
+	if strings.Contains(work.Description, "DEFAULT") {
+		t.Fatalf("step description = %q still shows the var default; caller --var did not reach molecule.Instantiate (the #4668 bug)", work.Description)
+	}
+	if strings.Contains(work.Description, "{{subject}}") {
+		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
+	}
+}
+
+// TestDispatchWispResolvesFormulaFromAnyConfiguredLayer is the controller-path
+// regression for #4378: dispatchWisp must resolve an order's formula from every
+// layer the order's scope configures, not just the layer the ORDER FILE was
+// found in. This is the controller/webhook dispatch path — the one the issue was
+// filed against. Pre-fix, searchPaths was []string{a.FormulaLayer}, so an order
+// whose own layer does not ship the formula could never dispatch.
+func TestDispatchWispResolvesFormulaFromAnyConfiguredLayer(t *testing.T) {
+	packFormulaDir := t.TempDir()
+	orderOwnLayer := t.TempDir() // deliberately EMPTY: does not ship the formula
+	writeFile(t, filepath.Join(packFormulaDir, "pack-formula.toml"), `
+formula = "pack-formula"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:         "cross-layer-order",
+		Trigger:      "manual",
+		Formula:      "pack-formula",
+		FormulaLayer: orderOwnLayer,
+	}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{FormulaLayers: config.FormulaLayers{City: []string{packFormulaDir}}},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", nil)
+
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for i := range all {
+		if all[i].Title == "Do work" {
+			return
+		}
+	}
+	var titles []string
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
 }

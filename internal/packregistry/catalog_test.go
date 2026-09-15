@@ -494,3 +494,23 @@ func TestReadCachedRegistryCatalogUsesRegistrySourceTrustBoundary(t *testing.T) 
 		t.Fatalf("ReadCachedRegistryCatalog rejected local registry cache: %v", err)
 	}
 }
+
+func TestIsInvalidCachedCatalogClassification(t *testing.T) {
+	home := t.TempDir()
+	if err := WriteCatalogCache(home, "main", []byte("not = valid = toml")); err != nil {
+		t.Fatalf("WriteCatalogCache(parse-invalid): %v", err)
+	}
+	if _, _, err := ReadCachedCatalog(home, "main"); !IsInvalidCachedCatalog(err) {
+		t.Fatalf("parse failure not classified as invalid cached catalog: %v", err)
+	}
+	semantic := strings.Replace(validCatalog, `source_kind = "git"`, `source_kind = "svn"`, 1)
+	if err := WriteCatalogCache(home, "main", []byte(semantic)); err != nil {
+		t.Fatalf("WriteCatalogCache(validate-invalid): %v", err)
+	}
+	if _, _, err := ReadCachedCatalog(home, "main"); !IsInvalidCachedCatalog(err) {
+		t.Fatalf("validation failure not classified as invalid cached catalog: %v", err)
+	}
+	if _, _, err := ReadCachedCatalog(home, "missing"); IsInvalidCachedCatalog(err) {
+		t.Fatalf("missing cache misclassified as invalid cached catalog: %v", err)
+	}
+}

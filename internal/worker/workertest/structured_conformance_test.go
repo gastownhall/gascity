@@ -38,9 +38,10 @@ func TestStructuredCatalogStaysAligned(t *testing.T) {
 
 // structuredConformanceProfile pairs a worker profile with a loader that
 // materializes a normalized history carrying a structured tool result. All
-// three canonical profiles run here against SYNTHETIC fixtures whose frame
+// canonical profiles run here against SYNTHETIC fixtures whose frame
 // shapes mirror the repo's provider fixtures (writeStructuredCodexPatchFixture,
-// writeStructuredGeminiWriteFixture, and the Claude transcript shape). Real
+// writeStructuredGeminiWriteFixture, Cursor hook capture, and the Claude
+// transcript shape). Real
 // broker-captured transcripts are exercised separately by
 // TestStructuredCorpusConformance against testdata/corpus/.
 type structuredConformanceProfile struct {
@@ -52,8 +53,43 @@ func structuredConformanceProfiles() []structuredConformanceProfile {
 	return []structuredConformanceProfile{
 		{profile: ProfileClaudeTmuxCLI, load: loadClaudeStructuredHistory},
 		{profile: ProfileCodexTmuxCLI, load: loadCodexStructuredHistory},
+		{profile: ProfileCursorTmuxCLI, load: loadCursorStructuredHistory},
 		{profile: ProfileGeminiTmuxCLI, load: loadGeminiStructuredHistory},
 	}
+}
+
+func TestStructuredConformanceProfilesIncludeCursor(t *testing.T) {
+	for _, profile := range structuredConformanceProfiles() {
+		if profile.profile == ProfileCursorTmuxCLI {
+			return
+		}
+	}
+	t.Fatal("structured conformance profiles missing cursor/tmux-cli")
+}
+
+// loadCursorStructuredHistory writes a Cursor afterFileEdit hook capture whose
+// result carries old/new text, then normalizes it through the real worker
+// adapter. Cursor's reader turns that provider result into neutral edit and
+// patch evidence.
+func loadCursorStructuredHistory(t *testing.T) *worker.HistorySnapshot {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session-cursor-structured.jsonl")
+	lines := []string{
+		`{"type":"system","subtype":"init","cwd":"/work","session_id":"cursor-struct"}`,
+		`{"hook_event_name":"afterFileEdit","file_path":"note.txt","old_text":"sample line","new_text":"golden line","session_id":"cursor-struct"}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write cursor fixture: %v", err)
+	}
+	history, err := (worker.SessionLogAdapter{}).LoadHistory(worker.LoadRequest{
+		Provider:       "cursor",
+		TranscriptPath: path,
+		GCSessionID:    "cursor-struct",
+	})
+	if err != nil {
+		t.Fatalf("LoadHistory: %v", err)
+	}
+	return history
 }
 
 // loadGeminiStructuredHistory writes a Gemini session containing a write_file

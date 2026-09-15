@@ -1,6 +1,7 @@
 package auto
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -16,6 +17,16 @@ type livenessObserverStub struct {
 }
 
 func (s *livenessObserverStub) ObserveLiveness(string, []string) runtime.Liveness { return s.obs }
+
+type errorBearingLivenessObserverStub struct {
+	*runtime.Fake
+	obs runtime.Liveness
+	err error
+}
+
+func (s *errorBearingLivenessObserverStub) ObserveLivenessWithError(string, []string) (runtime.Liveness, error) {
+	return s.obs, s.err
+}
 
 // TestProvider_ForwardsObserveLivenessToRoutedBackend guards the herdr
 // singleton-liveness fix against the auto wrapper. When a LivenessObserver
@@ -51,5 +62,23 @@ func TestProvider_ObserveLivenessFallsThroughOnStaleRoute(t *testing.T) {
 
 	if got := p.ObserveLiveness("acpsess", []string{"claude"}); got != acp.obs {
 		t.Errorf("stale-route ObserveLiveness = %+v; want %+v (fallthrough to ACP backend lost)", got, acp.obs)
+	}
+}
+
+func TestProvider_ForwardsLivenessObservationErrorFromRoutedBackend(t *testing.T) {
+	wantErr := errors.New("snapshot unavailable")
+	def := &errorBearingLivenessObserverStub{Fake: runtime.NewFake(), err: wantErr}
+	acp := &errorBearingLivenessObserverStub{Fake: runtime.NewFake(), err: wantErr}
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+
+	for _, name := range []string{"plain", "acpsess"} {
+		got, err := p.ObserveLivenessWithError(name, nil)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("ObserveLivenessWithError(%q) error = %v, want %v", name, err, wantErr)
+		}
+		if got != (runtime.Liveness{}) {
+			t.Errorf("ObserveLivenessWithError(%q) = %+v, want zero while routed result is unknown", name, got)
+		}
 	}
 }
