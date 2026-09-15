@@ -5520,6 +5520,9 @@
       "OutputTurn": {
         "additionalProperties": false,
         "properties": {
+          "id": {
+            "type": "string"
+          },
           "role": {
             "type": "string"
           },
