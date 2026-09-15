@@ -330,6 +330,19 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Assignee shape guard (crn-23jqc): refuse a non-empty --assignee value
+	// with an empty rig or role segment (e.g. "cairn/", "/pm", "a//b") before
+	// it reaches bd. Such a value is invisible to both --assignee=<role>
+	// exact matching and --unassigned matching, so a bead written with it
+	// becomes silently unreachable by every agent. "" (clear) is unaffected.
+	// Pure argv analysis with no store dependency, so it runs here alongside
+	// its sibling refusal — ahead of the by-ID class route, which would
+	// otherwise serve the write in process and never reach a later guard.
+	if msg, refused := bdAssigneeShapeRefusal(bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
