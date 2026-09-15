@@ -15,6 +15,7 @@ func (t *cityRunTailer) runCensus(ctx context.Context) runproj.CanonicalRunCensu
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+	t.awaitProjection(ctx)
 
 	t.mu.RLock()
 	counts := t.census
@@ -46,7 +47,8 @@ func (p *Plane) RunCensus(ctx context.Context, cityName string) (runproj.Canonic
 	return tailer.runCensus(ctx), true
 }
 
-func (t *cityRunTailer) runProjection() runproj.RunProjectionSnapshot {
+func (t *cityRunTailer) runProjection(ctx context.Context) runproj.RunProjectionSnapshot {
+	t.awaitProjection(ctx)
 	t.mu.RLock()
 	snapshot := runproj.RunProjectionSnapshot{
 		Ready:        t.ready,
@@ -61,14 +63,17 @@ func (t *cityRunTailer) runProjection() runproj.RunProjectionSnapshot {
 	return snapshot
 }
 
-// RunProjection returns the non-blocking bead snapshot from the plane's warm
-// incremental projector. The bool is false only when cityName is unknown.
-func (p *Plane) RunProjection(_ context.Context, cityName string) (runproj.RunProjectionSnapshot, bool) {
+// RunProjection returns the bead snapshot from the plane's warm incremental
+// projector. It never waits on the cold replay; it does wait, bounded by ctx and
+// runProjectWait, when the tail folded a change while nobody was watching and
+// this read is the demand that projects it. The bool is false only when cityName
+// is unknown.
+func (p *Plane) RunProjection(ctx context.Context, cityName string) (runproj.RunProjectionSnapshot, bool) {
 	tailer, ok := p.cityRunTailer(cityName)
 	if !ok {
 		return runproj.RunProjectionSnapshot{}, false
 	}
-	return tailer.runProjection(), true
+	return tailer.runProjection(ctx), true
 }
 
 // RunProjectionMissInGrace reports whether a projected point-read miss is still
