@@ -379,6 +379,13 @@ func computePoolDesiredStatesAt(
 				}
 			}
 			routedTo = normalizeAgentTemplateIdentity(cfg, agentutil.NormalizePoolRouteTarget(cfg, routedTo))
+			// Mail is addressed to a configured pool alias rather than a work
+			// route. The collector only admits unread messages for such aliases;
+			// resolve that address to this pool template so a cold pool can
+			// materialize one session to read the durable message.
+			if routedTo == "" && wb.Type == "message" && agentTemplateIdentitiesEquivalent(cfg, wb.Assignee, template) {
+				routedTo = template
+			}
 			if sessionBeadID != "" {
 				sessionTemplate := strings.TrimSpace(sessionBeadTemplate[sessionBeadID])
 				if sessionTemplate != "" && routedTo != "" && !agentTemplateIdentitiesEquivalent(cfg, routedTo, sessionTemplate) {
