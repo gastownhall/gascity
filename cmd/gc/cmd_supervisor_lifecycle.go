@@ -70,6 +70,19 @@ var (
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
 	}
+	// supervisorLaunchdDisabled reports whether launchd holds a persistent
+	// disable override for the label. `gc supervisor stop` writes one with
+	// `launchctl disable`, and it survives logout and reboot until
+	// `launchctl enable` clears it, so a supervisor that answers its socket
+	// is not proof the machine stays supervised. Tri-state like
+	// supervisorLaunchdLoaded: known is false when launchd cannot be asked.
+	supervisorLaunchdDisabled = func(label string) (disabled bool, known bool) {
+		out, err := exec.Command("launchctl", "print-disabled", "gui/"+strconv.Itoa(os.Getuid())).Output()
+		if err != nil {
+			return false, false
+		}
+		return launchdPrintDisabledReportsDisabled(string(out), label)
+	}
 	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
 	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
 	// have it flow into the supervisor's launchd plist. Returns "" on
@@ -241,6 +254,48 @@ func launchdPrintReportsRunning(out []byte) bool {
 		}
 	}
 	return false
+}
+
+// launchdPrintDisabledReportsDisabled reads one label's entry out of
+// `launchctl print-disabled`. The value spelling changed across macOS
+// releases ("=> true" on older systems, "=> disabled" on newer ones), so
+// accept both. A label with no entry carries no override, which is a known
+// answer, not an unknown one.
+func launchdPrintDisabledReportsDisabled(out, label string) (disabled bool, known bool) {
+	quoted := `"` + label + `"`
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		name, value, ok := strings.Cut(line, "=>")
+		if !ok || strings.TrimSpace(name) != quoted {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		return value == "true" || value == "disabled", true
+	}
+	return false, true
+}
+
+// supervisorLaunchdSupervisionWarning returns why launchd is not supervising
+// this machine, or "" when it is (or when the platform is not macOS, or the
+// agent was never installed). Process liveness alone hides the failure the
+// stop path creates: a foreground supervisor answers every probe while the
+// launchd agent stays disabled, so the next logout leaves the city unrun.
+func supervisorLaunchdSupervisionWarning() string {
+	if supervisorRuntimeGOOS != "darwin" {
+		return ""
+	}
+	if _, err := os.Stat(supervisorLaunchdPlistPath()); err != nil {
+		return ""
+	}
+	label := supervisorLaunchdLabel()
+	if disabled, known := supervisorLaunchdDisabled(label); known && disabled {
+		return fmt.Sprintf("launchd agent %s is disabled; it will not start after logout or reboot. Run 'gc supervisor start' to clear the override", label)
+	}
+	if _, absent, _ := supervisorLaunchdLoaded(label); absent {
+		return fmt.Sprintf("launchd agent %s is not loaded; it will not restart if the supervisor exits. Run 'gc supervisor start' to load it", label)
+	}
+	return ""
 }
 
 func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
@@ -561,6 +616,15 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	}
 	lock.Close() //nolint:errcheck // release probe lock
 
+	// macOS: `gc supervisor stop` runs `launchctl disable`, which writes a
+	// PERSISTENT override that survives logout and reboot, and only
+	// `launchctl enable` clears it. Forking a bare child here would leave
+	// the machine reporting healthy while nothing restarts the supervisor,
+	// so re-register through launchd whenever the agent is installed.
+	if startSupervisorViaLaunchd(stderr) {
+		return waitForSupervisorStartResult(stdout, stderr, jsonOut, supervisorLogPath())
+	}
+
 	gcPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: finding executable: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -592,6 +656,31 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		return 1
 	}
 
+	return waitForSupervisorStartResult(stdout, stderr, jsonOut, logPath)
+}
+
+// startSupervisorViaLaunchd clears any persistent launchd override and boots
+// the installed agent. It reports whether launchd now owns the supervisor;
+// false means the caller must fall back to a forked child, which dies with
+// the login session.
+func startSupervisorViaLaunchd(stderr io.Writer) bool {
+	if supervisorRuntimeGOOS != "darwin" {
+		return false
+	}
+	plist := supervisorLaunchdPlistPath()
+	if _, err := os.Stat(plist); err != nil {
+		return false
+	}
+	if err := loadAndStartSupervisorLaunchd(plist, supervisorLaunchdLabel()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: warning: launchd start failed (%v); falling back to a foreground supervisor that ends with this login session\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
+}
+
+// waitForSupervisorStartResult polls for readiness and reports the outcome in
+// the caller's chosen format.
+func waitForSupervisorStartResult(stdout, stderr io.Writer, jsonOut bool, logPath string) int {
 	deadline := time.Now().Add(supervisorReadyTimeout)
 	for time.Now().Before(deadline) {
 		if pid := supervisorAliveHook(); pid != 0 {
@@ -1579,7 +1668,10 @@ func writeSupervisorServiceFile(path string, content []byte) error {
 	return os.Chmod(path, supervisorServiceFileMode)
 }
 
-func supervisorLaunchdPlistPath() string {
+// supervisorLaunchdPlistPath is a var so tests can point the launchd
+// probes at a temporary plist without overriding HOME, which
+// platformSupervisorHomeOverrideError rejects.
+var supervisorLaunchdPlistPath = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
 }
