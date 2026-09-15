@@ -1607,11 +1607,14 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 // member. Live members are addressed by their instance identity, which is not
 // itself a config entry: numeric slots expand to "pool-N", and namepool slots
 // expand to the namepool name (e.g. "rig/binding.furiosa"). resolveAgentIdentity
-// synthesizes the numeric shape but has no namepool knowledge, so a config
-// lookup alone strands every namepool pool member.
+// synthesizes both shapes for members the config still declares within
+// max_active_sessions.
 //
-// The pool agent the bead was routed to is always in config, so its instance
-// projection is the correct fallback: pool members inherit the pool's provider
+// The instance projection remains the fallback for live members the config no
+// longer covers — a namepool or numeric slot above a since-reduced capacity,
+// which the resolver rejects but preferredPoolSlotAboveCapacityInfo still keeps
+// addressable. The pool agent the bead was routed to is always in config, so
+// that projection is always available: pool members inherit the pool's provider
 // and workspace settings, and only the identity differs.
 func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInstance string) config.Agent {
 	if member, ok := resolveAgentIdentity(cfg, qualifiedInstance, currentRigContext(cfg)); ok {

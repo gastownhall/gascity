@@ -389,6 +389,103 @@ func TestResolveAgentIdentityResolvesBindingQualifiedPoolInstance(t *testing.T) 
 	}
 }
 
+// TestResolveAgentIdentityResolvesBindingQualifiedNamepoolMember reproduces
+// gc-lgoak: status exposes a bounded pool's configured themed member, but the
+// CLI dispatch resolver previously recognized only numeric "template-N"
+// members. A target such as "sites/gastown.furiosa" therefore failed before
+// sling could collapse it back to the pool route.
+func TestResolveAgentIdentityResolvesBindingQualifiedNamepoolMember(t *testing.T) {
+	max := 1
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			BindingName:       "gastown",
+			Dir:               "sites",
+			MaxActiveSessions: &max,
+			NamepoolNames:     []string{"furiosa", "nux"},
+		}},
+	}
+
+	a, ok := resolveAgentIdentity(cfg, "sites/gastown.furiosa", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(sites/gastown.furiosa) = (_, false), want configured namepool member")
+	}
+	if got := a.QualifiedName(); got != "sites/gastown.furiosa" {
+		t.Fatalf("QualifiedName() = %q, want %q", got, "sites/gastown.furiosa")
+	}
+	if got := a.PoolName; got != "sites/gastown.polecat" {
+		t.Fatalf("PoolName = %q, want pool route %q", got, "sites/gastown.polecat")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "sites/gastown.nux", ""); ok {
+		t.Fatal("namepool member above max_active_sessions resolved")
+	}
+	if _, ok := resolveAgentIdentity(cfg, "sites/gastown.ghost", ""); ok {
+		t.Fatal("unknown namepool member resolved")
+	}
+}
+
+// TestResolveAgentIdentityResolvesNamepoolMemberViaBareName covers the step-3
+// bare-name path into matchPoolInstance. A scope-unqualified target such as
+// "gastown.furiosa" misses step 2b (which compares against the fully qualified
+// "sites/gastown.furiosa") and must still resolve to the configured namepool
+// member, collapsing to the pool route so sling can dispatch it.
+func TestResolveAgentIdentityResolvesNamepoolMemberViaBareName(t *testing.T) {
+	t.Run("binding qualified, scope unqualified", func(t *testing.T) {
+		max := 1
+		cfg := &config.City{
+			Agents: []config.Agent{{
+				Name:              "polecat",
+				BindingName:       "gastown",
+				Dir:               "sites",
+				MaxActiveSessions: &max,
+				NamepoolNames:     []string{"furiosa", "nux"},
+			}},
+		}
+
+		a, ok := resolveAgentIdentity(cfg, "gastown.furiosa", "")
+		if !ok {
+			t.Fatal("resolveAgentIdentity(gastown.furiosa) = (_, false), want configured namepool member")
+		}
+		if got := a.QualifiedName(); got != "sites/gastown.furiosa" {
+			t.Fatalf("QualifiedName() = %q, want %q", got, "sites/gastown.furiosa")
+		}
+		if got := a.PoolName; got != "sites/gastown.polecat" {
+			t.Fatalf("PoolName = %q, want pool route %q", got, "sites/gastown.polecat")
+		}
+		if _, ok := resolveAgentIdentity(cfg, "gastown.nux", ""); ok {
+			t.Fatal("namepool member above max_active_sessions resolved")
+		}
+		if _, ok := resolveAgentIdentity(cfg, "gastown.ghost", ""); ok {
+			t.Fatal("unknown namepool member resolved")
+		}
+	})
+
+	t.Run("unbound bare name", func(t *testing.T) {
+		max := 1
+		cfg := &config.City{
+			Agents: []config.Agent{{
+				Name:              "polecat",
+				MaxActiveSessions: &max,
+				NamepoolNames:     []string{"furiosa", "nux"},
+			}},
+		}
+
+		a, ok := resolveAgentIdentity(cfg, "furiosa", "")
+		if !ok {
+			t.Fatal("resolveAgentIdentity(furiosa) = (_, false), want configured namepool member")
+		}
+		if got := a.QualifiedName(); got != "furiosa" {
+			t.Fatalf("QualifiedName() = %q, want %q", got, "furiosa")
+		}
+		if got := a.PoolName; got != "polecat" {
+			t.Fatalf("PoolName = %q, want pool route %q", got, "polecat")
+		}
+		if _, ok := resolveAgentIdentity(cfg, "nux", ""); ok {
+			t.Fatal("namepool member above max_active_sessions resolved")
+		}
+	})
+}
+
 func TestResolveAgentIdentityUsesRigContextForScopeUnqualifiedControlDispatcher(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
