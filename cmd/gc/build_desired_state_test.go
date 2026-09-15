@@ -255,6 +255,27 @@ type partialAssignedWorkStore struct {
 	partialReady      bool
 }
 
+// listQueryRecordingStore records every List query so tests can assert which
+// listings a collection pass issued, following demandListCountingStore.
+type listQueryRecordingStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *listQueryRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
+}
+
+func messageListIssued(queries []beads.ListQuery) bool {
+	for _, q := range queries {
+		if q.Type == "message" {
+			return true
+		}
+	}
+	return false
+}
+
 type controllerDemandPartialStore struct {
 	*beads.MemStore
 }
@@ -2209,6 +2230,7 @@ func TestIsUnreadPoolMailRequiresNotifyAndEligibleConfiguredAlias(t *testing.T) 
 		{name: "notified cold pool alias", cfg: poolCfg, bead: base, want: true},
 		{name: "plain unread mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.ReadMetadataKey: "false"}}},
 		{name: "read notified mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true", mail.ReadMetadataKey: "true"}}},
+		{name: "read label notified mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Labels: []string{"read"}, Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true", mail.ReadMetadataKey: "false"}}},
 		{name: "unknown recipient", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "unknown", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true"}}},
 		{name: "suspended pool", cfg: &config.City{Agents: []config.Agent{{Name: "codex-im", Suspended: true}}}, bead: base},
 	}
@@ -2218,6 +2240,30 @@ func TestIsUnreadPoolMailRequiresNotifyAndEligibleConfiguredAlias(t *testing.T) 
 				t.Errorf("isUnreadPoolMail() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCollectAssignedWorkBeads_SkipsMessageScanWithoutEligiblePoolAgent(t *testing.T) {
+	// A city with no eligible pool agent must not pay the per-store
+	// Type=message listing on any tick.
+	bare := &listQueryRecordingStore{Store: beads.NewMemStore()}
+	if _, _, _, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, bare, nil, nil, nil); partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if messageListIssued(bare.queries) {
+		t.Fatalf("pool-less city issued a message listing: %#v", bare.queries)
+	}
+
+	// A city with an eligible pool agent keeps the listing: behaviour is
+	// identical to before the gate.
+	maxOne := 1
+	poolCfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	pooled := &listQueryRecordingStore{Store: beads.NewMemStore()}
+	if _, _, _, _, partial := collectAssignedWorkBeadsWithStores("", poolCfg, pooled, nil, nil, nil); partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if !messageListIssued(pooled.queries) {
+		t.Fatal("pool city issued no message listing, want the scan to run")
 	}
 }
 

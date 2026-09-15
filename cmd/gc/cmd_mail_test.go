@@ -3598,6 +3598,53 @@ func TestMailSendAllExcludesSender(t *testing.T) {
 	}
 }
 
+func TestMailSendAllNotifyPersistsIntentForEveryMessage(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "coder": true, "committer": true, "tester": true}
+	// A failing nudge must not stop the broadcast or lose the intent:
+	// every created message still carries mail.notify.
+	failedNudge := func(_, _ string) error { return errors.New("recipient unavailable") }
+
+	var stdout, stderr bytes.Buffer
+	code := doMailSendAllJSON(mp, events.Discard, recipients, "coder", []string{"wake up"}, failedNudge, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	// Sender coder and human are excluded, so the broadcast creates exactly
+	// gc-1 (committer) and gc-2 (tester) in sorted recipient order.
+	for _, id := range []string{"gc-1", "gc-2"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if b.Metadata[mail.NotificationIntentMetadataKey] != "true" {
+			t.Errorf("%s mail.notify = %q, want true", id, b.Metadata[mail.NotificationIntentMetadataKey])
+		}
+	}
+}
+
+func TestMailSendAllWithoutNotifyMarksNoIntent(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "coder": true, "committer": true, "tester": true}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailSendAllJSON(mp, events.Discard, recipients, "coder", []string{"wake up"}, nil, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailSendAllJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	for _, id := range []string{"gc-1", "gc-2"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got := b.Metadata[mail.NotificationIntentMetadataKey]; got != "" {
+			t.Errorf("%s mail.notify = %q, want unset without --notify", id, got)
+		}
+	}
+}
+
 // --- gc mail check ---
 
 func TestMailCheckNoMail(t *testing.T) {

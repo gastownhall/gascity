@@ -1526,6 +1526,11 @@ func collectAssignedWorkBeadsWithStores(
 		errs      []error
 	}
 	results := make([]storeAssignedWorkResult, len(stores))
+	// Unread pool-alias mail can only be wake demand when cfg names at
+	// least one eligible pool agent, so resolve that once per collection
+	// and skip the per-store message listing on pool-less cities instead
+	// of paying an extra query per store on every tick.
+	scanPoolMail := cityHasEligiblePoolAgent(cfg)
 	var wg sync.WaitGroup
 	for idx, source := range stores {
 		idx, source := idx, source
@@ -1599,12 +1604,16 @@ func collectAssignedWorkBeadsWithStores(
 			// unread mail addressed to a configured pool alias is wake demand. A
 			// cold singleton otherwise has no live session identity for --notify
 			// to nudge, leaving the durable message stranded indefinitely.
-			if messages, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open", Type: "message"}); err == nil {
-				appendUnreadPoolMailUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, messages, seen, source.store, source.ref)
-			} else {
-				errs = append(errs, fmt.Errorf("List(open message): %w", err))
-				if beads.IsPartialResult(err) && len(messages) > 0 {
+			// scanPoolMail is false on cities without an eligible pool agent,
+			// where no alias could ever resolve, so the listing is skipped.
+			if scanPoolMail {
+				if messages, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open", Type: "message"}); err == nil {
 					appendUnreadPoolMailUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, messages, seen, source.store, source.ref)
+				} else {
+					errs = append(errs, fmt.Errorf("List(open message): %w", err))
+					if beads.IsPartialResult(err) && len(messages) > 0 {
+						appendUnreadPoolMailUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, messages, seen, source.store, source.ref)
+					}
 				}
 			}
 			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
@@ -2786,6 +2795,23 @@ func isUnreadPoolMail(cfg *config.City, b beads.Bead) bool {
 		}
 	}
 	return mailAliasPoolTemplate(cfg, b.Assignee) != ""
+}
+
+// cityHasEligiblePoolAgent reports whether cfg names at least one pool agent
+// that mailAliasPoolTemplate could ever resolve to: non-suspended and able
+// to host generic ephemeral sessions. The per-store unread-mail listing only
+// runs when this holds, so cities without pools pay no extra query per tick.
+func cityHasEligiblePoolAgent(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if !agent.Suspended && agent.SupportsGenericEphemeralSessions() {
+			return true
+		}
+	}
+	return false
 }
 
 // mailAliasPoolTemplate resolves a mail assignee to the qualified name of the

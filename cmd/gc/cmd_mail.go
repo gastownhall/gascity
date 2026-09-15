@@ -1966,6 +1966,12 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 			fmt.Fprintf(stderr, "gc mail send --all: sending to %s: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		if nudgeFn != nil {
+			if err := markMailNotificationIntent(mp, m.ID); err != nil {
+				fmt.Fprintf(stderr, "gc mail send --all: recording notification intent for %s: %v\n", to, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+		}
 		rec.Record(events.Event{
 			Type:    events.MailSent,
 			Actor:   m.From,
