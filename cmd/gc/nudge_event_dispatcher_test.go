@@ -965,6 +965,49 @@ func TestNudgeEventDispatcherAbandonsThePassWhenShutdownBeatsTheSlot(t *testing.
 	seen.assertQuiet(t, 250*time.Millisecond, "a pass spawned after shutdown with every slot already held")
 }
 
+// TestNudgeEventDispatcherAbandonsThePassWhenShutdownAndASlotAreBothReady
+// pins the half of the shutdown contract that a single select cannot express.
+//
+// TestNudgeEventDispatcherAbandonsThePassWhenShutdownBeatsTheSlot holds every
+// slot on purpose, so the shutdown branch is the only ready case and the
+// runtime has no choice to make. That is the easy half. The half that matters
+// in production is the opposite one: eight slots and almost never all busy, so
+// at the moment the parent is canceled a slot is usually free and BOTH cases
+// are ready. Go select has no case priority, so the runtime picks
+// pseudo-randomly and the pass runs anyway about half the time, unthrottled,
+// against stores and a provider that are tearing down.
+//
+// One call cannot tell the two behaviors apart: a coin lands the right way
+// half the time. So this asserts over many calls. With the cancellation check
+// ahead of the slot race the answer is no every time; without it, passing
+// requires every one of the calls to come up the same way, which is 2^-N.
+func TestNudgeEventDispatcherAbandonsThePassWhenShutdownAndASlotAreBothReady(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", testNudgeDispatchStores(dir))
+
+	cancel()
+	<-d.workerDone
+
+	// Every slot is free here, which is the whole point: this is the state the
+	// dispatcher is normally in when shutdown arrives.
+	const trials = 200
+	ran := 0
+	for i := 0; i < trials; i++ {
+		release, run := d.acquirePassSlot()
+		release()
+		if run {
+			ran++
+		}
+	}
+	if ran != 0 {
+		t.Fatalf("acquirePassSlot allowed the pass to run in %d of %d trials after the parent was canceled with every slot free; shutdown must win every time, not on a coin flip", ran, trials)
+	}
+}
+
 // TestNudgeEventDispatcherFullKickDuringPassIsNotLost pins the window that
 // made TestNudgeEventDispatcherSweepMakesNoProviderCall flaky, and the reason
 // that one was flaky rather than simply wrong.

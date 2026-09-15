@@ -521,6 +521,17 @@ func (d *nudgeEventDispatcher) acquirePassSlot() (func(), bool) {
 	if d.passSlots == nil {
 		return func() {}, true
 	}
+	// Answer shutdown before racing for a slot. Select has no case priority,
+	// so a single select over both channels decides pseudo-randomly whenever
+	// both are ready -- and with eight slots they usually are, because a free
+	// slot is the normal state. That made the abandon below fire only when
+	// every slot happened to be occupied, which is the rare case, not the
+	// one that matters.
+	select {
+	case <-d.parent.Done():
+		return func() {}, false
+	default:
+	}
 	select {
 	case d.passSlots <- struct{}{}:
 	case <-d.parent.Done():
