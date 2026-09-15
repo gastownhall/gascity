@@ -106,12 +106,35 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 	)
 }
 
+// isDrainAcked reports whether a drain has been acknowledged by either
+// writer: the agent's GC_DRAIN_ACK, or the reconciler's own marker
+// (source, reason and generation all present — setReconcilerDrainAckMetadata).
+// The two live under disjoint keys so that canceling one never erases the
+// other; the agent's key is read first because it outranks the marker.
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
 	val, err := o.sp.GetMeta(sessionName, "GC_DRAIN_ACK")
 	if err != nil {
 		return false, fmt.Errorf("reading GC_DRAIN_ACK: %w", err)
 	}
-	return val == "1", nil
+	if val == "1" {
+		return true, nil
+	}
+	source, err := o.sp.GetMeta(sessionName, reconcilerDrainAckSourceKey)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", reconcilerDrainAckSourceKey, err)
+	}
+	if source != reconcilerDrainAckSourceValue {
+		return false, nil
+	}
+	reason, err := o.sp.GetMeta(sessionName, reconcilerDrainAckReasonKey)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", reconcilerDrainAckReasonKey, err)
+	}
+	generation, err := o.sp.GetMeta(sessionName, reconcilerDrainAckGenerationKey)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", reconcilerDrainAckGenerationKey, err)
+	}
+	return reason != "" && generation != "", nil
 }
 
 func (o *providerDrainOps) setRestartRequested(sessionName string) error {
