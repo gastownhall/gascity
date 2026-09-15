@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 // storeScopedBeadKey identifies an assigned-work bead by its store ref and ID.
@@ -41,10 +42,12 @@ type storeScopedBeadKey struct {
 // ContinuationClaimCandidate is a ready graph-v2 successor that may need a
 // bounded claim nudge after its current pool session completed the preceding
 // step but did not start another turn. All fields are exact provenance:
-// StoreRef is canonical (city:<name> or rig:<name>), RootBeadID was verified
-// through Store, and Assignee is the bead's persisted preassignment. Store is
-// retained for immediate pre-delivery revalidation; session identity
-// resolution happens later against the post-reconcile session snapshot.
+// StoreRef is the canonical ref of the scope that OWNS the row (city:<name> or
+// rig:<name>), which for a class binding is not the leg the row was read from;
+// RootBeadID was verified through Store, and Assignee is the bead's persisted
+// preassignment. Store is retained for immediate pre-delivery revalidation;
+// session identity resolution happens later against the post-reconcile session
+// snapshot.
 type ContinuationClaimCandidate struct {
 	WorkBeadID string
 	RootBeadID string
@@ -91,6 +94,21 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
+	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
+	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
+	// demand probes selected. The seat-claim backstop reads this one because it
+	// settles readiness itself, from each row's own dependency edges rather than
+	// from pool-demand selection: a named seat's routed work is not pool demand,
+	// so the narrowed view can be silent on exactly the rows that lane exists
+	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
+	// with it, the same contract AssignedWorkStores/StoreRefs carry.
+	OpenRoutedWorkBeads     []beads.Bead
+	OpenRoutedWorkStores    []beads.Store
+	OpenRoutedWorkStoreRefs []string
+	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
+	// incomplete. A missing row makes a seat's own work look absent, so
+	// consumers that act on ABSENCE must disable themselves for that tick.
+	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -175,12 +193,14 @@ type defaultScaleCheckTarget struct {
 }
 
 type scaleCheckDemand struct {
-	Count       int
-	WorkBeadIDs []string
-	Titles      map[string]string
-	Packs       map[string]string
-	Workspaces  map[string]string
-	StoreRefs   map[string]string
+	Count          int
+	WorkBeadIDs    []string
+	Titles         map[string]string
+	Packs          map[string]string
+	Workspaces     map[string]string
+	StoreRefs      map[string]string
+	WorktreeSpecs  map[string]*worktree.Spec
+	WorktreeErrors map[string]string
 	// ParentSIDs maps work-bead id → gc.brain_parent_sid, carrying the fork
 	// parent through to the new pool session bead so the launch path can fork
 	// the warm arm off its pre-built brain.
@@ -499,6 +519,10 @@ func buildDesiredStateWithSessionBeadsAt(
 			activeStores = append(activeStores, activeStore{store: s, ref: rig.Name})
 		}
 	}
+	// The store a control dispatcher's rows actually live in, asked once per
+	// build from the residency plan rather than guessed from config. Non-nil
+	// only on a city converged onto a class binding; see its doc comment.
+	controlBinding := convergedRoutedWorkBinding(cityPath, cfg, store, rigStores, suspendedRigPaths)
 
 	for i := range cfg.Agents {
 		if cfg.Agents[i].Suspended {
@@ -582,7 +606,7 @@ func buildDesiredStateWithSessionBeadsAt(
 			// retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
-				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 				// mode='always': named session is unconditionally desired by the named
 				// pass; pool demand is redundant and creates {name}-N phantoms when N
 				// routed beads arrive. mode='on_demand': pool demand wakes the sleeping
@@ -658,7 +682,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// new unassigned demand while assigned work drives resume requests.
 		poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 		if store != nil && !hasCustomScaleCheck {
-			ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+			ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
 			defaultScaleTargets = append(defaultScaleTargets, ownTarget)
 			// Cross-store demand (FR-S0.1 / vp-s37): a rig pool's routed demand
 			// may live in the city store (vp-kvp cross-store delivery), which
@@ -746,6 +770,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
+	var unassignedRoutedPartial bool
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
 	var readyAssigned map[storeScopedBeadKey]bool
@@ -783,6 +808,17 @@ func buildDesiredStateWithSessionBeadsAt(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// One-shot repair for beads a prior reconciler tick already clobbered
+		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
+		// legacy work_dir when the canonical value was overwritten with a
+		// pool-slot label before workDirStampWouldClobberEvidence existed to
+		// prevent it. Idempotent — see repairPoolSlotWorkDirClobber. Runs
+		// BEFORE the stamp below: stampRunSessionIdentity writes through the
+		// store without refreshing assignedWorkBeads, so a sweep placed after
+		// it would read pre-stamp metadata and could undo a legitimate fresh
+		// stamp. Repair reads the snapshot it was collected with; the live
+		// stamp gets the last word.
+		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, stderr)
 		// Durably record which session is executing each in-progress work
 		// bead. The Assignee link is transient (cleared on close), so without
 		// this a completed run carries no session/worktree reference. See
@@ -790,22 +826,28 @@ func buildDesiredStateWithSessionBeadsAt(
 		// storePartial: stamping the beads that WERE collected is always
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
-		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
-		// Re-home work pre-assigned to a legacy bound form of a now-unbound pool
-		// agent onto the canonical identity, so the canonical session the
-		// awake/scale accounting wakes for it can actually surface and claim it
-		// (the agent-side work_query/claim path matches identities by raw string).
+		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		// Re-home work pre-assigned to a legacy template identity onto the
+		// configured canonical identity, so the canonical session the awake/scale
+		// accounting wakes for it can actually surface and claim it (the
+		// agent-side work_query/claim path matches identities by raw string).
 		canonicalizeLegacyBoundAssignedWork(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
-		// Re-home open, unassigned work still routed to a legacy bound form of a
-		// now-unbound pool agent. This is the demand/claim half of the migration:
-		// empty-assignee open work never enters the assigned-work collection above,
-		// and the canonical pool-demand probe below (defaultScaleCheckCounts) plus
-		// the worker work_query/claim path match gc.routed_to canonically by raw
-		// string, so the route must be canonicalized before demand is counted or
-		// the cold pool never wakes for it.
+		// Re-home open, unassigned work still routed to a legacy template identity.
+		// This is the demand/claim half of the migration: empty-assignee open work
+		// never enters the assigned-work collection above, and the canonical
+		// pool-demand probe below (defaultScaleCheckCounts) plus the worker
+		// work_query/claim path match gc.routed_to canonically by raw string, so
+		// the route must be canonicalized before demand is counted or the cold
+		// pool never wakes for it.
 		subPhaseStart = time.Now()
-		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		// Same repair as above, over the open/unassigned collection: a bead
+		// released back to open by a drain is clobbered the same way an
+		// in_progress one is, and never appears in assignedWorkBeads once
+		// reopened. Ordered first here for the same reason as the assigned
+		// site: the sweep reads the snapshot it was collected with, before any
+		// later pass writes through the store behind it.
+		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -1160,6 +1202,10 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
+		OpenRoutedWorkBeads:                unassignedRoutedBeads,
+		OpenRoutedWorkStores:               unassignedRoutedStores,
+		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
+		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1740,6 +1786,85 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 	return result
 }
 
+// convergedRoutedWorkBinding reports the one class binding a city serves ALL
+// its routed work from, or nil when it serves any of it from a work ledger.
+//
+// The question is answered from the residency plan, not from config: the legs
+// come from routedWorkStoreCandidates, the same set collectOpenUnassignedRoutedWork
+// reads, so demand and collection cannot disagree about where routed work is.
+// A converged split narrows (storeref.Narrow, runtime plane) to nothing but its
+// binding legs, so "every leg is a class ref" IS "this city is converged"; a
+// city that relocates nothing keeps its work leg and answers nil.
+//
+// Two bindings would mean a per-class fan-out no constructor in this build
+// produces (TestTopologyConstructorsServeOnlyTheWholeSplit); until one can,
+// a plan that named more than one store gets the same conservative nil as a
+// legacy city rather than a guess about which one holds control work.
+func convergedRoutedWorkBinding(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	suspendedRigPaths map[string]bool,
+) beads.Store {
+	legs, err := routedWorkStoreCandidates(cityPath, cfg, store, rigStores, suspendedRigPaths, censusRefScoped)
+	// An unresolvable topology takes the same conservative nil as a legacy city:
+	// fall back to the legacy target rather than guess a store. The error is not
+	// swallowed — collectOpenUnassignedRoutedWork resolves this same leg set later
+	// in this build and reports it there.
+	if err != nil || len(legs) == 0 {
+		return nil
+	}
+	var binding beads.Store
+	for _, leg := range legs {
+		if leg.store == nil || !storeref.IsClassRef(leg.ref) {
+			return nil
+		}
+		if binding != nil && leg.store != binding {
+			return nil
+		}
+		binding = leg.store
+	}
+	return binding
+}
+
+// ownScaleCheckTarget picks the store a pool's default demand probe reads.
+//
+// It is its own scope's ledger — except for a store-scoped control dispatcher
+// on a city converged onto a class binding, where every scope's control rows
+// live in the binding and the rig work ledger the dispatcher is named after
+// holds none of them. There the target is the binding under the CITY store key,
+// byte-for-byte the target the city's own dispatcher already gets: the binding
+// is a city-scope store serving every scope, demand keys normalize class refs
+// onto "city" anyway (normalizeDemandStoreRef), and one store key means one
+// store group, listed once per tick for every dispatcher template — rows are
+// attributed to templates by route, not by store.
+//
+// This does not widen anyone's probe. A dispatcher still reads exactly one
+// store; it is just the one its rows live in.
+func ownScaleCheckTarget(
+	cityPath string,
+	cfg *config.City,
+	agentCfg *config.Agent,
+	cityStore beads.Store,
+	rigStores map[string]beads.Store,
+	controlBinding beads.Store,
+	storeScopedControlDispatcher bool,
+) defaultScaleCheckTarget {
+	if storeScopedControlDispatcher && controlBinding != nil {
+		return defaultScaleCheckTarget{
+			template: agentCfg.QualifiedName(),
+			storeKey: "city",
+			store:    controlBinding,
+		}
+	}
+	return defaultScaleCheckTargetForAgent(cityPath, cfg, agentCfg, cityStore, rigStores)
+}
+
+// defaultScaleCheckTargetForAgent points a pool at its own scope's ledger: the
+// rig store for a Dir-scoped agent, the city store otherwise. A control
+// dispatcher on a split city is the documented exception — see
+// ownScaleCheckTarget, which is what the agent loop calls.
 func defaultScaleCheckTargetForAgent(
 	cityPath string,
 	cfg *config.City,
@@ -1891,6 +2016,18 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				entry.StoreRefs = make(map[string]string)
 			}
 			entry.StoreRefs[b.ID] = group.storeKey
+			spec, specErr := worktreeSpecForBead(b, group.storeKey)
+			if specErr != nil {
+				if entry.WorktreeErrors == nil {
+					entry.WorktreeErrors = make(map[string]string)
+				}
+				entry.WorktreeErrors[b.ID] = specErr.Error()
+			} else if spec != nil {
+				if entry.WorktreeSpecs == nil {
+					entry.WorktreeSpecs = make(map[string]*worktree.Spec)
+				}
+				entry.WorktreeSpecs[b.ID] = spec
+			}
 			if parentSID := strings.TrimSpace(b.Metadata[beadmeta.BrainParentSIDMetadataKey]); parentSID != "" {
 				if entry.ParentSIDs == nil {
 					entry.ParentSIDs = make(map[string]string)
@@ -1926,6 +2063,12 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 	if existing.ParentSIDs == nil && len(incoming.ParentSIDs) > 0 {
 		existing.ParentSIDs = make(map[string]string, len(incoming.ParentSIDs))
 	}
+	if existing.WorktreeSpecs == nil && len(incoming.WorktreeSpecs) > 0 {
+		existing.WorktreeSpecs = make(map[string]*worktree.Spec, len(incoming.WorktreeSpecs))
+	}
+	if existing.WorktreeErrors == nil && len(incoming.WorktreeErrors) > 0 {
+		existing.WorktreeErrors = make(map[string]string, len(incoming.WorktreeErrors))
+	}
 	for _, id := range incoming.WorkBeadIDs[:limit] {
 		if strings.TrimSpace(id) == "" {
 			continue
@@ -1946,6 +2089,16 @@ func mergeScaleCheckDemand(existing, incoming scaleCheckDemand, count int) scale
 		if incoming.ParentSIDs != nil {
 			if sid := incoming.ParentSIDs[id]; sid != "" {
 				existing.ParentSIDs[id] = sid
+			}
+		}
+		if incoming.WorktreeSpecs != nil {
+			if spec := incoming.WorktreeSpecs[id]; spec != nil {
+				existing.WorktreeSpecs[id] = spec
+			}
+		}
+		if incoming.WorktreeErrors != nil {
+			if worktreeErr := incoming.WorktreeErrors[id]; worktreeErr != "" {
+				existing.WorktreeErrors[id] = worktreeErr
 			}
 		}
 	}
@@ -2270,7 +2423,7 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // unfiltered set is exactly the assignee-filtered set, and taking the first
 // Limit of it matches a per-assignee fetch. NativeDoltStore.Ready filters the
 // assignee server-side, and its wisp sub-query is assignee-aware too: the
-// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// pinned beads@v1.3.0-rc.2 readyWorkWispIssueFilter carries filter.Assignee into the
 // wisp filter (internal/storage/issueops/ready_work.go), which emits
 // `assignee = ?` for the wisp table (internal/storage/sqlbuild/filter.go),
 // exactly as the issues leg does. Both legs order by a total order independent
@@ -2829,6 +2982,22 @@ func discoverSessionBeadsWithRoots(
 				tp.InstanceName = sn
 			}
 		}
+		if isNamedSessionInfo(info) {
+			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+			// (build_desired_state.go ~1130-1139) did not populate this bead into
+			// desired this tick — e.g. during city suspend, which gates only that
+			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+			// but never sets these three fields, so without this the named-session
+			// markers session_beads.go and templateParamsSessionOrigin key off go
+			// missing and the bead is wrongly treated as non-named.
+			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["GC_SESSION_ORIGIN"] = "named"
+		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
@@ -3192,6 +3361,13 @@ func realizePoolDesiredSessionsAt(
 		// (poolTriggerMetadata via selectOrPlanPoolSessionBead), which also
 		// resolves the work dir off the base agent plus the per-slot name.
 		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedInstance, sbInfo, item.request); err != nil {
+			if errors.Is(err, errPoolTriggerWorktreeEvidence) {
+				// Unusable ownership evidence is not a partial bind: a reused
+				// session left in desired would restart against its previous
+				// binding's work dir.
+				fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (skipping)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+				continue
+			}
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
 		} else {
 			sbInfo = bound
@@ -3333,7 +3509,10 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if info.ID == "" {
 		return info, nil
 	}
-	workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	if err != nil {
+		return info, err
+	}
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
 		return info, nil
@@ -3343,9 +3522,20 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	}
 	boundInfo, err := sessionFrontDoor(bp.beadStore).UpdateMetadataInfo(info, patch)
 	if err != nil {
-		return info, err
+		return info, bindWriteFailure(request, err)
 	}
 	return boundInfo, nil
+}
+
+// bindWriteFailure marks a failed binding write on a managed-worktree
+// request. The verified workspace never reached the session bead, so the
+// stamped binding still names the previous bead's work dir and the caller
+// must skip the item rather than reuse it.
+func bindWriteFailure(request SessionRequest, err error) error {
+	if request.WorktreeSpec == nil {
+		return err
+	}
+	return fmt.Errorf("%w: binding write failed: %w", errPoolTriggerWorktreeEvidence, err)
 }
 
 // namedTriggerRefIsSameStore reports whether a named session's stamped
@@ -3430,11 +3620,73 @@ func bindNamedSessionTriggerBead(store beads.Store, info session.Info, cityName 
 	return sessionFrontDoor(store).UpdateMetadataInfo(info, patch)
 }
 
+// errPoolTriggerWorktreeEvidence marks a bind failure caused by unusable
+// worktree ownership evidence. The caller must skip such an item rather than
+// continue without trigger env: continuing would restart a reused session
+// against whatever work dir its previous binding left behind.
+var errPoolTriggerWorktreeEvidence = errors.New("pool trigger worktree evidence")
+
+func verifiedPoolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (string, error) {
+	if strings.TrimSpace(request.WorktreeError) != "" {
+		return "", fmt.Errorf("%w invalid: %s", errPoolTriggerWorktreeEvidence, request.WorktreeError)
+	}
+	if request.WorktreeSpec == nil {
+		return poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request), nil
+	}
+	spec := *request.WorktreeSpec
+	workID := strings.TrimSpace(request.WorkBeadID)
+	if workID == "" || strings.TrimSpace(spec.BeadID) != workID {
+		return "", fmt.Errorf("%w: bead %q does not match request bead %q", errPoolTriggerWorktreeEvidence, spec.BeadID, workID)
+	}
+	storeRef := strings.TrimSpace(request.WorkStoreRef)
+	if storeRef != "" && canonicalEvidenceStoreRef(spec.StoreRef) != canonicalEvidenceStoreRef(storeRef) {
+		return "", fmt.Errorf("%w: store %q does not match request store %q", errPoolTriggerWorktreeEvidence, spec.StoreRef, storeRef)
+	}
+	report, err := worktree.Verify(spec)
+	if err != nil {
+		return "", fmt.Errorf("%w: verification failed: %w", errPoolTriggerWorktreeEvidence, err)
+	}
+	return report.Path, nil
+}
+
+// canonicalEvidenceStoreRef collapses the spellings one store answers to, so
+// the evidence guard can compare a request against workspace provenance. The
+// two sides speak different vocabularies: demand records a probe shorthand
+// ("city", or a bare rig name from the cold-wake probe's activeStores) while
+// the worktree spec carries the bead's canonical gc.root_store_ref
+// ("city:<name>", "rig:<name>"). Comparing those literally refuses a workspace
+// that is in fact ours. Collapsing them keeps the cross-store guard closed:
+// two different rigs still never compare equal.
+func canonicalEvidenceStoreRef(storeRef string) string {
+	storeRef = strings.TrimSpace(storeRef)
+	switch {
+	case storeRef == "":
+		return ""
+	case storeRef == "city", strings.HasPrefix(storeRef, "city:"), storeref.IsClassRef(storeRef):
+		return "city"
+	case strings.HasPrefix(storeRef, "rig:"):
+		return "rig:" + strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
+	default:
+		// The only bare names in the demand vocabulary are rig names.
+		//
+		// A rig literally named "city" is ambiguous here, because the city
+		// store's own probe ref is the bare string "city". That ambiguity is
+		// older and wider than this guard: the same collision already exists
+		// in every demand key built from the probe vocabulary. Nothing is
+		// reserved at config validation. This guard resolves it fail-closed,
+		// refusing the workspace rather than binding a session to a store it
+		// cannot prove it owns.
+		return "rig:" + storeRef
+	}
+}
+
 func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) string {
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
 	}
-	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	// Pure path computation: this feeds a metadata patch, so it must never
+	// create directories (gc-r9fx dry-run purity).
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -4164,9 +4416,12 @@ func selectOrPlanPoolSessionBead(
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 		return info, slot, nil, err
 	}
-	// Reuse an existing active/creating session bead. Skip drained, closed,
-	// and asleep — asleep ephemerals are not restarted; a fresh session is
-	// created instead. The reconciler closes orphaned asleep beads.
+	// Reuse an existing active/creating session bead. Skip drained and
+	// closed. Asleep is skipped too, with one carve-out: a
+	// lifecycle=one_shot session whose sleep reason is freeable and which
+	// holds no assigned work is reused through the wake path — see
+	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
+	// asleep beads; an earlier version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
@@ -4185,7 +4440,11 @@ func selectOrPlanPoolSessionBead(
 		return session.Info{}, 0, nil, err
 	}
 	_, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(cfgAgent, slot)
-	metadata := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
+	metadata, err := poolTriggerMetadata(bp, cfgAgent, qualifiedInstance, request)
+	if err != nil {
+		delete(usedSlots, slot)
+		return session.Info{}, 0, nil, err
+	}
 
 	if bp.poolScaleCheckPartialTemplates[template] {
 		delete(usedSlots, slot)
@@ -4421,10 +4680,10 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())
 }
 
-func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) map[string]string {
+func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) (map[string]string, error) {
 	workID := strings.TrimSpace(request.WorkBeadID)
 	if workID == "" {
-		return nil
+		return nil, nil
 	}
 	metadata := map[string]string{
 		beadmeta.TriggerBeadIDMetadataKey: workID,
@@ -4441,11 +4700,15 @@ func poolTriggerMetadata(bp *agentBuildParams, cfgAgent *config.Agent, qualified
 	if workspace := packWorkspaceSlug(request); workspace != "" {
 		metadata[beadmeta.PackWorkspaceMetadataKey] = workspace
 	}
-	if workDir := poolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); workDir != "" {
+	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
+	if err != nil {
+		return nil, err
+	}
+	if workDir != "" {
 		metadata[beadmeta.WorkDirMetadataKey] = workDir
 		metadata[beadmeta.LegacyWorkDirMetadataKey] = workDir
 	}
-	return metadata
+	return metadata, nil
 }
 
 // executePlannedPoolSessionBeadCreate materializes a pool session bead from a
@@ -4685,6 +4948,41 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 	return false
 }
 
+// sessionBeadHasAssignedWorkByAnyIdentityInfo is the broader sibling of
+// sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
+// Assignee against every current identity of the session (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
+// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
+// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
+// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
+// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
+// does not consider, so it can miss live assigned work entirely.
+//
+// It exists as a separate function (not a change to the pinned
+// sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
+// that need it — currently only the one_shot asleep-freeable wake-reuse
+// guard in reusablePoolSessionInfo, where under-detecting assigned work lets
+// the ordinary wake path "reuse" an identity that still holds an unfinished
+// step, orphaning it a tick later with the step pinned in_progress forever.
+func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info session.Info) bool {
+	identities := make(map[string]bool, 5)
+	for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		if id = strings.TrimSpace(id); id != "" {
+			identities[id] = true
+		}
+	}
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if identities[assignee] {
+			return true
+		}
+	}
+	return false
+}
+
 // poolRequestResumesAssignedWorkInfo proves that a concrete resume request is
 // still backed by its exact actionable work bead and that the bead is assigned
 // through any current or historical identity of the preferred session.
@@ -4793,7 +5091,7 @@ func sessionBeadIdentifierInfo(info session.Info) string {
 // only a newly claimed (or reassigned) bead triggers a single write. A write
 // failure is logged and skipped — stamping is best-effort observability and
 // must never block reconciliation.
-func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
 	if sessionBeads == nil || len(workBeads) != len(workStores) {
 		return
 	}
@@ -4828,7 +5126,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
 		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) {
+			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
+			!workDirStampWouldClobberEvidence(cfg, wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -4841,7 +5140,7 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
 	}
 }
 
@@ -4863,7 +5162,7 @@ func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
+func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
@@ -4883,7 +5182,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
 	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) {
+		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) &&
+		!workDirStampWouldClobberEvidence(cfg, root.Metadata, workDir) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {
@@ -4895,19 +5195,21 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 }
 
 // canonicalizeLegacyBoundAssignedWork re-homes the Assignee and gc.routed_to of
-// actionable pool work that is pre-assigned to a legacy bound form of a
-// configured unbound pool agent (e.g. "dir/binding.name") to that agent's
-// current canonical identity ("dir/name").
+// actionable pool work that is pre-assigned to a legacy template identity to
+// that agent's current canonical identity. It handles both legacy bound forms
+// for a now-unbound agent (e.g. "dir/binding.name" -> "dir/name") and legacy
+// unbound forms for a now-binding-qualified import (e.g.
+// "dir/name" -> "dir/binding.name").
 //
-// Why: after a bound→unbound agent migration, the awake/scale accounting wakes
-// a canonical pool session for work persisted under the legacy bound identity
-// (it normalizes template identities), but the woken session's work_query and
+// Why: after a binding-prefix migration, the awake/scale accounting wakes a
+// canonical pool session for work persisted under the legacy identity (it
+// normalizes template identities), but the woken session's work_query and
 // `gc hook --claim` path match assignees and routes by raw string. A canonical
-// session can derive neither the old binding name nor the legacy assignee, so
-// the triggering bead would surface to no one and stay unclaimed. Re-homing the
-// persisted identity to canonical makes the bead behave exactly like ordinary
-// canonical pool work, which the existing surface/claim machinery already
-// resumes — closing the agent-side half of the migration recovery loop.
+// session cannot derive the old spelling, so the triggering bead would surface
+// to no one and stay unclaimed. Re-homing the persisted identity to canonical
+// makes the bead behave exactly like ordinary canonical pool work, which the
+// existing surface/claim machinery already resumes — closing the agent-side half
+// of the migration recovery loop.
 //
 // The live-session guard preserves the resume tier: work a still-running
 // session already owns under the legacy identity is left untouched so its own
@@ -4979,18 +5281,19 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 }
 
 // canonicalizeLegacyBoundUnassignedRoutedWork rewrites the gc.routed_to of open,
-// unassigned pool work that is still routed to the legacy bound form of a
-// now-unbound pool agent ("dir/binding.name") onto the agent's current canonical
-// identity ("dir/name").
+// unassigned pool work that is still routed to a legacy template identity onto
+// the agent's current canonical identity. It handles both legacy bound forms for
+// a now-unbound agent ("dir/binding.name" -> "dir/name") and legacy unbound
+// forms for a now-binding-qualified import ("dir/name" -> "dir/binding.name").
 //
-// This closes the demand/claim half of the bound→unbound migration that the
-// assignee-keyed canonicalizeLegacyBoundAssignedWork cannot reach: open work with
-// an empty assignee never enters the assigned-work collection, and the canonical
+// This closes the demand/claim half of the migration that the assignee-keyed
+// canonicalizeLegacyBoundAssignedWork cannot reach: open work with an empty
+// assignee never enters the assigned-work collection, and the canonical
 // pool-demand probe (EffectivePoolDemandQuery), the worker work_query
 // (EffectiveWorkQuery Tier 3), and the claim predicate (hookClaimMatchesRoute)
 // all match gc.routed_to against the canonical target by raw string. A bead still
-// routed to "dir/binding.name" is therefore invisible to the canonical "dir/name"
-// pool — it neither contributes scale demand nor can be claimed — so migration-era
+// routed to the legacy spelling is therefore invisible to the canonical pool —
+// it neither contributes scale demand nor can be claimed — so migration-era
 // ready work stays stuck until its route is canonicalized. Rewriting the route in
 // place lets every existing canonical-only path surface it, keeping the legacy
 // awareness confined to this migration pass instead of spread across the demand,
@@ -5000,10 +5303,9 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 // unassigned work has no live owner to strand, so rewriting its route can only
 // make it discoverable. Idempotent by design: it writes only when the canonical
 // identity differs from the persisted route, so steady-state reconciles perform
-// no writes, and a route that is already canonical, resolves to no configured
-// agent, or still matches a configured bound agent is left untouched. A write
-// failure is logged and skipped — recovery is best-effort and must never block
-// reconciliation.
+// no writes, and a route that is already canonical or resolves to no configured
+// agent is left untouched. A write failure is logged and skipped — recovery is
+// best-effort and must never block reconciliation.
 func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
@@ -5020,14 +5322,12 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		if routedTo == "" {
 			continue
 		}
-		// Cheap pre-filter: a legacy bound form is "dir/binding.name", so only a
-		// route whose local segment carries the binding-separator dot can be one.
-		// Canonical unbound routes ("dir/name") skip the per-bead agent scan in
-		// normalizeAgentTemplateIdentity, keeping the steady-state cost off the
-		// full open-routed backlog.
-		if _, local := config.ParseQualifiedName(routedTo); !strings.Contains(local, ".") {
-			continue
-		}
+		// No cheap pre-filter here: the import direction's legacy form is a bare
+		// "dir/name" with no binding-separator dot to key on, so every open routed
+		// bead must reach normalizeAgentTemplateIdentity. The former dot filter kept
+		// the per-bead agent scan off the steady-state backlog; if that cost bites,
+		// narrow it by config shape (any agent with a BindingName) rather than by
+		// route spelling.
 		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
 		if canonicalRouted == "" || canonicalRouted == routedTo {
 			continue
@@ -5261,9 +5561,40 @@ func normalizeDemandStoreRef(storeRef string) string {
 // through the city candidate and rig-owned rows only through their named rig.
 // Legacy rows without a canonical ref remain visible through every independent
 // store so same-ID beads in genuinely separate stores are not collapsed.
+//
+// A class-binding candidate is a special case of "authoritative", not an
+// exception to it. The duplicate-view risk this filter exists for is legacy
+// unscoped file-store mode, where two DIFFERENT store handles alias the same
+// physical file; a relocated class binding is never that — it is a distinct
+// physical store `gc storage migrate` moves rows INTO, and `gc storage status`
+// proves it converged. Admitting it here is safe because of this filter's ONE
+// call site: collectOpenUnassignedRoutedWork resolves its legs through
+// routedWorkStoreCandidates, which plans on the RUNTIME plane, and Narrow
+// (internal/storeref/relevance.go) drops every leg but the binding once a plan
+// touches one — so the binding is the only leg that will ever offer the row and
+// there is no second candidate to defer to.
+//
+// That is a property of the CALL SITE, not of the stores. `gc storage migrate`
+// never mutates the source (infra_class_migrate.go, "Retained source": the work
+// store keeps its infrastructure rows verbatim), so a reconcile-plane leg set —
+// which is not narrowed — would offer a relocated row through BOTH the binding
+// and the retained legacy leg, and this caller's seen key ({StoreRef, ID}) does
+// not dedupe across differing refs. Do not extend this carve-out to a
+// reconcile-plane caller without solving that first.
+//
+// Gating it on rootRig the way a legacy-store candidate is gated would
+// silently drop every rig-logical row a migration relocated into the binding —
+// the row is real, open, routed, and permanently invisible to demand and route
+// repair. The binding's OWN ref reads as city scope
+// (storeref.ScopeRigContext) because it belongs to no rig; that says where a
+// row lives, not who owns it, which is why the route repair downstream
+// (repairBead) takes the owner from the row's gc.root_store_ref.
 func rootStoreRefMatchesCandidate(rootStoreRef, candidateStoreRef string) bool {
 	rootRig, rootScoped := storeref.ScopeRigContext(rootStoreRef)
 	if !rootScoped {
+		return true
+	}
+	if storeref.IsClassRef(candidateStoreRef) {
 		return true
 	}
 	candidateRig, candidateScoped := storeref.ScopeRigContext(candidateStoreRef)
@@ -5323,28 +5654,14 @@ func selectReadyContinuationClaimCandidates(
 
 	result := make([]ContinuationClaimCandidate, 0, len(order))
 	for _, key := range order {
-		var (
-			valid  []ContinuationClaimCandidate
-			absent bool
-			hold   bool
+		valid, absent, hold := foldReadyContinuationClaimGroup(
+			groups[key],
+			work,
+			workStores,
+			workStoreRefs,
+			key.StoreRef,
+			readyAssigned,
 		)
-		for _, i := range groups[key] {
-			candidate, resolution := evaluateReadyContinuationClaimCandidate(
-				work[i],
-				workStores[i],
-				workStoreRefs[i],
-				key.StoreRef,
-				readyAssigned,
-			)
-			switch resolution {
-			case continuationCandidateAbsent:
-				absent = true
-			case continuationCandidateHold:
-				hold = true
-			case continuationCandidateValid:
-				valid = append(valid, candidate)
-			}
-		}
 		if hold {
 			partial = true
 			continue
@@ -5373,12 +5690,60 @@ func selectReadyContinuationClaimCandidates(
 	return result, partial
 }
 
+// foldReadyContinuationClaimGroup evaluates every leg-local copy of one grouped
+// (StoreRef, ID) pair and reduces the per-row resolutions to the three signals
+// the caller's agreement guard acts on: the candidates whose own owner ref this
+// fold resolved — inside a class binding that owner can be a rig scope rather
+// than the city ref the group is keyed on — whether a same-scope copy disagreed
+// (absent), and whether a copy could not be read at all (hold). A copy another
+// scope owns contributes no signal at all. rows holds that group's indexes into
+// the aligned work/workStores/workStoreRefs slices, and canonicalStoreRef is the
+// group key, not necessarily the owner.
+func foldReadyContinuationClaimGroup(
+	rows []int,
+	work []beads.Bead,
+	workStores []beads.Store,
+	workStoreRefs []string,
+	canonicalStoreRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) (valid []ContinuationClaimCandidate, absent bool, hold bool) {
+	for _, i := range rows {
+		candidate, resolution := evaluateReadyContinuationClaimCandidate(
+			work[i],
+			workStores[i],
+			workStoreRefs[i],
+			canonicalStoreRef,
+			readyAssigned,
+		)
+		switch resolution {
+		case continuationCandidateAbsent:
+			absent = true
+		case continuationCandidateHold:
+			hold = true
+		case continuationCandidateValid:
+			valid = append(valid, candidate)
+		case continuationCandidateForeign:
+			// Deliberately no signal. A group keyed on the city ref holds
+			// every leg that serves the city, and on a migrated city that
+			// includes the class bindings, which carry rows other scopes
+			// own. Such a copy says nothing about this group's scope, so
+			// counting it absent would drop the owning leg's candidate and
+			// — partial being snapshot-wide — turn every unrelated
+			// continuation backstop in the city dark.
+		}
+	}
+	return valid, absent, hold
+}
+
 type continuationCandidateResolution int
 
 const (
 	continuationCandidateAbsent continuationCandidateResolution = iota
 	continuationCandidateHold
 	continuationCandidateValid
+	// A row this leg can read but another scope owns. Kept distinct from
+	// "absent" because the fold reads absent as a same-scope disagreement.
+	continuationCandidateForeign
 )
 
 func continuationRowCouldBeCandidate(
@@ -5404,13 +5769,25 @@ func evaluateReadyContinuationClaimCandidate(
 	canonicalStoreRef string,
 	readyAssigned map[storeScopedBeadKey]bool,
 ) (ContinuationClaimCandidate, continuationCandidateResolution) {
+	// Scope is answered before eligibility: a row another scope owns is foreign
+	// to this leg whatever its own state, and a co-resident copy that is merely
+	// stale or not ready would otherwise be reported as an absent row of THIS
+	// scope. Both questions still answer "absent" for a row this leg owns, so
+	// the order is otherwise immaterial.
+	rootStoreRef := bead.Metadata[beadmeta.RootStoreRefMetadataKey]
+	ownerStoreRef, owned := continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef)
+	if !owned {
+		if continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef) {
+			return ContinuationClaimCandidate{}, continuationCandidateForeign
+		}
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
 	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-	rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
-	if rootID == "" || rootStoreRef == "" || rootStoreRef != canonicalStoreRef {
+	if rootID == "" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	if store == nil {
@@ -5433,7 +5810,7 @@ func evaluateReadyContinuationClaimCandidate(
 	if root.ID != rootID ||
 		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
-		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != ownerStoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
@@ -5441,10 +5818,68 @@ func evaluateReadyContinuationClaimCandidate(
 	return ContinuationClaimCandidate{
 		WorkBeadID: strings.TrimSpace(bead.ID),
 		RootBeadID: rootID,
-		StoreRef:   canonicalStoreRef,
+		StoreRef:   ownerStoreRef,
 		Assignee:   strings.TrimSpace(bead.Assignee),
 		Store:      store,
 	}, continuationCandidateValid
+}
+
+// continuationClaimOwnerStoreRef answers which canonical store ref OWNS one
+// candidate row, which is not always the scope its leg serves. A class binding
+// is a city-scope store but a many-scope container — the same distinction PR
+// #5918 (ga-oytw9) drew for control-route repair. A rig-scoped workflow's steps
+// are minted into the binding carrying gc.root_store_ref=rig:<name>, so on a
+// split city the row's own root ref is the owner and the leg-derived city ref
+// is only the grouping key. It is accepted only when canonical: exactly the
+// city ref, or a well-formed rig ref. A blank, class, or legacy value fails
+// closed. The rig name is not checked against the configured rigs — the binding
+// that authorizes delivery is the step's assignee resolving to exactly one live
+// session (newPoolContinuationCandidateSnapshot). Every other leg is
+// single-scope, so there the leg-derived canonical ref stays the comparator.
+func continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef string) (string, bool) {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" {
+		return "", false
+	}
+	if !storeref.IsClassRef(rawStoreRef) {
+		if rootStoreRef != canonicalStoreRef {
+			return "", false
+		}
+		return canonicalStoreRef, true
+	}
+	if rootStoreRef == canonicalStoreRef {
+		return canonicalStoreRef, true
+	}
+	rigName, scoped := storeref.ScopeRigContext(rootStoreRef)
+	if !scoped || rigName == "" || rootStoreRef != "rig:"+rigName {
+		return "", false
+	}
+	return rootStoreRef, true
+}
+
+// continuationClaimRowIsForeign answers, for a row continuationClaimOwnerStoreRef
+// admitted no owner for, whether it names a DIFFERENT scope rather than merely
+// carrying provenance this leg cannot read. Only an exactly-canonical
+// "city:<name>" or "rig:<name>" naming another scope qualifies. Blank,
+// class-valued, non-canonical and malformed refs stay unreadable, so they keep
+// resolving absent and the owner helper's fail-closed posture is unchanged:
+// this widens no admission, it only separates "someone else's row" from
+// "a broken row of ours".
+func continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef string) bool {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" || rootStoreRef == canonicalStoreRef {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(rootStoreRef, "city:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "city:"))
+		return name != "" && rootStoreRef == "city:"+name
+	case strings.HasPrefix(rootStoreRef, "rig:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "rig:"))
+		return name != "" && rootStoreRef == "rig:"+name
+	default:
+		return false
+	}
 }
 
 func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
@@ -5471,7 +5906,9 @@ func canonicalContinuationClaimStoreRef(cityName, storeRef string) (string, bool
 	// census named it separately, a binding-resident continuation row arrived
 	// under the city ref and was a candidate; answering "not canonical" here
 	// would silently retire the continuation backstop for every graph-class step
-	// on a split city.
+	// on a split city. This is the GROUPING key and the city-rooted comparator
+	// only: the binding holds rows from many scopes, and each row's own owner is
+	// taken from its gc.root_store_ref by continuationClaimOwnerStoreRef.
 	case storeref.IsClassRef(storeRef):
 		if cityName == "" {
 			return "", false
@@ -5518,16 +5955,21 @@ func controlDispatcherRouteRepairCursorForDomain(repairDomain string) *atomic.Ui
 }
 
 // repairControlDispatcherRoutesForStoreScope durably repairs open control work
-// whose persisted route names a dispatcher in a different store scope. Older
-// builds could stamp a city route on a rig-resident graph; rewriting the route
-// before demand evaluation lets the matching rig dispatcher start and claim it
-// without teaching claimers to reinterpret dishonest route metadata. Writes are
-// bounded per city pass so a large upgrade backlog cannot monopolize a
-// reconciler tick. Each city owns its rotating start offset, preventing either
-// a persistently bad row or another CityRuntime in the same supervisor from
-// starving later scopes. Deferred or failed cross-scope route repairs are
-// suppressed from this tick's demand snapshot and retried on later ticks;
-// marker-only cleanup leaves an already-canonical route eligible for demand.
+// whose persisted route names a dispatcher in a scope other than the one the
+// row's canonical gc.root_store_ref belongs to. Older builds could stamp a city
+// route on a rig-owned graph; rewriting the route before demand evaluation lets
+// the matching rig dispatcher start and claim it without teaching claimers to
+// reinterpret dishonest route metadata. The row's root ref, not the store leg
+// it was collected through, names the owner: through a legacy file store the
+// two agree (rootStoreRefMatchesCandidate admits nothing else), and through a
+// relocated class binding — which serves every scope's rows and belongs to
+// none — the root ref is the only ownership evidence left. Writes are bounded
+// per city pass so a large upgrade backlog cannot monopolize a reconciler tick.
+// Each city owns its rotating start offset, preventing either a persistently
+// bad row or another CityRuntime in the same supervisor from starving later
+// scopes. Deferred or failed cross-scope route repairs are suppressed from this
+// tick's demand snapshot and retried on later ticks; marker-only cleanup leaves
+// an already-canonical route eligible for demand.
 func repairControlDispatcherRoutesForStoreScope(
 	repairDomain string,
 	cfg *config.City,
@@ -5555,8 +5997,8 @@ func repairControlDispatcherRoutesForStoreScope(
 	}
 }
 
-// controlDispatcherRouteLookup memoizes whether a store scope has a configured
-// control-dispatcher and, if so, its qualified route.
+// controlDispatcherRouteLookup memoizes whether a scope (the city, or one rig)
+// has a configured control-dispatcher and, if so, its qualified route.
 type controlDispatcherRouteLookup struct {
 	route string
 	ok    bool
@@ -5564,7 +6006,7 @@ type controlDispatcherRouteLookup struct {
 
 // controlDispatcherRouteRepair carries the per-pass state for a bounded
 // cross-scope control-route repair sweep: per-scope route lookups are cached, a
-// store scope with no configured dispatcher is reported once, and the remaining
+// scope with no configured dispatcher is reported once, and the remaining
 // durable-write budget is tracked so a large upgrade backlog cannot monopolize a
 // reconciler tick.
 type controlDispatcherRouteRepair struct {
@@ -5586,21 +6028,27 @@ func newControlDispatcherRouteRepair(cfg *config.City, stderr io.Writer) *contro
 }
 
 // repairBead realigns one control bead's persisted route with the dispatcher
-// that owns its store scope, clearing any stale fallback marker in the same
-// bounded write. Non-control, unscoped, and already-canonical beads are left
-// untouched. Store ownership, not the current route, selects the dispatcher: an
-// unscoped row cannot be repaired safely because #3765 itself stamped a valid
-// city route onto rig-owned controls, so gc.routed_to is not ownership evidence.
-// Graph v2 stamped gc.root_store_ref before that regression, so malformed/older
-// rows are left untouched instead of guessing a store.
+// that owns the scope its gc.root_store_ref names, clearing any stale fallback
+// marker in the same bounded write. Non-control, unscoped, and
+// already-canonical beads are left untouched. Ownership, not the current route,
+// selects the dispatcher: an unscoped row cannot be repaired safely because
+// #3765 itself stamped a valid city route onto rig-owned controls, so
+// gc.routed_to is not ownership evidence. Graph v2 stamped gc.root_store_ref
+// before that regression, so malformed/older rows are left untouched instead of
+// guessing a store. The physical leg is not ownership evidence either once a
+// class binding exists: the binding reads as city scope because it belongs to
+// no rig, yet it serves every rig's relocated control rows, and routing those
+// to the city dispatcher would strip the rig dispatchers that have always run
+// them and park the rows on a dispatcher the city may have suspended.
 func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.Store, storeRef string) {
 	if !beadmeta.IsControlKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
 		return
 	}
-	if _, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey]); !scoped {
+	rigContext, scoped := storeref.ScopeRigContext(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if !scoped {
 		return
 	}
-	route, ok := r.desiredRoute(bead, storeRef)
+	route, ok := r.desiredRoute(bead, storeRef, rigContext)
 	if !ok {
 		return
 	}
@@ -5613,14 +6061,15 @@ func (r *controlDispatcherRouteRepair) repairBead(bead *beads.Bead, store beads.
 	r.persist(bead, store, current, route, needsRouteRepair, clearFallback)
 }
 
-// desiredRoute returns the configured control-dispatcher route for the bead's
-// store scope, caching lookups per rig context. When no dispatcher is
-// configured it reports the gap once per scope and suppresses the bead's
-// cross-scope route from this tick's demand snapshot so it cannot create phantom
-// demand for a dispatcher that cannot read the store; the durable route is left
-// in place for operator diagnosis and a later config repair.
-func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef string) (string, bool) {
-	rigContext := controlDispatcherRigContextForStoreRef(storeRef)
+// desiredRoute returns the configured control-dispatcher route for the scope
+// that owns the bead — "" for the city, else the rig its gc.root_store_ref
+// names — caching lookups per rig context. When no dispatcher is configured it
+// reports the gap once per scope and suppresses the bead's cross-scope route
+// from this tick's demand snapshot so it cannot create phantom demand for a
+// dispatcher that cannot read the store; the durable route is left in place for
+// operator diagnosis and a later config repair. storeRef is the leg the row was
+// collected through and is used only to name it in that diagnostic.
+func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef, rigContext string) (string, bool) {
 	lookup, cached := r.routeByScope[rigContext]
 	if !cached {
 		lookup.route, lookup.ok = configuredControlDispatcherRouteForScope(r.cfg, rigContext)
@@ -5631,7 +6080,7 @@ func (r *controlDispatcherRouteRepair) desiredRoute(bead *beads.Bead, storeRef s
 	}
 	if !r.reportedMissingScope[rigContext] {
 		if r.stderr != nil {
-			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its store scope\n", bead.ID, controlDispatcherStoreRefLabel(storeRef)) //nolint:errcheck
+			fmt.Fprintf(r.stderr, "repairControlDispatcherRoutesForStoreScope: control bead %s in %s has no configured control-dispatcher for its scope\n", bead.ID, controlDispatcherRowScopeLabel(storeRef, rigContext)) //nolint:errcheck
 		}
 		r.reportedMissingScope[rigContext] = true
 	}
@@ -5717,20 +6166,23 @@ func configuredControlDispatcherRouteForScope(cfg *config.City, rigContext strin
 	return "", false
 }
 
-func controlDispatcherRigContextForStoreRef(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
-		return ""
+// controlDispatcherRowScopeLabel names, for the missing-dispatcher diagnostic,
+// the leg a control row was collected through and the scope that owns it. A
+// class binding is named as itself with its owner alongside, because the
+// binding holds rows of every scope and the owner is what the operator has to
+// configure a dispatcher for.
+func controlDispatcherRowScopeLabel(storeRef, rigContext string) string {
+	owner := "the city"
+	if rigContext != "" {
+		owner = fmt.Sprintf("rig %q", rigContext)
 	}
-	return strings.TrimPrefix(storeRef, "rig:")
-}
-
-func controlDispatcherStoreRefLabel(storeRef string) string {
-	storeRef = strings.TrimSpace(storeRef)
-	if storeRef == "" || storeRef == "city" || strings.HasPrefix(storeRef, "city:") {
+	if storeref.IsClassRef(storeRef) {
+		return fmt.Sprintf("class binding %q serving %s", strings.TrimSpace(storeRef), owner)
+	}
+	if rigContext == "" {
 		return "the city store"
 	}
-	return fmt.Sprintf("rig store %q", controlDispatcherRigContextForStoreRef(storeRef))
+	return fmt.Sprintf("rig store %q", rigContext)
 }
 
 func selectOrCreateDependencyPoolSessionBead(
@@ -5889,13 +6341,23 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// reappear at session start; the next tick converges it. That turns the
 	// permanent drift this fix targets into a transient one, which is the
 	// actual invariant — not that nothing else ever writes these paths.
+	//
+	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
+	// Staging has no version check and writes no backup, so without this it
+	// reverted a hook file that internal/hooks considers current — or newer,
+	// or user-authored — on every tick (#5554).
+	//
+	// One option value is created here and reused across every staging call
+	// below: it carries the per-pass write-tracking that keeps a path this pass
+	// itself wrote overridable by a later overlay layer (last-writer-wins).
+	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

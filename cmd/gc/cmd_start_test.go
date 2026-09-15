@@ -301,7 +301,7 @@ func TestBuildIdleTracker_PoolAgentTemplateFallbackMatchesReconcilerTemplate(t *
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
 	}
-	if !idle.checkIdle(sessionName, template, sp, now) {
+	if !idle.checkIdle(sessionName, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not idle out via template %q", sessionName, template)
 	}
 }
@@ -343,10 +343,10 @@ func TestBuildIdleTracker_NamedOnDemandPoolRegistersNameAndTemplate(t *testing.T
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
 	}
-	if !idle.checkIdle(namedSession, template, sp, now) {
+	if !idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("named session %q did not idle out via per-name timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -386,10 +386,10 @@ func TestBuildIdleTracker_NamedAlwaysPoolExemptsNamedOnly(t *testing.T) {
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing named pool template %q in %v", template, idle.templateTimeouts)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -427,10 +427,10 @@ func TestBuildIdleTracker_AliasAlwaysNamedPoolExemptsAliasOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("alias always-named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -468,10 +468,10 @@ func TestBuildIdleTracker_NamedAlwaysNoExplicitPoolRegistersTemplateFallback(t *
 	if _, ok := idle.templateTimeouts[template]; !ok {
 		t.Fatalf("idle tracker missing template %q in %v", template, idle.templateTimeouts)
 	}
-	if idle.checkIdle(namedSession, template, sp, now) {
+	if idle.checkIdle(namedSession, template, "", "", sp, now) {
 		t.Fatalf("always named session %q must not inherit template idle timeout", namedSession)
 	}
-	if !idle.checkIdle(poolSession, template, sp, now) {
+	if !idle.checkIdle(poolSession, template, "", "", sp, now) {
 		t.Fatalf("pool session %q did not inherit template idle timeout", poolSession)
 	}
 }
@@ -666,6 +666,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			StoreQueryPartial:  true,
 		},
 		nil,
+		nil,
+		nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
@@ -690,6 +692,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			SessionQueryPartial: true,
 		},
 		nil,
+		nil,
+		nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
@@ -712,6 +716,8 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 			AssignedWorkBeads:  []beads.Bead{work},
 			AssignedWorkStores: []beads.Store{store},
 		},
+		nil,
+		nil,
 		nil,
 	)
 	if len(released) != 1 {
@@ -1328,6 +1334,44 @@ func TestResolveTemplateAddsKimiHookConfigArgWhenHooksInstalled(t *testing.T) {
 				t.Fatalf("Command = %q, want %q", tp.Command, tt.wantCommand)
 			}
 		})
+	}
+}
+
+// TestResolveTemplateExpandsDefaultBranchInPreStart pins the pre_start
+// carrier end to end through resolveTemplate: the setupCtx literal in
+// template_resolve.go must copy DefaultBranch from the path context, or the
+// GC_DEFAULT_BRANCH='{{.DefaultBranch}}' handoff the example packs rely on
+// silently renders empty. The unit tests on expandSessionSetup and
+// sessionSetupContextForAgent cannot catch a dropped field at THIS call site.
+func TestResolveTemplateExpandsDefaultBranchInPreStart(t *testing.T) {
+	cityDir := t.TempDir()
+	rigRoot := filepath.Join(cityDir, "repos", "demo")
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "kimi",
+		Dir:      "demo",
+		PreStart: []string{`GC_DEFAULT_BRANCH='{{.DefaultBranch}}' setup.sh`},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "kimi"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot, DefaultBranch: "release/v2"}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "demo/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	want := `GC_DEFAULT_BRANCH='release/v2' setup.sh`
+	if len(tp.Hints.PreStart) == 0 || tp.Hints.PreStart[0] != want {
+		t.Fatalf("Hints.PreStart = %#v, want first entry %q", tp.Hints.PreStart, want)
 	}
 }
 

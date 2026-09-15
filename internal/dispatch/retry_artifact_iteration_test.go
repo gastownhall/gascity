@@ -48,7 +48,7 @@ func TestResolveRequiredArtifactPathResolvesIterationSeparatelyFromAttempt(t *te
 	}
 
 	got, _, reason, err := resolveRequiredArtifactPath(store, subject,
-		".gc/reviews/{root}/attempt-{iteration}/synthesis.md")
+		".gc/reviews/{root}/attempt-{iteration}/synthesis.md", ProcessOptions{})
 	if err != nil {
 		t.Fatalf("resolveRequiredArtifactPath error = %v, want nil", err)
 	}
@@ -64,7 +64,7 @@ func TestResolveRequiredArtifactPathResolvesIterationSeparatelyFromAttempt(t *te
 		// The two placeholders must genuinely diverge; a template that asks for
 		// the retry attempt still gets it.
 		got, _, reason, err := resolveRequiredArtifactPath(store, subject,
-			".gc/reviews/{root}/attempt-{attempt}/synthesis.md")
+			".gc/reviews/{root}/attempt-{attempt}/synthesis.md", ProcessOptions{})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactPath = (%v, %q), want success", err, reason)
 		}
@@ -99,7 +99,7 @@ func TestResolveRequiredArtifactPathRefusesToGuessAMissingIteration(t *testing.T
 			"gc.root_bead_id": root.ID,
 			"gc.attempt":      "3",
 		},
-	}, ".gc/reviews/{root}/attempt-{iteration}/synthesis.md")
+	}, ".gc/reviews/{root}/attempt-{iteration}/synthesis.md", ProcessOptions{})
 	if err != nil {
 		t.Fatalf("resolveRequiredArtifactPath error = %v, want nil", err)
 	}
@@ -129,7 +129,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 				"gc.root_bead_id": root.ID,
 				"gc.work_dir":     worktree,
 			},
-		}, "synthesis.md")
+		}, "synthesis.md", ProcessOptions{})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactPath = (%v, %q), want success", err, reason)
 		}
@@ -146,7 +146,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"gc.work_dir": worktree},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID)
+		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}
@@ -168,7 +168,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"gc.source_bead_id": source.ID},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID)
+		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}
@@ -187,7 +187,7 @@ func TestResolveRequiredArtifactWorktreePrefersCanonicalWorkDir(t *testing.T) {
 			Type:     "task",
 			Metadata: map[string]string{"work_dir": worktree},
 		})
-		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID)
+		got, reason, err := resolveRequiredArtifactWorktree(store, root.ID, ProcessOptions{})
 		if err != nil || reason != "" {
 			t.Fatalf("resolveRequiredArtifactWorktree = (%v, %q), want success", err, reason)
 		}

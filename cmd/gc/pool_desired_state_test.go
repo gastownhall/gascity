@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worktree"
 )
 
 func intPtr(n int) *int { return &n }
@@ -782,11 +786,12 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(2), 0)},
 	}
-	// 3 assigned beads with different priorities, max=2. Highest priority wins.
+	// 3 assigned beads with different bd priorities, max=2. bd priorities are
+	// ascending-urgent (P0 is the most urgent), so the most urgent two win.
 	work := []beads.Bead{
-		workBead("w-low", "claude", "s1", "in_progress", 1),
-		workBead("w-high", "claude", "s2", "in_progress", 10),
-		workBead("w-mid", "claude", "s3", "in_progress", 5),
+		workBead("w-low", "claude", "s1", "in_progress", 4),
+		workBead("w-high", "claude", "s2", "in_progress", 0),
+		workBead("w-mid", "claude", "s3", "in_progress", 1),
 	}
 	sessions := []beads.Bead{
 		sessionBead("s1", "open"),
@@ -799,12 +804,18 @@ func TestComputePoolDesiredStates_ResumePriorityOrder(t *testing.T) {
 	if len(result) != 1 || len(result[0].Requests) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(result[0].Requests))
 	}
-	// Highest priority resume requests should be accepted.
-	if result[0].Requests[0].BeadPriority != 10 {
-		t.Errorf("first priority = %d, want 10", result[0].Requests[0].BeadPriority)
+	// Most urgent resume requests should be accepted, P0 first.
+	if got, want := result[0].Requests[0].WorkBeadID, "w-high"; got != want {
+		t.Errorf("first work bead = %q, want %q (P0 schedules first)", got, want)
 	}
-	if result[0].Requests[1].BeadPriority != 5 {
-		t.Errorf("second priority = %d, want 5", result[0].Requests[1].BeadPriority)
+	if got, want := result[0].Requests[0].BeadPriority, beadPriorityRank(0); got != want {
+		t.Errorf("first rank = %d, want %d (P0)", got, want)
+	}
+	if got, want := result[0].Requests[1].WorkBeadID, "w-mid"; got != want {
+		t.Errorf("second work bead = %q, want %q (P1 schedules second)", got, want)
+	}
+	if got, want := result[0].Requests[1].BeadPriority, beadPriorityRank(1); got != want {
+		t.Errorf("second rank = %d, want %d (P1)", got, want)
 	}
 }
 
@@ -846,6 +857,35 @@ func TestComputePoolDesiredStates_ScaleCheckMerge(t *testing.T) {
 		if r.Tier != "new" {
 			t.Errorf("request tier = %q, want new", r.Tier)
 		}
+	}
+}
+
+func TestComputePoolDesiredStatesCarriesWorktreeOwnerEvidence(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "rig", intPtr(1), 0)},
+	}
+	spec := &worktree.Spec{BeadID: "gc-test", Owner: "gc-sling"}
+	result := computePoolDesiredStates(
+		cfg,
+		nil,
+		nil,
+		map[string]int{"rig/claude": 1},
+		map[string]scaleCheckDemand{
+			"rig/claude": {
+				WorkBeadIDs:    []string{"gc-test"},
+				StoreRefs:      map[string]string{"gc-test": "rig:gascity"},
+				WorktreeSpecs:  map[string]*worktree.Spec{"gc-test": spec},
+				WorktreeErrors: map[string]string{"other": "ignored"},
+			},
+		},
+		nil,
+	)
+	if len(result) != 1 || len(result[0].Requests) != 1 {
+		t.Fatalf("result = %+v, want one new request", result)
+	}
+	request := result[0].Requests[0]
+	if request.WorktreeSpec != spec || request.WorktreeError != "" {
+		t.Fatalf("request owner evidence = spec %+v error %q, want exact spec and no error", request.WorktreeSpec, request.WorktreeError)
 	}
 }
 
@@ -2426,6 +2466,57 @@ func TestComputePoolDesiredStates_InFlightNewSessionsOnlySubtractCoveredDemand(t
 	}
 }
 
+// TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor
+// reproduces the claim-handoff race from ga-nf5xlp: a pending-create session
+// is born, and on the very next tick scale_check cleanly recomputes to zero
+// before that session finishes creating. Without a demand floor for
+// in-flight sessions (mirroring the protected-session floor #4789 added),
+// the session gets zero slots, falls out of desired state, and is rolled
+// back ~10 minutes later having never started — even though it is still
+// well within its own pending-create lease window.
+func TestComputePoolDesiredStates_InFlightPendingCreateEstablishesDemandFloor(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-30*time.Second)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 1 {
+		t.Fatalf("poolDesired[claude] = %d, want 1: a fresh pending-create session must survive a scale_check drop to zero on the next tick while still within its own lease window", counts["claude"])
+	}
+	if len(result) != 1 || len(result[0].Requests) != 1 || result[0].Requests[0].SessionBeadID != "sess-1" {
+		t.Fatalf("result = %#v, want sess-1 retained as the sole in-flight demand-floor request", result)
+	}
+}
+
+// TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease
+// guards the other side of the same fix: a pending-create session that has
+// aged past its own lease window (pendingCreateLeaseExpiredForRollbackInfo)
+// must NOT be propped up by the new floor. It is genuinely stuck and should
+// still fall to zero desired demand so the existing rollback path can reap
+// it.
+func TestComputePoolDesiredStates_InFlightPendingCreateDemandFloorExpiresWithLease(t *testing.T) {
+	now := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
+	}
+	sessions := []beads.Bead{
+		pendingPoolSessionBeadAt("sess-1", now.Add(-11*time.Minute)),
+	}
+
+	result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+
+	counts := PoolDesiredCounts(result)
+	if counts["claude"] != 0 {
+		t.Fatalf("poolDesired[claude] = %d, want 0: a pending-create session past its own lease window must still roll back to zero demand, not be propped up indefinitely", counts["claude"])
+	}
+}
+
 func TestComputePoolDesiredStates_InFlightResumeBeadsDoNotConsumeNewDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
@@ -2678,6 +2769,88 @@ func TestComputePoolDesiredStates_InFlightDemandRecordsTraceWhenCapsSuppressReus
 	}
 }
 
+// A template with nothing to do never appears in scaleCheckCounts, so the
+// demand-merge loop skips it. The skip has to leave a decision behind or the
+// trace cannot tell "correctly idle" from "never evaluated" — and the desired
+// state it produces has to stay byte-identical to the untraced run.
+func TestComputePoolDesiredStates_ZeroDemandRecordsSkipDecision(t *testing.T) {
+	tests := []struct {
+		name             string
+		suspended        bool
+		sessions         []beads.Bead
+		scaleCheckCounts map[string]int
+		wantNoDemand     bool
+		wantInFlight     int
+		wantRequests     int
+	}{
+		{name: "absent from scale check", scaleCheckCounts: map[string]int{}, wantNoDemand: true},
+		{name: "nil scale check", wantNoDemand: true},
+		{name: "other template has demand", scaleCheckCounts: map[string]int{"other": 3}, wantNoDemand: true},
+		// scale_check and protected are 0 by the branch condition itself, so
+		// in_flight is the only payload field that can ever carry information
+		// here — and pool sessions still in flight while nothing demands them
+		// is the diagnostic this record exists to surface.
+		{
+			name:         "in-flight sessions with no demand",
+			sessions:     []beads.Bead{pendingPoolSessionBead("sess-1"), pendingPoolSessionBead("sess-2")},
+			wantNoDemand: true,
+			wantInFlight: 2,
+		},
+		{name: "demand present", scaleCheckCounts: map[string]int{"claude": 1}, wantRequests: 1},
+		{name: "suspended template", suspended: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := poolAgent("claude", "", intPtr(10), 0)
+			agent.Suspended = tt.suspended
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			trace := newPoolDesiredStateTestTrace("claude")
+			sessions := sessionInfosFromBeads(tt.sessions)
+
+			result := computePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts, nil, trace)
+
+			if untraced := ComputePoolDesiredStates(cfg, nil, sessions, tt.scaleCheckCounts); !reflect.DeepEqual(result, untraced) {
+				t.Fatalf("traced result = %#v, want identical to untraced %#v", result, untraced)
+			}
+			requests := 0
+			for _, state := range result {
+				requests += len(state.Requests)
+			}
+			if requests != tt.wantRequests {
+				t.Fatalf("requests = %d, want %d; result=%#v", requests, tt.wantRequests, result)
+			}
+
+			decisions := trace.decisionCounts[string(TraceSitePoolDemandCompute)]
+			if !tt.wantNoDemand {
+				if decisions != 0 {
+					t.Fatalf("%s decisions = %d, want 0; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+				}
+				return
+			}
+			if decisions != 1 {
+				t.Fatalf("%s decisions = %d, want 1; records=%#v", TraceSitePoolDemandCompute, decisions, trace.records)
+			}
+			rec := poolTraceDecision(t, trace, TraceSitePoolDemandCompute)
+			if rec.Template != "claude" {
+				t.Fatalf("record template = %q, want claude", rec.Template)
+			}
+			if rec.ReasonCode != TraceReasonNoDemand || rec.OutcomeCode != TraceOutcomeSkipped {
+				t.Fatalf("record reason/outcome = %q/%q, want %q/%q",
+					rec.ReasonCode, rec.OutcomeCode, TraceReasonNoDemand, TraceOutcomeSkipped)
+			}
+			for key, want := range map[string]int{
+				"scale_check": 0,
+				"protected":   0,
+				"in_flight":   tt.wantInFlight,
+			} {
+				if got := poolTraceFieldInt(t, rec.Fields, key); got != want {
+					t.Fatalf("%s = %d, want %d", key, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestApplyNestedCaps_DedupsConcreteSessionRequestsAcrossTiers(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{poolAgent("claude", "", intPtr(10), 0)},
@@ -2877,5 +3050,110 @@ func TestCanonicalSingletonAliasHeldTemplates_ExcludesFailedCreateHolder(t *test
 	// A drained holder released its alias.
 	if _, ok := canonicalSingletonAliasHeldTemplates(cfg, sessionInfosFromBeads([]beads.Bead{holder("drained")}))["mayor"]; ok {
 		t.Fatalf("drained holder released its alias and must NOT mark mayor held; got held")
+	}
+}
+
+// Rebinding reused capacity to a different bead must rebind its worktree
+// evidence too. Carrying the previous bead's spec forward would hand the
+// session a workspace verified for other work.
+func TestRequestWithScaleDemandProvenanceRebindsWorktreeEvidence(t *testing.T) {
+	stale := &worktree.Spec{BeadID: "gc-old", Path: "/tmp/old"}
+	fresh := &worktree.Spec{BeadID: "gc-new", Path: "/tmp/new"}
+	demand := scaleCheckDemand{
+		WorktreeSpecs:  map[string]*worktree.Spec{"gc-new": fresh},
+		WorktreeErrors: map[string]string{},
+	}
+	got := requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-new")
+	if got.WorktreeSpec != fresh {
+		t.Errorf("WorktreeSpec = %+v, want the spec for gc-new", got.WorktreeSpec)
+	}
+
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeSpec: stale}, demand, "gc-unknown")
+	if got.WorktreeSpec != nil {
+		t.Errorf("WorktreeSpec = %+v for a bead with no evidence, want nil", got.WorktreeSpec)
+	}
+
+	demand.WorktreeErrors["gc-bad"] = " conflicting evidence "
+	got = requestWithScaleDemandProvenance(SessionRequest{WorkBeadID: "gc-old", WorktreeError: "stale"}, demand, "gc-bad")
+	if got.WorktreeError != "conflicting evidence" {
+		t.Errorf("WorktreeError = %q, want the trimmed error for gc-bad", got.WorktreeError)
+	}
+}
+
+// Unusable worktree ownership evidence must be distinguishable from an
+// ordinary bind failure: buildDesiredState skips the item on this error
+// rather than continuing without trigger env.
+func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
+	req := SessionRequest{WorkBeadID: "gc-a", WorktreeError: "conflicting work dir metadata"}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("WorktreeError path err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+
+	req = SessionRequest{WorkBeadID: "gc-a", WorktreeSpec: &worktree.Spec{BeadID: "gc-b"}}
+	if _, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req); !errors.Is(err, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("bead mismatch err = %v, want errPoolTriggerWorktreeEvidence", err)
+	}
+}
+
+// A failed binding write on a managed-worktree request leaves the session
+// bead stamped with the previous bead's work dir, so it is marked as an
+// evidence failure and skipped rather than reused. An unmanaged request
+// keeps the ordinary continue-without-trigger-env path.
+func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
+	cause := errors.New("store write failed")
+
+	managed := bindWriteFailure(SessionRequest{WorktreeSpec: &worktree.Spec{BeadID: "gc-a"}}, cause)
+	if !errors.Is(managed, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("managed bind write failure = %v, want the evidence sentinel", managed)
+	}
+	if !errors.Is(managed, cause) {
+		t.Errorf("managed bind write failure lost its cause: %v", managed)
+	}
+
+	unmanaged := bindWriteFailure(SessionRequest{}, cause)
+	if errors.Is(unmanaged, errPoolTriggerWorktreeEvidence) {
+		t.Errorf("unmanaged bind write failure = %v, want no evidence sentinel", unmanaged)
+	}
+	if !errors.Is(unmanaged, cause) {
+		t.Errorf("unmanaged bind write failure lost its cause: %v", unmanaged)
+	}
+}
+
+// Demand records the probe shorthand ("city") while the workspace provenance
+// on the bead carries the canonical spelling ("city:<name>"). Those are one
+// store, so the cross-store guard must not reject the pair; two different rigs
+// still must not match.
+func TestVerifiedPoolTriggerWorkDirAcceptsCanonicalStoreRefSpelling(t *testing.T) {
+	const mismatch = "does not match request store"
+
+	req := SessionRequest{
+		WorkBeadID:   "gc-a",
+		WorkStoreRef: "city",
+		WorktreeSpec: &worktree.Spec{BeadID: "gc-a", StoreRef: "city:test-city"},
+	}
+	_, err := verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("canonical city spelling rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:alpha"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err != nil && strings.Contains(err.Error(), mismatch) {
+		t.Errorf("bare rig shorthand rejected as a store mismatch: %v", err)
+	}
+
+	req.WorkStoreRef = "alpha"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:beta"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("alpha vs rig:beta err = %v, want a store mismatch", err)
+	}
+
+	req.WorkStoreRef = "rig:a"
+	req.WorktreeSpec = &worktree.Spec{BeadID: "gc-a", StoreRef: "rig:b"}
+	_, err = verifiedPoolTriggerWorkDir(nil, nil, "rig/pool", req)
+	if err == nil || !strings.Contains(err.Error(), mismatch) {
+		t.Errorf("rig:a vs rig:b err = %v, want a store mismatch", err)
 	}
 }

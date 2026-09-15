@@ -1,10 +1,14 @@
 package dispatch
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -1682,6 +1686,214 @@ func TestProcessRetryEvalSoftFailOnExhaustedTransient(t *testing.T) {
 	}
 }
 
+// outcomeHiddenRetrySubjectStore simulates the sub-second Dolt read-after-
+// write visibility lag between a retry subject's status=closed write and its
+// gc.outcome/gc.failure_class/gc.failure_reason metadata becoming visible: it
+// strips those keys from subjectID's metadata on every List result (so the
+// initial DirectMembers-based resolution always races) and on the first
+// hideReads direct Get calls (so the bounded re-resolution retry has to run
+// hideReads times before it observes the real, persisted metadata).
+type outcomeHiddenRetrySubjectStore struct {
+	*beads.MemStore
+	subjectID   string
+	hideReads   int
+	hiddenReads int
+}
+
+func (s *outcomeHiddenRetrySubjectStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	result, err := s.MemStore.List(query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]beads.Bead, len(result))
+	for i, b := range result {
+		if b.ID == s.subjectID {
+			b = stripRetryOutcomeMetadata(b)
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+func (s *outcomeHiddenRetrySubjectStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.MemStore.Get(id)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	if id != s.subjectID || s.hiddenReads >= s.hideReads {
+		return bead, nil
+	}
+	s.hiddenReads++
+	return stripRetryOutcomeMetadata(bead), nil
+}
+
+func stripRetryOutcomeMetadata(b beads.Bead) beads.Bead {
+	clone := make(map[string]string, len(b.Metadata))
+	for k, v := range b.Metadata {
+		switch k {
+		case beadmeta.OutcomeMetadataKey, beadmeta.FailureClassMetadataKey, beadmeta.FailureReasonMetadataKey:
+			continue
+		}
+		clone[k] = v
+	}
+	b.Metadata = clone
+	return b
+}
+
+func TestProcessRetryEvalSoftFailToleratesDelayedOutcomeVisibility(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	root := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	logical := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "gemini review",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "retry",
+			"gc.root_bead_id": root.ID,
+			"gc.step_ref":     "demo.review-gemini",
+			"gc.max_attempts": "3",
+			"gc.on_exhausted": "soft_fail",
+		},
+	})
+	run3 := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "gemini review attempt 3",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review-gemini.run.3",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "3",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "soft_fail",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+			"gc.failure_reason":  "rate_limited",
+		},
+	})
+	eval3 := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title: "gemini review eval 3",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-eval",
+			"gc.root_bead_id":    root.ID,
+			"gc.step_ref":        "demo.review-gemini.eval.3",
+			"gc.logical_bead_id": logical.ID,
+			"gc.attempt":         "3",
+			"gc.max_attempts":    "3",
+			"gc.on_exhausted":    "soft_fail",
+		},
+	})
+	mustDepAdd(t, mem, logical.ID, eval3.ID, "blocks")
+	mustDepAdd(t, mem, eval3.ID, run3.ID, "blocks")
+
+	store := &outcomeHiddenRetrySubjectStore{MemStore: mem, subjectID: run3.ID, hideReads: 3}
+
+	result, err := ProcessControl(store, eval3, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(retry-eval soft-fail, delayed outcome visibility): %v", err)
+	}
+	if !result.Processed || result.Action != "soft-fail" {
+		t.Fatalf("result = %+v, want processed soft-fail", result)
+	}
+	if store.hiddenReads == 0 {
+		t.Fatal("hiddenReads = 0, want the delayed-outcome-visibility path exercised")
+	}
+
+	logicalAfter := mustGetBead(t, mem, logical.ID)
+	if logicalAfter.Status != "closed" || logicalAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("logical = status %q outcome %q, want closed/pass", logicalAfter.Status, logicalAfter.Metadata["gc.outcome"])
+	}
+	if logicalAfter.Metadata["gc.final_disposition"] != "soft_fail" {
+		t.Fatalf("logical gc.final_disposition = %q, want soft_fail", logicalAfter.Metadata["gc.final_disposition"])
+	}
+	if logicalAfter.Metadata["gc.failure_reason"] != "rate_limited" {
+		t.Fatalf("logical gc.failure_reason = %q, want rate_limited (not missing_outcome)", logicalAfter.Metadata["gc.failure_reason"])
+	}
+}
+
+func TestResolveRetrySubjectOutcomeStopsRetryWhenContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	subject := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:  "gemini review attempt 3",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind": "retry-run",
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var trace bytes.Buffer
+	_, err := resolveRetrySubjectOutcome(mem, subject, "eval3", ProcessOptions{
+		Context: ctx,
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveRetrySubjectOutcome error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(trace.String(), "attempt=1") || !strings.Contains(trace.String(), "result=retry") {
+		t.Fatalf("trace = %q, want a first-attempt retry logged before cancellation", trace.String())
+	}
+}
+
+// failingGetStore fails every direct Get of subjectID, standing in for a bd
+// read failure during the bounded outcome re-resolution window.
+type failingGetStore struct {
+	*beads.MemStore
+	subjectID string
+}
+
+func (s *failingGetStore) Get(id string) (beads.Bead, error) {
+	if id == s.subjectID {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.MemStore.Get(id)
+}
+
+func TestResolveRetrySubjectOutcomeDegradesOnReadError(t *testing.T) {
+	t.Parallel()
+
+	mem := beads.NewMemStore()
+	subject := mustCreateWorkflowBead(t, mem, beads.Bead{
+		Title:    "gemini review attempt 3",
+		Type:     "task",
+		Status:   "closed",
+		Metadata: map[string]string{"gc.kind": "retry-run"},
+	})
+	store := &failingGetStore{MemStore: mem, subjectID: subject.ID}
+
+	var trace bytes.Buffer
+	got, err := resolveRetrySubjectOutcome(store, subject, "eval3", ProcessOptions{
+		Tracef: func(format string, args ...any) {
+			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolveRetrySubjectOutcome error = %v, want nil (degrade to last-known subject)", err)
+	}
+	if got.ID != subject.ID {
+		t.Fatalf("subject = %q, want the last-known subject %q", got.ID, subject.ID)
+	}
+	if !strings.Contains(trace.String(), "result=read-error") {
+		t.Fatalf("trace = %q, want a read-error observation", trace.String())
+	}
+}
+
 func TestProcessRetryEvalStaleAttemptFinalizesNoop(t *testing.T) {
 	t.Parallel()
 
@@ -2208,5 +2420,142 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 		if bead.Metadata["gc.outcome"] != "skipped" {
 			t.Fatalf("%s gc.outcome = %q, want skipped", beadID, bead.Metadata["gc.outcome"])
 		}
+	}
+}
+
+// writeRequiredRetryArtifact creates a non-empty artifact file inside worktree
+// and returns its basename for use as a gc.required_artifact template.
+func writeRequiredRetryArtifact(t *testing.T, worktree, name string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(worktree, name), []byte("artifact\n"), 0o644); err != nil {
+		t.Fatalf("write required artifact: %v", err)
+	}
+	return name
+}
+
+// TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores pins
+// the split-city required-artifact source read: the workflow root lives in the
+// graph store, but the source bead carrying work_dir lives in another scope's
+// store named by gc.source_store_ref. Reading the source through the ambient
+// graph store gets a clean ErrNotFound and misclassifies a genuinely-passing
+// attempt as transient missing_required_artifact_context, burning retries.
+func TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores(t *testing.T) {
+	t.Parallel()
+
+	workStore := &beads.MemStore{IDPrefix: "hq"}
+	graphStore := &beads.MemStore{IDPrefix: "gcg"}
+	worktree := t.TempDir()
+	artifact := writeRequiredRetryArtifact(t, worktree, "codex-review.md")
+
+	source := mustCreateWorkflowBead(t, workStore, beads.Bead{
+		Title:    "source",
+		Type:     "task",
+		Metadata: map[string]string{"work_dir": worktree},
+	})
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.source_bead_id":   source.ID,
+			"gc.source_store_ref": "city:foo",
+		},
+	})
+
+	var resolverRef string
+	opts := ProcessOptions{ResolveStoreRef: func(ref string) (beads.Store, error) {
+		resolverRef = ref
+		return workStore, nil
+	}}
+	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": artifact,
+		},
+	}, opts)
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	if want := (retryEvalResult{Outcome: "pass"}); got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (cross-store source misclassified?)", got, want)
+	}
+	if resolverRef != "city:foo" {
+		t.Fatalf("resolver called with ref %q, want city:foo", resolverRef)
+	}
+}
+
+// TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFailsLoud:
+// a gc.source_store_ref present but no resolver wired must fail loud, not
+// silently burn a retry attempt with a fabricated
+// missing_required_artifact_context reason.
+func TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFailsLoud(t *testing.T) {
+	t.Parallel()
+
+	graphStore := &beads.MemStore{IDPrefix: "gcg"}
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.source_bead_id":   "hq-source", // deliberately absent from graphStore
+			"gc.source_store_ref": "city:foo",
+		},
+	})
+
+	_, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": "codex-review.md",
+		},
+	}, ProcessOptions{}) // nil ResolveStoreRef
+	if err == nil {
+		t.Fatal("want a loud error when a cross-store source ref has no resolver, got nil (silent transient)")
+	}
+	if !strings.Contains(err.Error(), "no store-ref resolver provided") {
+		t.Fatalf("error = %v, want it to mention the missing resolver", err)
+	}
+}
+
+// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores:
+// the gc.input_convoy_id hop carries no store ref on the root — a convoy is a
+// work bead, so on a split city it lives in the work store while the root and
+// the retry control run in the graph store. The read must federate through
+// opts.MemberStores (the work-store tail), exactly like the drain lane.
+func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores(t *testing.T) {
+	t.Parallel()
+
+	workStore := &beads.MemStore{IDPrefix: "hq"}
+	graphStore := &beads.MemStore{IDPrefix: "gcg"}
+	worktree := t.TempDir()
+	artifact := writeRequiredRetryArtifact(t, worktree, "codex-review.md")
+
+	convoy := mustCreateWorkflowBead(t, workStore, beads.Bead{
+		Title:    "input convoy",
+		Type:     "convoy",
+		Metadata: map[string]string{"work_dir": worktree},
+	})
+	root := mustCreateWorkflowBead(t, graphStore, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":            "workflow",
+			"gc.input_convoy_id": convoy.ID,
+		},
+	})
+
+	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+		Metadata: map[string]string{
+			"gc.outcome":           "pass",
+			"gc.root_bead_id":      root.ID,
+			"gc.required_artifact": artifact,
+		},
+	}, ProcessOptions{MemberStores: []beads.Store{workStore}})
+	if err != nil {
+		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
+	}
+	if want := (retryEvalResult{Outcome: "pass"}); got != want {
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via MemberStores?)", got, want)
 	}
 }

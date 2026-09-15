@@ -104,6 +104,42 @@ func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[str
 	return CloseSubtreeWithMetadataExcept(store, rootID, metadata, nil)
 }
 
+// TeardownTailExclusion builds the predicate that keeps a workflow's teardown
+// tail out of a terminal sweep over its subtree. Teardown work runs after the
+// root settles by contract (its pass condition may branch on the run
+// outcome), so force-closing it at settlement, or at cancellation, would skip
+// the very step that releases the workflow's resources.
+//
+// The tail is the teardown-scoped members plus every attempt of the same step:
+// retry expansion strips gc.scope_role from the first attempt, leaving
+// gc.step_id as the only durable link back to the teardown step.
+func TeardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) bool, error) {
+	members, err := ListSubtree(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	teardownStepIDs := make(map[string]struct{})
+	for _, member := range members {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
+			continue
+		}
+		if stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey]); stepID != "" {
+			teardownStepIDs[stepID] = struct{}{}
+		}
+	}
+	return func(member beads.Bead) bool {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
+			return true
+		}
+		stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey])
+		if stepID == "" {
+			return false
+		}
+		_, ok := teardownStepIDs[stepID]
+		return ok
+	}, nil
+}
+
 // CloseSubtreeWithMetadataExcept is CloseSubtreeWithMetadata with an exclusion
 // predicate: any member for which exclude reports true is left untouched. A nil
 // predicate closes the whole subtree.

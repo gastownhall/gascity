@@ -148,9 +148,11 @@ var beadEventWatcherRetryDelay = time.Second
 
 // newControllerStateOpenCityStore opens the city-level bead store for
 // newControllerState. Test code can swap this to return an in-memory store
-// and skip spawning managed dolt (~12s per call).
+// and skip spawning managed dolt (~12s per call). The store is long-lived —
+// the controller holds it for the process lifetime — so it keeps the beads
+// library's daemon-sized project pool rather than the one-shot CLI cap.
 var newControllerStateOpenCityStore = func(cityPath string, mode gate.Mode) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true)
+	return openStoreResultAtForCityWithMode(cityPath, cityPath, mode, true, true)
 }
 
 // controllerStateOpenRigStoreAtForCity routes controller rig stores through
@@ -2041,24 +2043,10 @@ func relWithinCity(base, target string) error {
 // realPathForContainment canonicalizes the nearest EXISTING ancestor of target
 // (a git_url clone destination is absent until the clone runs) so a symlinked
 // ancestor cannot smuggle the path outside the city, then re-appends the
-// not-yet-created tail. It returns target unchanged if nothing along the path
-// resolves.
+// not-yet-created tail. It delegates the walk itself to the shared
+// pathutil.ResolveNearestExistingAncestor helper.
 func realPathForContainment(target string) (string, error) {
-	cur := filepath.Clean(target)
-	tail := ""
-	for {
-		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(resolved, tail), nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return filepath.Clean(target), nil // reached the root; nothing resolvable
-		}
-		tail = filepath.Join(filepath.Base(cur), tail)
-		cur = parent
-	}
+	return pathutil.ResolveNearestExistingAncestor(target)
 }
 
 // CreateRig provisions a rig through internal/rig.Provision (Decision 7) and
@@ -2275,6 +2263,14 @@ func (cs *controllerState) assertDroppableManagedDoltDatabase(rigName, dbName st
 	return nil
 }
 
+// controllerLiveDoltPortResolve is the live-resolution seam for the
+// controller's DROP path. It is nil in production, which makes
+// ResolveDoltPort wire newLiveDoltPortResolverForExplicitCity — the strict,
+// cityPath-derived resolver that ambient GC_DOLT_* cannot redirect. Tests
+// inject a fake process table so the most destructive consumer of the chain
+// can be exercised without a live Dolt server.
+var controllerLiveDoltPortResolve func(cityPath string) (liveDoltPortResolution, error)
+
 // controllerDropManagedDoltDatabase drops a managed Dolt database for the city.
 // It is a package var so the G14 rollback tests can inject a recorder without a
 // live Dolt server; production resolves the city's Dolt endpoint and issues the
@@ -2291,12 +2287,18 @@ var controllerDropManagedDoltDatabase = func(cs *controllerState, ctx context.Co
 		host = "127.0.0.1"
 	}
 	resolution := ResolveDoltPort(PortResolverInput{
-		CityPort: cityPort,
-		Rigs:     loadResolverRigs(cs.cityPath, cfg),
-		FS:       fsys.OSFS{},
+		CityPort:    cityPort,
+		CityPath:    cs.cityPath,
+		LiveResolve: controllerLiveDoltPortResolve,
 	})
 	if err := fatalPortResolutionError(resolution); err != nil {
 		return fmt.Errorf("resolving dolt port: %w", err)
+	}
+	// This is a DROP DATABASE. With the port file out of the chain, a stopped
+	// managed dolt is a clean miss that lands on the legacy default — refuse
+	// rather than drop against whatever happens to be listening on 3307.
+	if resolution.Fallback {
+		return fmt.Errorf("refusing to drop dolt database %q: no live managed dolt endpoint for %s (resolution fell back to legacy port %d)", dbName, cs.cityPath, resolution.Port)
 	}
 	client, err := newSQLCleanupDoltClient(cs.cityPath, host, strconv.Itoa(resolution.Port))
 	if err != nil {

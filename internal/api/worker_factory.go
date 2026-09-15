@@ -23,6 +23,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		ResolveTransport:      resolveTransport,
 		ResolveSessionRuntime: s.resolveWorkerSessionRuntimeWithMetadata,
 		Pricing:               cfg.PricingRegistry(),
+		ActivityMemo:          s.activityMemo,
 	})
 }
 

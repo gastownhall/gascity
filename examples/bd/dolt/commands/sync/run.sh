@@ -19,11 +19,31 @@
 #      on legacy setups.
 #   3. Fallback when active_branch() cannot be resolved (or in CLI mode): 'main'.
 #
+# Remote resolution (per database):
+#   1. GC_DOLT_REMOTE_<DB_UPPER> env var override, naming a configured remote
+#      by name (same key derivation as GC_DOLT_REFSPEC_<DB_UPPER> above). This
+#      pins the remote regardless of scheme — an explicit override is by
+#      definition intentional, so it is honored even for a non-local remote.
+#   2. No override: the first file:// remote in name-sorted order wins,
+#      deterministically and independent of whatever order the database
+#      itself returns candidates in (gc-fqi7kq: an unordered SELECT made
+#      this pick 1-of-N at random, occasionally selecting a public network
+#      remote for private fleet data). Preferring file:// keeps local/backup
+#      remotes from losing to a network remote by accident.
+#   3. No override and no candidate is file://: ambiguous by policy,
+#      REGARDLESS of how many remotes are configured — including exactly
+#      one. Sync skips the database and reports why rather than pushing
+#      private data to a network remote by default; set the override
+#      (case 1) to choose one deliberately.
+#
 # Environment:
 #   GC_CITY_PATH                          (required) — city root
 #   GC_DOLT_PORT                          (required) — managed dolt port
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
+#   GC_DOLT_REMOTE_<DB>                   (optional) — select which remote to
+#                     push to when a database has several, or to permit
+#                     pushing to a non-file:// remote (see Remote resolution).
 #   GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for SQL-mode remote push. Increase for
 #                     slow links or large first pushes (a multi-GB first push to
@@ -64,6 +84,8 @@ while [ $# -gt 0 ]; do
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
       echo ""
       echo "Environment:"
+      echo "  GC_DOLT_REMOTE_<DB>              Select which remote to push to when a database has several"
+      echo "                                   (also the only way to push to a non-file:// remote)"
       echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
       echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
       exit 0
@@ -189,16 +211,35 @@ valid_branch_name() {
   esac
 }
 
-# refspec_env_value <db> — emit the GC_DOLT_REFSPEC_<DB_UPPER> override, if any.
-# DB name is uppercased and '-' is replaced with '_' to form a valid env key.
-refspec_env_value() {
-  db="$1"
-  valid_database_name "$db" || return 1
-  key=$(printf '%s' "$db" | tr 'a-z-' 'A-Z_')
+# db_env_key <db> — uppercase a database name and replace '-' with '_' to form
+# an env-var key segment (shared by GC_DOLT_REFSPEC_<KEY> and
+# GC_DOLT_REMOTE_<KEY>). Returns 1 if the name itself is invalid. Empty stdout
+# with a 0 return means the name is valid but its uppercased form still
+# contains characters that cannot form a bare env var name (e.g. '.') — no
+# override is possible for it; callers treat that as "no override" rather
+# than an error.
+db_env_key() {
+  valid_database_name "$1" || return 1
+  key=$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')
   case "$key" in
     *[!A-Z0-9_]*) return 0 ;;
   esac
+  printf '%s' "$key"
+}
+
+# refspec_env_value <db> — emit the GC_DOLT_REFSPEC_<DB_UPPER> override, if any.
+refspec_env_value() {
+  key=$(db_env_key "$1") || return 1
+  [ -z "$key" ] && return 0
   eval "printf '%s' \"\${GC_DOLT_REFSPEC_$key:-}\""
+}
+
+# remote_env_value <db> — emit the GC_DOLT_REMOTE_<DB_UPPER> override, if any.
+# See select_remote for how this pins remote selection.
+remote_env_value() {
+  key=$(db_env_key "$1") || return 1
+  [ -z "$key" ] && return 0
+  eval "printf '%s' \"\${GC_DOLT_REMOTE_$key:-}\""
 }
 
 warn_refspec_fallback() {
@@ -256,10 +297,60 @@ classify_count() {
   printf '%s\n' "$cc_out" | awk -F, 'NR == 2 { gsub(/^"|"$/, "", $1); print $1; exit }'
 }
 
+# select_remote <db> <pairs> — apply the remote-selection policy (see the
+# "Remote resolution" header doc) over newline-separated "name|url" candidate
+# pairs and emit the winner as "name|url". Emits nothing for zero candidates,
+# or the literal token "AMBIGUOUS" when no candidate is local and no override
+# was given — regardless of how many candidates there are, including exactly
+# one: a sole remote is not auto-selected unless it is local. Never depends
+# on the input's row order: candidates are sorted by name (under LC_ALL=C, so
+# the winner is identical on every host, not merely stable per-locale) before
+# any policy rule is applied. Returns 1 (with its own stderr message) only when
+# GC_DOLT_REMOTE_<DB> is set but names a remote that is not among the
+# candidates.
+select_remote() {
+  sr_db="$1"
+  sr_pairs="$2"
+  [ -z "$sr_pairs" ] && return 0
+
+  sr_sorted=$(printf '%s\n' "$sr_pairs" | LC_ALL=C sort -t'|' -k1,1)
+
+  sr_override=$(remote_env_value "$sr_db") || return 1
+  if [ -n "$sr_override" ]; then
+    sr_match=$(printf '%s\n' "$sr_sorted" | awk -F'|' -v want="$sr_override" '$1 == want {print; exit}')
+    if [ -z "$sr_match" ]; then
+      echo "  $sr_db: ERROR: GC_DOLT_REMOTE override '$sr_override' does not match any configured remote" >&2
+      return 1
+    fi
+    printf '%s\n' "$sr_match"
+    return 0
+  fi
+
+  sr_local=$(printf '%s\n' "$sr_sorted" | awk -F'|' '$2 ~ /^file:\/\// {print; exit}')
+  if [ -n "$sr_local" ]; then
+    printf '%s\n' "$sr_local"
+    return 0
+  fi
+
+  printf 'AMBIGUOUS\n'
+  return 0
+}
+
+# find_remote_sql <db> — query all configured remotes over SQL and resolve
+# the one to sync against via select_remote. ORDER BY name keeps the raw
+# query itself deterministic; select_remote re-sorts independently so
+# correctness never relies on the server actually honoring it. Returns 1 when
+# the query itself fails (and reports that), and 2 when select_remote refuses
+# — it has already printed its own, more specific reason.
 find_remote_sql() {
   db="$1"
-  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
-  printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2; exit}'
+  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || {
+    echo "  $db: ERROR: failed to query remotes" >&2
+    return 1
+  }
+  pairs=$(printf '%s\n' "$remote_csv" | awk -F, 'NR > 1 && $1 != "" {print $1 "|" $2}')
+  # 2 = select_remote already printed a specific policy refusal; 1 = lookup failed.
+  select_remote "$db" "$pairs" || return 2
 }
 
 # resolve_refspec_sql <db> — emit two lines: local-branch and remote-branch.
@@ -356,12 +447,20 @@ sync_database_sql() {
   fi
 
   remote_pair=$(find_remote_sql "$name") || {
-    echo "  $name: ERROR: failed to query remotes" >&2
-    last_fail_reason="failed to query remotes"
+    find_rc=$?
+    if [ "$find_rc" -eq 2 ]; then
+      last_fail_reason="remote selection refused"
+    else
+      last_fail_reason="failed to query remotes"
+    fi
     return 1
   }
-  if [ -z "$remote_pair" ]; then
-    echo "  $name: skipped (no remote)"
+  if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
+    if [ "$remote_pair" = "AMBIGUOUS" ]; then
+      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
+    else
+      echo "  $name: skipped (no remote)"
+    fi
     return 0
   fi
   remote_name=${remote_pair%%|*}
@@ -531,23 +630,42 @@ sync_database_sql() {
   return 1
 }
 
+# remotes_json_pairs <remotes.json path> — emit newline-separated "name|url"
+# pairs from a Dolt CLI remotes.json. Requires name and url to appear
+# adjacent as "name":"...","url":"..." (the compact shape this parser
+# requires; the same pattern `pull/run.sh` uses); an entry that doesn't match
+# this shape is skipped rather than guessed at.
+remotes_json_pairs() {
+  [ -f "$1" ] || return 0
+  grep -o '"name":"[^"]*","url":"[^"]*"' "$1" 2>/dev/null |
+    sed 's/"name":"//;s/","url":"/|/;s/"$//'
+}
+
 sync_database_cli() {
   d="$1"
   name="$2"
+  if ! valid_database_name "$name"; then
+    echo "  $name: ERROR: invalid database name" >&2
+    return 1
+  fi
 
   # Check for remote.
-  remote_name=""
-  remote=""
-  if [ -f "$d/.dolt/remotes.json" ]; then
-    remote_name=$(grep -o '"name":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"name":"//;s/"//' || true)
-    remote=$(grep -o '"url":"[^"]*"' "$d/.dolt/remotes.json" 2>/dev/null | head -1 | sed 's/"url":"//;s/"//' || true)
-  fi
-  [ -z "$remote_name" ] && remote_name="origin"
-
-  if [ -z "$remote" ]; then
-    echo "  $name: skipped (no remote)"
+  pairs=$(remotes_json_pairs "$d/.dolt/remotes.json")
+  remote_pair=$(select_remote "$name" "$pairs") || {
+    last_fail_reason="remote selection refused"
+    return 1
+  }
+  if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
+    if [ "$remote_pair" = "AMBIGUOUS" ]; then
+      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
+    else
+      echo "  $name: skipped (no remote)"
+    fi
     return 0
   fi
+  remote_name=${remote_pair%%|*}
+  remote=${remote_pair#*|}
+
   if ! valid_remote_name "$remote_name"; then
     echo "  $name: ERROR: invalid remote name: $remote_name" >&2
     last_fail_reason="invalid remote name: $remote_name"

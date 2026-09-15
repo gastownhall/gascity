@@ -273,9 +273,74 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
+		if newerSemverCompatibleBD(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd version is a newer semver-compatible release of the linked beads library version", details)
+		}
+		if samePrereleaseSeries(ctx.BDVersion, libraryVersion) {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and the linked beads library are prereleases of the same release", details)
+		}
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
 	}
 	return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and linked beads library versions match", details)
+}
+
+// newerSemverCompatibleBD reports whether bdVersion is a semver-compatible
+// upgrade of libraryVersion: the same major version, and not older. Per
+// semver, only a major bump breaks compatibility, so a newer bd release
+// within the linked library's major version — the common case when an
+// unversioned Homebrew dependency drifts ahead of gc's pinned go.mod release
+// (gastownhall/gascity#5164) — is safe to treat as compatible rather than a
+// hard version mismatch. Returns false (falling back to the exact-match
+// behavior already applied above) whenever either version does not parse as
+// valid semver, so this only ever widens what passes, never what fails.
+func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
+	bdCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	libCanonical := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bdCanonical) || !semver.IsValid(libCanonical) {
+		return false
+	}
+	if semver.Major(bdCanonical) != semver.Major(libCanonical) {
+		return false
+	}
+	return semver.Compare(bdCanonical, libCanonical) >= 0
+}
+
+// samePrereleaseSeries reports whether both versions are prereleases of the same
+// MAJOR.MINOR.PATCH release — v1.3.0-rc.1 and v1.3.0-rc.2, in either order.
+//
+// newerSemverCompatibleBD deliberately refuses an OLDER bd, because an older bd
+// may not understand a newer library's schema. For the pairing this widening
+// was written for, that risk was checked rather than assumed: v1.3.0-rc.1 and
+// v1.3.0-rc.2 embed a byte-identical internal/storage/schema, both computing
+// LatestVersion() == 66, so neither can carry schema skew against the other.
+// That is a verified property of THAT pair, not a law of RC series: nothing
+// stops an rc.N from being cut precisely to land a schema change, and this
+// predicate compares version strings only, never schema versions. A future
+// same-series pin move must re-prove the schema premise for its own pair.
+//
+// gascity's own pins do not currently produce that pairing (BD_VERSION and
+// BD_CURRENT_VERSION are both v1.3.0-rc.2), so this widening is not load-bearing
+// for the current bump. It is kept so that an operator running a bd from
+// elsewhere in a series whose schema identity has been checked is not refused
+// a native store for a skew that pair does not carry.
+//
+// Kept deliberately narrow: BOTH sides must be prereleases and the release they
+// are candidates for must be identical, so every cross-release skew, and an RC
+// paired with its own final release, still fails. semver.Compare's prerelease
+// ordering is intentionally not consulted: ordering rc.1 before rc.2 says
+// nothing about which of them embeds which schema, so it is no substitute
+// for the by-hand check recorded above.
+func samePrereleaseSeries(bdVersion, libraryVersion string) bool {
+	bd := "v" + strings.TrimPrefix(strings.TrimSpace(bdVersion), "v")
+	lib := "v" + strings.TrimPrefix(strings.TrimSpace(libraryVersion), "v")
+	if !semver.IsValid(bd) || !semver.IsValid(lib) {
+		return false
+	}
+	bdPre, libPre := semver.Prerelease(bd), semver.Prerelease(lib)
+	if bdPre == "" || libPre == "" {
+		return false
+	}
+	return strings.TrimSuffix(semver.Canonical(bd), bdPre) == strings.TrimSuffix(semver.Canonical(lib), libPre)
 }
 
 func (c PreflightChecker) checkContractShape(metadata preflightMetadata) PreflightCheckResult {
