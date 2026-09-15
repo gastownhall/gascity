@@ -1247,10 +1247,14 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         # judged on its Dolt sync state, and only a scope that never migrated is
         # judged on the legacy embedded-store state. `bd backup sync` writes
         # only dolt-backup-state.json, so reading the legacy file on a migrated
-        # scope would latch this gate closed with no backup action able to clear it.
+        # scope would pin the gate to a stale timestamp forever. An explicit
+        # state path overrides pipeline detection for managed callers.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+        if [ -n "${GC_DOLT_BACKUP_STATE_FILE:-}" ]; then
+            _BACKUP_STATE="$GC_DOLT_BACKUP_STATE_FILE"
+            _BACKUP_FIELD="last_sync"
+        elif [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
             _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
             _BACKUP_FIELD="last_sync"
         else
@@ -1436,9 +1440,12 @@ fi
 
 # Report.
 if [ -n "$ANOMALIES" ]; then
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[^ ]+/age=<dynamic>/g')
     "$ESCALATE_SCRIPT" \
         --subject "ESCALATION: Reaper anomalies detected [MEDIUM]" \
-        --message "$ANOMALIES" 2>/dev/null || true
+        --message "$ANOMALIES" \
+        --incident-key "reaper:anomalies" \
+        --fingerprint "$ANOMALY_FINGERPRINT" 2>/dev/null || true
 fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"

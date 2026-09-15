@@ -33,12 +33,19 @@ DOLT_ESCALATE_SCRIPT="${DOLT_ESCALATE_SCRIPT:-$(dolt_resolve_escalate_script)}"
 dolt_escalate() {
     local subject="$1"
     local message="$2"
+    local incident_key="${3:-}"
+    local fingerprint="${4:-}"
 
     if [ -z "$DOLT_ESCALATE_SCRIPT" ] || [ ! -x "$DOLT_ESCALATE_SCRIPT" ]; then
         echo "dolt notify: no executable escalate.sh found" >&2
         return 1
     fi
-    "$DOLT_ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+    if [ -n "$incident_key" ]; then
+        "$DOLT_ESCALATE_SCRIPT" --subject "$subject" --message "$message" \
+            --incident-key "$incident_key" --fingerprint "$fingerprint"
+    else
+        "$DOLT_ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+    fi
 }
 
 dolt_notify_done() {

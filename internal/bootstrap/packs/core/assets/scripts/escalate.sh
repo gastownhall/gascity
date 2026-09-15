@@ -8,6 +8,8 @@ set -euo pipefail
 SUBJECT=""
 MESSAGE=""
 SEVERITY=""
+INCIDENT_KEY=""
+FINGERPRINT=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -24,6 +26,16 @@ while [ "$#" -gt 0 ]; do
         --severity)
             [ "$#" -ge 2 ] || { echo "escalate: --severity requires a value" >&2; exit 2; }
             SEVERITY="$2"
+            shift 2
+            ;;
+        --incident-key)
+            [ "$#" -ge 2 ] || { echo "escalate: --incident-key requires a value" >&2; exit 2; }
+            INCIDENT_KEY="$2"
+            shift 2
+            ;;
+        --fingerprint)
+            [ "$#" -ge 2 ] || { echo "escalate: --fingerprint requires a value" >&2; exit 2; }
+            FINGERPRINT="$2"
             shift 2
             ;;
         --)
@@ -72,11 +84,45 @@ case "$ESCALATE_SEND_TIMEOUT_SECS" in
     *[1-9]*) ;;
     *) ESCALATE_SEND_TIMEOUT_SECS=30 ;;
 esac
+INCIDENT_STATE=""
+INCIDENT_FINGERPRINT=""
+LAST_NOTIFIED=0
+NOW_EPOCH="${GC_ESCALATE_NOW_EPOCH:-$(date -u '+%s')}"
+REMINDER_SECONDS="${GC_ESCALATE_REMINDER_SECONDS:-86400}"
+case "$NOW_EPOCH" in ''|*[!0-9]*) NOW_EPOCH=$(date -u '+%s') ;; esac
+case "$REMINDER_SECONDS" in ''|*[!0-9]*) REMINDER_SECONDS=86400 ;; esac
+
+if [ -n "$INCIDENT_KEY" ]; then
+    INCIDENT_DIR="${GC_ESCALATE_INCIDENT_DIR:-${GC_CITY_PATH:-${GC_CITY:-.}}/.gc/incidents}"
+    mkdir -p "$INCIDENT_DIR"
+    INCIDENT_ID=$(printf '%s' "$INCIDENT_KEY" | cksum | awk '{print $1}')
+    INCIDENT_STATE="$INCIDENT_DIR/$INCIDENT_ID.state"
+    INCIDENT_MESSAGE="$INCIDENT_DIR/$INCIDENT_ID.message"
+    INCIDENT_FINGERPRINT=$(printf '%s' "${FINGERPRINT:-$SUBJECT
+$MESSAGE}" | cksum | awk '{print $1}')
+    if [ -f "$INCIDENT_STATE" ]; then
+        PREVIOUS_FINGERPRINT=$(sed -n '1p' "$INCIDENT_STATE")
+        LAST_NOTIFIED=$(sed -n '3p' "$INCIDENT_STATE")
+        case "$LAST_NOTIFIED" in ''|*[!0-9]*) LAST_NOTIFIED=0 ;; esac
+    else
+        PREVIOUS_FINGERPRINT=""
+    fi
+    printf '%s\n' "$MESSAGE" >"$INCIDENT_MESSAGE.tmp.$$"
+    mv "$INCIDENT_MESSAGE.tmp.$$" "$INCIDENT_MESSAGE"
+    printf '%s\n%s\n%s\n' "$PREVIOUS_FINGERPRINT" "$NOW_EPOCH" "$LAST_NOTIFIED" >"$INCIDENT_STATE.tmp.$$"
+    mv "$INCIDENT_STATE.tmp.$$" "$INCIDENT_STATE"
+    if [ "$LAST_NOTIFIED" -gt 0 ] \
+        && [ "$INCIDENT_FINGERPRINT" = "$PREVIOUS_FINGERPRINT" ] \
+        && [ $((NOW_EPOCH - LAST_NOTIFIED)) -lt "$REMINDER_SECONDS" ]; then
+        exit 0
+    fi
+fi
+
+send_rc=0
 
 if command -v timeout >/dev/null 2>&1; then
     # Capture the code on the same line: `set -e` is active, so a bare call
     # would abort the script before the 124 check below could run.
-    send_rc=0
     # shellcheck disable=SC2086 # NOTIFY_ARGS is a controlled empty-or-one-flag string
     timeout "$ESCALATE_SEND_TIMEOUT_SECS" gc mail send "$RECIPIENT" $NOTIFY_ARGS -s "$SUBJECT" -m "$MESSAGE" || send_rc=$?
     # 124 means the wake outlived its bound after the mail was already written.
@@ -84,10 +130,15 @@ if command -v timeout >/dev/null 2>&1; then
     # caller retry a message that landed.
     if [ "$send_rc" -eq 124 ]; then
         echo "escalate: mail to $RECIPIENT sent; wake exceeded ${ESCALATE_SEND_TIMEOUT_SECS}s and was abandoned" >&2
-        exit 0
+        send_rc=0
     fi
-    exit "$send_rc"
+else
+    # shellcheck disable=SC2086 # NOTIFY_ARGS is a controlled empty-or-one-flag string
+    gc mail send "$RECIPIENT" $NOTIFY_ARGS -s "$SUBJECT" -m "$MESSAGE" || send_rc=$?
 fi
 
-# shellcheck disable=SC2086 # NOTIFY_ARGS is a controlled empty-or-one-flag string
-gc mail send "$RECIPIENT" $NOTIFY_ARGS -s "$SUBJECT" -m "$MESSAGE"
+if [ "$send_rc" -eq 0 ] && [ -n "$INCIDENT_STATE" ]; then
+    printf '%s\n%s\n%s\n' "$INCIDENT_FINGERPRINT" "$NOW_EPOCH" "$NOW_EPOCH" >"$INCIDENT_STATE.tmp.$$"
+    mv "$INCIDENT_STATE.tmp.$$" "$INCIDENT_STATE"
+fi
+exit "$send_rc"

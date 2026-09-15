@@ -67,14 +67,15 @@ touch_ago() {
     shift 2
     epoch=$(( $(date -u '+%s') - age ))
     touch -d "@$epoch" "$path" "$@" 2>/dev/null \
-        || touch -t "$(date -u -r "$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null)" "$path" "$@"
+        || TZ=UTC touch -t "$(date -u -r "$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null)" "$path" "$@"
 }
 
 # run_prune_scenario <backup_age_seconds|"absent"|"malformed"> [max_age_seconds] [pipeline] [legacy_age] [frac] [dolt_native]
 #
 #   pipeline    "legacy" (default) writes .beads/backup/backup_state.json;
 #               "dolt" registers .beads/dolt-backup.json and writes
-#               .beads/dolt-backup-state.json with a last_sync field.
+#               .beads/dolt-backup-state.json; "override" writes a distinct
+#               state file selected through GC_DOLT_BACKUP_STATE_FILE.
 #   legacy_age  only meaningful for pipeline=dolt: age of an ADDITIONAL legacy
 #               backup_state.json, used to prove the guard consults the active
 #               pipeline and does not fall back. "absent" (default) writes none.
@@ -100,6 +101,7 @@ run_prune_scenario() {
     local legacy_age="${4:-absent}"
     local frac="${5:-}"
     local dolt_native="${6:-absent}"
+    local override_env=""
     local tmpdir bd_flag anomaly_flag anomaly_msg_file step6_file run_script
     tmpdir=$(mktemp -d)
     bd_flag="$tmpdir/bd_called"
@@ -121,6 +123,10 @@ run_prune_scenario() {
             printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$(ts_ago "$legacy_age")" \
                 > "$tmpdir/.beads/backup/backup_state.json"
         fi
+    elif [ "$pipeline" = "override" ]; then
+        state_file="$tmpdir/explicit-backup-state.json"
+        state_field="last_sync"
+        override_env="GC_DOLT_BACKUP_STATE_FILE='$state_file'"
     else
         mkdir -p "$tmpdir/.beads/backup"
         state_file="$tmpdir/.beads/backup/backup_state.json"
@@ -193,6 +199,8 @@ gc()            { touch '$bd_flag'; printf '{"pruned_count":3}'; }
 record_anomaly(){ touch '$anomaly_flag'; printf '%s\n' "\$*" >> '$anomaly_msg_file'; }
 export -f gc record_anomaly
 $dolt_stub
+unset GC_DOLT_BACKUP_STATE_FILE
+$override_env
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
 SESSION_BEAD_PATTERN='gm-*'
@@ -409,4 +417,14 @@ else
     fail "T14: dolt-native many objects → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
+
+# ── T15: explicit state path overrides automatic pipeline selection ──────────
+fresh_result=$(run_prune_scenario "60" "86400" "override")
+absent_result=$(run_prune_scenario "absent" "86400" "override")
+if [ "$(printf '%s' "$fresh_result" | cut -d'|' -f1-2)" = "yes|no" ] \
+        && [ "$(printf '%s' "$absent_result" | cut -d'|' -f1-2)" = "no|yes" ]; then
+    pass "T15: explicit backup state path passes when fresh and blocks when absent"
+else
+    fail "T15: explicit backup state path produced fresh=$fresh_result absent=$absent_result"
+fi
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1
