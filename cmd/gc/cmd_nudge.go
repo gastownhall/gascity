@@ -1327,8 +1327,43 @@ func sendMailNotifyWithProvider(target nudgeTarget, sp runtime.Provider) error {
 	return sendMailNotifyWithWorker(target, nil, sp, "human", "")
 }
 
+// mailNudgeNotice renders the pending-mail notice. The only id it may name is
+// the message id, which always addresses a bead of type message, so the
+// obvious next command actually works. A sender is named only when its mail
+// address is not itself a bead id: a session with no alias addresses as its
+// own session bead id, and printing that reads exactly like a message id.
+// Readers then ran "gc mail read <session-id>" and got nothing (this happened
+// four times in one session on 2026-09-15).
+func mailNudgeNotice(store beads.Store, sender, messageID string) string {
+	who := mailNudgeSenderLabel(store, sender)
+	if messageID == "" {
+		return fmt.Sprintf("You have mail from %s — run: gc mail inbox", who)
+	}
+	return fmt.Sprintf("You have mail from %s (message %s) — run: gc mail read %s", who, messageID, messageID)
+}
+
+// mailNudgeSenderLabel names the sender in a form no reader can mistake for a
+// message id. It probes the store rather than guessing from the shape of the
+// string, because an alias ("omp-1") and a bead id ("sc-wisp-p2yobus") are the
+// same shape. A sender that resolves to a bead is named by that bead's title
+// instead, and a titleless one is not named at all.
+func mailNudgeSenderLabel(store beads.Store, sender string) string {
+	sender = strings.TrimSpace(sender)
+	if store == nil || sender == "" || sender == "human" {
+		return sender
+	}
+	b, err := store.Get(sender)
+	if err != nil || b.ID != sender {
+		return sender
+	}
+	if title := strings.TrimSpace(b.Title); title != "" {
+		return title
+	}
+	return "another session"
+}
+
 func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, sender, messageID string) error {
-	msg := fmt.Sprintf("You have mail from %s", sender)
+	msg := mailNudgeNotice(store, sender, messageID)
 	now := time.Now()
 	// Carry the mail message ID as the nudge's re-validation reference so
 	// blockedQueuedNudgeReason can re-read the message at delivery time and
@@ -1941,7 +1976,41 @@ func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	})
 }
 
+// collapseMailNudges folds two or more pending mail notices into one. Each
+// notice names its own message id, and a reader facing several of them has no
+// reason to open any particular one first, so the honest instruction is the
+// count and the inbox. The collapse is display-only: the drain acks the
+// original claimed items, not this slice.
+func collapseMailNudges(items []queuedNudge) []queuedNudge {
+	mail := 0
+	for _, item := range items {
+		if item.Source == "mail" {
+			mail++
+		}
+	}
+	if mail < 2 {
+		return items
+	}
+	out := make([]queuedNudge, 0, len(items)-mail+1)
+	folded := false
+	for _, item := range items {
+		if item.Source != "mail" {
+			out = append(out, item)
+			continue
+		}
+		if folded {
+			continue
+		}
+		item.Message = fmt.Sprintf("You have %d unread messages — run: gc mail inbox", mail)
+		item.Reference = nil
+		out = append(out, item)
+		folded = true
+	}
+	return out
+}
+
 func formatNudgeInjectOutput(items []queuedNudge) string {
+	items = collapseMailNudges(items)
 	var sb strings.Builder
 	sb.WriteString("<system-reminder>\n")
 	if len(items) == 1 {
@@ -1964,6 +2033,7 @@ func formatNudgeInjectOutput(items []queuedNudge) string {
 }
 
 func formatNudgeRuntimeMessage(items []queuedNudge) string {
+	items = collapseMailNudges(items)
 	var sb strings.Builder
 	sb.WriteString("Deferred reminders:\n")
 	for _, item := range items {
