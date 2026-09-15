@@ -1,6 +1,7 @@
 package gastown_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/extmsg"
 )
 
 var rawDoltSQLCallRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])dolt(?:[ \t]+|[ \t]*\\[ \t]*\r?\n[ \t]*)+sql([ \t]|$)`)
@@ -6086,6 +6089,249 @@ exit 0
 	if !strings.Contains(string(gcData), "closed:2") {
 		t.Fatalf("reaper summary did not report both stale closes:\n%s", gcData)
 	}
+}
+
+func TestReaperStaleAutoClosePreservesDurableExtmsgRecords(t *testing.T) {
+	durableIDs := []string{
+		"ga-extmsg-group",
+		"ga-extmsg-participant",
+		"ga-extmsg-binding",
+		"ga-extmsg-membership",
+		"ga-extmsg-transcript-state",
+		"ga-extmsg-transcript",
+	}
+	closedIDs := runReaperExtmsgRoomFixture(t, durableIDs, "ga-ordinary")
+	for _, id := range durableIDs {
+		if slices.Contains(closedIDs, id) {
+			t.Errorf("reaper closed durable extmsg record %s; all closes: %v", id, closedIDs)
+		}
+	}
+	if !slices.Contains(closedIDs, "ga-ordinary") {
+		t.Fatalf("reaper did not close the ordinary stale task; all closes: %v", closedIDs)
+	}
+}
+
+func TestReaperPreservedExtmsgRoomStillRoutesInboundAndAdvancesTranscript(t *testing.T) {
+	ctx := context.Background()
+	store := beads.NewMemStore()
+	services := extmsg.NewServices(store)
+	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "reaper-integration-test"}
+	room := extmsg.ConversationRef{
+		ScopeID:        "test-city",
+		Provider:       "slack",
+		AccountID:      "T-test",
+		ConversationID: "C-test-room",
+		Kind:           extmsg.ConversationRoom,
+	}
+	group, err := services.Groups.EnsureGroup(ctx, caller, extmsg.EnsureGroupInput{
+		RootConversation: room,
+		Mode:             extmsg.GroupModeLauncher,
+		DefaultHandle:    "builder",
+	})
+	if err != nil {
+		t.Fatalf("EnsureGroup: %v", err)
+	}
+	if _, err := services.Groups.UpsertParticipant(ctx, caller, extmsg.UpsertParticipantInput{
+		GroupID:   group.ID,
+		Handle:    "builder",
+		SessionID: "sess-room",
+	}); err != nil {
+		t.Fatalf("UpsertParticipant: %v", err)
+	}
+	if _, err := services.Bindings.Bind(ctx, caller, extmsg.BindInput{
+		Conversation: extmsg.ConversationRef{
+			ScopeID:        "test-city",
+			Provider:       "slack",
+			AccountID:      "T-test",
+			ConversationID: "D-test-dm",
+			Kind:           extmsg.ConversationDM,
+		},
+		SessionID: "sess-dm",
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	first, err := extmsg.HandleInboundNormalized(ctx, extmsg.InboundDeps{Services: services}, extmsg.ExternalInboundMessage{
+		ProviderMessageID: "provider-before-reaper",
+		Conversation:      room,
+		Actor:             extmsg.ExternalActor{ID: "U-test", DisplayName: "Test User"},
+		Text:              "before reaper",
+		ReceivedAt:        time.Now().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(before reaper): %v", err)
+	}
+	if first.TranscriptEntry == nil {
+		t.Fatal("first inbound did not create a canonical transcript entry")
+	}
+
+	priority := 2
+	ordinary, err := store.Create(beads.Bead{Title: "ordinary stale task", Type: "task", Priority: &priority})
+	if err != nil {
+		t.Fatalf("Create(ordinary stale task): %v", err)
+	}
+	items, err := store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List(extmsg fixture): %v", err)
+	}
+	durableLabels := []string{
+		"gc:extmsg-group",
+		"gc:extmsg-participant",
+		"gc:extmsg-binding",
+		"gc:extmsg-membership",
+		"gc:extmsg-transcript-state",
+		"gc:extmsg-transcript",
+	}
+	durableIDs := make([]string, 0, len(items))
+	seenLabels := make(map[string]bool, len(durableLabels))
+	for _, item := range items {
+		for _, label := range durableLabels {
+			if slices.Contains(item.Labels, label) {
+				seenLabels[label] = true
+				durableIDs = append(durableIDs, item.ID)
+				break
+			}
+		}
+	}
+	for _, label := range durableLabels {
+		if !seenLabels[label] {
+			t.Fatalf("extmsg fixture did not create a record carrying %q", label)
+		}
+	}
+
+	closedIDs := runReaperExtmsgRoomFixture(t, durableIDs, ordinary.ID)
+	for _, id := range closedIDs {
+		if err := store.Close(id); err != nil {
+			t.Fatalf("apply reaper close for %s: %v", id, err)
+		}
+	}
+	for _, id := range durableIDs {
+		item, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(durable extmsg record %s): %v", id, err)
+		}
+		if item.Status == "closed" {
+			t.Fatalf("durable extmsg record %s was closed by the generic reaper", id)
+		}
+	}
+	ordinaryAfter, err := store.Get(ordinary.ID)
+	if err != nil {
+		t.Fatalf("Get(ordinary stale task): %v", err)
+	}
+	if ordinaryAfter.Status != "closed" {
+		t.Fatalf("ordinary stale task status = %q, want closed", ordinaryAfter.Status)
+	}
+
+	later, err := extmsg.HandleInboundNormalized(ctx, extmsg.InboundDeps{Services: services}, extmsg.ExternalInboundMessage{
+		ProviderMessageID: "provider-after-reaper",
+		Conversation:      room,
+		Actor:             extmsg.ExternalActor{ID: "U-test", DisplayName: "Test User"},
+		Text:              "after reaper",
+		ReceivedAt:        time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("HandleInboundNormalized(after reaper): %v", err)
+	}
+	if later.TargetSessionID != "sess-room" {
+		t.Fatalf("TargetSessionID = %q, want sess-room", later.TargetSessionID)
+	}
+	if later.TranscriptEntry == nil {
+		t.Fatal("later inbound did not create a canonical transcript entry")
+	}
+	if later.TranscriptEntry.Sequence != first.TranscriptEntry.Sequence+1 {
+		t.Fatalf("later transcript sequence = %d, want %d", later.TranscriptEntry.Sequence, first.TranscriptEntry.Sequence+1)
+	}
+}
+
+func runReaperExtmsgRoomFixture(t *testing.T, durableIDs []string, ordinaryID string) []string {
+	t.Helper()
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
+    protected=1
+    case "$*" in *"NOT EXISTS"*) ;; *) protected=0 ;; esac
+    for label in \
+      gc:extmsg-group \
+      gc:extmsg-participant \
+      gc:extmsg-binding \
+      gc:extmsg-membership \
+      gc:extmsg-transcript-state \
+      gc:extmsg-transcript
+    do
+      case "$*" in *"'$label'"*) ;; *) protected=0 ;; esac
+    done
+    printf 'id,close_mode\n'
+    if [ "$protected" -ne 1 ]; then
+      for id in $DURABLE_IDS; do
+        printf '%s,bare\n' "$id"
+      done
+    fi
+    printf '%s,bare\n' "$ORDINARY_ID"
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+
+	runScript(t, coreScriptPath("reaper.sh"), map[string]string{
+		"DURABLE_IDS":      strings.Join(durableIDs, " "),
+		"ORDINARY_ID":      ordinaryID,
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if strings.Contains(string(doltData), "gc:extmsg-%") {
+		t.Fatalf("stale query used a broad extmsg wildcard instead of explicit durable labels:\n%s", doltData)
+	}
+
+	data, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(data), "close "+ordinaryID+" --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close ordinary stale task with the generic stale reason:\n%s", data)
+	}
+	var closed []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "close" {
+			closed = append(closed, fields[1])
+		}
+	}
+	return closed
 }
 
 func TestReaperDoesNotStaleCloseIssueWithFutureExpiresAt(t *testing.T) {
