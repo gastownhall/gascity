@@ -127,6 +127,10 @@ func TestCmdSlingMultiDefaultTargets_DeterministicPick(t *testing.T) {
 				[]string{"foundations/worker-a", "foundations/worker-b"})
 			restore := SetSlingTargetIndexForTest(func(int) int { return tc.idx })
 			defer restore()
+			// This fixture's file store isn't visible to a real bd subprocess (see
+			// ga-wvtgnv); opt out of the postcondition check like doSling's testDeps does.
+			restoreProbe := SetSlingWorkQueryProbeForTest(skipWorkQueryProbe)
+			defer restoreProbe()
 
 			var stdout, stderr bytes.Buffer
 			code := cmdSling(
