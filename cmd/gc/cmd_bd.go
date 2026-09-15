@@ -550,6 +550,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	env = projectBdActorInEnv(bdArgs, env, guardBeads)
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 	traceStart := time.Now()
