@@ -47,15 +47,18 @@ func TestLiveListRefreshConvergesOnIndefinitelyDeferredBead(t *testing.T) {
 		case "version":
 			return []byte("bd version 1.3.0\n"), nil
 		case "list":
-			// bd filters on its OWN status vocabulary: a deferred row is not
-			// an open row, so --status=open stops returning it once deferred.
-			if deferredNow && hasArgPrefix(args, "--status=open") {
+			if !deferredNow {
+				return issue("open"), nil
+			}
+			// bd filters on its OWN status vocabulary, before Gas City's
+			// normalization: a deferred row is not an open row, so
+			// --status=open stops returning it. An UNFILTERED bd list still
+			// returns it, carrying bd's real status — which is why the
+			// unfiltered reconcile scan can still see it.
+			if hasArgPrefix(args, "--status=open") {
 				return []byte(`[]`), nil
 			}
-			if deferredNow {
-				return []byte(`[]`), nil
-			}
-			return issue("open"), nil
+			return issue("deferred"), nil
 		case "show":
 			showCalls++
 			if deferredNow {
