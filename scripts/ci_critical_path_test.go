@@ -879,7 +879,7 @@ func TestMacRegressionSummaryPostsVerdictCheckRun(t *testing.T) {
 
 	wantEnv := map[string]string{
 		"GH_TOKEN": "${{ github.token }}",
-		"HEAD_SHA": "${{ inputs.head_sha || github.sha }}",
+		"HEAD_SHA": "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.head_sha || github.sha }}",
 	}
 	for name, want := range wantEnv {
 		if got := summarize.Env[name]; got != want {
@@ -927,6 +927,55 @@ func TestMacRegressionSummaryPostsVerdictCheckRun(t *testing.T) {
 	}
 	if concludeIdx > failExitIdx {
 		t.Error(`Summarize ran branch posts its verdict check run after exit "$fail" -- the POST must happen before the step can exit`)
+	}
+}
+
+// TestMacRegressionSummaryHeadSHASelectsTruePRHeadOnPullRequestEvent asserts
+// the mac-regression-summary job's Summarize step resolves HEAD_SHA to the
+// true PR head commit on pull_request-triggered runs, not the synthetic
+// refs/pull/N/merge SHA that a bare `github.sha` (and thus the prior
+// `inputs.head_sha || github.sha` expression, since inputs.head_sha is unset
+// on that event) resolves to. prwatchdog polls check-runs by the true PR
+// head SHA (github.event.pull_request.head.sha), so a verdict check posted
+// against the synthetic merge SHA is invisible to it -- the root cause of
+// ga-gd1a5c's deploy-gate failure. workflow_dispatch/workflow_call runs must
+// keep selecting inputs.head_sha (falling back to github.sha) unchanged.
+func TestMacRegressionSummaryHeadSHASelectsTruePRHeadOnPullRequestEvent(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	job, ok := wf.Jobs["mac-regression-summary"]
+	if !ok {
+		t.Fatal("mac-regression workflow has no mac-regression-summary job")
+	}
+
+	var summarize ciCriticalPathStep
+	var found bool
+	for _, step := range job.Steps {
+		if step.Name == "Summarize" {
+			summarize, found = step, true
+		}
+	}
+	if !found {
+		t.Fatal("mac-regression-summary has no Summarize step")
+	}
+
+	const wantHeadSHA = `${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.head_sha || github.sha }}`
+	got := summarize.Env["HEAD_SHA"]
+	if got != wantHeadSHA {
+		t.Errorf("Summarize env HEAD_SHA = %q, want %q", got, wantHeadSHA)
+	}
+
+	for _, marker := range []string{
+		"github.event_name == 'pull_request'",
+		"github.event.pull_request.head.sha",
+		"inputs.head_sha",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Errorf("Summarize env HEAD_SHA %q missing %q -- on pull_request-triggered runs it must select the true PR head SHA, not the synthetic refs/pull/N/merge SHA that github.sha resolves to on that event, while still preserving inputs.head_sha for workflow_dispatch/workflow_call runs", got, marker)
+		}
+	}
+
+	if got == "${{ inputs.head_sha || github.sha }}" {
+		t.Error("Summarize env HEAD_SHA still uses the old event-agnostic expression -- on pull_request runs this resolves to the synthetic refs/pull/N/merge SHA, which is invisible to prwatchdog (it polls check-runs by the true PR head SHA)")
 	}
 }
 
