@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -164,7 +166,94 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
+	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
+	// recursive calls to this exact executable rather than inheriting an
+	// ambient GC_BIN or resolving an unrelated gc from PATH.
+	executable, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return nil, err
+	}
+	overrides["GC_BIN"] = executable
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func resolveBdInvokingGCBinary() (string, error) {
+	executable, err := resolveInvokingExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if !filepath.IsAbs(executable) {
+		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
+	}
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat invoking gc executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
+	}
+	return canonical, nil
+}
+
+// pinBdGCEnvironment replaces ambient GC_BIN with the physical invoking
+// executable before the beads runner merges the child environment.
+func pinBdGCEnvironment(env map[string]string) error {
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
+}
+
+// bestEffortBdGCBinaryWarning fires once per process.
+var bestEffortBdGCBinaryWarning sync.Once
+
+// pinBdGCEnvironmentBestEffort is pinBdGCEnvironment for the legacy managed
+// path, where main never set GC_BIN for gc's own bd invocations at all.
+//
+// The strict resolver refuses when the physical path behind os.Executable() is
+// gone — a Homebrew/Nix upgrade that removed the old store or Cellar directory a
+// still-running supervisor resolved through. Making that refusal fatal for every
+// bd runner turned an upgrade into a supervisor whose session reconciler, store
+// opens, health, recover and its own SIGTERM shutdown all fail until restart,
+// leaving the managed Dolt unstopped. Where GC_BIN is load-bearing — the bd
+// store bridge's hook callbacks, and provider-owned scopes where bd re-invokes
+// gc — the refusal stays; here the pin degrades to main's own fallback chain and
+// says so once.
+func pinBdGCEnvironmentBestEffort(env map[string]string) {
+	if env == nil {
+		return
+	}
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err == nil {
+		env["GC_BIN"] = gcBin
+		return
+	}
+	bestEffortBdGCBinaryWarning.Do(func() {
+		log.Printf("gc: cannot canonicalize the invoking gc executable (%v); bd callbacks will use the ambient GC_BIN or PATH gc until this process restarts", err)
+	})
+	if fallback := bestEffortInvokingGCBinary(); fallback != "" {
+		env["GC_BIN"] = fallback
+	}
+}
+
+// bestEffortInvokingGCBinary reproduces the fallback chain this branch replaced:
+// the absolute path os.Executable() reports even when it no longer resolves,
+// then a gc on PATH, then nothing at all — in which case the caller leaves
+// whatever GC_BIN the environment already carries.
+func bestEffortInvokingGCBinary() string {
+	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) {
+		return executable
+	}
+	if found, err := exec.LookPath("gc"); err == nil {
+		return found
+	}
+	return ""
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {

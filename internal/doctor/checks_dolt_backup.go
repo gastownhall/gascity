@@ -63,6 +63,30 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 
 	rigPath := c.normalizedRigPath()
 
+	// A bd-owned scope has neither of the two signals below and cannot grow
+	// them: its Dolt repository lives under bd's root, gc never writes
+	// <city>/.dolt-backup for it, and the fix hint would hand the operator a
+	// `dolt backup` invocation against a server gc does not own. Report
+	// not-required rather than warning every healthy bd-owned rig forever.
+	//
+	// Both transports, because the transport is not what the check is about:
+	// a direct bd-owned rig keeps its Dolt under bd's root exactly as a proxied
+	// one does.
+	//
+	// It must not read as coverage either, and what coverage exists differs by
+	// transport. On the proxied path rc.2 refuses `bd backup` outright, so
+	// there is no backup at all and nothing else reports it —
+	// bd-backup-freshness skips a scope with no backup_state.json and delegates
+	// "no backup at all" to this check by name; that gap also gets one
+	// city-level line in ProxiedBackupCoverageCheck. A direct bd-owned scope
+	// can still be backed up through bd, so its message claims only that gc
+	// does not register it. See bdOwnedBackupCoverageNote.
+	if scopeIsProviderOwned(c.cityPath, rigPath) {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("rig %q: %s — %s", c.rig.Name, bdOwnedStoreNoun(rigPath), bdOwnedBackupCoverageNote(rigPath))
+		return r
+	}
+
 	// An external (non-managed) Dolt endpoint owns its own backups; gc does not
 	// manage them, so the local .dolt-backup directory and managed-Dolt
 	// repo_state.json signals never apply, and the localhost fix hint below is

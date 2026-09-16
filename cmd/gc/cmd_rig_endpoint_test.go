@@ -227,7 +227,7 @@ func TestRequireCanonicalizedScopeMetadataPreservesExistingManagedProbeDatabase(
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata: %v", err)
 	}
-	if err := requireCanonicalizedScopeMetadata(fsys.OSFS{}, scopeDir); err != nil {
+	if err := requireCanonicalizedScopeMetadata(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
 		t.Fatalf("requireCanonicalizedScopeMetadata: %v", err)
 	}
 	got, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
@@ -245,7 +245,7 @@ func TestRequireCanonicalizedScopeMetadataPreservesExistingManagedProbeDatabase(
 func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T) {
 	t.Run("absent metadata is not an error and fabricates nothing", func(t *testing.T) {
 		scopeDir := filepath.Join(t.TempDir(), "never-initialized")
-		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
 			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(scopeDir, ".beads", "metadata.json")); !os.IsNotExist(err) {
@@ -261,7 +261,7 @@ func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T)
 		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir)
+		err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir)
 		if err == nil || !strings.Contains(err.Error(), "missing pinned dolt_database") {
 			t.Fatalf("canonicalizeScopeMetadataIfPresent error = %v, want missing pinned dolt_database", err)
 		}
@@ -276,11 +276,11 @@ func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T)
 		if err := os.WriteFile(metadataPath, []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"fe"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
+		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir, scopeDir); err != nil {
 			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
 		}
-		if mode := readScopeDoltMode(t, scopeDir); mode != "server" {
-			t.Fatalf("dolt_mode = %q, want server", mode)
+		if mode := readScopeDoltMode(t, scopeDir); mode != "embedded" {
+			t.Fatalf("dolt_mode = %q, want embedded", mode)
 		}
 	})
 }

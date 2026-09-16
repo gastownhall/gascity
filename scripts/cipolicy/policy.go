@@ -20,8 +20,13 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "330280e18d45b077cb5842e89c79753f47ace535d53a4505a15c62605fb4f837"
+	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
+	// shapes had never executed in CI — every job lacked a bd with
+	// --proxied-server, so each test skipped and a suite that ran nothing
+	// reported green. The new job builds bd from BD_CURRENT_REF and sets
+	// GC_REQUIRE_ACCEPTANCE_TOOLING so a runner without that bd fails instead.
+	expectedCIExecutionHash      = "928e64138e15e811cafdf13dd3c033d39d0649b3db915e9332fc07afcbe6c936"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "dfe3e40bf2fb461e2f7422ea93b7f9ea769f0e8bf35eb6060690af6f2f361877"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"

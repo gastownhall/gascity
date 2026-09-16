@@ -27,10 +27,19 @@ import (
 // so Ready() and `bd ready` can exclude formula scaffolding from actionable
 // work queues. Without it registered, formula dispatch fails with
 // "invalid issue type: step" (#1039).
+//
+// "startup-health-episode" is included for the same reason
+// (internal/session.StartupHealthEpisodeType): the session reconciler writes
+// one per session name, and the startup-health-episodes check lists them. A
+// city on the bd CLI front door — which is every city that keeps its Dolt
+// topology in bd's hands — has bd validate the type on both paths, so an
+// unregistered one turns both the write and the scan into "invalid issue
+// type". A native-store city never noticed because its SQL path does not
+// validate.
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step",
+	"convergence", "step", "startup-health-episode",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead

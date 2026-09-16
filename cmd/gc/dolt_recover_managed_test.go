@@ -31,6 +31,120 @@ func TestRecoverManagedDoltExistingObserveTimeout(t *testing.T) {
 	}
 }
 
+// TestRecoverManagedDoltRefusesProviderOwnedScopesBeforeLifecycleOps keeps
+// the legacy managed-Dolt recovery path out of scopes whose lifecycle is
+// already assigned to bd. The injected operations make any probe, health,
+// stop, cleanup, start, or runtime publication observable.
+func TestRecoverManagedDoltRefusesProviderOwnedScopesBeforeLifecycleOps(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		setup       func(t *testing.T, city string)
+		wantBlocked bool
+	}{
+		{
+			name: "initializing provider ownership",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantBlocked: true,
+		},
+		{
+			name: "ready provider ownership",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(city, city); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantBlocked: true,
+		},
+		{
+			name: "corrupt provider ownership journal",
+			setup: func(t *testing.T, city string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(city, ".gc"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(providerScopeOwnershipPath(city), []byte("not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantBlocked: true,
+		},
+		{
+			name:        "legacy absent journal remains admitted",
+			setup:       func(*testing.T, string) {},
+			wantBlocked: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			tc.setup(t, city)
+			var calls []string
+			ops := managedDoltRecoveryOps{
+				queryProbe: func(string, string, string) error { calls = append(calls, "query"); return errors.New("unavailable") },
+				healthCheck: func(string, string, string) (managedDoltSQLHealthReport, error) {
+					calls = append(calls, "health")
+					return managedDoltSQLHealthReport{}, nil
+				},
+				stop: func(string, string) (managedDoltStopReport, error) {
+					calls = append(calls, "stop")
+					return managedDoltStopReport{}, nil
+				},
+				preflightCleanup: func(string) error { calls = append(calls, "preflight"); return errors.New("stop after admission") },
+				start: func(string, string, string, string, string, time.Duration) (managedDoltStartReport, error) {
+					calls = append(calls, "start")
+					return managedDoltStartReport{}, nil
+				},
+				publish:       func(string) error { calls = append(calls, "publish"); return nil },
+				failedCleanup: func(_ string, _ int, _ int, cause error) error { calls = append(calls, "failed-cleanup"); return cause },
+			}
+			_, err := recoverManagedDoltProcessWithOps(city, "127.0.0.1", "3307", "root", "warning", time.Second, ops)
+			if tc.wantBlocked {
+				if err == nil || !strings.Contains(err.Error(), "provider scope ownership") {
+					t.Fatalf("recover error = %v, want provider ownership refusal", err)
+				}
+				if len(calls) != 0 {
+					t.Fatalf("provider-owned recovery invoked lifecycle operations: %v", calls)
+				}
+				return
+			}
+			if err == nil || strings.Contains(err.Error(), "provider scope ownership") {
+				t.Fatalf("legacy recovery error = %v, want later recovery failure rather than ownership admission", err)
+			}
+			if len(calls) == 0 {
+				t.Fatal("legacy recovery performed no lifecycle operation")
+			}
+		})
+	}
+}
+
+func TestManagedDoltLifecycleOwnedDefersToProviderScopeOwnership(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"owned\"\n\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := managedDoltLifecycleOwned(city)
+	if err != nil || owned {
+		t.Fatalf("managed lifecycle ownership with generic provider journal = (%t, %v), want (false, nil)", owned, err)
+	}
+	if err := os.WriteFile(providerScopeOwnershipPath(city), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedDoltLifecycleOwned(city); err == nil || !strings.Contains(err.Error(), "provider scope ownership") {
+		t.Fatalf("corrupt provider ownership journal error = %v, want fail-closed ownership error", err)
+	}
+}
+
 func TestRecoverManagedDoltShouldReuseExisting(t *testing.T) {
 	tests := []struct {
 		name          string
