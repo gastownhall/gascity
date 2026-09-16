@@ -817,7 +817,7 @@ func livenessFromAgent(info agentInfo, present bool, err error) runtime.Liveness
 // and non-destructive) is the acceptable direction to err. The terminal set is
 // validated against live herdr output during rollout; extend it there.
 func agentAliveFromStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
+	switch normalizeAgentState(status) {
 	case "exited", "stopped", "dead", "gone", "terminated", "closed", "crashed":
 		return false
 	default:

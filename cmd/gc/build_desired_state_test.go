@@ -3805,7 +3805,9 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePriority := 10
+	// bd priorities are ascending-urgent: P0 outranks P1, so the stale slot's
+	// work is the one that wins the singleton cap.
+	stalePriority := 0
 	if _, err := store.Create(beads.Bead{
 		Title:    "stale assigned work",
 		Type:     "task",
@@ -5060,7 +5062,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
-		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads,
+		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
 	)
 
 	// No duplicate was minted: exactly one open bead carries the created session_name.
@@ -5167,6 +5169,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		clk,
 		&firstSyncStderr,
 		true,
+		nil,
 		nil,
 	)
 	stillDeferred, err := store.Get(stale.ID)
@@ -5284,6 +5287,77 @@ func TestDiscoverSessionBeadsSkipsStaleMaxOneWhenDependencyFloorDesired(t *testi
 
 	if _, ok := desired[stale.Metadata["session_name"]]; ok {
 		t.Fatalf("desired state includes stale duplicate dependency-floor sibling; keys=%v", mapKeys(desired))
+	}
+}
+
+// TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState
+// probes ga-pmafyc step 2: when the primary cfg-driven namedSpecs loop does not
+// run for a tick (e.g. because the city is suspended and buildDesiredState
+// short-circuits to an empty result before reaching that loop),
+// discoverSessionBeadsWithRoots rediscovers an already-open named session bead
+// directly from the live store. It must backfill tp.ConfiguredNamedIdentity /
+// tp.ConfiguredNamedMode / tp.Env["GC_SESSION_ORIGIN"] from the bead's own
+// already-persisted identity, mirroring what the namedSpecs loop
+// (build_desired_state.go ~1130-1139) sets on a normal tick. Without this
+// backfill, session_beads.go's isConfiguredNamed check (keyed on
+// tp.ConfiguredNamedIdentity) sees a false negative and clears the bead's
+// configured_named_* metadata, and templateParamsSessionOrigin falls through
+// to "ephemeral" instead of "named".
+func TestDiscoverSessionBeadsBackfillsConfiguredNamedIdentityOutsideDesiredState(t *testing.T) {
+	store := beads.NewMemStore()
+	named, err := store.Create(beads.Bead{
+		Title:  "gascity/worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/worker", "template:gascity/worker"},
+		Metadata: map[string]string{
+			"template":                   "gascity/worker",
+			"agent_name":                 "gascity/worker",
+			"session_name":               "s-worker-named",
+			"state":                      "awake",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, named))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "gascity",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	bp := &agentBuildParams{
+		cityPath:     t.TempDir(),
+		city:         cfg,
+		beadStore:    store,
+		sessionBeads: snapshot,
+		agents:       cfg.Agents,
+	}
+	// Empty desired simulates the primary cfg-driven namedSpecs loop not
+	// running this tick.
+	desired := map[string]TemplateParams{}
+
+	discoverSessionBeadsWithRoots(bp, cfg, desired, nil, nil, nil, io.Discard)
+
+	tp, ok := desired["s-worker-named"]
+	if !ok {
+		t.Fatalf("desired state missing rediscovered named session; keys=%v", mapKeys(desired))
+	}
+	if tp.ConfiguredNamedIdentity != "worker" {
+		t.Errorf("ConfiguredNamedIdentity = %q, want %q (rediscovery must backfill from the bead's own persisted identity)", tp.ConfiguredNamedIdentity, "worker")
+	}
+	if tp.ConfiguredNamedMode != "always" {
+		t.Errorf("ConfiguredNamedMode = %q, want %q", tp.ConfiguredNamedMode, "always")
+	}
+	if got := tp.Env["GC_SESSION_ORIGIN"]; got != "named" {
+		t.Errorf(`Env["GC_SESSION_ORIGIN"] = %q, want "named" (else templateParamsSessionOrigin falls through to "ephemeral")`, got)
 	}
 }
 
@@ -14055,5 +14129,85 @@ func TestBuildDesiredState_RigDispatcherOnLegacyCityStillProbesRigStore(t *testi
 	}
 	if ref := session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]; ref != "rig:fixture" {
 		t.Fatalf("gc.trigger_bead_store_ref = %q, want %q: a city that relocates nothing keeps the rig probe", ref, "rig:fixture")
+	}
+}
+
+// SESSION-RECON-015: an API-created agent session bead carries
+// session_origin=ephemeral with agent_name set and no pool markers
+// (pool_managed / pool_slot). On a multi-session template that bead is
+// user-created capacity, not controller-created pool capacity, so
+// desired-state construction must keep it — including when the same backing
+// template also carries a configured [[named_session]], which owns the
+// template's canonical identity but must not evict the separate ad-hoc
+// session bead.
+func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) {
+	const (
+		sessionName = "test-city--worker-adhoc"
+		agentName   = "worker-adhoc"
+	)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+	}{
+		{
+			name: "multi session agent",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+			},
+		},
+		{
+			name: "multi session agent with always named session",
+			cfg: &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:         "worker",
+					StartCommand: "true",
+					WorkQuery:    "printf ''",
+				}},
+				NamedSessions: []config.NamedSession{{
+					Template: "worker",
+					Mode:     "always",
+				}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  "adhoc worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel, "template:worker"},
+				Metadata: map[string]string{
+					"template":       "worker",
+					"session_name":   sessionName,
+					"agent_name":     agentName,
+					"state":          "active",
+					"session_origin": "ephemeral",
+				},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var stderr bytes.Buffer
+			dsResult := buildDesiredState("test-city", cityPath, time.Now().UTC(), tc.cfg, runtime.NewFake(), store, &stderr)
+			tp, ok := dsResult.State[sessionName]
+			if !ok {
+				t.Fatalf("API-created agent session %q missing from desired state, got keys %v; stderr=%s",
+					sessionName, mapKeys(dsResult.State), stderr.String())
+			}
+			if tp.TemplateName != "worker" {
+				t.Fatalf("desired[%q].TemplateName = %q, want worker", sessionName, tp.TemplateName)
+			}
+			if tp.ConfiguredNamedIdentity != "" {
+				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
+					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
 	}
 }

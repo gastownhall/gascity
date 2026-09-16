@@ -57,6 +57,9 @@ type AgentTranscriptResult struct {
 // sessionlog as the only production transcript parser in Phase 1.
 type SessionLogAdapter struct {
 	SearchPaths []string
+	// activity memoizes derived tail activity across the per-request handles a
+	// Factory hands out. Nil (the zero adapter) derives on every call.
+	activity *DerivedActivityMemo
 }
 
 // DiscoverTranscript returns the best available transcript path for a worker.
@@ -92,6 +95,9 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 // full-file parser diagnostics override, and these readers set none, so clearing
 // it removes a false signal rather than a real one.
 func (a SessionLogAdapter) TailMetaForProvider(provider, path string) (*sessionlog.TailMeta, error) {
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		return sessionlog.ExtractKimiTailMetaFromSearchPaths(a.SearchPaths, path)
+	}
 	if sessionlog.ProviderFamily(provider) == "codex" {
 		return sessionlog.ExtractCodexTailMetaFromSearchPaths(a.SearchPaths, path)
 	}
@@ -148,14 +154,20 @@ func (a SessionLogAdapter) InvocationUsage(provider, path, cursorID string) ([]s
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.
 func (a SessionLogAdapter) TailActivityForProvider(provider, path string) (TailActivity, error) {
+	if sessionlog.ProviderFamily(provider) == "kimi" {
+		meta, err := a.TailMetaForProvider(provider, path)
+		return tailActivity(meta), err
+	}
 	if !sessionlog.DerivesActivityFromHistory(provider) {
 		return a.TailActivity(path)
 	}
-	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
-	if err != nil || snapshot == nil {
-		return TailActivityUnknown, err
-	}
-	return snapshot.TailState.Activity, nil
+	return a.activity.resolve(path, func() (TailActivity, error) {
+		snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path, TailCompactions: 1})
+		if err != nil || snapshot == nil {
+			return TailActivityUnknown, err
+		}
+		return snapshot.TailState.Activity, nil
+	})
 }
 
 // TailActivity reads the transcript tail activity without loading full history.
@@ -348,7 +360,7 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		ProviderSessionID:     session.ID,
 		TranscriptStreamID:    filepath.Clean(path),
 		Generation: Generation{
-			ID:         fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()),
+			ID:         transcriptGenerationID(info),
 			ObservedAt: info.ModTime().UTC(),
 		},
 		Cursor: Cursor{

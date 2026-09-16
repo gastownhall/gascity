@@ -12278,3 +12278,51 @@ func TestDefaultScopeDoltDatabase(t *testing.T) {
 		})
 	}
 }
+
+// The first init attempt already treats "already initialized" as success. A
+// post-commit re-init that reports the same thing means the recovery worked, so
+// it must not turn a recovered rig into a hard `gc rig add` failure.
+func TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	cityConfig := `[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "gascity-packs")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var commits int
+	stubCommitDirtyScopeTables(t, func(string, string) (bool, error) {
+		commits++
+		return true, nil
+	})
+
+	alreadyErr := errors.New("bd init: already initialized")
+	var calls int
+	execute := func(_ string, _ []string, _ ...string) error {
+		calls++
+		if calls == 1 {
+			return errors.New(bdDirtyTablesErrText)
+		}
+		return alreadyErr
+	}
+
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "gsp", "gsp", execute)
+	if errors.Is(err, alreadyErr) {
+		t.Fatalf("initBeadsForDirWithExecutor error = %v, want the recovery to be treated as success", err)
+	}
+	if calls != 2 {
+		t.Fatalf("bd init attempts = %d, want 2 (initial + post-commit retry)", calls)
+	}
+	if commits != 1 {
+		t.Fatalf("commit rounds = %d, want 1", commits)
+	}
+}

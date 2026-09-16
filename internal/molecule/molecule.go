@@ -8,6 +8,7 @@ package molecule
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -305,6 +306,20 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// with no run chain still self-roots via its own id (ResolveRunID's
 	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+
+	// A resolved run-chain root may point at a molecule that has since fully
+	// closed (e.g. re-attaching a content bead to a fresh formula after its
+	// prior review round-trip closed cleanly) -- a dead pointer, not a live
+	// upstream workflow to honor. Only a still-open chain root is trusted;
+	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	if rootBeadID != attachBeadID {
+		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+			rootBeadID = attachBeadID
+		}
+	}
+
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.
@@ -1385,7 +1400,7 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 
 	b := beads.Bead{
 		Title:       formula.Substitute(step.Title, vars),
-		Description: formula.Substitute(step.Description, vars),
+		Description: substituteStepDescription(step, vars),
 		Type:        stepType,
 		Priority:    resolveStepPriority(step, priorityOverride),
 		Labels:      substituteLabels(step.Labels, vars),
@@ -1404,6 +1419,22 @@ func stepToBead(step formula.RecipeStep, vars map[string]string, priorityOverrid
 	}
 
 	return b
+}
+
+func substituteStepDescription(step formula.RecipeStep, vars map[string]string) string {
+	if step.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindSpec {
+		return formula.Substitute(step.Description, vars)
+	}
+
+	// A source-spec description is serialized JSON. Runtime values must be
+	// escaped for their JSON string context before placeholder substitution;
+	// otherwise newlines, quotes, or backslashes corrupt the retry snapshot.
+	escaped := make(map[string]string, len(vars))
+	for name, value := range vars {
+		encoded, _ := json.Marshal(value) // strings are always JSON-marshalable
+		escaped[name] = string(encoded[1 : len(encoded)-1])
+	}
+	return formula.Substitute(step.Description, escaped)
 }
 
 func preserveExecutableRootType(step formula.RecipeStep) bool {

@@ -1280,6 +1280,10 @@ type attachmentCachingProvider struct {
 	cache map[string]bool
 }
 
+func (p *attachmentCachingProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithError(p.Provider, name, processNames)
+}
+
 func (p *attachmentCachingProvider) GetMeta(name, key string) (string, error) {
 	if p.Provider == nil {
 		return "", nil
@@ -2334,11 +2338,15 @@ func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
-		Long: `Force-kill the runtime process for a session without changing its bead state.
+		Long: `Force-kill the runtime process for a session without discarding its work.
 
-The session remains marked as active, so the reconciler will detect the dead
-process and restart it according to the session's lifecycle rules. This is
-useful for unsticking a session without losing its conversation history.
+The kill syncs the session's lifecycle state to asleep and pokes the controller,
+so the reconciler observes the dead process promptly and restarts the session
+according to its lifecycle rules. This keeps Gas City bead continuity: hooks,
+assignments, and work still point at the same session bead. If the provider has
+resume metadata, Gas City may attempt provider resume, but
+provider conversation continuity is not guaranteed; confirm it with the agent or
+provider after restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),

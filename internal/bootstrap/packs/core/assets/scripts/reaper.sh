@@ -400,6 +400,35 @@ EOF
     printf '%s\n' "$refs"
 }
 
+# rig_name_for_db looks up the rig name bound to a non-city database, using
+# the same RIG_STORE_REFS_BY_DB map discover_rig_store_refs populates from
+# city.toml/site.toml [[rigs]] bindings. Prints the rig name and returns 0 on
+# a match; returns 1 with no output when $db has no rig binding (e.g. it is
+# neither the city store nor a discovered rig store).
+rig_name_for_db() {
+    local db="$1"
+    local entry
+    local entry_db
+    local store_ref
+
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        entry_db="${entry%%|*}"
+        store_ref="${entry#*|}"
+        [ "$entry_db" = "$db" ] || continue
+        case "$store_ref" in
+            rig:*)
+                printf '%s\n' "${store_ref#rig:}"
+                return 0
+                ;;
+        esac
+    done <<EOF
+$RIG_STORE_REFS_BY_DB
+EOF
+
+    return 1
+}
+
 workflow_root_store_ref_local_condition() {
     local db="$1"
     local alias="$2"
@@ -728,6 +757,36 @@ close_city_issue() {
     )
 }
 
+# close_rig_issue mirrors close_city_issue but closes an issue in a
+# rig-scoped bead store instead of the city store, via the --city+--rig flag
+# combination (see cmd/gc/cmd_bd.go resolveBdScopeTarget/extractBdScopeFlags).
+# Needed because sling-delivered nudge shadows are enqueued into the sling
+# target's rig store (cmd/gc/cmd_sling.go deliverSlingNudge), not the city
+# store, so the reaper's TTL sweep (Step 4) must be able to close them there
+# too (gastownhall/gascity#5285).
+close_rig_issue() {
+    local issue_id="$1"
+    local reason="$2"
+    local rig_name="$3"
+    # See close_city_issue above for why the reaper closes bare unless the
+    # caller explicitly requests --force.
+    local force="${4:-}"
+
+    if [ ! -d "$CITY_BEADS_DIR" ]; then
+        printf 'city bead store %s is unavailable' "$CITY_BEADS_DIR"
+        return 1
+    fi
+
+    (
+        cd "$CITY_ABS"
+        if [ -n "$force" ]; then
+            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --force --reason "$reason"
+        else
+            gc bd --city "$CITY_ABS" --rig "$rig_name" close "$issue_id" --reason "$reason"
+        fi
+    )
+}
+
 run_sql_change() {
     local db="$1"
     local label="$2"
@@ -1023,10 +1082,7 @@ while IFS= read -r DB; do
             fi
             SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
             TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        elif [ "$DB" != "$CITY_DB" ]; then
-            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
-        else
+        elif [ "$DB" = "$CITY_DB" ]; then
             while IFS= read -r issue_id; do
                 [ -z "$issue_id" ] && continue
                 if CLOSE_OUTPUT=$(close_city_issue "$issue_id" "ttl:expired by reaper" 2>&1); then
@@ -1037,6 +1093,29 @@ while IFS= read -r DB; do
                     record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB: $(sanitize_output "$CLOSE_OUTPUT")"
                 fi
             done <<< "$EXPIRED_IDS"
+        elif EXPIRED_RIG_NAME=$(rig_name_for_db "$DB"); then
+            # $DB is a rig-scoped store bound via a [[rigs]] entry in
+            # city.toml/site.toml (see discover_rig_store_refs). Nudge
+            # shadows created by a sling land here — deliverSlingNudge
+            # enqueues into the sling target's rig store, not the city
+            # store — so close them via gc bd --rig instead of only
+            # counting them as skipped (gastownhall/gascity#5285).
+            while IFS= read -r issue_id; do
+                [ -z "$issue_id" ] && continue
+                if CLOSE_OUTPUT=$(close_rig_issue "$issue_id" "ttl:expired by reaper" "$EXPIRED_RIG_NAME" 2>&1); then
+                    DB_EXPIRED_ISSUES_CLOSED=$((DB_EXPIRED_ISSUES_CLOSED + 1))
+                    TOTAL_EXPIRED_ISSUES_CLOSED=$((TOTAL_EXPIRED_ISSUES_CLOSED + 1))
+                    DB_MUTATIONS=$((DB_MUTATIONS + 1))
+                else
+                    record_anomaly "$DB" "closing expired nudge bead $issue_id failed for $DB (rig:$EXPIRED_RIG_NAME): $(sanitize_output "$CLOSE_OUTPUT")"
+                fi
+            done <<< "$EXPIRED_IDS"
+        else
+            # $DB is neither the city store nor a discovered rig store (e.g.
+            # an unbound or undiscoverable scope) — no scoped close path
+            # exists, so fall back to the prior skip+anomaly behavior.
+            SKIPPED_COUNT=$(printf '%s\n' "$EXPIRED_IDS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+            TOTAL_EXPIRED_ISSUES_SKIPPED=$((TOTAL_EXPIRED_ISSUES_SKIPPED + SKIPPED_COUNT))
         fi
     fi
 
@@ -1178,14 +1257,70 @@ if [ -d "$CITY_BEADS_DIR" ]; then
             _BACKUP_STATE="$CITY_BEADS_DIR/backup/backup_state.json"
             _BACKUP_FIELD="timestamp"
         fi
+        # Third case: a Dolt-native backup destination. Backups registered
+        # directly in the `dolt_backups` table (synced by a city order calling
+        # DOLT_BACKUP) never pass through bd, so bd writes neither state file
+        # and `bd backup status` reports "No backup has been performed yet"
+        # against a backup that is minutes old. Both branches above then take
+        # the absent path and the gate latches closed with no backup action able
+        # to clear it — a permanent per-tick escalation against real, current
+        # backups. This is consulted only as a SECOND OPINION, after the bd or
+        # legacy state file has already failed: it can rescue that false
+        # positive, and can never permit a prune the primary evidence refused.
+        dolt_native_backup_epoch() {
+            local urls url dir newest best=""
+            [ -n "$CITY_DB" ] || return 0
+            command -v dolt_sql >/dev/null 2>&1 || return 0
+            urls=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT url FROM dolt_backups;" 2>/dev/null \
+                | tail -n +2 | tr -d '\r' | grep -v '^$') || urls=""
+            while IFS= read -r url; do
+                url="${url%\"}"; url="${url#\"}"
+                # Only a file:// destination can be dated from here. A remote
+                # one (DoltHub &c.) carries no locally observable timestamp, so
+                # it is no evidence either way and is passed over. A scope whose
+                # ONLY destination is remote therefore yields nothing and the
+                # primary verdict stands.
+                case "$url" in
+                    file://*) dir="${url#file://}" ;;
+                    *) continue ;;
+                esac
+                [ -d "$dir" ] || continue
+                # Freshness is the newest object written into the backup, never
+                # `now`: if the syncing order stops, this ages out on its own
+                # and the gate correctly starts complaining again.
+                # Reduced with awk rather than `sort -rn | head -1`: under
+                # `set -o pipefail`, `head` exiting early SIGPIPEs `sort`, the
+                # pipeline reports 141 and the `|| newest=""` then discards a
+                # correct answer. That happens once the listing exceeds the pipe
+                # buffer — a few hundred files — which is exactly the busy
+                # destination this gate exists to read.
+                newest=$(find "$dir" -type f -printf '%T@\n' 2>/dev/null \
+                    | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
+                if [ -z "$newest" ]; then
+                    newest=$(find "$dir" -type f -exec stat -f '%m' {} + 2>/dev/null \
+                        | awk '{ if ($1+0 > m+0) m=$1 } END { if (NR) print m }') || newest=""
+                fi
+                case "$newest" in ''|*[!0-9.]*) continue ;; esac
+                newest="${newest%%.*}"
+                if [ -z "$best" ] || [ "$newest" -gt "$best" ]; then
+                    best="$newest"
+                fi
+            done <<EOF
+$urls
+EOF
+            [ -n "$best" ] && printf '%s\n' "$best"
+            return 0
+        }
+
         _PRUNE_SKIP=0
+        _PRUNE_SKIP_REASON=""
         if [ ! -f "$_BACKUP_STATE" ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=absent threshold=${_PRUNE_MAX_AGE}s)"
+            _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=absent"
             _PRUNE_SKIP=1
         else
             _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
             if [ -z "$_BACKUP_TS" ]; then
-                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
                 _PRUNE_SKIP=1
             else
                 # Real on-disk timestamps are RFC3339Nano. Truncate to whole
@@ -1198,16 +1333,86 @@ if [ -d "$CITY_BEADS_DIR" ]; then
                     || echo "")
                 _NOW_EPOCH=$(date -u '+%s')
                 if [ -z "$_BACKUP_EPOCH" ]; then
-                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=unparseable threshold=${_PRUNE_MAX_AGE}s)"
+                    _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=unparseable"
                     _PRUNE_SKIP=1
                 else
                     _BACKUP_AGE=$(( _NOW_EPOCH - _BACKUP_EPOCH ))
                     if [ "$_BACKUP_AGE" -gt "$_PRUNE_MAX_AGE" ]; then
-                        record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=${_BACKUP_AGE}s threshold=${_PRUNE_MAX_AGE}s)"
+                        _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=${_BACKUP_AGE}s"
                         _PRUNE_SKIP=1
                     fi
                 fi
             fi
+        fi
+
+        if [ "$_PRUNE_SKIP" -eq 1 ]; then
+            _DOLT_BACKUP_EPOCH="$(dolt_native_backup_epoch)"
+            if [ -n "$_DOLT_BACKUP_EPOCH" ]; then
+                _DOLT_BACKUP_AGE=$(( $(date -u '+%s') - _DOLT_BACKUP_EPOCH ))
+                if [ "$_DOLT_BACKUP_AGE" -le "$_PRUNE_MAX_AGE" ]; then
+                    _PRUNE_SKIP=0
+                    _PRUNE_SKIP_REASON=""
+                else
+                    _PRUNE_SKIP_REASON="$_PRUNE_SKIP_REASON dolt_backups=${_DOLT_BACKUP_AGE}s"
+                fi
+            fi
+        fi
+
+        if [ "$_PRUNE_SKIP" -eq 1 ]; then
+            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+        fi
+
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced directly
+        # into a SQL LIKE literal below (type-scope gate) and passed as bd's
+        # own --pattern flag further down. A value outside this charset
+        # (e.g. a single quote) would corrupt the guard's own COUNT query --
+        # id LIKE 'x' OR '1'='1' always matches, silently defeating the very
+        # guard it is supposed to be. Fail closed: reject before any SQL is
+        # built, matching the backup-age gate above. Inlined (not a shared
+        # helper like valid_database_identifier) because every per-file test
+        # harness in test/ extracts only this Step 6 block via awk, and a
+        # call to a helper defined outside that boundary would resolve to
+        # nothing in those harnesses.
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
+            case "$SESSION_BEAD_PATTERN" in
+                ''|*[!A-Za-z0-9_.*?-]*)
+                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+                    _PRUNE_SKIP=1
+                    ;;
+            esac
+        fi
+
+        # Type-scope gate: bd's prune SweepRequest has no issue_type filter
+        # (only ID glob + age), so a pattern like the default gm-* would
+        # delete any closed, non-session bead sharing that ID prefix. Cheap
+        # mechanical count mirroring bd's own prune candidate selection
+        # (pattern + closed + older-than), restricted to non-session rows --
+        # fail closed on a nonzero hit, matching the backup-age gate above.
+        # When the city database can't be resolved the count can't be
+        # computed at all; record once (like every other CITY_DB-unresolved
+        # branch in this file) and let bd's own prune proceed unverified --
+        # bd resolves its store independently of this file's direct-SQL
+        # CITY_DB, so blocking it here would regress that guarantee.
+        if [ "$_PRUNE_SKIP" -eq 0 ] && [ -n "$CITY_DB" ]; then
+            # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
+            # literal % or _ in a custom pattern would not round-trip.
+            _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
+            _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
+            case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
+            get_sql_count "$CITY_DB" "type scope guard" "
+                SELECT COUNT(*) FROM \`$CITY_DB\`.issues
+                WHERE id LIKE '$_TYPE_GUARD_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(NOW(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND issue_type != 'session'
+            "
+            if [ "$SQL_COUNT_RESULT" -gt 0 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: $SQL_COUNT_RESULT non-session bead(s) matching pattern=$SESSION_BEAD_PATTERN would be caught by prune (type scope guard)"
+                _PRUNE_SKIP=1
+            fi
+        elif [ "$_PRUNE_SKIP" -eq 0 ] && [ -z "$CITY_DB" ] && [ "${CITY_DB_ANOMALY_RECORDED:-0}" -eq 0 ]; then
+            record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or ${CITY:-}/.beads/metadata.json; session-prune type-scope guard disabled, prune proceeding unverified"
+            CITY_DB_ANOMALY_RECORDED=1
         fi
 
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")

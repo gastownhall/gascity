@@ -183,12 +183,10 @@ const wallMinuteLayout = "2006-01-02 15:04"
 //     match a real instant; the catch-up scan detects the gap and fires the
 //     order once at the first real minute after the jump.
 func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
-	fields := strings.Fields(a.Schedule)
-	if len(fields) != 5 {
-		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: want 5 fields, got %d", len(fields))}
+	if err := ValidateCronSchedule(a.Schedule); err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("bad cron schedule: %v", err)}
 	}
-
-	minute, hour, dom, month, dow := fields[0], fields[1], fields[2], fields[3], fields[4]
+	fields := strings.Fields(a.Schedule)
 
 	loc, err := resolveOrderLocation(a, now)
 	if err != nil {
@@ -196,12 +194,11 @@ func checkCron(a Order, now time.Time, lastRunFn LastRunFunc) TriggerResult {
 	}
 	now = now.In(loc)
 
+	// The schedule was validated above, so no parse error can reach here; a
+	// non-match is the safe reading if one ever did.
 	matchesAt := func(t time.Time) bool {
-		return cronFieldMatches(minute, t.Minute()) &&
-			cronFieldMatches(hour, t.Hour()) &&
-			cronFieldMatches(dom, t.Day()) &&
-			cronFieldMatches(month, int(t.Month())) &&
-			cronFieldMatches(dow, int(t.Weekday()))
+		matched, err := CronScheduleMatchesAt(fields, t)
+		return err == nil && matched
 	}
 	sameWallMinute := func(x, y time.Time) bool {
 		return x.Format(wallMinuteLayout) == y.Format(wallMinuteLayout)
@@ -287,29 +284,6 @@ func matchesInWallGap(matchesAt func(time.Time) bool, prev, t time.Time) bool {
 	return false
 }
 
-// cronFieldMatches checks if a single cron field matches a value.
-// Supports: "*" (any), exact integer, or comma-separated values.
-func cronFieldMatches(field string, value int) bool {
-	if field == "*" {
-		return true
-	}
-	for _, part := range strings.Split(field, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "*/") {
-			step, err := strconv.Atoi(strings.TrimPrefix(part, "*/"))
-			if err == nil && step > 0 && value%step == 0 {
-				return true
-			}
-			continue
-		}
-		n, err := strconv.Atoi(part)
-		if err == nil && n == value {
-			return true
-		}
-	}
-	return false
-}
-
 // checkCondition runs the check command and returns due if exit code is 0.
 // Uses a timeout to prevent hanging check scripts from blocking trigger evaluation.
 func checkCondition(a Order, opts TriggerOptions) TriggerResult {
@@ -357,6 +331,17 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 				reason = fmt.Sprintf("%s: %v", reason, cleanupErr)
 			}
 			return TriggerResult{Due: false, Reason: reason}
+		}
+		// A non-zero exit is the condition-probe contract, but *exec.ExitError
+		// also covers processes we killed and processes something else killed.
+		// Both predicates are load-bearing and neither subsumes the other:
+		// ctx.Err() == nil rules out our own cancel/deadline (on Windows a
+		// canceled check is Kill()ed and reports a clean-looking exit 1), and
+		// Exited() rules out a signal death we did not cause (OOM killer,
+		// external SIGKILL), where ExitCode() is a meaningless -1.
+		var exitErr *exec.ExitError
+		if ctx.Err() == nil && errors.As(err, &exitErr) && exitErr.Exited() {
+			return TriggerResult{Due: false, Reason: fmt.Sprintf("condition: not met (exit %d)", exitErr.ExitCode())}
 		}
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
 	}

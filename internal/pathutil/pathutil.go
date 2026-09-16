@@ -2,6 +2,7 @@
 package pathutil
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,26 +20,43 @@ func NormalizePathForCompare(path string) string {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
-	} else if resolved, ok := normalizeMissingPath(path); ok {
+	} else if resolved, resolveErr := ResolveNearestExistingAncestor(path); resolveErr == nil {
 		path = resolved
 	}
 	return canonicalizePlatformPathAlias(path)
 }
 
-func normalizeMissingPath(path string) (string, bool) {
-	var missing []string
-	for current := path; ; current = filepath.Dir(current) {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
-			for i := len(missing) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, missing[i])
-			}
-			return resolved, true
+// ResolveNearestExistingAncestor canonicalizes path by resolving symlinks on
+// its nearest existing ancestor and rejoining the remaining, not-yet-existing
+// tail segments onto that resolved ancestor. A plain filepath.EvalSymlinks
+// fails outright on any path with a missing leaf, so this is what lets a
+// not-yet-created path — a rig or git-clone destination, for example — be
+// compared or contained correctly even when it's reached through a
+// symlinked ancestor.
+//
+// path is expected to already be absolute; it is only filepath.Clean'd here,
+// not resolved against the working directory.
+//
+// It returns an error only when resolution fails for a reason other than an
+// ancestor simply not existing yet — e.g. a permission error or a symlink
+// loop — since walking further up the tree cannot recover from those.
+func ResolveNearestExistingAncestor(path string) (string, error) {
+	cur := filepath.Clean(path)
+	tail := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
 		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", false
+		if !os.IsNotExist(err) {
+			return "", err
 		}
-		missing = append(missing, filepath.Base(current))
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(path), nil
+		}
+		tail = filepath.Join(filepath.Base(cur), tail)
+		cur = parent
 	}
 }
 

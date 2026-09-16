@@ -1440,6 +1440,16 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.
+
 ```
 gc doctor [flags]
 ```
@@ -1451,10 +1461,14 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
+gc doctor --check controller
+gc doctor --check controller --check events-log
+gc doctor --check controller,events-log --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
@@ -1464,14 +1478,18 @@ gc doctor --json
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1484,7 +1502,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the
@@ -2043,12 +2062,13 @@ bead, because the environment alone cannot reliably name it: $GC_BEAD_ID exists
 only in the controller's dispatch condition environment, never in a session
 shell, and $GC_TRIGGER_BEAD_ID — exported to demand-spawned pool seats as a
 pool-level spawn marker — is absent on other seats (e.g. a warm seat bound
-after start) and never decides what a session claims; the pool is pull. It
-appears in the chain below only as a name fallback for work already claimed:
-for a vapor wisp the trigger IS the work bead. A formula step that must close
+after start) and never decides what a session claims; the pool is pull. Named
+singleton sessions can carry a stale $GC_TRIGGER_BEAD_ID for their entire
+lifetime, pointing at a different bead than the one currently claimed, so it
+must never be consulted ahead of the claim. A formula step that must close
 the bead it is running reads the stamp back here:
 
-    BEAD_ID="$&#123;GC_BEAD_ID:-$&#123;GC_TRIGGER_BEAD_ID:-$(gc hook current --id-only)&#125;&#125;"
+    BEAD_ID="$&#123;GC_BEAD_ID:-$(gc hook current --id-only)&#125;"
 
 The calling session is taken from $GC_SESSION_ID. Exits 1 when there is no
 session identity and when the session has claimed nothing, so a caller that
@@ -4096,11 +4116,15 @@ gc session close <session-id-or-alias> [flags]
 
 ## gc session kill
 
-Force-kill the runtime process for a session without changing its bead state.
+Force-kill the runtime process for a session without discarding its work.
 
-The session remains marked as active, so the reconciler will detect the dead
-process and restart it according to the session's lifecycle rules. This is
-useful for unsticking a session without losing its conversation history.
+The kill syncs the session's lifecycle state to asleep and pokes the controller,
+so the reconciler observes the dead process promptly and restarts the session
+according to its lifecycle rules. This keeps Gas City bead continuity: hooks,
+assignments, and work still point at the same session bead. If the provider has
+resume metadata, Gas City may attempt provider resume, but
+provider conversation continuity is not guaranteed; confirm it with the agent or
+provider after restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
@@ -4861,6 +4885,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.

@@ -2799,8 +2799,7 @@ func TestBeadsListKeepsARigBeadThatCollidesWithABindingID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	recensusAfterSeedingARelic(t, cityPath)
+	classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	rigHoldingID(t, cityPath, frozen.ID, "the rig's own row", "task")
 
 	var stdout, stderr bytes.Buffer
@@ -2835,8 +2834,7 @@ func TestBeadsListFilteredByStatusDropsTheFrozenCopy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	classStore := recensusAfterSeedingARelic(t, cityPath)
+	_, classStore := classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	if err := classStore.Close(frozen.ID); err != nil {
 		t.Fatalf("closing the binding's row: %v", err)
 	}
@@ -2905,8 +2903,7 @@ func TestBeadsListRefusesWhenTheOwnershipProbeFaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seeding the retained copy in the work store: %v", err)
 	}
-	classResidentWorkShapedBead(t, soleClassBindingStore(t, cityPath), frozen.ID, "the binding's live row")
-	recensusAfterSeedingARelic(t, cityPath)
+	classResidentWorkShapedBead(t, cityPath, frozen.ID, "the binding's live row")
 	var probe *idsFaultingClassStore
 	installWrappedClassBinding(t, cityPath, func(previous beads.Store) beads.Store {
 		probe = &idsFaultingClassStore{Store: previous, err: errors.New("the id index is corrupt")}
