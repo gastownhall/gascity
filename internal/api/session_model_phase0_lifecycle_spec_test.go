@@ -220,6 +220,63 @@ func TestPhase0HandleSessionWake_NamedIdentityAfterTerminalCloseUsesFreshCanonic
 	}
 }
 
+// A closed lifecycle record can retain its runtime name when it was drained by
+// an older lifecycle path. Resolving the configured identity must still create
+// its fresh canonical successor; the historical record remains closed.
+func TestPhase0HandleSessionWake_NamedIdentityIgnoresClosedDrainedNameHolder(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	if err != nil {
+		t.Fatalf("find named session spec: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected configured named session spec")
+	}
+	runtimeName := spec.SessionName
+
+	closed, err := fs.cityBeadStore.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": runtimeName,
+			"state":        string(session.StateDrained),
+			"template":     "worker",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed drained session: %v", err)
+	}
+	if err := fs.cityBeadStore.Close(closed.ID); err != nil {
+		t.Fatalf("close drained session: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/worker/wake"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wake named identity with closed drained name holder status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	historical, err := fs.cityBeadStore.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("get historical session: %v", err)
+	}
+	if historical.Status != "closed" || historical.Metadata["session_name"] != runtimeName {
+		t.Fatalf("historical session was mutated: %#v", historical)
+	}
+	all, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(session): %v", err)
+	}
+	if len(all) != 1 || all[0].ID == closed.ID {
+		t.Fatalf("open session beads = %#v, want one fresh successor", all)
+	}
+	if got := all[0].Metadata["session_name"]; got != runtimeName {
+		t.Fatalf("successor session_name = %q, want %q", got, runtimeName)
+	}
+}
+
 func TestPhase0HandleSessionWake_NamedIdentitySkipsContinuityIneligibleHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
