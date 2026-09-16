@@ -646,10 +646,11 @@ environment, so set these at orchestrator start to customize routing:
   before the wake blocks, so a tripped bound costs the wake, not the
   message, and the script still exits 0.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
-  `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
-  (default: unset, no completion nudge). Deployments that relied on the
-  old hardcoded completion nudges to a health-patrol session should set
-  this to restore that loop.
+  `MAINTENANCE_DONE:`, `MAINTENANCE_WARN:`, and `MAINTENANCE_ESCALATE:`
+  summaries when a maintenance run completes, crosses a warning
+  threshold, or leaves work only an operator can finish (default: unset,
+  no nudge). Deployments that relied on the old hardcoded completion
+  nudges to a health-patrol session should set this to restore that loop.
 
 Common root causes, in rough order of frequency:
 

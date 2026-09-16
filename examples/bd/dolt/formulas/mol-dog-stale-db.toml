@@ -171,6 +171,27 @@ fail_open_after_drain() {
   exit 1
 }
 
+# close_work_bead presents the identity the claim was recorded under: bd's
+# ownership guard compares the closer's actor against the assignee verbatim
+# (we-m34w5). `gc hook --claim` picks that identity as GC_ALIAS, then
+# GC_SESSION_ID, then BEADS_ACTOR, GC_AGENT and GC_SESSION_NAME
+# (hookClaimAssigneeIdentity); this chain mirrors it. The session id must
+# outrank BEADS_ACTOR: an unaliased pool dog — the shipped dog, with
+# max_active_sessions and no namepool — claims under its session bead id
+# while its BEADS_ACTOR is the slot name every occupant of that slot reuses,
+# and presenting the slot name is refused. No identity resolved means no
+# --actor flag — bd then applies its own actor chain. CLOSE_ACTOR stays set
+# for the refusal report.
+close_work_bead() {
+  local reason="$1"
+  CLOSE_ACTOR="${GC_ALIAS:-${GC_SESSION_ID:-${BEADS_ACTOR:-${GC_AGENT:-${GC_SESSION_NAME:-}}}}}"
+  if [ -n "$CLOSE_ACTOR" ]; then
+    bd close "$WORK_BEAD" --actor "$CLOSE_ACTOR" --reason "$reason"
+  else
+    bd close "$WORK_BEAD" --reason "$reason"
+  fi
+}
+
 if ! gc dolt-cleanup --json --probe > "$SCAN_FILE"; then
   append_report_note "scan (dry-run failed)" "$SCAN_FILE"
   run_or_warn "emit dry-run failure escalation" gc event emit mol-dog-stale-db.escalate \
@@ -317,7 +338,27 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"
+# A refused terminal close must leave evidence, never a clean drain: under
+# set -euo pipefail an unguarded failure aborts the script, the EXIT trap
+# still drain-acks, and the controller re-dispatches a fresh agent against
+# the still-open bead forever (we-m34w5: 15 wakes in ~40 minutes). Only an
+# operator can finish this, so it escalates like every other operator path
+# in this script, carrying bd's refusal — it names the assignee and the actor
+# it compared — and the actor this run presented.
+CLOSE_FILE="$TMP_DIR/close.log"
+if ! close_work_bead "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" > "$CLOSE_FILE" 2>&1; then
+  cat "$CLOSE_FILE" >&2
+  CLOSE_REFUSAL="$(tr '\n' ' ' < "$CLOSE_FILE")"
+  CLOSE_REFUSAL_MESSAGE="terminal bd close refused for ${WORK_BEAD} (actor presented: ${CLOSE_ACTOR:-none}): ${CLOSE_REFUSAL:-no error text}"
+  run_or_warn "send close-refused escalation" send_escalation \
+    "ESCALATION: stale-db terminal close refused for ${WORK_BEAD} [HIGH]" \
+    "${CLOSE_REFUSAL_MESSAGE}. The bead is still open behind a drained session, so the controller re-dispatches a fresh dog on every firing until it is closed by hand with the assignee identity: bd show ${WORK_BEAD}, then bd close ${WORK_BEAD} --actor <assignee>."
+  run_or_warn "emit close-refused escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "${CLOSE_REFUSAL_MESSAGE}; leaving work bead open — close it by hand with the assignee identity"
+  maintenance_notice "MAINTENANCE_ESCALATE: stale-db terminal close REFUSED for ${WORK_BEAD}; an open bead behind a clean drain re-dispatches forever"
+  fail_open_after_drain "${CLOSE_REFUSAL_MESSAGE}; leaving work bead open"
+fi
+cat "$CLOSE_FILE"
 drain_ack_once # drain-ack before normal exit
 exit
 ```
