@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -24,7 +25,7 @@ func TestStatusProvider_ForwardsRelaunch(t *testing.T) {
 	if err := fake.Start(context.Background(), "s", runtime.Config{Command: "c"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	rp, ok := newBoundedStatusProvider(fake).(runtime.RelaunchProvider)
+	rp, ok := newBoundedStatusProvider(fake, time.Second).(runtime.RelaunchProvider)
 	if !ok {
 		t.Fatal("statusProvider does not implement runtime.RelaunchProvider")
 	}
@@ -35,7 +36,7 @@ func TestStatusProvider_ForwardsRelaunch(t *testing.T) {
 		t.Errorf("forwarded Relaunch calls = %d, want 1", got)
 	}
 
-	noRP := newBoundedStatusProvider(noRelaunchProvider{Provider: runtime.NewFake()}).(runtime.RelaunchProvider)
+	noRP := newBoundedStatusProvider(noRelaunchProvider{Provider: runtime.NewFake()}, time.Second).(runtime.RelaunchProvider)
 	if err := noRP.Relaunch(context.Background(), "s", runtime.Config{}); !errors.Is(err, runtime.ErrRelaunchUnsupported) {
 		t.Errorf("Relaunch err = %v, want ErrRelaunchUnsupported", err)
 	}

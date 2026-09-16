@@ -202,7 +202,17 @@ func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath stri
 	if err != nil {
 		return nil, err
 	}
-	return newBoundedStatusProvider(sp), nil
+	return newBoundedStatusProvider(sp, statusProbeTimeoutForCity(cfg)), nil
+}
+
+// statusProbeTimeoutForCity resolves the per-call runtime status probe budget
+// for cfg. A nil city — the callers that bind a provider before any config is
+// loaded — gets the built-in default.
+func statusProbeTimeoutForCity(cfg *config.City) time.Duration {
+	if cfg == nil {
+		return config.DefaultStatusProbeTimeout
+	}
+	return cfg.Session.StatusProbeTimeoutDuration()
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
