@@ -72,6 +72,122 @@ func TestStoreGetSpeaksInfo(t *testing.T) {
 	}
 }
 
+// TestStoreGetProjectsLastWokeAtFromLocalString proves Get reads
+// Info.LastWokeAt from clone-local storage, not durable Bead.Metadata — the
+// read-side half of the last_woke_at cutover (ga-igcny0.1.2.1 Phase B). The
+// fixture carries no durable last_woke_at at all (the post-migration steady
+// state); only a clone-local value is seeded, and the projection must still
+// surface it as the current value.
+func TestStoreGetProjectsLastWokeAtFromLocalString(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"state": "active"})
+	mem := beads.NewMemStoreFrom(1, []beads.Bead{b}, nil)
+	if err := mem.SetLocalString("s-1", "last_woke_at", "2026-08-12T00:00:00Z"); err != nil {
+		t.Fatalf("SetLocalString (seed): %v", err)
+	}
+	is := NewStore(beads.SessionStore{Store: mem})
+
+	got, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastWokeAt != "2026-08-12T00:00:00Z" {
+		t.Errorf("Get LastWokeAt = %q, want %q (from clone-local storage; durable Metadata never carried the key)", got.LastWokeAt, "2026-08-12T00:00:00Z")
+	}
+}
+
+// TestStoreGetFallsBackToDurableLastWokeAtWhenLocalUntouched pins the
+// durable-fallback half of Store.projectWithLocalOverlay: a bead whose
+// last_woke_at lives only in durable Bead.Metadata — because it predates the
+// last_woke_at cutover (ga-igcny0.1.2.1 Phase B), or was only ever touched
+// via session.Tx, which writes durable directly and never calls
+// SetLocalString (see storeTx.ApplyPatch) — reads back its real durable
+// value, not blank. GetLocalString returns ("", nil) both when a key was
+// explicitly cleared and when it was never set (SetLocalString's
+// empty-clears contract), so the overlay cannot tell "never touched" apart
+// from "cleared" by itself; it relies on the write-side guarantee that an
+// explicit clear also clears durable (splitLocalMetadataPatch /
+// setMetadataValue in store.go), so an empty local read always means
+// "durable is authoritative here," never "a real clear was silently lost."
+// See TestGetReflectsApplyPatch (store_test.go) for the paired case — an
+// explicit clear through Store.ApplyPatch — which pins that durable agrees
+// with local ("") after a real clear, so this fallback does not resurrect a
+// stale value there.
+func TestStoreGetFallsBackToDurableLastWokeAtWhenLocalUntouched(t *testing.T) {
+	b := sessionBeadFixture("s-durable-only", "open", map[string]string{
+		"state":        "active",
+		"last_woke_at": "2026-08-01T00:00:00Z",
+	})
+	store := seedSessionStore(t, b)
+	is := NewStore(store)
+
+	got, err := is.Get("s-durable-only")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastWokeAt != "2026-08-01T00:00:00Z" {
+		t.Errorf("Get LastWokeAt = %q, want the durable value %q (clone-local was never written, so the overlay falls back to durable)", got.LastWokeAt, "2026-08-01T00:00:00Z")
+	}
+}
+
+// panicsOnGetLocalStringStore is a beads.Store double that implements only Get
+// and List by embedding the bare interface, leaving every other method —
+// including GetLocalString — as the promoted-but-nil embedded value. This is
+// the exact test-double shape used throughout the repo (e.g. cmd/gc's
+// lookupPoolSessionNameCandidatesStore, internal/api's pathAliasFakeStore):
+// a partial mock built by embedding beads.Store and overriding only the one
+// or two methods the test exercises. Calling any unoverridden method panics
+// with a nil pointer dereference.
+type panicsOnGetLocalStringStore struct {
+	beads.Store
+	beads []beads.Bead
+}
+
+func (s panicsOnGetLocalStringStore) Get(id string) (beads.Bead, error) {
+	for _, b := range s.beads {
+		if b.ID == id {
+			return b, nil
+		}
+	}
+	return beads.Bead{}, beads.ErrNotFound
+}
+
+func (s panicsOnGetLocalStringStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return s.beads, nil
+}
+
+// TestStoreGetAndListSurviveGetLocalStringPanic proves Get and List fall back
+// to the durable last_woke_at via safeGetLocalString instead of panicking
+// when the underlying beads.Store is a partial double whose GetLocalString
+// resolves to a promoted nil embedded interface method. This is the failure
+// mode hit by TestLookupPoolSessionNames_DoesNotRecoverOwnedPoolSessionNameSlot
+// (cmd/gc) and TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent
+// (internal/api), reproduced directly against this package's own
+// GetLocalString-calling overlay rather than through those callers.
+func TestStoreGetAndListSurviveGetLocalStringPanic(t *testing.T) {
+	b := sessionBeadFixture("s-panic", "open", map[string]string{
+		"state":        "active",
+		"last_woke_at": "2026-08-01T00:00:00Z",
+	})
+	double := panicsOnGetLocalStringStore{beads: []beads.Bead{b}}
+	is := NewStore(beads.SessionStore{Store: double})
+
+	got, err := is.Get("s-panic")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.LastWokeAt != "2026-08-01T00:00:00Z" {
+		t.Errorf("Get LastWokeAt = %q, want durable fallback %q (not a panic)", got.LastWokeAt, "2026-08-01T00:00:00Z")
+	}
+
+	all, err := is.List("", "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 1 || all[0].LastWokeAt != "2026-08-01T00:00:00Z" {
+		t.Fatalf("List = %+v, want one Info with durable fallback LastWokeAt", all)
+	}
+}
+
 // TestStoreGetNotFound asserts a missing session id surfaces a not-found error.
 func TestStoreGetNotFound(t *testing.T) {
 	store := seedSessionStore(t)
