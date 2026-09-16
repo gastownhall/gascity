@@ -315,11 +315,12 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 // Dockerfile.base now forces x/crypto, x/net, x/text and thrift forward in the gh and
 // Dolt builds the same way it forces grpc, so a waiver on those paths would let the
 // scan gate mask a regressed rebuild instead of proving the fix holds. The reviewed
-// set is the three CVEs published against the grpc and thrift versions those builds
-// pin, carried over from main's time-boxed bridge and held to exactly the paths the
-// scan reported; TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and
-// statements. kubectl keeps the x/text waiver because it is an upstream-signed
-// prebuilt this repo installs rather than builds. gc's module waivers are enforced
+// set is the two surviving CVEs -- CVE-2026-56852 for kubectl and CVE-2026-43871,
+// published against the thrift 0.23.0 the Dolt build still pins -- carried over from
+// main's time-boxed bridge and held to exactly the paths the scan reported;
+// TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and statements.
+// kubectl keeps the x/text waiver because it is an upstream-signed prebuilt this
+// repo installs rather than builds. gc's module waivers are enforced
 // separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
@@ -379,7 +380,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				continue
 			}
 			if rebuiltPaths[p] {
-				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and bd's pinned source already selects them, so move the module forward in that build instead of waiving the path", v.ID, p)
+				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc and thrift forward, so move the module forward in that build instead of waiving the path", v.ID, p)
 			}
 		}
 	}

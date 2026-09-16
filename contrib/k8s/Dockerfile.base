@@ -21,8 +21,10 @@ ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
 ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
 ARG GRPC_VERSION=1.83.2
 # Patched module versions forced into the gh and Dolt rebuilds below, matching
-# the versions this repo's own go.mod carries. The rebuilt bd takes only the
-# grpc override, so it does not track these.
+# the versions this repo's own go.mod carries. The rebuilt bd tracks its own
+# GRPC_VERSION and THRIFT_VERSION in contrib/k8s/Dockerfile.agent; its thrift
+# floor is 0.24.0, deliberately ahead of the 0.23.0 below, which is Dolt's pin.
+# The other overrides here are gh/Dolt only.
 # Each build applies these in ascending-constraint order: a later `go get` can
 # roll an earlier one back, and only the rolled-back module's own assertion
 # would catch it. XMOD_VERSION is the newest constraint, so it goes last.
