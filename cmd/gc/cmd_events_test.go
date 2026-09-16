@@ -1364,6 +1364,7 @@ type testEventRoutes struct {
 	cityStream       func(http.ResponseWriter, *http.Request)
 	supervisorEvents func(http.ResponseWriter, *http.Request)
 	supervisorStream func(http.ResponseWriter, *http.Request)
+	fallback         func(http.ResponseWriter, *http.Request)
 }
 
 func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server {
@@ -1396,6 +1397,10 @@ func newEventsTestServer(t *testing.T, routes testEventRoutes) *httptest.Server 
 			}
 			routes.supervisorStream(w, r)
 		default:
+			if routes.fallback != nil {
+				routes.fallback(w, r)
+				return
+			}
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 	}))
