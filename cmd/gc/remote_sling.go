@@ -105,12 +105,17 @@ func fetchRemoteCityConfig(c *api.Client, target *remoteTarget) (remoteCityConfi
 		}
 	}
 	// Projected agent dirs may be city-relative, and workdir.ConfiguredRigName
-	// resolves those against the city root. The status snapshot carries that root;
-	// without it a relative dir would resolve to nothing and the predicate would
-	// answer for the wrong store.
-	if st, err := c.GetStatus(); err == nil {
-		out.cityPath = strings.TrimSpace(st.Body.CityPath)
+	// resolves those against the city root. The status snapshot carries that root.
+	// A failure here is FATAL rather than tolerated: with no root a relative
+	// agent dir resolves to no rig at all, and the predicate would then answer
+	// "reads the city store" for a rig-scoped target — a false agreement, which
+	// is the one thing that makes a pre-flight worse than no pre-flight. A
+	// pre-flight may only answer with inputs it actually obtained.
+	st, err := c.GetStatus()
+	if err != nil {
+		return remoteCityConfig{}, fmt.Errorf("read hosted city root: %w", err)
 	}
+	out.cityPath = strings.TrimSpace(st.Body.CityPath)
 	return out, nil
 }
 

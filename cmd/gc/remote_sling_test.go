@@ -24,10 +24,11 @@ type remoteCity struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	beadJSON  string
-	cfgJSON   string
-	path      string
-	mutations []string
+	beadJSON   string
+	cfgJSON    string
+	path       string
+	hideStatus bool // simulates a city that cannot answer GET /status
+	mutations  []string
 }
 
 // remoteCityRoot is the city root the hosted city reports for itself. The agent
@@ -58,6 +59,10 @@ func (rc *remoteCity) serve(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/config"):
 		_, _ = io.WriteString(w, rc.cfgJSON)
 	case strings.HasSuffix(r.URL.Path, "/status"):
+		if rc.hideStatus {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		_, _ = w.Write([]byte(`{"city":"mc","path":"` + rc.path + `"}`))
 	case strings.Contains(r.URL.Path, "/bead/"):
 		if strings.Contains(r.URL.Path, "MISSING") {
@@ -188,6 +193,39 @@ func TestCmdSlingRemote_DryRunSurfacesNonTaskClass(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "convoy") {
 		t.Errorf("preview does not name the class: %q", out.String())
+	}
+	if n := rc.countMutations(); n != 0 {
+		t.Errorf("dry-run issued %d mutating request(s)", n)
+	}
+}
+
+// A pre-flight may only answer with inputs it actually obtained. If the city
+// root cannot be read, a city-relative agent dir resolves to no rig at all and
+// the reachability predicate would answer "reads the city store" for a
+// rig-scoped target — a false green. This must refuse, not preview.
+func TestCmdSlingRemote_DryRunRefusesWhenCityRootUnreadable(t *testing.T) {
+	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
+	// A city-relative agent dir: only the city root can resolve it.
+	agents := `[{"name":"worker","dir":"rigs/alpha","scope":"rig"}]`
+	rc := &remoteCity{
+		t:          t,
+		beadJSON:   remoteBeadJSON("task", ""),
+		cfgJSON:    remoteCfgJSON(rigs, agents),
+		hideStatus: true,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(rc.serve))
+	defer srv.Close()
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
+		[]string{"worker", "al-7"}, false, false, false, "", nil, "",
+		false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	combined := out.String() + errb.String()
+	if strings.Contains(combined, "store agreement: agrees") {
+		t.Errorf("printed an agreement it could not have computed: %q", combined)
 	}
 	if n := rc.countMutations(); n != 0 {
 		t.Errorf("dry-run issued %d mutating request(s)", n)
