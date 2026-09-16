@@ -4,19 +4,23 @@ on:
   pull_request_target:
     types:
       - labeled
-
-permissions:
-  actions: write
-  contents: read
-  pull-requests: read
+      - opened
+      - ready_for_review
+      - reopened
+      - synchronize
 
 jobs:
   dispatch-suite:
     name: Dispatch requested suite
     if: >-
-      github.event.label.name == 'needs-mac' ||
-      github.event.label.name == 'needs-review-formulas'
+      github.event.action == 'labeled' &&
+      (github.event.label.name == 'needs-mac' ||
+      github.event.label.name == 'needs-review-formulas')
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
     steps:
       # This workflow never checks out or runs pull request code. It reads the
       # trusted base allowlist, then dispatches a dedicated workflow with the
@@ -34,7 +38,7 @@ jobs:
           LABEL_NAME: ${{ github.event.label.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_LOGIN: ${{ github.event.pull_request.user.login }}
           PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -43,28 +47,25 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import subprocess
           import urllib.parse
           import urllib.request
-          from pathlib import Path
 
           label = os.environ["LABEL_NAME"]
           draft = os.environ.get("PR_DRAFT", "").lower() == "true"
-          author = os.environ.get("PR_AUTHOR", "").strip()
+          login = os.environ.get("PR_LOGIN", "").strip()
           association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
 
           if draft:
               print("PR is draft; not dispatching a label-requested suite")
               raise SystemExit(0)
 
-          allowlist = set()
-          for raw_line in Path(".github/blacksmith-allowlist.txt").read_text(encoding="utf-8").splitlines():
-              line = raw_line.split("#", 1)[0].strip()
-              if line:
-                  allowlist.add(line.lower())
-
-          trusted = association in {"OWNER", "MEMBER", "COLLABORATOR"} or author.lower() in allowlist
-          if not trusted:
-              print(f"PR author {author or '<unknown>'} is not trusted for label-dispatched suites")
+          trust_check = subprocess.run(
+              ["python3", ".github/workflows/scripts/pr_trust_check.py"],
+              env={**os.environ, "PR_LOGIN": login, "PR_ASSOCIATION": association},
+          )
+          if trust_check.returncode != 0:
+              print(f"PR author {login or '<unknown>'} is not trusted for label-dispatched suites")
               raise SystemExit(0)
 
           workflows = {
@@ -103,3 +104,132 @@ jobs:
 
           print(f"Dispatched {workflow} for PR #{inputs['pr_number']} at {inputs['head_repo']}@{inputs['head_sha']}")
           PY
+
+  auto-label-path-sensitive:
+    name: Auto-label path-sensitive PRs for Mac Regression
+    if: github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: auto-label-path-sensitive-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      # Mirrors dispatch-suite: never checks out or runs pull request code.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Label path-sensitive PRs and dispatch Mac Regression
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_LOGIN: ${{ github.event.pull_request.user.login }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_REPO" != "$REPOSITORY" ]; then
+            echo "decision=fork head_repo=$HEAD_REPO repository=$REPOSITORY"
+            exit 0
+          fi
+
+          files=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')
+
+          matched=0
+          for file in $files; do
+            case "$file" in
+              internal/pathutil/**)
+                echo "decision=matched family=internal/pathutil/** file=$file"
+                matched=1
+                ;;
+              internal/fsys/**)
+                echo "decision=matched family=internal/fsys/** file=$file"
+                matched=1
+                ;;
+              internal/testutil/path.go)
+                echo "decision=matched family=internal/testutil/path.go file=$file"
+                matched=1
+                ;;
+              cmd/gc/path_*.go)
+                echo "decision=matched family=cmd/gc/path_*.go file=$file"
+                matched=1
+                ;;
+              cmd/gc/*_path*.go)
+                echo "decision=matched family=cmd/gc/*_path*.go file=$file"
+                matched=1
+                ;;
+              cmd/gc/city_discovery*.go)
+                echo "decision=matched family=cmd/gc/city_discovery*.go file=$file"
+                matched=1
+                ;;
+              cmd/gc/*worktree*.go)
+                echo "decision=matched family=cmd/gc/*worktree*.go file=$file"
+                matched=1
+                ;;
+              cmd/gc/cmd_supervisor_city*.go)
+                echo "decision=matched family=cmd/gc/cmd_supervisor_city*.go file=$file"
+                matched=1
+                ;;
+              .github/actions/setup-gascity-macos/**)
+                echo "decision=matched family=.github/actions/setup-gascity-macos/** file=$file"
+                matched=1
+                ;;
+              **/*_darwin.go)
+                echo "decision=matched family=**/*_darwin.go file=$file"
+                matched=1
+                ;;
+              **/*_darwin_test.go)
+                echo "decision=matched family=**/*_darwin_test.go file=$file"
+                matched=1
+                ;;
+            esac
+          done
+
+          if [ "$matched" -eq 0 ]; then
+            echo "decision=unmatched pr_number=$PR_NUMBER"
+            exit 0
+          fi
+
+          current_labels=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')
+          if echo "$current_labels" | grep -qx "needs-mac"; then
+            echo "decision=already-labeled pr_number=$PR_NUMBER"
+          else
+            gh pr edit "$PR_NUMBER" --add-label needs-mac
+            echo "labeled needs-mac pr_number=$PR_NUMBER"
+          fi
+
+          if [ "$PR_DRAFT" = "true" ]; then
+            echo "decision=draft pr_number=$PR_NUMBER"
+            exit 0
+          fi
+
+          if ! python3 .github/workflows/scripts/pr_trust_check.py; then
+            echo "decision=untrusted login=$PR_LOGIN"
+            exit 0
+          fi
+
+          in_flight=$(gh run list --workflow mac-regression.yml --json status,headSha \
+            --jq "[.[] | select(.headSha == \"$HEAD_SHA\") | select(.status == \"queued\" or .status == \"in_progress\")] | length")
+          if [ "$in_flight" -gt 0 ]; then
+            echo "decision=already-dispatched pr_number=$PR_NUMBER head_sha=$HEAD_SHA"
+            exit 0
+          fi
+
+          gh workflow run mac-regression.yml \
+            --ref "$BASE_REF" \
+            -f suite=needs-mac \
+            -f pr_number="$PR_NUMBER" \
+            -f head_repo="$HEAD_REPO" \
+            -f head_ref="$HEAD_REF" \
+            -f head_sha="$HEAD_SHA"
+          echo "decision=dispatched pr_number=$PR_NUMBER head_sha=$HEAD_SHA"
