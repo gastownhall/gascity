@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -531,5 +532,108 @@ func TestResumeInjectsSSHKeepalive(t *testing.T) {
 				t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", cfg.Env["GIT_SSH_COMMAND"])
 			}
 		})
+	}
+}
+
+// A seat sitting at an approval or selection prompt is waiting on a human, not
+// stalled. The wait-idle paths reached that conclusion independently of
+// sendLocked and delivered anyway, typing into the open prompt.
+func TestTryWaitIdleNudgeRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	if _, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "mail", "hello", "", runtime.Config{}); !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudge error = %v, want %v", err, ErrPendingInteraction)
+	}
+	for _, call := range sp.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			t.Fatalf("nudged a session awaiting human input: %#v", sp.Calls)
+		}
+	}
+}
+
+func TestTryWaitIdleNudgeLiveOnlyRefusesPendingInteraction(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("precondition: CreateSession should leave the runtime running")
+	}
+	sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	if _, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "mail", "hello"); !errors.Is(err, ErrPendingInteraction) {
+		t.Fatalf("TryWaitIdleNudgeLiveOnly error = %v, want %v", err, ErrPendingInteraction)
+	}
+}
+
+// The guard must sit after ensureRunning, as sendLocked's does. A dormant
+// session has no pane to probe, so checking first turns a managed wake into
+// ErrSessionNotFound and the session is never started.
+func TestTryWaitIdleNudgeStillWakesDormantSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude",
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := sp.Stop(info.SessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if sp.IsRunning(info.SessionName) {
+		t.Fatalf("precondition: session must be dormant before the nudge")
+	}
+
+	sp.Calls = nil
+	if _, err := mgr.TryWaitIdleNudge(context.Background(), info.ID, "mail", "hello", "claude --resume", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("TryWaitIdleNudge on a dormant session = %v, want the wake to proceed", err)
+	}
+	if !sp.IsRunning(info.SessionName) {
+		t.Fatalf("dormant session was not started: %#v", sp.Calls)
+	}
+	// Pin the ORDER, not just the outcome. A fake reports no pending
+	// interaction for a session that does not exist, but a real pane probe
+	// returns ErrSessionNotFound, so a guard placed ahead of the start would
+	// refuse the wake in production while this fake still passed.
+	started := -1
+	for i, call := range sp.Calls {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			started = i
+			break
+		}
+	}
+	if started < 0 {
+		t.Fatalf("no Start recorded for the dormant session: %#v", sp.Calls)
+	}
+	for i, call := range sp.Calls {
+		if call.Method == "Pending" && call.Name == info.SessionName && i < started {
+			t.Fatalf("probed for a pending interaction before starting the session: %#v", sp.Calls)
+		}
 	}
 }
