@@ -89,7 +89,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return err
 	}
 
-	err = doStartSession(ctx, p.startOps(cfg), name, cfg, p.cfg.SetupTimeout)
+	err = doStartSession(ctx, p.startOps(cfg, true), name, cfg, p.cfg.SetupTimeout)
 	if err == nil {
 		p.cache.Invalidate()
 		return nil
@@ -224,7 +224,7 @@ func (p *Provider) cleanupFailedStart(name string, cfg runtime.Config) {
 // RunLive re-applies session_live commands to a running session.
 // Called by the reconciler when only session_live config has changed.
 func (p *Provider) RunLive(name string, cfg runtime.Config) error {
-	runSessionLive(context.Background(), p.startOps(cfg), name, cfg, os.Stderr, p.cfg.SetupTimeout)
+	runSessionLive(context.Background(), p.startOps(cfg, false), name, cfg, os.Stderr, p.cfg.SetupTimeout)
 	return nil
 }
 
@@ -244,7 +244,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// launchOrchestration and then recorded nowhere: success returned with
 	// neither confirmed delivery nor the durable evidence that suppression
 	// is predicated on.
-	if err := doRelaunchSession(ctx, p.startOps(cfg), name, cfg, p.cfg.SetupTimeout); err != nil {
+	if err := doRelaunchSession(ctx, p.startOps(cfg, false), name, cfg, p.cfg.SetupTimeout); err != nil {
 		return err
 	}
 	p.cache.Invalidate()
@@ -866,6 +866,11 @@ type tmuxStartOps struct {
 	// pane capture and crash artifact this startup produces. Built by
 	// newTmuxStartOps; a zero value simply redacts nothing.
 	secrets []string
+	// freshStart marks a session this startup created from nothing, so a
+	// partially-delivered startup prompt can be discarded outright. Relaunch
+	// and RunLive drive an already-warm box and must leave it standing on
+	// failure (see Provider.Relaunch), so they set this false.
+	freshStart bool
 }
 
 // newTmuxStartOps builds the startup adapter for one session, deriving the
@@ -888,16 +893,17 @@ type tmuxStartOps struct {
 // Passing the field explicitly at each site is what let two of them omit it;
 // TestProductionStartOpsCarryRuntimeDir asserts this stays the only
 // production construction, so the defect cannot recur by omission.
-func (p *Provider) startOps(cfg runtime.Config) *tmuxStartOps {
-	return newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg)
+func (p *Provider) startOps(cfg runtime.Config, freshStart bool) *tmuxStartOps {
+	return newTmuxStartOps(p.tm, p.cfg.RuntimeDir, p.cfg.SetupMaxTimeout, cfg, freshStart)
 }
 
-func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config) *tmuxStartOps {
+func newTmuxStartOps(tm *Tmux, runtimeDir string, setupMaxTimeout time.Duration, cfg runtime.Config, freshStart bool) *tmuxStartOps {
 	return &tmuxStartOps{
 		tm:              tm,
 		runtimeDir:      runtimeDir,
 		setupMaxTimeout: setupMaxTimeout,
 		secrets:         runtime.SetupCommandSecrets(cfg.Env),
+		freshStart:      freshStart,
 	}
 }
 
@@ -1047,6 +1053,21 @@ func (o *tmuxStartOps) writeDiagnostic(name, filename, content string) string {
 	return path
 }
 
+func discardPartialStartup(err error, killWithProcesses, killSession func() error) error {
+	if !errors.Is(err, errPartialPasteDelivery) {
+		return err
+	}
+	killErr := killWithProcesses()
+	if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
+		return err
+	}
+	fallbackErr := killSession()
+	if fallbackErr == nil || errors.Is(fallbackErr, ErrSessionNotFound) || errors.Is(fallbackErr, ErrNoServer) {
+		return errors.Join(err, fmt.Errorf("discard partial startup session with process cleanup: %w", killErr))
+	}
+	return errors.Join(err, fmt.Errorf("discard partial startup session: process cleanup: %w; fallback kill: %w", killErr, fallbackErr))
+}
+
 // writeDiagnosticTextBlock appends a labeled text block to a diagnostic
 // builder, normalizing a missing trailing newline. Shared by
 // recordStartCrash, recordUnconfirmedNudge, and Tmux.recordUnconfirmedSubmit.
@@ -1093,7 +1114,21 @@ func writeSessionDiagnosticFile(runtimeDir, name, filename, content string) (str
 }
 
 func (o *tmuxStartOps) sendKeys(name, text string) error {
-	return o.tm.NudgeSession(name, text)
+	err := o.tm.nudgeStartupSession(name, text)
+	if !o.freshStart {
+		// Relaunch and RunLive drive a box this startup did not create, and
+		// Provider.Relaunch documents that a failure leaves it in place. Report
+		// the partial delivery instead of tearing down a warm session.
+		return err
+	}
+	// Belt-and-braces on the fresh-start path only: Provider.Start already
+	// calls the token-guarded cleanupFailedStart for any error returned here,
+	// so this kill is redundant cleanup rather than the only cleanup.
+	return discardPartialStartup(
+		err,
+		func() error { return o.tm.KillSessionWithProcesses(name) },
+		func() error { return o.tm.KillSession(name) },
+	)
 }
 
 // paneBusy reports whether the target agent pane is showing a busy/
@@ -1524,9 +1559,15 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 			// retry-capable caller beyond the bounded ladder just spent, so
 			// exhausting it is a warning, not a start failure: the session
 			// starts, but the agent may sit silently idle with the nudge
-			// still drafted in its input line rather than acted on. Any
+			// still drafted in its input line rather than acted on. A submit
+			// proven delivered but never observed busy
+			// (ErrNudgeSubmitDeliveredUnobserved) is the same warning-not-
+			// failure case for a different reason: the ladder above already
+			// refuses to retry it (retrying would re-inject a message the
+			// session already received), so by the time it reaches here
+			// delivery is proven and only the observation missed it. Any
 			// other error still fails the start.
-			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+			if !errors.Is(err, ErrNudgeSubmitUnconfirmed) && !errors.Is(err, ErrNudgeSubmitDeliveredUnobserved) {
 				return fmt.Errorf("sending startup nudge: %w", err)
 			}
 			// The stderr warning alone is not a durable record (Layer 0

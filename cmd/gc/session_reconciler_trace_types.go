@@ -241,7 +241,6 @@ const (
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
 
-	TraceOutcomeRollbackDeferred    TraceOutcomeCode = "rollback_deferred"
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
 	TraceOutcomeCancelPending       TraceOutcomeCode = "cancel_pending"
