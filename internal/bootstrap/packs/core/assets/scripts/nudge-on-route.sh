@@ -15,6 +15,17 @@
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #
+# Two event sources, one window. Routing is often stamped in the CREATE
+# payload (`gc order run`, formula pours, poured step beads), so the only
+# lifecycle event such a bead ever emits before it is claimed is
+# bead.created (#4382); bead.updated alone misses every one of them. And
+# the controller fires this order on its own dispatch cadence — under
+# max_dispatches_per_tick that can be many minutes apart — while a fixed
+# wall-clock lookback only sees the last couple of minutes, so events
+# between two runs were dropped. Each run therefore processes every
+# bead.created/bead.updated event with seq > the high-water seq recorded by
+# the previous run (bounded by WINDOW), and records the new high-water mark.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
@@ -30,11 +41,12 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 CITY="${GC_CITY:-.}"
-# Event lookback window. Must exceed the controller's event-trigger eval
-# cadence so no routing event is missed between runs.
-LOOKBACK="${GC_NUDGE_ON_ROUTE_LOOKBACK:-2m}"
+# Upper bound on how far back one run reads. The real cut is the persisted
+# high-water seq; this only bounds the read (and is the lookback on the very
+# first run, when no seq has been recorded yet).
+WINDOW="${GC_NUDGE_ON_ROUTE_WINDOW:-${GC_NUDGE_ON_ROUTE_LOOKBACK:-1h}}"
 # Dedup entries older than this are pruned so the state file stays bounded.
-# Must comfortably exceed LOOKBACK so an active routing — which keeps
+# Must comfortably exceed WINDOW so an active routing — which keeps
 # re-emitting bead.updated as the reconciler refreshes it — is never
 # pruned and re-nudged. Accepts a simple Ns / Nm / Nh duration.
 RETENTION="${GC_NUDGE_ON_ROUTE_RETENTION:-1h}"
@@ -42,6 +54,8 @@ NUDGE_MESSAGE="${GC_NUDGE_ON_ROUTE_MESSAGE:-check for assigned work}"
 
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 STATE_FILE="$PACK_STATE_DIR/nudge-on-route-state.json"
+# Highest event seq processed by the previous run (a bare integer).
+SEQ_FILE="$PACK_STATE_DIR/nudge-on-route-seq"
 mkdir -p "$PACK_STATE_DIR"
 
 # Convert a simple Go-style duration (Ns/Nm/Nh) to whole seconds.
@@ -80,24 +94,50 @@ MEMBERS
     gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
 }
 
-# Pull recent bead.updated events. Best-effort: a read failure (API down)
-# must not crash the controller's order loop.
-EVENTS="$(gc events --type bead.updated --since "$LOOKBACK" 2>/dev/null)" || exit 0
+# Pull recent events. Best-effort: a read failure (API down) must not crash
+# the controller's order loop. One unfiltered read: `gc events --type` takes
+# a single exact type and both bead.created and bead.updated are needed.
+EVENTS="$(gc events --since "$WINDOW" 2>/dev/null)" || exit 0
 [ -n "$EVENTS" ] || exit 0
 
-# Reduce to unique "<bead_id>\t<routed_to>" pairs. Only events that actually
-# carry a non-empty gc.routed_to target are considered.
-#
-# The bead.updated payload is flat — .payload.id and .payload.metadata — not
-# the nested .payload.bead.{id,metadata} an earlier schema exposed. The nested
-# paths match nothing against the current event shape, so every routed bead was
-# silently dropped and no nudge was ever delivered.
+LAST_SEQ="$(cat "$SEQ_FILE" 2>/dev/null || true)"
+case "$LAST_SEQ" in ''|*[!0-9]*) LAST_SEQ=0 ;; esac
+
+# Reduce to unique "<bead_id>\t<routed_to>" pairs from events newer than the
+# previous run's high-water seq. Only events that actually carry a non-empty
+# gc.routed_to target are considered. The bead payload is read as
+# (.payload.bead // .payload): the API envelope wraps the bead under
+# .payload.bead while the `gc events` local fallback emits the bead fields
+# directly under .payload (#5968) — same normalization as the sibling
+# notify-on-human-gate-creation.sh.
 PAIRS="$(printf '%s\n' "$EVENTS" \
-    | jq -r 'select(.payload.metadata."gc.routed_to" != null
-                    and .payload.metadata."gc.routed_to" != "")
-             | [.payload.id, .payload.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
+    | jq -r --argjson last "$LAST_SEQ" '
+        select((.seq // 0) > $last
+               and (.type == "bead.created" or .type == "bead.updated"))
+        | (.payload.bead // .payload) as $b
+        | select($b.metadata."gc.routed_to" != null
+                 and $b.metadata."gc.routed_to" != "")
+        | [$b.id, $b.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
     | sort -u)" || PAIRS=""
-[ -n "$PAIRS" ] || exit 0
+
+# Advance the high-water mark to the newest event seen, regardless of type,
+# so the next run starts exactly where this one stopped. Unconditional: a
+# nudge that fails is usually a pool with no live member yet (its spawn
+# primes it), so holding the mark back for it would stall every later
+# routing behind it; a routing that still matters re-emits bead.updated as
+# the reconciler refreshes it and is picked up then.
+HEAD_SEQ="$(printf '%s\n' "$EVENTS" | jq -r '.seq // 0' 2>/dev/null | sort -n | tail -1)" || HEAD_SEQ=""
+case "$HEAD_SEQ" in ''|*[!0-9]*) HEAD_SEQ=0 ;; esac
+advance_seq() {
+    [ "$HEAD_SEQ" -gt "$LAST_SEQ" ] || return 0
+    _tmp="$(mktemp "$PACK_STATE_DIR/.nudge-on-route-seq.XXXXXX")"
+    printf '%s\n' "$HEAD_SEQ" > "$_tmp"
+    mv -f "$_tmp" "$SEQ_FILE"
+}
+if [ -z "$PAIRS" ]; then
+    advance_seq
+    exit 0
+fi
 
 # Load dedup state (object mapping "<bead>|<routed_to>" -> ISO timestamp).
 # A missing or corrupt file resets to an empty object rather than failing.
@@ -122,6 +162,7 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
 done <<EOF
 $PAIRS
 EOF
+advance_seq
 
 # Prune entries older than RETENTION so the state file stays bounded.
 RETENTION_S="$(duration_to_seconds "$RETENTION")"
