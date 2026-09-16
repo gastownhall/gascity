@@ -197,7 +197,7 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "complete drain fresh mode",
-			patch: CompleteDrainPatch(now, "idle", true),
+			patch: CompleteDrainPatch(now, "idle", "", true),
 			want: MetadataPatch{
 				"state":                      string(StateAsleep),
 				"state_reason":               "",
@@ -414,15 +414,35 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "clear expired user hold",
-			patch: ClearExpiredHoldPatch("user-hold"),
+			patch: ClearExpiredHoldPatch("user-hold", "user-hold"),
 			want: MetadataPatch{
 				"held_until":   "",
 				"sleep_reason": "",
+				"sleep_intent": "",
 			},
 		},
 		{
 			name:  "clear expired non-hold timer",
-			patch: ClearExpiredHoldPatch("idle"),
+			patch: ClearExpiredHoldPatch("idle", ""),
+			want: MetadataPatch{
+				"held_until": "",
+			},
+		},
+		{
+			// A drain-ack overwrites sleep_reason with "idle" while the
+			// user-hold intent survives, so expiry must key the intent
+			// release on the intent, not on the displayed reason.
+			name:  "clear expired hold releases a user-hold intent under an idle reason",
+			patch: ClearExpiredHoldPatch("idle", "user-hold"),
+			want: MetadataPatch{
+				"held_until":   "",
+				"sleep_intent": "",
+			},
+		},
+		{
+			// wait_hold, not held_until, is a wait gate's own timer.
+			name:  "clear expired hold leaves a wait-hold intent alone",
+			patch: ClearExpiredHoldPatch("idle", "wait-hold"),
 			want: MetadataPatch{
 				"held_until": "",
 			},
@@ -687,12 +707,44 @@ func TestDrainCompletionPatchesClearStopPendingReason(t *testing.T) {
 		patch MetadataPatch
 	}{
 		{name: "acknowledge", patch: AcknowledgeDrainPatch(now, false)},
-		{name: "complete", patch: CompleteDrainPatch(now, "idle", false)},
+		{name: "complete", patch: CompleteDrainPatch(now, "idle", "", false)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got, ok := tt.patch["state_reason"]; !ok || got != "" {
 				t.Fatalf("state_reason = %q, present=%v; want explicit clear", got, ok)
+			}
+		})
+	}
+}
+
+// TestCompleteDrainPatchPreservesStandingSleepIntent pins the drain-completion
+// half of gastownhall/gascity#5561: SleepPatch clears sleep_intent because an
+// ordinary sleep ends the intent that caused it, but a standing hold
+// (`gc session suspend` -> user-hold, `gc session wait --sleep` -> wait-hold)
+// outlives the drain it provoked and must reach the wake side intact.
+func TestCompleteDrainPatchPreservesStandingSleepIntent(t *testing.T) {
+	now := time.Date(2026, 5, 18, 4, 15, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		priorIntent string
+		want        string
+	}{
+		{name: "user hold survives", priorIntent: string(SleepReasonUserHold), want: string(SleepReasonUserHold)},
+		{name: "wait hold survives", priorIntent: string(SleepReasonWaitHold), want: string(SleepReasonWaitHold)},
+		{name: "padded marker normalizes", priorIntent: "  user-hold  ", want: string(SleepReasonUserHold)},
+		{name: "idle stop pending clears", priorIntent: "idle-stop-pending", want: ""},
+		{name: "no intent clears", priorIntent: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patch := CompleteDrainPatch(now, string(SleepReasonIdle), tt.priorIntent, false)
+			if got, ok := patch["sleep_intent"]; !ok || got != tt.want {
+				t.Fatalf("sleep_intent = %q, present=%v; want %q explicitly written", got, ok, tt.want)
+			}
+			// The patch still records an ordinary sleep in every other respect.
+			if patch["state"] != string(StateAsleep) || patch["sleep_reason"] != string(SleepReasonIdle) {
+				t.Fatalf("state=%q sleep_reason=%q, want asleep/idle", patch["state"], patch["sleep_reason"])
 			}
 		})
 	}

@@ -261,12 +261,22 @@ func ClearWakeBlockersPatch(state State, sleepReason string, now time.Time) Meta
 
 // ClearExpiredHoldPatch clears an expired user hold and drops the displayed
 // hold reason only when that reason came from the expired timer.
-func ClearExpiredHoldPatch(sleepReason string) MetadataPatch {
+//
+// held_until IS the suspend hold's expiry, so a user-hold sleep_intent is
+// released with it: the intent outlives the drain it provoked
+// (CompleteDrainPatch) but not its own timer, and a marker left behind after
+// expiry keeps vetoing wake for a seat nothing is holding any more. A wait-hold
+// intent is deliberately untouched — it is paired with wait_hold and released by
+// the wait's own resolution, not by this timer.
+func ClearExpiredHoldPatch(sleepReason, sleepIntent string) MetadataPatch {
 	patch := MetadataPatch{
 		"held_until": "",
 	}
 	if SleepReason(sleepReason) == SleepReasonUserHold {
 		patch["sleep_reason"] = ""
+	}
+	if StandingSleepIntent(sleepIntent) == SleepReasonUserHold {
+		patch["sleep_intent"] = ""
 	}
 	return patch
 }
@@ -461,9 +471,21 @@ func AcknowledgeDrainPatch(now time.Time, freshWake bool) MetadataPatch {
 }
 
 // CompleteDrainPatch records a completed controller drain as ordinary asleep.
-func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPatch {
+//
+// priorSleepIntent is the session's sleep_intent as it stood when the drain ran.
+// SleepPatch clears sleep_intent because an ordinary sleep ends the intent that
+// caused it, but a STANDING hold (see StandingSleepIntent) does not end with the
+// drain it provoked — the drain is the hold doing its job. Such an intent is
+// re-stamped here so the wake side can still tell a deliberate hold from an
+// agent keep-alive; anything else is cleared as before. Callers pass the
+// session's CURRENT sleep_intent; an empty string means the session had none,
+// and is never a way to opt out of carrying one. See gastownhall/gascity#5561.
+func CompleteDrainPatch(now time.Time, reason, priorSleepIntent string, freshWake bool) MetadataPatch {
 	patch := SleepPatch(now, reason)
 	patch["state_reason"] = ""
+	if standing := StandingSleepIntent(priorSleepIntent); standing != "" {
+		patch["sleep_intent"] = string(standing)
+	}
 	if freshWake {
 		patch["session_key"] = ""
 		applyFreshWakeConversationReset(patch)

@@ -766,6 +766,7 @@ Restart and patrol recovery use one authoritative outcome table:
 | stopped | any | `idle-stop-confirmed` | no | commit or preserve `asleep: idle` |
 | stopped | any | `idle-stop-pending` | no | clear `idle-stop-pending`, emit recovery-ambiguous event, then rerun ordinary wake and idle-eligibility evaluation before any suppression is re-latched |
 | stopped | any | any | yes | clear idle markers and wake now |
+| stopped | asleep / `user-hold` or `wait-hold` | `user-hold` or `wait-hold` | any | stay parked: a standing hold survives the drain that enacted it and is released by `gc session wake`, by the wait resolving, or by `held_until` expiring — never by the drain (gastownhall/gascity#5561) |
 | any | any | any | structural action wins | ignore idle path and apply structural action |
 
 The missing-session classifier is therefore constrained:
@@ -845,8 +846,11 @@ Definitions:
   idle-sleep attempt
 - `config_wake_suppressed`: whether config wake is currently latched off
   due to idle sleep
-- `sleep_intent`: durable stop-path marker (`idle-stop-pending`,
-  `idle-stop-confirmed`, or empty)
+- `sleep_intent`: durable stop marker. Two kinds: a transient stop-path
+  marker (`idle-stop-pending`, `idle-stop-confirmed`) that ends with the
+  drain, and a STANDING hold (`user-hold` from `gc session suspend`,
+  `wait-hold` from `gc session wait --sleep`) that outlives it. Empty when
+  neither applies.
 - `attach_intent`: durable operator attach/wake request with expiry,
   cleared when attach starts, fails definitively, or expires
 - `sleep_decision_snapshot`: canonical struct recorded in metadata and
@@ -870,7 +874,10 @@ Definitions:
 Authoritative precedence:
 
 1. `state` and `sleep_reason` define the public lifecycle state
-2. `sleep_intent` only describes an in-flight or recovered stop path
+2. a transient `sleep_intent` only describes an in-flight or recovered stop
+   path; a standing hold intent additionally records that an operator or a
+   wait gate parked the session, and is carried into `sleep_reason` at drain
+   completion so pool-slot and crash-recovery readers see the park
 3. `config_wake_suppressed` is derived from lifecycle state plus
    suppression rules; it is not an independent lifecycle state
 4. blocker and snapshot fields are diagnostic, not state-machine inputs
