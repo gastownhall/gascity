@@ -264,7 +264,7 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityStore, err := openCityStoreAt(cityPath)
+	cityStore, err := openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
