@@ -1248,9 +1248,18 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         # judged on the legacy embedded-store state. `bd backup sync` writes
         # only dolt-backup-state.json, so reading the legacy file on a migrated
         # scope would latch this gate closed with no backup action able to clear it.
+        #
+        # Probe BOTH Dolt files, because either one alone proves the Dolt
+        # pipeline owns this scope: the registration file proves a destination
+        # is configured, and the state file proves a sync has completed. A
+        # migrated scope can hold the state file without a local registration
+        # (the destination lives in bd's own config), and probing only the
+        # registration sent such a scope down the legacy branch, where the
+        # absent legacy file recorded a false "backup stale or absent" anomaly
+        # on every run while its Dolt backup was current.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
-        if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+        if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ] || [ -f "$CITY_BEADS_DIR/dolt-backup-state.json" ]; then
             _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
             _BACKUP_FIELD="last_sync"
         else

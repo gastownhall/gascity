@@ -9,6 +9,9 @@
 #   5. Dolt registered + fresh sync  → bd IS called even when the legacy file is stale
 #   6. Dolt registered, never synced → bd NOT called even when the legacy file is fresh
 #   7. Malformed backup state        → bd NOT called, anomaly recorded
+#   8. Migrated: only dolt-backup-state.json → bd IS called, no anomaly
+#   9. Legacy-only scope             → guard still reads backup/backup_state.json
+#  10. Neither state file            → bd NOT called, anomaly recorded
 
 set -euo pipefail
 
@@ -56,7 +59,11 @@ ts_ago() {
 #
 #   pipeline    "legacy" (default) writes .beads/backup/backup_state.json;
 #               "dolt" registers .beads/dolt-backup.json and writes
-#               .beads/dolt-backup-state.json with a last_sync field.
+#               .beads/dolt-backup-state.json with a last_sync field;
+#               "dolt-migrated" writes only .beads/dolt-backup-state.json, with
+#               no registration file — the shape a scope reaches after
+#               `bd backup sync` when the destination lives outside .beads;
+#               "none" creates neither file nor a legacy backup directory.
 #   legacy_age  only meaningful for pipeline=dolt: age of an ADDITIONAL legacy
 #               backup_state.json, used to prove the guard consults the active
 #               pipeline and does not fall back. "absent" (default) writes none.
@@ -80,9 +87,13 @@ run_prune_scenario() {
     mkdir -p "$tmpdir/.beads"
 
     local state_file state_field
-    if [ "$pipeline" = "dolt" ]; then
-        # A registered destination is what flips the guard to the Dolt pipeline.
-        printf '{"destination":"test-remote"}\n' > "$tmpdir/.beads/dolt-backup.json"
+    if [ "$pipeline" = "dolt" ] || [ "$pipeline" = "dolt-migrated" ]; then
+        # Either Dolt file flips the guard to the Dolt pipeline: the
+        # registration proves a destination is configured, the state file
+        # proves a sync completed.
+        if [ "$pipeline" = "dolt" ]; then
+            printf '{"destination":"test-remote"}\n' > "$tmpdir/.beads/dolt-backup.json"
+        fi
         state_file="$tmpdir/.beads/dolt-backup-state.json"
         state_field="last_sync"
         if [ "$legacy_age" != "absent" ]; then
@@ -90,6 +101,10 @@ run_prune_scenario() {
             printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$(ts_ago "$legacy_age")" \
                 > "$tmpdir/.beads/backup/backup_state.json"
         fi
+    elif [ "$pipeline" = "none" ]; then
+        # No state file of either shape, and no legacy directory.
+        state_file="$tmpdir/.beads/backup/backup_state.json"
+        state_field="timestamp"
     else
         mkdir -p "$tmpdir/.beads/backup"
         state_file="$tmpdir/.beads/backup/backup_state.json"
@@ -231,6 +246,54 @@ if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
     pass "T7: malformed backup_state.json → bd skipped, anomaly recorded"
 else
     fail "T7: malformed backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T8: migrated scope, only dolt-backup-state.json, fresh → bd IS called ────
+# The false-anomaly regression (sc-vld5b): `bd backup sync` writes
+# dolt-backup-state.json, and a scope whose destination lives outside .beads
+# has no dolt-backup.json. Probing only the registration sent this scope down
+# the legacy branch, where the absent legacy file recorded a false anomaly on
+# every reaper run while the Dolt backup was current.
+result=$(run_prune_scenario "60" "86400" "dolt-migrated")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
+    pass "T8: migrated scope (dolt-backup-state.json only, fresh) → bd called, no anomaly"
+else
+    fail "T8: migrated scope (dolt-backup-state.json only, fresh) → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T9: legacy-only scope still reads the legacy file ────────────────────────
+# The fix must not steal never-migrated scopes from the legacy branch. A stale
+# legacy timestamp proves which file the guard read, because the anomaly names
+# its source path.
+result=$(run_prune_scenario "90000" "86400" "legacy")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
+        && printf '%s' "$anomaly_msg" | grep -q "backup/backup_state.json"; then
+    pass "T9: legacy-only scope → guard reads backup/backup_state.json"
+else
+    fail "T9: legacy-only scope → expected bd=no anomaly=yes naming backup/backup_state.json; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T10: neither state file → bd NOT called, anomaly recorded ────────────────
+# A scope with no backup of either shape is a real fault, so the anomaly must
+# survive the fix.
+result=$(run_prune_scenario "absent" "86400" "none")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
+        && printf '%s' "$anomaly_msg" | grep -q "age=absent"; then
+    pass "T10: neither state file → bd skipped, anomaly recorded (age=absent)"
+else
+    fail "T10: neither state file → expected bd=no anomaly=yes age=absent; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1
