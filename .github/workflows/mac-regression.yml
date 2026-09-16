@@ -626,7 +626,7 @@ jobs:
           RUN_SMOKE: ${{ needs.gate.outputs.run_smoke }}
           REASON: ${{ needs.gate.outputs.reason }}
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.head_sha || github.sha }}
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
