@@ -11,12 +11,13 @@
 //   session_start    → gc prime --hook (load context side effects)
 //   session_compact  → gc prime --hook + gc handoff --auto "context cycle"
 //   before_agent_start → gc hook --inject + queued nudges + unread mail
+//   agent_end        → idle re-drive: drain queued nudges into a new turn
 
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 9;
+const GC_PI_HOOK_VERSION = 11;
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
@@ -160,6 +161,103 @@ function mirrorTranscript(ctx) {
   }
 }
 
+// Idle re-drive. A managed pi session whose model yields its turn without
+// finishing (no tool call, a question to nobody) sits at an idle TUI prompt.
+// Queued nudges normally reach pi only in before_agent_start, which needs a
+// turn, which needs input — circular while idle. The tmux quiescence poller
+// cannot bridge the gap either: an idle pi TUI repaints continuously, so the
+// pane's window_activity never ages past the 3 s quiescence window (measured
+// on pi 0.84: three samples over 80 s, every one under 1 s old). So the hook,
+// which knows exactly when the agent is idle, drains the queue itself: once
+// at agent_end and then every IDLE_DRAIN_INTERVAL_MS until the next
+// agent_start. Drained nudges arrive as a user message, which starts a turn.
+//
+// A drained reminder stays in memory until Pi accepts it. This matters because
+// sendUserMessage rejects while the agent is streaming unless a delivery mode
+// is explicit; consuming the queue first used to lose that reminder. Only
+// armed when gc exported a session identity, so a human running pi in a
+// managed worktree does not get an idle gc subprocess loop.
+const IDLE_DRAIN_INTERVAL_MS = 15000;
+let idleDrainTimer = null;
+let idleDrainInFlight = false;
+let pendingIdleNudges = "";
+
+function managedSessionIdentity() {
+  return process.env.GC_ALIAS || process.env.GC_SESSION_ID || "";
+}
+
+// Like run(), but an exit status of 1 is the documented "nothing queued"
+// answer from `gc nudge drain`, not a failure, so it is not logged.
+function runQuiet(args, cwd) {
+  try {
+    return execFileSync("gc", args, {
+      cwd: cwd || process.cwd(),
+      encoding: "utf-8",
+      timeout: 30000,
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, PATH: PATH_PREFIX + (process.env.PATH || "") },
+    }).trim();
+  } catch (err) {
+    if (!err || err.status !== 1) {
+      logRunFailure(args, cwd, err);
+    }
+    return "";
+  }
+}
+
+function stopIdleDrain() {
+  if (idleDrainTimer) {
+    clearInterval(idleDrainTimer);
+    idleDrainTimer = null;
+  }
+}
+
+async function drainIdleNudges(pi, ctx) {
+  if (idleDrainInFlight) {
+    return false;
+  }
+  idleDrainInFlight = true;
+  try {
+    if (!pendingIdleNudges) {
+      pendingIdleNudges = runQuiet(["nudge", "drain"], ctx.cwd);
+    }
+    if (!pendingIdleNudges) {
+      return false;
+    }
+    await pi.sendUserMessage(pendingIdleNudges, { deliverAs: "followUp" });
+    pendingIdleNudges = "";
+    stopIdleDrain();
+    return true;
+  } catch (err) {
+    try {
+      const detail =
+        (err && (err.code || err.message)) || "unknown delivery error";
+      console.error("gc-hooks idle nudge delivery failed:", detail);
+    } catch {
+      // Keep Pi hooks non-fatal even if stderr is unavailable.
+    }
+    return false;
+  } finally {
+    idleDrainInFlight = false;
+  }
+}
+
+async function startIdleDrain(pi, ctx) {
+  stopIdleDrain();
+  if (!managedSessionIdentity()) {
+    return;
+  }
+  if (await drainIdleNudges(pi, ctx)) {
+    return;
+  }
+  idleDrainTimer = setInterval(() => {
+    void drainIdleNudges(pi, ctx);
+  }, IDLE_DRAIN_INTERVAL_MS);
+  if (typeof idleDrainTimer.unref === "function") {
+    idleDrainTimer.unref();
+  }
+}
+
 function appendSystemPrompt(systemPrompt, additions) {
   const extras = additions.filter(Boolean);
   if (extras.length === 0) {
@@ -196,11 +294,17 @@ module.exports = function gascityPiExtension(pi) {
     mirrorTranscript(ctx);
   });
 
-  pi.on("agent_end", (_event, ctx) => {
+  pi.on("agent_start", () => {
+    stopIdleDrain();
+  });
+
+  pi.on("agent_end", async (_event, ctx) => {
     mirrorTranscript(ctx);
+    await startIdleDrain(pi, ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    stopIdleDrain();
     mirrorTranscript(ctx);
   });
 };

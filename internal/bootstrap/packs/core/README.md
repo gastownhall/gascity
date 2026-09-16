@@ -36,9 +36,11 @@ set"*). Without that nudge, a bead whose `metadata.gc.routed_to` is newly set
 or changed sits unclaimed against any worker not currently in an active turn
 cycle. This order ships that workaround.
 
-**Event contract.** Triggers on `bead.updated`. For each event whose bead
-carries a non-empty `metadata.gc.routed_to`, nudges that target with
-`check for assigned work`.
+**Event contract.** Reads `bead.created` and `bead.updated` events after its
+persisted high-water sequence. For each event whose bead carries a non-empty
+`metadata.gc.routed_to`, nudges that target with the exact atomic pool
+protocol: `gc hook --claim --drain-ack --json`, followed by an instruction to
+execute the claimed formula immediately.
 
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
@@ -64,9 +66,9 @@ older than the retention window are pruned on each run.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `2m` | Event lookback window |
+| `GC_NUDGE_ON_ROUTE_LOOKBACK` | `1h` | Event lookback window |
 | `GC_NUDGE_ON_ROUTE_RETENTION` | `1h` | Dedup-entry retention (Ns/Nm/Nh) |
-| `GC_NUDGE_ON_ROUTE_MESSAGE` | `check for assigned work` | Nudge text |
+| `GC_NUDGE_ON_ROUTE_MESSAGE` | atomic `gc hook --claim --drain-ack --json` instruction | Nudge text |
 
 ## `cascade-nudge-on-blocker-close`
 

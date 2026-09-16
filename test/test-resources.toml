@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 450
-baseline_files = 130
+baseline_calls = 451
+baseline_files = 131
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -227,6 +227,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the ADR-0009 commit-reachability oracle is a checked Medium subprocess owner"
 resource_owner = "the git processes are confined to TestCommitReachableOnBranch, which exists to ask a real repository whether a commit is an ancestor of a branch: CommitReachableOnBranch is that git invocation, so a fake oracle would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "internal/hooks"
+package_name = "hooks"
+owner = "TestPiIdleDrainRetriesRejectedFollowUpWithoutRedraining"
+resources = ["subprocess"]
+owner_bead = "sys-xtzg5w"
+invariant = "the Pi idle-redrive provider-boundary regression is a checked Medium subprocess owner"
+resource_owner = "the one Node subprocess is confined to TestPiIdleDrainRetriesRejectedFollowUpWithoutRedraining, which executes the real bundled extension against a deterministic mocked Pi API and fake gc binary"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 
