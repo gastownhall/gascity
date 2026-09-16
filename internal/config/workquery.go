@@ -682,6 +682,21 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+// assignedReadyTierCommand is the pre-assigned ready tier: the read a seat runs
+// for work already assigned to one of its identities.
+//
+// The CONTROLLER mirrors this predicate before it counts such a row as capacity
+// demand — cmd/gc poolWakeReadiness, the assigned-arm counterpart to
+// PoolDemandServeRules below. It answers from the Ready() snapshot the demand
+// phase already holds, and deliberately declines to answer for the cases where
+// this command is not what will run: a template carrying its own WorkQuery
+// (which replaces this tier verbatim, see effectiveQuery), a bead type or label
+// Ready() structurally excludes but ephemeralAssignedReadyProbeScript still
+// serves, and a deferred row, which `bd ready` refuses at any timestamp while
+// several Ready() backends resurface it (beads.CarriesDeferral).
+//
+// Change the flags here and that mirror needs the same change, or the pool goes
+// back to spawning seats for rows their own hooks are forbidden to claim.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	fed := topo.FederatedReady
 	return `r=$(` + readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +

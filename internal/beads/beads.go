@@ -679,6 +679,30 @@ func IsDeferred(b Bead, now time.Time) bool {
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
 }
 
+// CarriesDeferral reports whether the bead carries a deferral marker of any
+// kind — bd's status-based indefinite defer, or a defer_until at any point in
+// time. It is the broader companion to IsDeferred, which answers only "hidden
+// right now" and goes false the moment a defer_until elapses.
+//
+// The two differ because bd does not reopen a deferred issue when its timestamp
+// passes, and bd's ready reader refuses a deferred issue either way. Measured
+// against bd 1.1.1-0.20260805093327-bf97b73749ac on a throwaway store holding one
+// plain open issue, one `bd defer`red issue with no defer_until, and one with
+// defer_until=2020-01-01: `bd ready --json`, `bd ready --assignee=<id> --json
+// --limit=1` (the assigned-ready tier a pool seat runs) and even `bd ready
+// --include-deferred` each returned ONLY the plain issue. The
+// --include-deferred flag relaxes a FUTURE timestamp; it does not resurface a
+// deferred status.
+//
+// Callers that must agree with what bd will actually serve need this predicate
+// rather than IsDeferred, because mapBdStatus collapses bd's "deferred" onto
+// "open" and the backends then disagree: NativeDoltStore.Ready deliberately
+// resurfaces an expired time-bound deferral and the cached tier recomputes it as
+// ready, while `bd ready` never returns it.
+func CarriesDeferral(b Bead) bool {
+	return b.IndefinitelyDeferred || b.DeferUntil != nil
+}
+
 // setBeadStatus applies an explicit Gas City status transition. Any such
 // transition supersedes richer source status that was normalized on read.
 func setBeadStatus(b *Bead, status string) {
