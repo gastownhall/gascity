@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"path"
 	"strings"
 	"time"
 
@@ -151,7 +152,7 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 		bead := AwakeSessionBead{
 			ID:          info.ID,
 			SessionName: name,
-			Alias:       strings.TrimSpace(info.Alias),
+			Alias:       durablePoolAlias(info.Alias),
 			// Canonicalize so adopted beads persisted under a legacy identity
 			// (e.g. a removed binding) key the awake engine by the current
 			// agent template. Unresolvable templates pass through unchanged.
@@ -325,4 +326,15 @@ func parseSleepDuration(s string) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// durablePoolAlias returns the alias unless it is a slot-form pool alias
+// ("<pool>-<n>"), which rebinds across incarnations and must not keep a seat
+// awake (see withoutTransientSlotAliases).
+func durablePoolAlias(alias string) string {
+	alias = strings.TrimSpace(alias)
+	if alias == "" || transientSlotAliasPattern.MatchString(path.Base(alias)) {
+		return ""
+	}
+	return alias
 }

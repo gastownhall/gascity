@@ -64,3 +64,15 @@ func TestSessionAssignmentIdentifiersInfo_IncludesAlias(t *testing.T) {
 		t.Fatalf("identifiers %v missing %v", got, want)
 	}
 }
+
+func TestSessionAssignmentIdentifiersInfo_ExcludesSlotFormAlias(t *testing.T) {
+	info := session.Info{ID: "ac-1", SessionNameMetadata: "rig--gc.run-operator-1", Alias: "rig/gc.run-operator-1"}
+	for _, id := range sessionAssignmentIdentifiersInfo(info) {
+		if id == "rig/gc.run-operator-1" {
+			t.Fatal("slot-form alias must not be an assignment identity")
+		}
+	}
+	if durablePoolAlias("rig/gc.run-operator-1") != "" || durablePoolAlias("rig/gastown.nux") != "rig/gastown.nux" {
+		t.Fatal("durablePoolAlias must drop slot-form aliases and keep namepool aliases")
+	}
+}
