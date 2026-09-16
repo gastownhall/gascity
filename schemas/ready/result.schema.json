@@ -124,6 +124,26 @@
             }
           }
         }
+      },
+      "created_by": {
+        "type": "string",
+        "description": "bd's created_by column. Read-only projection."
+      },
+      "owner": {
+        "type": "string",
+        "description": "bd's owner column. Read-only projection."
+      },
+      "notes": {
+        "type": "string",
+        "description": "bd's notes column. Read-only projection."
+      },
+      "await_type": {
+        "type": "string",
+        "description": "Gate condition type from bd's await_type column. Read-only projection."
+      },
+      "await_id": {
+        "type": "string",
+        "description": "Gate condition identifier from bd's await_id column. Read-only projection."
       }
     },
     "additionalProperties": false

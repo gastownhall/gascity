@@ -2499,6 +2499,14 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
 		IndefinitelyDeferred: indefinitelyDeferred,
 		Revision:             issue.RowVersion,
+		// bd's plain columns. This backend reads beadslib.Issue directly, so
+		// without these it drops them before the wire and carrying them on
+		// beads.Bead alone would not be enough here.
+		AwaitType: issue.AwaitType,
+		AwaitID:   issue.AwaitID,
+		CreatedBy: issue.CreatedBy,
+		Owner:     issue.Owner,
+		Notes:     issue.Notes,
 	}
 	for _, dep := range issue.Dependencies {
 		if dep == nil {

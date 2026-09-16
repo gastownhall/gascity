@@ -73,6 +73,13 @@ type readyBead struct {
 	NoHistory    bool              `json:"no_history,omitempty"`
 	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	// bd's plain columns, carried so `gc ready --json` shows the same bead bd
+	// does. Read-only projections: nothing on this path writes them back.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
 	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
 	// `bd ready --json` shape. It is populated only on the --status in_progress
 	// arm, which is the crash-recovery read: a resumed holder must be told
@@ -141,6 +148,11 @@ func toReadyBead(b beads.Bead) readyBead {
 		NoHistory:    b.NoHistory,
 		DeferUntil:   b.DeferUntil,
 		IsBlocked:    b.IsBlocked,
+		CreatedBy:    b.CreatedBy,
+		Owner:        b.Owner,
+		Notes:        b.Notes,
+		AwaitType:    b.AwaitType,
+		AwaitID:      b.AwaitID,
 	}
 }
 
