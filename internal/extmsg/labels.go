@@ -9,6 +9,12 @@ import (
 )
 
 const (
+	// LabelBaseClientToken is the base bead type label for client token beads.
+	LabelBaseClientToken = "gc:extmsg-client-token"
+
+	// labelClientTokenCredentialPrefix is the lookup label: extmsg:client:token:v1:<credential_hash>
+	labelClientTokenCredentialPrefix = "extmsg:client:token:v1:"
+
 	labelBindingBase          = "gc:extmsg-binding"
 	labelDeliveryBase         = "gc:extmsg-delivery"
 	labelGroupBase            = "gc:extmsg-group"
@@ -197,5 +203,17 @@ func conversationLockKey(ref ConversationRef) string {
 func hashJoin(parts ...string) string {
 	data, _ := json.Marshal(parts)
 	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// clientTokenCredentialLabel returns the lookup label for a client token bead
+// keyed by the SHA-256 hex of the raw credential string.
+func clientTokenCredentialLabel(credentialHash string) string {
+	return labelClientTokenCredentialPrefix + strings.TrimSpace(credentialHash)
+}
+
+// hashCredential returns the SHA-256 hex hash of a credential string.
+func hashCredential(credential string) string {
+	sum := sha256.Sum256([]byte(credential))
 	return hex.EncodeToString(sum[:])
 }

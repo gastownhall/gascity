@@ -3,9 +3,18 @@ package extmsg
 import "sync"
 
 // AdapterKey uniquely identifies a registered transport adapter.
+//
+// ConversationID is the zero value ("") for adapters shared across every
+// conversation under an account (the discord/slack-style HTTPAdapter path,
+// registered once per Provider+AccountID via the admin API) and is set to a
+// specific conversation for adapters scoped to exactly one conversation
+// (the llm-client/connected-client SSE subscribe path, which registers one
+// adapter per subscribe call). See LookupByConversation for how the two
+// forms resolve through the same map.
 type AdapterKey struct {
-	Provider  string
-	AccountID string
+	Provider       string
+	AccountID      string
+	ConversationID string
 }
 
 // AdapterRegistry is a concurrent-safe, ephemeral registry of transport
@@ -49,9 +58,17 @@ func (r *AdapterRegistry) Lookup(key AdapterKey) TransportAdapter {
 	return r.adapters[key]
 }
 
-// LookupByConversation finds the adapter for a ConversationRef by deriving
-// the key from ref.Provider and ref.AccountID.
+// LookupByConversation finds the adapter for a ConversationRef. It first
+// tries the conversation-scoped key (ref.ConversationID included), which
+// matches an llm-client adapter registered for exactly this conversation;
+// if none is registered, it falls back to the account-wide key (no
+// ConversationID), which matches a discord/slack-style adapter registered
+// once per account and shared across every conversation under it.
 func (r *AdapterRegistry) LookupByConversation(ref ConversationRef) TransportAdapter {
+	scoped := AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID, ConversationID: ref.ConversationID}
+	if a := r.Lookup(scoped); a != nil {
+		return a
+	}
 	return r.Lookup(AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID})
 }
 

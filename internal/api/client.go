@@ -1991,3 +1991,42 @@ func extmsgBindingRecordFromWire(record genclient.SessionBindingRecord) extmsg.S
 		Metadata:          record.Metadata,
 	}
 }
+
+// ExtMsgOutboundResult is the domain-facing result of an extmsg outbound delivery.
+type ExtMsgOutboundResult struct {
+	Delivered      bool
+	ConversationID string
+	Sequence       int64
+	FailureKind    string
+}
+
+// ExtMsgOutbound delivers text to an external conversation via
+// POST /v0/city/{cityName}/extmsg/outbound.
+func (c *Client) ExtMsgOutbound(ctx context.Context, sessionID string, conv genclient.ConversationRef, text string) (*ExtMsgOutboundResult, error) {
+	if err := c.requireCityScope(); err != nil {
+		return nil, err
+	}
+	t := text
+	resp, err := c.cw.PostV0CityByCityNameExtmsgOutboundWithResponse(ctx, c.cityName, nil,
+		genclient.PostV0CityByCityNameExtmsgOutboundJSONRequestBody{
+			SessionId:    sessionID,
+			Conversation: &conv,
+			Text:         &t,
+		},
+	)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return nil, err
+	}
+	if resp.JSON200 == nil {
+		return nil, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return &ExtMsgOutboundResult{
+		Delivered:      resp.JSON200.Receipt.Delivered,
+		ConversationID: resp.JSON200.Receipt.Conversation.ConversationId,
+		Sequence:       resp.JSON200.TranscriptEntry.Sequence,
+		FailureKind:    resp.JSON200.Receipt.FailureKind,
+	}, nil
+}

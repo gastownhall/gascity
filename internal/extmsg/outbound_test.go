@@ -131,6 +131,57 @@ func TestHandleOutbound_BindingPathUnchanged(t *testing.T) {
 	}
 }
 
+func TestHandleOutbound_ThreadsTranscriptSequenceToPublish(t *testing.T) {
+	freezeTestClock(t)
+	// Sequence threading is scoped to the llm-client (in-process SSE) path;
+	// out-of-process adapters publish first so provider_message_id is available.
+	store := beads.NewMemStore()
+	fabric := NewServices(store)
+	ref := testConversationRef()
+	ref.Provider = ProviderLLMClient
+	adapter := newStubAdapter("stub", ref)
+	reg := NewAdapterRegistry()
+	reg.Register(AdapterKey{Provider: ref.Provider, AccountID: ref.AccountID}, adapter)
+	captured := make([]capturedEvent, 0)
+	emit := func(eventType, subject string, payload events.Payload) {
+		captured = append(captured, capturedEvent{Type: eventType, Subject: subject, Payload: payload})
+	}
+	deps := OutboundDeps{Services: fabric, Registry: reg, EmitEvent: emit}
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-bound",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	// Two replies on the same conversation: the live publish must carry the
+	// monotonic transcript sequence assigned to each (1, then 2), not the
+	// hardcoded 0 that made every reconnecting client replay the whole
+	// transcript via Last-Event-ID: 0.
+	for i, text := range []string{"first", "second"} {
+		result, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+			SessionID:    "sess-bound",
+			Conversation: ref,
+			Text:         text,
+		})
+		if err != nil {
+			t.Fatalf("HandleOutbound[%d]: %v", i, err)
+		}
+		wantSeq := int64(i + 1)
+		if result.TranscriptEntry == nil {
+			t.Fatalf("HandleOutbound[%d]: TranscriptEntry = nil, want appended", i)
+		}
+		if result.TranscriptEntry.Sequence != wantSeq {
+			t.Fatalf("transcript sequence = %d, want %d", result.TranscriptEntry.Sequence, wantSeq)
+		}
+		if got := adapter.publishs[i].Sequence; got != wantSeq {
+			t.Fatalf("published PublishRequest.Sequence = %d, want %d (must equal transcript sequence)", got, wantSeq)
+		}
+	}
+}
+
 func TestHandleOutbound_RoomBoundParticipantPublishes(t *testing.T) {
 	freezeTestClock(t)
 	fabric, adapter, _, deps := newOutboundTestRig(t)
@@ -387,6 +438,76 @@ func TestHandleOutbound_OwnBindingNoMismatchEvent(t *testing.T) {
 		if ev.Type == events.ExtMsgOutboundChannelMismatch {
 			t.Fatalf("unexpected mismatch warning on own-channel publish: %#v", ev)
 		}
+	}
+}
+
+// TestHandleOutbound_NonLLMClientRecordsProviderMessageID verifies that for
+// out-of-process adapters (non-llm-client) the outbound transcript entry
+// captures the receipt's provider_message_id, enabling inbound-echo dedup.
+func TestHandleOutbound_NonLLMClientRecordsProviderMessageID(t *testing.T) {
+	freezeTestClock(t)
+	fabric, adapter, _, deps := newOutboundTestRig(t)
+	ref := testConversationRef() // "discord" — not ProviderLLMClient
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-bound",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	result, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "sess-bound",
+		Conversation: ref,
+		Text:         "hello",
+	})
+	if err != nil {
+		t.Fatalf("HandleOutbound: %v", err)
+	}
+	if result.TranscriptEntry == nil {
+		t.Fatalf("TranscriptEntry = nil, want appended")
+	}
+	if got, want := result.TranscriptEntry.ProviderMessageID, adapter.receipt.MessageID; got != want {
+		t.Fatalf("ProviderMessageID = %q, want %q (receipt.MessageID)", got, want)
+	}
+}
+
+// TestHandleOutbound_NonLLMClientPublishErrorLeavesNoEntry verifies that for
+// out-of-process adapters a Publish error leaves no phantom outbound transcript
+// entry (transcript is written after publish, only on success).
+func TestHandleOutbound_NonLLMClientPublishErrorLeavesNoEntry(t *testing.T) {
+	freezeTestClock(t)
+	fabric, adapter, _, deps := newOutboundTestRig(t)
+	ref := testConversationRef() // "discord" — not ProviderLLMClient
+	adapter.err = errors.New("upstream unavailable")
+
+	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
+		Conversation: ref,
+		SessionID:    "sess-bound",
+		Now:          testNow(),
+	}); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	_, err := HandleOutbound(context.Background(), deps, testControllerCaller(), OutboundRequest{
+		SessionID:    "sess-bound",
+		Conversation: ref,
+		Text:         "hello",
+	})
+	if err == nil {
+		t.Fatalf("HandleOutbound error = nil, want publish error")
+	}
+
+	entries, listErr := fabric.Transcript.List(context.Background(), ListTranscriptInput{
+		Caller:       testControllerCaller(),
+		Conversation: ref,
+	})
+	if listErr != nil {
+		t.Fatalf("Transcript.List: %v", listErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("transcript entries = %d, want 0 (no entry on publish error)", len(entries))
 	}
 }
 
