@@ -97,9 +97,49 @@ func TestDrainReminderHoldsWithBreadcrumbWhenAckBindingUnreadable(t *testing.T) 
 }
 
 // The acknowledging agent records which incarnation it was, so the readers above
-// have something to bind against.
+// have something to bind against. Both identity keys count: a tmux pane names
+// itself through GC_TMUX_SESSION, and GC_SESSION_NAME is the fallback for the
+// runtimes that do not set it.
+//
+// This is also the guard against the cross-session pin below regressing into
+// "never stamp anything" — a stamp that never lands would satisfy that pin and
+// leave every acknowledgement permanently unprovable.
 func TestSetDrainAckStampsTheAcknowledgingIncarnation(t *testing.T) {
-	t.Setenv("GC_INSTANCE_TOKEN", "tok-a")
+	for _, identityKey := range []string{"GC_TMUX_SESSION", "GC_SESSION_NAME"} {
+		t.Run(identityKey, func(t *testing.T) {
+			t.Setenv("GC_INSTANCE_TOKEN", "tok-a")
+			t.Setenv("GC_TMUX_SESSION", "")
+			t.Setenv("GC_SESSION_NAME", "")
+			t.Setenv(identityKey, "gc-city-worker-1")
+			sp := runtime.NewFake()
+			ops := &providerDrainOps{sp: sp}
+
+			if err := ops.setDrainAck("gc-city-worker-1"); err != nil {
+				t.Fatalf("setDrainAck: %v", err)
+			}
+
+			if got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey); got != "tok-a" {
+				t.Errorf("%s = %q, want %q", drainAckRequesterInstanceTokenKey, got, "tok-a")
+			}
+			if got, _ := sp.GetMeta("gc-city-worker-1", reconcilerDrainAckSourceKey); got != drainAckSourceAgentValue {
+				t.Errorf("ack source = %q, want %q", got, drainAckSourceAgentValue)
+			}
+		})
+	}
+}
+
+// `gc runtime drain-ack <name>` takes an explicit target, so an operator or an
+// overseer can acknowledge a drain on somebody else's behalf. The caller's
+// token is evidence about the CALLER; stamped onto the target's row it reads
+// back as agentAckBindingStale — positive proof of residue for an
+// acknowledgement that landed seconds ago, which is the one verdict that must
+// never be minted by accident. A cross-session ack therefore leaves the stamp
+// empty and the acknowledgement reads as unprovable: the reminder keeps asking,
+// which is the direction this reader is meant to fail in.
+func TestSetDrainAckLeavesStampUnprovableWhenAckingAnotherSession(t *testing.T) {
+	t.Setenv("GC_INSTANCE_TOKEN", "tok-operator")
+	t.Setenv("GC_TMUX_SESSION", "")
+	t.Setenv("GC_SESSION_NAME", "gc-city-mayor")
 	sp := runtime.NewFake()
 	ops := &providerDrainOps{sp: sp}
 
@@ -107,11 +147,11 @@ func TestSetDrainAckStampsTheAcknowledgingIncarnation(t *testing.T) {
 		t.Fatalf("setDrainAck: %v", err)
 	}
 
-	if got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey); got != "tok-a" {
-		t.Errorf("%s = %q, want %q", drainAckRequesterInstanceTokenKey, got, "tok-a")
+	if got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey); got != "" {
+		t.Errorf("%s = %q, want empty: the acker's own token is not evidence about the session it acked", drainAckRequesterInstanceTokenKey, got)
 	}
 	if got, _ := sp.GetMeta("gc-city-worker-1", reconcilerDrainAckSourceKey); got != drainAckSourceAgentValue {
-		t.Errorf("ack source = %q, want %q", got, drainAckSourceAgentValue)
+		t.Errorf("ack source = %q, want %q: the acknowledgement still lands, only its binding is withheld", got, drainAckSourceAgentValue)
 	}
 }
 
@@ -152,6 +192,10 @@ func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
 // keeps asking, which is the direction this reader is meant to fail in.
 func TestSetDrainAckOverwritesPriorStampWhenIncarnationUnknown(t *testing.T) {
 	t.Setenv("GC_INSTANCE_TOKEN", "")
+	// A SELF-ack: the pane knows which session it is, it just lost its token.
+	// Without this the empty stamp would come from the cross-session guard and
+	// the degraded-pane arm this test names would go unexercised.
+	t.Setenv("GC_TMUX_SESSION", "gc-city-worker-1")
 	sp := runtime.NewFake()
 	ops := &providerDrainOps{sp: sp}
 	mustSetMeta(t, sp, "gc-city-worker-1", drainAckRequesterInstanceTokenKey, "stale-prior-incarnation-token")
