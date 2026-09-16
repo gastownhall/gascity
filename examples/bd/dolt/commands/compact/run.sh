@@ -2059,6 +2059,37 @@ clear_compact_marker() {
   rm -f "$(compact_marker_path "$dir" "$db")"
 }
 
+# explain_full_gc_cancellation DB ERR_FILE
+#   One extra stderr line after a failed CALL DOLT_GC('--full') whose error is
+#   the managed listener's own read deadline. `connection was closed`, `row
+#   read wait bigger than connection timeout` and `context canceled` are how
+#   the managed sql-server reports killing a statement that outran
+#   listener.read_timeout_millis (mol-dog-backup.sh classifies the same family
+#   for `dolt backup sync`). DOLT_GC produces no rows until it finishes, so the
+#   timeout caps the whole reclaim, and nothing in the retry path can outwait it.
+explain_full_gc_cancellation() {
+  db="$1"
+  err_file="$2"
+  [ -s "$err_file" ] || return 0
+  gc_stderr=$(tr '\n' ' ' <"$err_file")
+  case "$gc_stderr" in
+    *"connection was closed"*|*"row read wait bigger than connection timeout"*|*"context canceled"*) ;;
+    *) return 0 ;;
+  esac
+  managed_config="${DOLT_STATE_DIR:-}/dolt-config.yaml"
+  ceiling=""
+  if [ -n "${DOLT_STATE_DIR:-}" ] && [ -r "$managed_config" ]; then
+    ceiling=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$managed_config" | sed -n '1p')
+  fi
+  if [ -n "$ceiling" ]; then
+    ceiling_text="listener.read_timeout_millis=$ceiling in $managed_config"
+  else
+    ceiling_text="listener.read_timeout_millis in the managed server config"
+  fi
+  printf 'compact: db=%s the managed sql-server ended DOLT_GC at its %s ceiling — DOLT_GC produces no rows until it finishes, so that timeout caps the whole reclaim and the pending-GC retry fails the same way every run; raise it via city.toml [dolt] read_timeout_millis, then gc dolt restart\n' \
+    "$db" "$ceiling_text" >&2
+}
+
 run_full_gc() {
   db="$1"
   failure_prefix="$2"
@@ -2075,6 +2106,7 @@ run_full_gc() {
     printf 'compact: db=%s %s DOLT_GC failed rc=%s duration=%ss\n' \
       "$db" "$failure_prefix" "$gc_rc" "$elapsed" >&2
     emit_error_file "$db" "$gc_err_tmp"
+    explain_full_gc_cancellation "$db" "$gc_err_tmp"
     rm -f "$gc_err_tmp"
     return 1
   fi

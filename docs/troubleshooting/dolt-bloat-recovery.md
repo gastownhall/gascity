@@ -101,6 +101,37 @@ reclaiming. Unlike the full `dolt gc --archive-level=1` procedure above,
 the city — though quiescing writers still makes the GC faster and more
 thorough.
 
+### A full GC that fails with `context canceled`
+
+Running against the live managed server has one ceiling of its own. The
+listener's `read_timeout_millis` bounds any statement that produces no rows for
+that long, and `CALL DOLT_GC('--full')` produces none until it finishes, so a
+reclaim that outruns the ceiling is killed by the server and reported as:
+
+```
+compact: db=<database> ... DOLT_GC failed rc=1 duration=21s
+compact: db=<database> error on line 1 for query CALL DOLT_GC('--full'): Error 1105 (HY000): Error in SaveHashes call: SaveHashes, error calling getManyCompressed: context canceled
+compact: db=<database> the managed sql-server ended DOLT_GC at its listener.read_timeout_millis=15000 in <runtime>/packs/dolt/dolt-config.yaml ceiling — ...
+```
+
+`connection was closed` is the other spelling of the same kill. Nothing is
+wrong with the store, and the pending-GC marker will retry into the same
+ceiling on every later run until it moves. Raise the value in `city.toml`
+past the longest GC you have seen; the failed run's `duration=` is the floor.
+Releases through v1.4.1 ship `15000`, the value in the example above, and
+current builds default to `120000`, so `120000` is the right first value for a
+city still on `15000`. A city already at `120000` needs a larger number.
+
+```toml
+[dolt]
+read_timeout_millis = 120000
+```
+
+then `gc dolt restart` and retry. The tell that you are looking at this and
+not a real disconnect is the server log: the `client connection went away`
+line that precedes the failure carries `i/o timeout`, not `EOF`, and lands
+exactly `read_timeout_millis` after the connection opened.
+
 ## Compacting a city whose Dolt remote is uncredentialed
 
 Before flattening (and again before pushing) the compactor runs
