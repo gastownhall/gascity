@@ -443,22 +443,32 @@ func TestTmuxKeybindingsScrollWheel(t *testing.T) {
 // alternate-screen regression: WheelUpPane must pass the wheel through to
 // full-screen apps (Claude Code, pagers) rather than forcing copy-mode over an
 // empty scrollback buffer (alternate-screen content never lands in the tmux
-// scrollback). Depends on gastownhall/gascity-packs#136; skips until go.mod is
-// bumped to a version that includes that change.
+// scrollback). The fix shipped in gastownhall/gascity-packs#205 (gastown
+// 0.1.11) as `#{||:#{pane_in_mode},#{alternate_on}}`; the earlier draft in
+// gascity-packs#136 (never merged) also OR-ed in #{mouse_any_flag}, so this
+// checks the property — WheelUpPane passes through when alternate_on — rather
+// than one exact condition string.
 func TestTmuxKeybindingsAlternateScreenPassthrough(t *testing.T) {
 	path := filepath.Join(packRoot(), "packs", "gastown", "assets", "scripts", "tmux-keybindings.sh")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading tmux-keybindings.sh: %v", err)
 	}
-	script := string(data)
-	if !strings.Contains(script, "alternate_on") {
-		t.Skip("embedded gascity-packs does not yet include #{alternate_on} in WheelUpPane " +
-			"(gastownhall/gascity-packs#136); test activates once go.mod is bumped to that release")
+	var binding string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "bind-key -T root WheelUpPane") {
+			binding = line
+			break
+		}
 	}
-	if !strings.Contains(script, "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}") {
-		t.Error("WheelUpPane binding has #{alternate_on} but not the full passthrough condition " +
-			"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}")
+	if binding == "" {
+		t.Fatal("tmux-keybindings.sh has no root WheelUpPane binding")
+	}
+	if !strings.Contains(binding, "#{alternate_on}") || !strings.Contains(binding, "#{||:") {
+		t.Errorf("WheelUpPane binding does not pass the wheel through on #{alternate_on}: %q", binding)
+	}
+	if !strings.Contains(binding, `"send-keys -M"`) {
+		t.Errorf("WheelUpPane binding no longer sends the wheel through with send-keys -M: %q", binding)
 	}
 }
 
@@ -579,7 +589,10 @@ func TestRefineryFormulaDirectMergeUsesDetachedWorktree(t *testing.T) {
 	}
 
 	assertContainsInOrder(t, direct,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		// 0.1.11 replaced the `foo || halt` guard with an explicit
+		// $?/case dispatch (also adds an already-merged short-circuit
+		// ahead of it); the guard call itself has no trailing `||`.
+		`branch_has_real_change "origin/$TARGET" temp`,
 		"set -e",
 		`MERGE_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gascity-refinery-merge.XXXXXX")`,
 		`git fetch origin "+refs/heads/${TARGET}:refs/remotes/origin/${TARGET}"`,
@@ -646,14 +659,17 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	)
 
 	// Both terminal handoffs call the shared predicate before closing.
-	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp ||`); count != 2 {
+	// 0.1.11 replaced `guard || halt` with an explicit $?/case dispatch
+	// (and added an already-merged short-circuit ahead of the direct-merge
+	// site), so the call itself no longer has a trailing `||`.
+	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp`); count != 2 {
 		t.Fatalf("expected the guard at both the direct-merge and mr/pr handoff sites, found %d call sites", count)
 	}
 
 	// Direct close-as-merged path: guard precedes the merge and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "direct" (default):**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "origin/$TARGET" temp`,
 		`git -C "$MERGE_WT" merge --ff-only "$TEMP_SHA"`,
 		`gc bd close "$WORK" --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
@@ -661,7 +677,7 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	// mr/pr publication path: guard precedes the push and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "mr":**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "origin/$TARGET" temp`,
 		"git push origin HEAD:$BRANCH --force-with-lease",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
 	)
@@ -886,7 +902,10 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 		`gc runtime drain-ack`,
 		`exit 1`,
 		"**2. Final clean-state verification (safeguard):**",
-		"**3. Push your branch:**",
+		// 0.1.11 renamed step 3 to "Push gate" and inserted a new
+		// "2b. Branch-content gate" ahead of it (phantom-handoff /
+		// 0-commit guard); the push-then-reassign shape is unchanged.
+		"**3. Push gate — FAIL CLOSED, then push:**",
 		"**6. Reassign to refinery:**",
 	)
 
@@ -973,36 +992,53 @@ func cookPolecatSelfReviewDescription(t *testing.T, vars map[string]string) stri
 	return selfReview.Description
 }
 
+// TestPolecatPromptDoneSequenceSignalsRefinery: 0.1.11 deleted the prompt's
+// own copy of the done sequence and replaced it with "run the formula's
+// submit-and-exit step" (mol-polecat-work.toml); the push/metadata/reassign/
+// wake/nudge/drain sequence itself now lives solely in that formula step, so
+// the assertion retargets there. The prompt's quick-reference row is checked
+// separately below for the pointer text.
 func TestPolecatPromptDoneSequenceSignalsRefinery(t *testing.T) {
-	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-polecat-work.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("reading polecat prompt: %v", err)
+		t.Fatalf("reading polecat formula: %v", err)
 	}
 	body := string(data)
+	submit := sectionBetween(t, body, `id = "submit-and-exit"`, "**Exit criteria:** Branch pushed, metadata set, bead reassigned, refinery signaled")
 
-	assertContainsInOrder(t, body,
-		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
-		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"`,
-		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
+	assertContainsInOrder(t, submit,
+		`REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"`,
+		`gc bd update "$WORK_BEAD_ID" --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		`gc session wake "$REFINERY_TARGET" || true`,
 		`gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`,
 		`gc runtime drain-ack`,
 	)
 	if strings.Contains(body, `--assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"`) {
-		t.Fatal("polecat prompt must clear gc.routed_to instead of routing to the refinery named session")
+		t.Fatal("polecat formula must clear gc.routed_to instead of routing to the refinery named session")
 	}
-	if !strings.Contains(body, "Done sequence (push, set metadata, reassign, wake refinery, nudge refinery, `gc runtime drain-ack`, exit)") {
-		t.Fatalf("polecat quick reference must include the refinery wake+nudge handoff")
+
+	promptPath := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	if !strings.Contains(string(promptData), "Run the `mol-polecat-work` `submit-and-exit` step (its single source of truth); if already run, `gc runtime drain-ack` + exit") {
+		t.Fatalf("polecat quick reference must point at the formula's submit-and-exit step")
 	}
 }
 
-// TestPolecatPromptHaltsOnAutoPushFalse asserts the done sequence respects
-// mol-pr-from-issue's auto_push=false halt-at-branch-ready contract. The
-// gate must run BEFORE `git push origin HEAD` so a false signal prevents
-// the push and refinery handoff entirely. Regression for gco-ded / gc-m3j:
-// prompt's done sequence was structurally overriding the formula's
-// auto_push gate (BYPASS rate hit 75%).
+// TestPolecatPromptHaltsOnAutoPushFalse asserted the prompt's own done
+// sequence respected the auto_push=false halt-at-branch-ready contract
+// (regression for gco-ded / gc-m3j: prompt's done sequence was structurally
+// overriding the formula's auto_push gate, BYPASS rate hit 75%). 0.1.11
+// deletes the prompt's copy of that logic entirely — the gate now lives
+// ONLY in mol-polecat-work's submit-and-exit step (see
+// TestPolecatFormulaHaltsOnAutoPushFalse) — which makes the structural-
+// override bypass impossible by construction rather than merely tested for.
+// This test now asserts that construction: the prompt delegates to
+// submit-and-exit and carries no independent push/auto_push logic to drift
+// out of sync with the formula's gate.
 func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 	path := filepath.Join(packRoot(), "packs", "gastown", "agents", "polecat", "prompt.template.md")
 	data, err := os.ReadFile(path)
@@ -1012,30 +1048,29 @@ func TestPolecatPromptHaltsOnAutoPushFalse(t *testing.T) {
 	body := string(data)
 
 	assertContainsInOrder(t, body,
-		"## FINAL REMINDER: RUN THE DONE SEQUENCE",
-		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
-		`if [ "$AUTO_PUSH" = "false" ]; then`,
-		`BRANCH=$(git branch --show-current)`,
-		`gc bd update <work-bead> \`,
-		`--status=open --assignee=""`,
-		`--set-metadata branch="$BRANCH"`,
-		`--set-metadata target={{ .DefaultBranch }}`,
-		`--set-metadata branch_ready=true`,
-		`--set-metadata halt_reason=auto_push_false`,
-		`--set-metadata gc.routed_to=""`,
-		`gc runtime drain-ack`,
-		"exit 0",
-		"fi",
-		"git push origin HEAD",
-		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
-		`LOCAL_HEAD=$(git rev-parse HEAD)`,
-		`PUSH VERIFICATION FAILED`,
-		`gc runtime drain-ack`,
-		"exit 1",
-		`gc bd update <work-bead> \`,
+		"## FINAL REMINDER: RUN THE FORMULA'S SUBMIT-AND-EXIT",
+		"`mol-polecat-work` `submit-and-exit` step is the single source of truth for the",
+		"The push gate lives inside submit-and-exit",
+		"`auto_push=false`",
+		"halts at branch-ready",
 	)
+	for _, bad := range []string{
+		"git push origin HEAD",
+		"AUTO_PUSH=$(gc bd show",
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("polecat prompt must not carry its own push/auto_push logic (must delegate entirely to submit-and-exit); found %q", bad)
+		}
+	}
 }
 
+// TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse: same delegation
+// check as TestPolecatPromptHaltsOnAutoPushFalse, but against the rendered
+// prompt (Go text/template applied) to prove rendering does not reintroduce
+// or corrupt the delegation text. The old "### The Done Sequence" / "This
+// pushes your branch" section markers no longer exist post-0.1.11; the
+// FINAL REMINDER section carries no {{ .X }} template variables now, so
+// there is nothing else for rendering to affect here.
 func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
 	body := renderGastownPromptForPack(t,
 		"packs/gastown/agents/polecat/prompt.template.md",
@@ -1045,30 +1080,22 @@ func TestPolecatRenderedApprovalFallacyHaltsOnAutoPushFalse(t *testing.T) {
 		"gastown",
 		"gastown.",
 	)
-	doneSequence := sectionBetween(t, body, "### The Done Sequence", "This pushes your branch")
+	doneSequence := sectionBetween(t, body, "## FINAL REMINDER: RUN THE FORMULA'S SUBMIT-AND-EXIT", "## Command Quick-Reference")
 
 	assertContainsInOrder(t, doneSequence,
-		`AUTO_PUSH=$(gc bd show <work-bead> --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
-		`if [ "$AUTO_PUSH" = "false" ]; then`,
-		`BRANCH=$(git branch --show-current)`,
-		`gc bd update <work-bead> \`,
-		`--status=open --assignee=""`,
-		`--set-metadata branch="$BRANCH"`,
-		`--set-metadata target=main`,
-		`--set-metadata branch_ready=true`,
-		`--set-metadata halt_reason=auto_push_false`,
-		`--set-metadata gc.routed_to=""`,
-		`gc runtime drain-ack`,
-		"exit 0",
-		"fi",
-		"git push origin HEAD",
-		`REMOTE_REF=$(git ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}')`,
-		`LOCAL_HEAD=$(git rev-parse HEAD)`,
-		`PUSH VERIFICATION FAILED`,
-		`gc runtime drain-ack`,
-		"exit 1",
-		`gc bd update <work-bead> \`,
+		"`mol-polecat-work` `submit-and-exit` step is the single source of truth for the",
+		"The push gate lives inside submit-and-exit",
+		"`auto_push=false`",
+		"halts at branch-ready",
 	)
+	for _, bad := range []string{
+		"git push origin HEAD",
+		"AUTO_PUSH=$(gc bd show",
+	} {
+		if strings.Contains(doneSequence, bad) {
+			t.Fatalf("rendered polecat prompt must not carry its own push/auto_push logic; found %q", bad)
+		}
+	}
 }
 
 func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
@@ -1080,11 +1107,19 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 	body := string(data)
 	submit := sectionBetween(t, body, `id = "submit-and-exit"`, "The refinery will pick this up")
 
+	// 0.1.11 renamed this step "Push gate — FAIL CLOSED, then push" and
+	// replaced the one-line has()-based auto_push read with a
+	// shape-normalising jq probe (object/null/JSON-string metadata,
+	// closed false/no/0 vs true/yes/1 vocabulary); BRANCH is now derived
+	// once, ahead of the probe, rather than inside the halt.
 	assertContainsInOrder(t, submit,
-		"Push your branch:",
-		`AUTO_PUSH=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata | if has("auto_push") then (.auto_push | tostring) else "" end')`,
-		`if [ "$AUTO_PUSH" = "false" ]; then`,
+		"**3. Push gate",
+		`WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json)`,
 		`BRANCH=$(git branch --show-current)`,
+		`AUTO_PUSH=""`,
+		`elif has("auto_push") then (.auto_push | tostring | ascii_downcase`,
+		`if   . == "false" or . == "no"  or . == "0" then "false"`,
+		`if [ "$AUTO_PUSH" = "false" ]; then`,
 		`gc bd update "$WORK_BEAD_ID" \`,
 		`--status=open --assignee=""`,
 		`--set-metadata branch="$BRANCH"`,
@@ -1878,10 +1913,9 @@ func TestGastownRoutedToTargetsUseBindingPrefix(t *testing.T) {
 		{"packs/gastown/formulas/mol-polecat-work.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery`},
 		{"packs/gastown/formulas/mol-refinery-patrol.toml", `${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat`},
 		{"packs/gastown/formulas/mol-idea-to-plan.toml", "$GC_RIG/{{binding_prefix}}polecat"},
-		{"packs/gastown/agents/mayor/prompt.template.md", `${TARGET_RIG:+$TARGET_RIG/}{{ .BindingPrefix }}polecat`},
+		{"packs/gastown/agents/mayor/prompt.template.md", `<rig>/{{ .BindingPrefix }}polecat`},
 		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`},
-		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
-		{"packs/gastown/template-fragments/approval-fallacy.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery`},
+		{"packs/gastown/agents/polecat/prompt.template.md", `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}witness`},
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(gastownRel(check.rel))
@@ -2035,56 +2069,49 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 	}
 }
 
+// TestDogStartupPromptUsesSplitClaimFirstQueries: since gastown 0.1.11 the
+// dog startup is `gc hook --claim --json` (the same migration polecat made in
+// 0.1.10, see the polecat case in TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup). gc hook
+// performs the split assigned-in-progress / assigned-ready / routed-pool
+// lookup and the per-source claim verification internally, so the fragment
+// no longer renders the {{ .AssignedInProgressQuery }} / {{ .AssignedReadyQuery }}
+// / {{ .RoutedPoolQuery }} placeholders or the Step 1a/1b/1c verification
+// prose. What must still hold: the fragment claims through gc hook (never a
+// hand-rolled bd query that could race the pool), verifies the claim against
+// the session identity before executing, and drains when there is no work.
 func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
-	checks := []string{
-		"packs/gastown/template-fragments/propulsion.template.md",
+	const hookClaimJSON = "gc hook --claim --json"
+	rel := "packs/gastown/template-fragments/propulsion.template.md"
+	data, err := os.ReadFile(gastownRel(rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
 	}
-	for _, rel := range checks {
-		data, err := os.ReadFile(gastownRel(rel))
-		if err != nil {
-			t.Fatalf("reading %s: %v", rel, err)
-		}
-		body := string(data)
-		dogBody := body
-		if strings.Contains(rel, "template-fragments/propulsion.template.md") {
-			dogBody = sectionBetween(t, body, `{{ define "propulsion-dog" }}`, `{{ end }}`)
-		}
-		for _, want := range []string{
-			"{{ .AssignedInProgressQuery }}",
-			"{{ .AssignedReadyQuery }}",
-			"{{ .RoutedPoolQuery }}",
-		} {
-			if !strings.Contains(dogBody, want) {
-				t.Errorf("%s missing split query placeholder %q", rel, want)
-			}
-		}
-		if strings.Contains(dogBody, `gc bd ready --assignee="$GC_SESSION_NAME"`) {
-			t.Errorf("%s hardcodes assigned-ready bd command instead of compatibility-aware placeholder", rel)
-		}
-		if strings.Contains(dogBody, `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`) {
-			t.Errorf("%s hardcodes weak in-progress recovery instead of compatibility-aware placeholder", rel)
-		}
-		for _, want := range []string{
-			"For Step 1a/1b candidates",
-			"Assigned work may have no",
-			"For Step 1c candidates",
-		} {
-			if !strings.Contains(dogBody, want) {
-				t.Errorf("%s missing source-aware dog verification text %q", rel, want)
-			}
+	dogBody := sectionBetween(t, string(data), `{{ define "propulsion-dog" }}`, `{{ end }}`)
+	assertContainsInOrder(t, dogBody,
+		"Run `"+hookClaimJSON+"`",
+		"verify the claimed bead matches your session identity",
+		"gc runtime drain-ack && exit",
+	)
+	for _, bad := range []string{
+		`gc bd ready --assignee="$GC_SESSION_NAME"`,
+		`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`,
+		"gc bd update <id> --claim",
+	} {
+		if strings.Contains(dogBody, bad) {
+			t.Errorf("%s hand-rolls the claim %q instead of %s", rel, bad, hookClaimJSON)
 		}
 	}
 
 	// The dog prompt stays thin: the claim-first startup protocol renders
-	// through the propulsion-dog fragment asserted above.
+	// through the propulsion-dog fragment asserted above, and the quick
+	// reference points at the same atomic claim.
 	dogPrompt, err := os.ReadFile(filepath.Join(packRoot(), "packs/gastown/agents/dog/prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading dog prompt: %v", err)
 	}
 	assertContainsInOrder(t, string(dogPrompt),
 		`{{ template "propulsion-dog" . }}`,
-		"{{ .WorkQuery }}",
-		"gc bd update <id> --claim",
+		"| Find and atomically claim work | `"+hookClaimJSON+"` |",
 		"gc bd show <id> --json",
 	)
 
@@ -2096,29 +2123,21 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 		"gastown",
 		"gastown.",
 	)
-	// The claim-first startup behavior renders through the propulsion-dog
-	// fragment: split queries expand, claim precedes inspection, and the
-	// source-aware verification guidance survives rendering.
 	assertContainsInOrder(t, renderedDogPrompt,
-		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
-		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
-		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
-		"bd ready --include-ephemeral --assignee=<session>",
-		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
-		"gc bd update <id> --claim",
-		"For Step 1a/1b candidates",
-		"Assigned work may have no",
-		"For Step 1c candidates",
-		"`metadata.gc.routed_to` is `$GC_TEMPLATE`",
+		"Run `"+hookClaimJSON+"`",
+		"verify the claimed bead matches your session identity",
+		"gc runtime drain-ack && exit",
+		"| Find and atomically claim work | `"+hookClaimJSON+"` |",
 	)
-	if strings.Contains(renderedDogPrompt, "{{ .AssignedReadyQuery }}") {
-		t.Fatal("rendered dog prompt still contains AssignedReadyQuery placeholder")
-	}
-	if strings.Contains(renderedDogPrompt, "{{ .AssignedInProgressQuery }}") {
-		t.Fatal("rendered dog prompt still contains AssignedInProgressQuery placeholder")
-	}
-	if strings.Contains(renderedDogPrompt, "{{ .RoutedPoolQuery }}") {
-		t.Fatal("rendered dog prompt still contains RoutedPoolQuery placeholder")
+	for _, placeholder := range []string{
+		"{{ .AssignedReadyQuery }}",
+		"{{ .AssignedInProgressQuery }}",
+		"{{ .RoutedPoolQuery }}",
+		"{{ .WorkQuery }}",
+	} {
+		if strings.Contains(renderedDogPrompt, placeholder) {
+			t.Fatalf("rendered dog prompt still contains %s placeholder", placeholder)
+		}
 	}
 }
 
@@ -2142,19 +2161,29 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 		rig            string
 		binding        string
 	}{
+		// 0.1.11 converted the mayor/crew/polecat propulsion fragments from
+		// the explicit AssignedInProgressQuery placeholder to a single
+		// `gc hook --claim --json` claim (precedent: ca35aa9fb did the same
+		// for polecat in 0.1.10 — hookClaimExistingOrAssigned checks
+		// assigned in-progress work internally, so the property still
+		// holds, just inside the hook rather than a rendered bd query).
+		// deacon/witness/refinery fragments are unaffected and keep the
+		// placeholder.
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-mayor" }}`,
-			end:    `{{ define "propulsion-crew" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-mayor" }}`,
+			end:            `{{ define "propulsion-crew" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-crew" }}`,
-			end:    `{{ define "propulsion-deacon" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-crew" }}`,
+			end:            `{{ define "propulsion-deacon" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
@@ -2171,11 +2200,12 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-polecat" }}`,
-			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-polecat" }}`,
+			end:            `{{ define "propulsion-refinery" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
@@ -2185,18 +2215,20 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-mayor" }}`,
-			end:    `{{ define "propulsion-crew" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-mayor" }}`,
+			end:            `{{ define "propulsion-crew" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-crew" }}`,
-			end:    `{{ define "propulsion-deacon" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-crew" }}`,
+			end:            `{{ define "propulsion-deacon" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
@@ -2213,11 +2245,12 @@ func TestNonDogStartupPromptsUseCompatibilityAwareWorkLookup(t *testing.T) {
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/gastown/template-fragments/propulsion.template.md",
-			start:  `{{ define "propulsion-polecat" }}`,
-			end:    `{{ define "propulsion-refinery" }}`,
-			want:   assignedInProgressTemplate,
-			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
+			rel:            "packs/gastown/template-fragments/propulsion.template.md",
+			start:          `{{ define "propulsion-polecat" }}`,
+			end:            `{{ define "propulsion-refinery" }}`,
+			want:           assignedInProgressTemplate,
+			alternateWants: []string{hookClaimJSON},
+			forbid:         []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
 			rel:    "packs/gastown/template-fragments/propulsion.template.md",
@@ -2311,11 +2344,17 @@ func TestPolecatStartupUsesHookClaim(t *testing.T) {
 		t.Fatalf("reading %s: %v", rel, err)
 	}
 	body := sectionBetween(t, string(data), "## Startup Protocol", "## Context Exhaustion")
+	// 0.1.11 rewrote the claim block into a scripted retry-loop (ownership
+	// verification, resume/crash re-verify) rather than a single `gc hook
+	// --claim --json` one-liner; "performs the atomic claim before you
+	// inspect the bead" became "flips gc bd status to in_progress
+	// atomically" / "Only after it prints CLAIMED_BEAD_ID do you read" —
+	// same properties (atomic claim, no inspection before claim), new words.
 	for _, want := range []string{
 		"gc hook --claim --json",
 		"checks assigned work first",
-		"performs the atomic",
-		"claim before you inspect the bead",
+		"atomically",
+		"Only after it prints `CLAIMED_BEAD_ID` do you read",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("%s Startup Protocol missing %q", rel, want)
@@ -2356,9 +2395,16 @@ func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
 
 	// Bug 2: no `gc bd` command may filter --type=wisp — it is not a valid bd
 	// issue type, so the query errors and matches nothing (prose warning
-	// against it is fine; an actual command is the bug).
+	// against it is fine; an actual command is the bug). 0.1.11's warning
+	// prose now reads "not a valid gc bd type", which itself contains the
+	// substring "gc bd" alongside "--type=wisp" — skip comment lines (`#`)
+	// so the check catches only an actual invocation, not the warning
+	// against one.
 	for _, line := range strings.Split(rendered, "\n") {
-		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if strings.Contains(line, "gc bd list") && strings.Contains(line, "--type=wisp") {
 			t.Errorf("witness prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
 		}
 	}
@@ -2535,11 +2581,9 @@ func TestGastownPromptPeerAddressesUseBindingPrefix(t *testing.T) {
 			agentName:    "gastown.boot",
 			templateName: "boot",
 			wants: []string{
-				"gc session peek gastown.deacon --lines 1",
-				"gc bd list --assignee=gastown.deacon --status=in_progress --json --limit=5",
-				"gc mail count gastown.deacon",
+				"gc session peek gastown.deacon --lines 30",
+				"gc bd list --assignee=gastown.deacon --status=in_progress --include-infra --json",
 				"gc session nudge gastown.deacon",
-				`--title="Stuck: gastown.deacon"`,
 				`"target":"gastown.deacon"`,
 			},
 			bads: []string{
@@ -2557,11 +2601,9 @@ func TestGastownPromptPeerAddressesUseBindingPrefix(t *testing.T) {
 			templateName: "boot",
 			unbound:      true,
 			wants: []string{
-				"gc session peek deacon --lines 1",
-				"gc bd list --assignee=deacon --status=in_progress --json --limit=5",
-				"gc mail count deacon",
+				"gc session peek deacon --lines 30",
+				"gc bd list --assignee=deacon --status=in_progress --include-infra --json",
 				"gc session nudge deacon",
-				`--title="Stuck: deacon"`,
 				`"target":"deacon"`,
 			},
 			bads: []string{
@@ -2902,8 +2944,8 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
 				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -2930,8 +2972,11 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 				`run ` + "`gc hook`" + ` immediately`,
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
-				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')`,
+				// 0.1.11 added --include-infra to both witness wisp queries:
+				// wisp roots are ephemeral, and gc bd list hides the wisps
+				// tier without that flag (would return [] and pour a dup).
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')`,
+				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --include-infra --limit=0 --json | jq -r '.[].id')`,
 				`ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')`,
 				`gc bd mol burn "$extra" --force`,
 				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
@@ -2993,7 +3038,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3019,7 +3064,9 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 			wantOrder: []string{
 				`CURRENT_WISP=${GC_BEAD_ID:-}`,
 				`if [ -z "$CURRENT_WISP" ]; then`,
-				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				// 0.1.11 fixed the wisp-lookup type from the invalid
+				// --type=wisp to --type=molecule across mol-refinery-patrol.
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 				`fi`,
 				`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id // empty')`,
 				`if [ -z "$NEXT" ]; then`,
@@ -3059,7 +3106,7 @@ func TestRefineryPatrolRestartGuidanceAssignsSuccessor(t *testing.T) {
 	assertContainsInOrder(t, patrolLifecycle,
 		`CURRENT_WISP=${GC_BEAD_ID:-}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`fi`,
 		`NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
@@ -3258,15 +3305,21 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 		}
 	}
 
+	// 0.1.11 replaced boot's single-pass "Triage Steps" (session-exists
+	// check via --lines 1, then Step 2-4 observe/decide/nudge/drain-ack)
+	// with a full mol-boot-patrol formula patrol loop; the short --lines 1
+	// liveness peek and the "Decide"/nudge narrative (ending "Next Boot wake
+	// will re-evaluate.") no longer exist in the prompt at all — that
+	// judgment now lives in the formula. "each wake" also became "each
+	// cycle" throughout.
 	for _, want := range []string{
-		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1",
 		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30",
 		"configured `boot` named session",
 		"`mode = \"always\"` keeps the `boot` identity present",
 		"`wake_mode = \"fresh\"`",
 		"gives each wake a new provider context",
-		"Narrow scope keeps each wake cheap.",
-		"Next Boot wake will re-evaluate.",
+		"Narrow scope keeps each cycle cheap.",
+		"the next `idle_timeout` recycle retries the pour.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("boot prompt missing current lifecycle or command guidance %q:\n%s", want, body)
@@ -3306,7 +3359,10 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	for _, want := range []string{
 		`formula = "mol-review-leg"`,
 		`coordinator`,
-		`gc bd update "$WORK_BEAD_ID" --notes`,
+		// 0.1.11 switched this to --append-notes: bare --notes REPLACES the
+		// whole field, destroying the coordinator's assignment and any prior
+		// leg's report; --append-notes preserves them.
+		`gc bd update "$WORK_BEAD_ID" --append-notes`,
 		`gc mail send "$COORD"`,
 		`gc bd update "$WORK_BEAD_ID" --status=closed`,
 	} {
@@ -3982,10 +4038,14 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	body := string(data)
 	section := sectionBetween(t, body, `id = "next-iteration"`, "")
 
+	// 0.1.11 added a spawn-trigger fallback (GC_TRIGGER_WORK_BEAD_ID) ahead
+	// of the assignee-scoped lookup — safe here only because the deacon is
+	// a fresh-wake singleton — and fixed --type=wisp (not a valid gc bd
+	// type) to --type=molecule.
 	assertContainsInOrder(t, section,
-		`CURRENT_WISP=${GC_BEAD_ID:-}`,
+		`CURRENT_WISP=${GC_BEAD_ID:-${GC_TRIGGER_WORK_BEAD_ID:-}}`,
 		`if [ -z "$CURRENT_WISP" ]; then`,
-		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+		`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
 		`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix='{{binding_prefix}}' --json | jq -r '.new_epic_id // empty')`,
 		`if [ -z "$NEXT" ]; then`,
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
@@ -4020,7 +4080,7 @@ func TestRefineryPromptUsesCanonicalAgentIdentity(t *testing.T) {
 	for _, want := range []string{
 		`gc bd list --assignee="$GC_AGENT" --status=in_progress`,
 		`gc bd update "$WISP" --assignee="$GC_AGENT"`,
-		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+		`| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open,in_progress` + "`" + ` — both statuses`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery prompt missing canonical $GC_AGENT usage %q", want)
@@ -4064,12 +4124,16 @@ func TestRefineryAssignedWorkQueriesUsePortableRigScope(t *testing.T) {
 		{
 			name: "prompt quick reference",
 			body: prompt,
-			want: `| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open` + "`" + ` |`,
+			want: `| Find assigned work | ` + "`" + `gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open,in_progress` + "`" + ` — both statuses`,
 		},
 		{
+			// 0.1.11 widened this to --status=open,in_progress: a bead this
+			// patrol just claimed moves to in_progress, so --status=open
+			// alone can never see its own in-flight claim again (stranded
+			// bead leak, gci-… measured 1->2 stranded in 30 min).
 			name: "formula find-work step",
 			body: formula,
-			want: `WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \`,
+			want: `WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open,in_progress \`,
 		},
 		{
 			name: "formula explanation",
