@@ -1,12 +1,12 @@
 # Release Gate: ga-0ckn7x - reload-test hang budget
 
-Deploy bead: `ga-0ckn7x`  
-Review bead: `ga-09qq0u`  
-Reviewed content commit: `341069eee3aa90b32afe2ff015600d7f0090acce`  
-Evaluated rebased commit: `8061ea62b587668f0e7f58d1777717fe68bb5c54`  
-Deploy branch: `deploy/ga-0ckn7x-gate-r2-20260820`  
-Base: `origin/main@7c817e0640fae801631043005f1d54b17ce3e97c`  
-Gate evaluated: 2026-08-20  
+Deploy bead: `ga-0ckn7x`
+Review bead: `ga-09qq0u`
+Reviewed content commit: `341069eee3aa90b32afe2ff015600d7f0090acce`
+Evaluated rebased commit: `8061ea62b587668f0e7f58d1777717fe68bb5c54`
+Deploy branch: `deploy/ga-0ckn7x-gate-r2-20260820`
+Base: `origin/main@7c817e0640fae801631043005f1d54b17ce3e97c`
+Gate evaluated: 2026-08-20
 Verdict: **PASS — MAYOR WAIVER APPLIED**
 
 `docs/PROJECT_MANIFEST.md` is not present in this checkout. This gate uses
