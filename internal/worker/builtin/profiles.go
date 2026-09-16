@@ -172,6 +172,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
 					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
+					{Value: "fable-5-1", Label: "Fable 5.1", FlagArgs: []string{"--model", "claude-fable-5-1"}, FlagAliases: [][]string{{"-m", "claude-fable-5-1"}}},
 					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
 					{Value: "opus-5", Label: "Opus 5", FlagArgs: []string{"--model", "claude-opus-5"}, FlagAliases: [][]string{{"-m", "claude-opus-5"}}},
 					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
@@ -196,6 +197,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 					{Value: "claude-opus-5[1m]", Label: "Opus 5 1M (canonical id)", FlagArgs: []string{"--model", "claude-opus-5[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-5[1m]"}}},
 					{Value: "claude-sonnet-5", Label: "Sonnet 5 (canonical id)", FlagArgs: []string{"--model", "claude-sonnet-5"}, FlagAliases: [][]string{{"-m", "claude-sonnet-5"}}},
 					{Value: "claude-fable-5", Label: "Fable 5 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
+					{Value: "claude-fable-5-1", Label: "Fable 5.1 (canonical id)", FlagArgs: []string{"--model", "claude-fable-5-1"}, FlagAliases: [][]string{{"-m", "claude-fable-5-1"}}},
 				},
 			},
 		},
