@@ -4682,7 +4682,14 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 	t.Run("ambiguous", func(t *testing.T) {
 		workDir := t.TempDir()
 		searchBase := t.TempDir()
-		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+		mgr, infos := newManagerWithSession(t, workDir, "one")
+		if err := mgr.Kill(infos[0].ID); err != nil {
+			t.Fatalf("Kill(one): %v", err)
+		}
+		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create two: %v", err)
+		}
 
 		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
 		if err := os.MkdirAll(slugDir, 0o755); err != nil {
@@ -4692,9 +4699,10 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 			t.Fatalf("WriteFile: %v", err)
 		}
 
-		// Two keyless sessions share the workdir: the refusal is deliberate, not a
-		// missing file — the transcript above exists and is still not resolved.
-		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		// "one" was killed, not closed, while sharing the workdir with "two": the
+		// refusal is deliberate, not a missing file — the transcript above exists
+		// and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(two.ID, []string{searchBase})
 		if err != nil {
 			t.Fatalf("TranscriptPathClassified: %v", err)
 		}

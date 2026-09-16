@@ -306,6 +306,20 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 	// with no run chain still self-roots via its own id (ResolveRunID's
 	// selfID fallback).
 	rootBeadID := beadmeta.ResolveRunID(parentBead.Metadata, attachBeadID, "")
+
+	// A resolved run-chain root may point at a molecule that has since fully
+	// closed (e.g. re-attaching a content bead to a fresh formula after its
+	// prior review round-trip closed cleanly) -- a dead pointer, not a live
+	// upstream workflow to honor. Only a still-open chain root is trusted;
+	// anything else (closed, or no longer resolvable) falls back to self-root,
+	// exactly like the no-chain case (ga-yov1rr). A live chain
+	// (gcg-wisp-y785sz) is unaffected: its root bead is never closed.
+	if rootBeadID != attachBeadID {
+		if rootBead, err := store.Get(rootBeadID); err != nil || rootBead.Status == "closed" {
+			rootBeadID = attachBeadID
+		}
+	}
+
 	rootStoreRef := parentBead.Metadata[beadmeta.RootStoreRefMetadataKey]
 
 	// Idempotency: check for existing sub-DAG with the same key.

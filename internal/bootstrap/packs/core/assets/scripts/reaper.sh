@@ -1362,6 +1362,59 @@ EOF
             record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
         fi
 
+        # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced directly
+        # into a SQL LIKE literal below (type-scope gate) and passed as bd's
+        # own --pattern flag further down. A value outside this charset
+        # (e.g. a single quote) would corrupt the guard's own COUNT query --
+        # id LIKE 'x' OR '1'='1' always matches, silently defeating the very
+        # guard it is supposed to be. Fail closed: reject before any SQL is
+        # built, matching the backup-age gate above. Inlined (not a shared
+        # helper like valid_database_identifier) because every per-file test
+        # harness in test/ extracts only this Step 6 block via awk, and a
+        # call to a helper defined outside that boundary would resolve to
+        # nothing in those harnesses.
+        if [ "$_PRUNE_SKIP" -eq 0 ]; then
+            case "$SESSION_BEAD_PATTERN" in
+                ''|*[!A-Za-z0-9_.*?-]*)
+                    record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: SESSION_BEAD_PATTERN='$SESSION_BEAD_PATTERN' contains characters outside the allowed pattern charset (letters, digits, . _ - * ?); refusing to build SQL from it (type scope guard)"
+                    _PRUNE_SKIP=1
+                    ;;
+            esac
+        fi
+
+        # Type-scope gate: bd's prune SweepRequest has no issue_type filter
+        # (only ID glob + age), so a pattern like the default gm-* would
+        # delete any closed, non-session bead sharing that ID prefix. Cheap
+        # mechanical count mirroring bd's own prune candidate selection
+        # (pattern + closed + older-than), restricted to non-session rows --
+        # fail closed on a nonzero hit, matching the backup-age gate above.
+        # When the city database can't be resolved the count can't be
+        # computed at all; record once (like every other CITY_DB-unresolved
+        # branch in this file) and let bd's own prune proceed unverified --
+        # bd resolves its store independently of this file's direct-SQL
+        # CITY_DB, so blocking it here would regress that guarantee.
+        if [ "$_PRUNE_SKIP" -eq 0 ] && [ -n "$CITY_DB" ]; then
+            # Glob -> SQL LIKE: simple prefix globs only (e.g. gm-*). A
+            # literal % or _ in a custom pattern would not round-trip.
+            _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
+            _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
+            case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
+            get_sql_count "$CITY_DB" "type scope guard" "
+                SELECT COUNT(*) FROM \`$CITY_DB\`.issues
+                WHERE id LIKE '$_TYPE_GUARD_LIKE'
+                AND status = 'closed'
+                AND closed_at < DATE_SUB(NOW(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
+                AND issue_type != 'session'
+            "
+            if [ "$SQL_COUNT_RESULT" -gt 0 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: $SQL_COUNT_RESULT non-session bead(s) matching pattern=$SESSION_BEAD_PATTERN would be caught by prune (type scope guard)"
+                _PRUNE_SKIP=1
+            fi
+        elif [ "$_PRUNE_SKIP" -eq 0 ] && [ -z "$CITY_DB" ] && [ "${CITY_DB_ANOMALY_RECORDED:-0}" -eq 0 ]; then
+            record_anomaly "city" "city database could not be determined from GC_REAPER_CITY_DATABASE or ${CITY:-}/.beads/metadata.json; session-prune type-scope guard disabled, prune proceeding unverified"
+            CITY_DB_ANOMALY_RECORDED=1
+        fi
+
         BD_PRUNE_ARGS=(prune --pattern "$SESSION_BEAD_PATTERN" --older-than "$SESSION_PURGE_AGE")
         if [ -z "$DRY_RUN" ]; then BD_PRUNE_ARGS+=(--force); fi
         BD_PRUNE_ARGS+=(--json)

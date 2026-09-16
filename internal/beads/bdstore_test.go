@@ -5366,3 +5366,49 @@ func TestIsTimeoutError(t *testing.T) {
 		})
 	}
 }
+
+// TestBdStoreReclaimStaleReturnsPreviousOwner covers ga-7rj87d FR2: the
+// reclaim call must be scoped to exactly the one candidate ID (bd reclaim
+// --id <id>), not a bare sweep, and must surface the previous owner so the
+// caller can report it on the hook.claim.reclaimed_stale event (FR5).
+func TestBdStoreReclaimStaleReturnsPreviousOwner(t *testing.T) {
+	var gotArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name != "bd" {
+			t.Fatalf("name = %q, want bd", name)
+		}
+		gotArgs = append([]string(nil), args...)
+		return []byte(`{"reclaimed":[{"id":"bd-42","previous_owner":"worker-1"}],"count":1,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reclaimed {
+		t.Fatal("ReclaimStale reclaimed = false, want true")
+	}
+	if previousOwner != "worker-1" {
+		t.Fatalf("previousOwner = %q, want worker-1", previousOwner)
+	}
+	if got := strings.Join(gotArgs, " "); got != "reclaim --id bd-42 --json" {
+		t.Fatalf("args = %q, want scoped single-id reclaim args", got)
+	}
+}
+
+// TestBdStoreReclaimStaleReportsNothingReclaimed covers ga-7rj87d FR4: when
+// bd reclaim reports nothing reclaimed for the scoped id, ReclaimStale must
+// report false without error so the caller leaves the candidate untouched.
+func TestBdStoreReclaimStaleReportsNothingReclaimed(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"reclaimed":[],"count":0,"scoped":true}`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	reclaimed, previousOwner, err := s.ReclaimStale("bd-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed {
+		t.Fatalf("ReclaimStale reclaimed = true, want false; previousOwner=%q", previousOwner)
+	}
+}

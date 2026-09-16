@@ -13,7 +13,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.82.1"
+		grpcVersion               = "1.83.2"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -69,7 +69,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43"
 		bdBuild        = "c185735c38"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.0"
+		grpcVersion    = "1.83.2"
+		thriftVersion  = "0.24.0"
 	)
 
 	root := repoRoot(t)
@@ -99,10 +100,13 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BUILD=" + bdBuild,
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
+		"ARG THRIFT_VERSION=" + thriftVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
+		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -119,6 +123,9 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd grpc override %d times, want exactly 1", got)
+	}
+	if got := strings.Count(dockerfile, `go get "github.com/apache/thrift@v${THRIFT_VERSION}"`); got != 1 {
+		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd thrift override %d times, want exactly 1", got)
 	}
 	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
 		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
@@ -308,11 +315,12 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 // Dockerfile.base now forces x/crypto, x/net, x/text and thrift forward in the gh and
 // Dolt builds the same way it forces grpc, so a waiver on those paths would let the
 // scan gate mask a regressed rebuild instead of proving the fix holds. The reviewed
-// set is the three CVEs published against the grpc and thrift versions those builds
-// pin, carried over from main's time-boxed bridge and held to exactly the paths the
-// scan reported; TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and
-// statements. kubectl keeps the x/text waiver because it is an upstream-signed
-// prebuilt this repo installs rather than builds. gc's module waivers are enforced
+// set is the two surviving CVEs -- CVE-2026-56852 for kubectl and CVE-2026-43871,
+// published against the thrift 0.23.0 the Dolt build still pins -- carried over from
+// main's time-boxed bridge and held to exactly the paths the scan reported;
+// TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and statements.
+// kubectl keeps the x/text waiver because it is an upstream-signed prebuilt this
+// repo installs rather than builds. gc's module waivers are enforced
 // separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
@@ -343,28 +351,18 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	}
 	// Waivers that survive, checked as present so an entry cannot be dropped without
 	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
-	// cannot grow without one either. The gc path of the grpc pair is governed by
-	// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold instead, so it is not listed.
+	// cannot grow without one either. The bd and gc paths of the grpc pair were removed
+	// after both moved to 1.83.2; the gh and Dolt grpc paths (CVE-2026-84304,
+	// CVE-2026-84445) were removed once Dockerfile.base's own GRPC_VERSION also reached
+	// 1.83.2, clearing both CVEs for both binaries. The bd path of the thrift entry was
+	// removed once Dockerfile.agent forced thrift forward to 0.24.0.
 	reviewedWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
 			"usr/local/bin/kubectl": true,
 		},
-		// grpc, fixed in 1.83.1 (CVE-2026-84304) and 1.82.2 / 1.83.2 (CVE-2026-84445);
-		// the gh and Dolt rebuilds pin 1.82.1 and the bd rebuild pins 1.83.0.
-		"CVE-2026-84304": {
-			"usr/bin/gh":         true,
-			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
-		},
-		"CVE-2026-84445": {
-			"usr/bin/gh":         true,
-			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
-		},
-		// thrift, fixed in 0.24.0; the Dolt rebuild pins 0.23.0 and bd's pinned source selects it.
+		// thrift, fixed in 0.24.0; the Dolt rebuild still pins 0.23.0.
 		"CVE-2026-43871": {
 			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
 		},
 	}
 	foundReviewed := map[string]map[string]bool{}
@@ -382,7 +380,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				continue
 			}
 			if rebuiltPaths[p] {
-				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and bd's pinned source already selects them, so move the module forward in that build instead of waiving the path", v.ID, p)
+				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc and thrift forward, so move the module forward in that build instead of waiving the path", v.ID, p)
 			}
 		}
 	}
@@ -538,14 +536,15 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins the six entries carried over from
-// main's time-boxed waiver bridge: the findings the rebuilds do not clear, because each
-// was published against the very versions the pins move to (grpc 1.82.1 and 1.83.0,
-// thrift 0.23.0) or sits in the mail image's requirements. Each is held to the exact
-// paths or purls the scan reported, to the bridge's own 2026-09-21 horizon rather than
-// this file's 2026-11-07, and to a statement naming the fixed version and the pin that
-// has to move. The bridge's other entries are what the rebuilds cleared, and the
-// rebuilt-path guard above is what keeps them from coming back.
+// TestTrivyIgnoreKeepsReviewedBridgeEntries pins the four entries carried over from
+// main's time-boxed waiver bridge: the findings the rebuilds do not fully clear, because
+// each was published against a version some pin still sits on (thrift 0.23.0 on the Dolt
+// rebuild) or sits in the mail image's requirements. Each is held to the exact paths or
+// purls the scan reported, to the bridge's own 2026-09-21 horizon rather than this
+// file's 2026-11-07, and to a statement naming the fixed version and the pin that has to
+// move. The bridge's other entries — including both grpc CVEs, cleared once
+// Dockerfile.base's own GRPC_VERSION reached 1.83.2 — are what the rebuilds cleared, and
+// the rebuilt-path guard above is what keeps them from coming back.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
@@ -580,18 +579,8 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	}
 	wantEntries := []wantEntry{
 		{
-			id:         "CVE-2026-84304",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "go.mod"},
-		},
-		{
-			id:         "CVE-2026-84445",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
-		},
-		{
 			id:         "CVE-2026-43871",
-			paths:      toSet("usr/local/bin/dolt", "usr/local/bin/bd"),
+			paths:      toSet("usr/local/bin/dolt"),
 			substrings: []string{"thrift", "0.24.0", "THRIFT_VERSION"},
 		},
 		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
