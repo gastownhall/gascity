@@ -17,11 +17,15 @@ import (
 //
 // Values are treated literally otherwise: there is no variable interpolation
 // and no inline-comment stripping on unquoted values (a '#' mid-value is kept).
-// A line missing '=' or with an empty key is a parse error so a malformed
-// secrets file fails loudly rather than silently dropping a credential. The
-// last assignment wins when a key repeats.
-func ParseEnvFile(content string) (map[string]string, error) {
+// A line missing '=' or with an empty key is malformed. Malformed lines are
+// skipped and reported individually rather than aborting the whole parse: the
+// returned map holds every successfully-parsed entry, and the returned error
+// slice holds one error per malformed line (nil/empty when the parse is
+// clean), so a single bad line in a secrets file no longer silently drops
+// every other credential in it. The last assignment wins when a key repeats.
+func ParseEnvFile(content string) (map[string]string, []error) {
 	out := make(map[string]string)
+	var errs []error
 	for i, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -30,15 +34,17 @@ func ParseEnvFile(content string) (map[string]string, error) {
 		line = strings.TrimPrefix(line, "export ")
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
-			return nil, fmt.Errorf("line %d: missing '=' in %q", i+1, raw)
+			errs = append(errs, fmt.Errorf("line %d: missing '=' in %q", i+1, raw))
+			continue
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return nil, fmt.Errorf("line %d: empty key in %q", i+1, raw)
+			errs = append(errs, fmt.Errorf("line %d: empty key in %q", i+1, raw))
+			continue
 		}
 		out[key] = unquoteEnvValue(strings.TrimSpace(val))
 	}
-	return out, nil
+	return out, errs
 }
 
 // unquoteEnvValue strips one layer of matching surrounding single or double
