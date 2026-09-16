@@ -9088,7 +9088,7 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	}
 }
 
-func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStarts(t *testing.T) {
+func TestReconcileSessionBeads_RollsBackAllMismatchesInOneTickAndStillStarts(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
 
@@ -9121,36 +9121,28 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStart
 	sessions = append(sessions, starter)
 
 	if woken := env.reconcile(sessions); woken != 1 {
-		t.Fatalf("woken = %d, want 1 planned start after rollback budget is exhausted", woken)
+		t.Fatalf("woken = %d, want 1 planned start alongside unbudgeted same-tick rollbacks", woken)
 	}
-	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 1 {
-		t.Fatalf("deferred rollback messages = %d, want 1; stderr:\n%s", got, env.stderr.String())
+	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 0 {
+		t.Fatalf("deferred rollback messages = %d, want 0; the per-tick rollback cap is removed, so nothing should defer; stderr:\n%s", got, env.stderr.String())
 	}
 	closedMismatches := 0
-	deferredMismatches := 0
 	for i := 0; i < 6; i++ {
 		name := fmt.Sprintf("sky-%d", i)
 		got, err := env.store.Get(sessions[i].ID)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
 		}
-		if got.Status == "closed" {
-			if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
-				t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
-			}
-			closedMismatches++
-			continue
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed; rollback is no longer capped per tick", name, got.Status)
 		}
-		if got.Metadata["pending_create_claim"] != "true" {
-			t.Fatalf("%s pending_create_claim = %q, want true on deferred mismatch", name, got.Metadata["pending_create_claim"])
+		if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+			t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
 		}
-		deferredMismatches++
+		closedMismatches++
 	}
-	if closedMismatches != 5 {
-		t.Fatalf("closed mismatches = %d, want 5", closedMismatches)
-	}
-	if deferredMismatches != 1 {
-		t.Fatalf("deferred mismatches = %d, want 1", deferredMismatches)
+	if closedMismatches != 6 {
+		t.Fatalf("closed mismatches = %d, want 6 (no per-tick deferral)", closedMismatches)
 	}
 	started, err := env.store.Get(starter.ID)
 	if err != nil {
@@ -9160,11 +9152,11 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessMismatchesAndStillStart
 		t.Fatalf("starter state = %q, want active", started.Metadata["state"])
 	}
 	if !env.sp.IsRunning("starter") {
-		t.Fatal("starter runtime was not started after rollback budget was exhausted")
+		t.Fatal("starter runtime was not started")
 	}
 }
 
-func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAndStillStarts(t *testing.T) {
+func TestReconcileSessionBeads_RollsBackAllStaleNoRuntimeCreatesInOneTickAndStillStarts(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "helper"}}}
 
@@ -9191,36 +9183,28 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAn
 	sessions = append(sessions, starter)
 
 	if woken := env.reconcile(sessions); woken != 1 {
-		t.Fatalf("woken = %d, want 1 planned start after rollback budget is exhausted", woken)
+		t.Fatalf("woken = %d, want 1 planned start alongside unbudgeted same-tick rollbacks", woken)
 	}
-	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 1 {
-		t.Fatalf("deferred rollback messages = %d, want 1; stderr:\n%s", got, env.stderr.String())
+	if got := strings.Count(env.stderr.String(), "deferring rollback of sky-"); got != 0 {
+		t.Fatalf("deferred rollback messages = %d, want 0; the per-tick rollback cap is removed, so nothing should defer; stderr:\n%s", got, env.stderr.String())
 	}
 	closedCreates := 0
-	deferredCreates := 0
 	for i := 0; i < 6; i++ {
 		name := fmt.Sprintf("sky-%d", i)
 		got, err := env.store.Get(sessions[i].ID)
 		if err != nil {
 			t.Fatalf("Get(%s): %v", sessions[i].ID, err)
 		}
-		if got.Status == "closed" {
-			if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
-				t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
-			}
-			closedCreates++
-			continue
+		if got.Status != "closed" {
+			t.Fatalf("%s status = %q, want closed; rollback is no longer capped per tick", name, got.Status)
 		}
-		if got.Metadata["pending_create_claim"] != "true" {
-			t.Fatalf("%s pending_create_claim = %q, want true on deferred stale create", name, got.Metadata["pending_create_claim"])
+		if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+			t.Fatalf("%s close_reason = %q, want %q", name, got.Metadata["close_reason"], want)
 		}
-		deferredCreates++
+		closedCreates++
 	}
-	if closedCreates != 5 {
-		t.Fatalf("closed stale creates = %d, want 5", closedCreates)
-	}
-	if deferredCreates != 1 {
-		t.Fatalf("deferred stale creates = %d, want 1", deferredCreates)
+	if closedCreates != 6 {
+		t.Fatalf("closed stale creates = %d, want 6 (no per-tick deferral)", closedCreates)
 	}
 	started, err := env.store.Get(starter.ID)
 	if err != nil {
@@ -9230,7 +9214,7 @@ func TestReconcileSessionBeads_RollbackBudgetDefersExcessStaleNoRuntimeCreatesAn
 		t.Fatalf("starter state = %q, want active", started.Metadata["state"])
 	}
 	if !env.sp.IsRunning("starter") {
-		t.Fatal("starter runtime was not started after rollback budget was exhausted")
+		t.Fatal("starter runtime was not started")
 	}
 }
 

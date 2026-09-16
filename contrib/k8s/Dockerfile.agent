@@ -28,16 +28,15 @@ ARG BD_SOURCE_REF=c185735c38e25569277eae798ce363ecba9859e8
 ARG BD_SOURCE_SHA256=3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43
 ARG BD_BUILD=c185735c38
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.83.0
+ARG GRPC_VERSION=1.83.2
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
-# configuration and release identity. GRPC_VERSION was an override when the
-# published binary embedded vulnerable grpc-go 1.80.0; beads v1.3.0-rc.2 already
-# requires v1.83.0, so it is now a floor assertion rather than a patch. Keep the
-# `go get` and the trailing `go version -m` check: together they fail the build
-# if a future beads release regresses below this grpc, instead of silently
-# shipping it. Raise GRPC_VERSION with the upstream requirement -- never leave it
-# behind, or the `go get` downgrades the release while the check still passes.
+# configuration and release identity. GRPC_VERSION overrides the source's
+# v1.83.0 requirement with the current security floor. Keep the `go get` and the
+# trailing `go version -m` check: together they fail the build if a future beads
+# release regresses below this grpc instead of silently shipping it. Raise
+# GRPC_VERSION with the upstream requirement -- never leave it behind, or the
+# `go get` downgrades the release while the check still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
