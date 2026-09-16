@@ -48,6 +48,7 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 	src := readGCBeadsBdScript(t)
 	validSQLName := extractShellFunction(t, src, "valid_sql_name")
 	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
 	holdsTables := extractShellFunction(t, src, "bd_runtime_store_holds_bd_tables")
 
 	cases := []struct {
@@ -104,6 +105,7 @@ func TestStoreHoldsBdTablesDistinguishesEmptyFromUndetermined(t *testing.T) {
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
 				validSQLName + "\n" +
 				tableCount + "\n" +
+				schemaCursor + "\n" +
 				holdsTables + "\n" +
 				"bd_runtime_store_holds_bd_tables hq\n"
 
