@@ -1729,7 +1729,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
 	// per-session poller would race with it and reintroduce the bd-shellout
 	// load it was designed to eliminate.
-	if nudgeDispatcherIsSupervisor(target.cfg) {
+	if nudgeDispatcherOwnsDelivery(target.cityPath, target.cfg) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the
@@ -1785,6 +1785,22 @@ func nudgeDispatcherIsSupervisor(cfg *config.City) bool {
 		return false
 	}
 	return cfg.Daemon.NudgeDispatcherMode() == "supervisor"
+}
+
+// nudgeDispatcherOwnsDelivery reports whether a live controller is actually
+// hosting the supervisor-mode nudge dispatcher for this city right now.
+// nudgeDispatcherIsSupervisor alone only reports what the config says; a
+// controller that has crashed, has not started yet, or is mid config-reload
+// can disagree with it, and callers that suppress a per-session poller on
+// the config check alone strand queued nudges until a controller comes back
+// (gascity#6361). Fails open (false) whenever it cannot confirm the
+// controller is really hosting the dispatcher, so the poller stays a safety
+// net rather than trusting an assumption this process cannot verify.
+func nudgeDispatcherOwnsDelivery(cityPath string, cfg *config.City) bool {
+	if !nudgeDispatcherIsSupervisor(cfg) {
+		return false
+	}
+	return probeControllerIdentity(cityPath).NudgeDispatcherActive
 }
 
 func splitQueuedNudgesForTarget(target nudgeTarget, items []queuedNudge) ([]queuedNudge, []queuedNudge) {
