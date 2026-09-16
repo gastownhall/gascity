@@ -546,7 +546,15 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 		aliasMatches = matches
 		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
-		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+		// findCanonicalNamedSessionBeadForLookup, not FindCanonicalNamedSessionBead:
+		// this stage's own query is keyed on `alias`, so a bare alias-only bead
+		// (no session_name, no configured_named_session flag, and no
+		// corroborating spec identity) is exactly the input
+		// FindCanonicalNamedSessionBead's unconditional alias-only-uniqueness
+		// fallback would promote to canonical here -- the case ga-t3a0fv round 2
+		// established must fall through to conflict detection instead. See
+		// findCanonicalNamedSessionBeadForLookup's doc comment.
+		if bead, ok := findCanonicalNamedSessionBeadForLookup(candidates, spec); ok {
 			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
 		}
 	}
@@ -570,9 +578,30 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 
 // namedSessionCandidateIsSelf reports whether a bead reached only through
 // conflict-scoped queries (session_name/alias) actually denotes spec's own
-// identity rather than a foreign claimant. It defers entirely to
-// FindCanonicalNamedSessionBead, the same signal canonical detection itself
-// treats as authoritative.
+// identity rather than a foreign claimant. It trusts only the two
+// highest-confidence signals FindCanonicalNamedSessionBead itself checks
+// first: an exact configured_named_session identity match, or an exact
+// session_name match corroborated by NamedSessionBeadMatchesSpec.
+//
+// It deliberately does NOT fall through to that function's third signal —
+// its alias-only-uniqueness fallback, added by #5487 / ga-4of1nc after this
+// function was first authored on a divergent branch. Discovered during the
+// ga-e3o1dq rebase (main and this PR's branch never had both changes
+// present at once until this rebase forced them together): that fallback is
+// unsafe for THIS caller specifically. (a) NamedSessionBeadMatchesSpec
+// degrades to an unconditional match when spec.Agent/spec.Named are both
+// nil — NamedSessionBackingTemplate then returns "", which trivially equals
+// an alias-only bead's own unset template metadata — so the "corroborating
+// template/agent_name" gate the alias fallback relies on can be vacuous.
+// (b) the uniqueness count that fallback uses to reject a genuine collision
+// is always 1 when reached this way, because namedSessionCandidateIsSelf is
+// invoked once per candidate with a single-element slice: the exact
+// protection TestFindCanonicalNamedSessionBead_AliasMatchNotPromotedWithSecondLiveCandidate
+// checks for FindCanonicalNamedSessionBead's own (whole-candidate-set)
+// caller can never trigger here. FindCanonicalNamedSessionBead's alias
+// branch and its own tests are untouched by this fix and remain correct for
+// that direct, full-candidate-set caller; this function simply stops
+// reaching the branch that was never safe for a per-candidate self-check.
 //
 // This previously also trusted a narrower fallback: a live,
 // continuity-eligible session bead whose alias exactly equals spec.Identity
@@ -589,7 +618,9 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 // The fallback was removed rather than narrowed further, because every
 // signal tried (template/agent_name match, creation recency, city/rig
 // scope) either broke existing intentionally-bare test fixtures or failed
-// to actually distinguish the two cases the reviewer's PoC turned on.
+// to actually distinguish the two cases the reviewer's PoC turned on. The
+// same reasoning is why this function does not resurrect an equivalent
+// fallback via FindCanonicalNamedSessionBead's alias branch above.
 //
 // The underlying problem the fallback was trying to solve is real and still
 // open (ga-1ycmli): a live singleton named-session bead that never got
@@ -607,7 +638,7 @@ func namedSessionCandidateIsSelf(b beads.Bead, spec NamedSessionSpec) bool {
 	if spec.Identity == "" {
 		return false
 	}
-	_, ok := FindCanonicalNamedSessionBead([]beads.Bead{b}, spec)
+	_, ok := findCanonicalNamedSessionBeadStrict([]beads.Bead{b}, spec)
 	return ok
 }
 
@@ -870,8 +901,19 @@ func closedNamedSessionReopenEligible(b beads.Bead) bool {
 	return true
 }
 
-// FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
-func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+// findCanonicalNamedSessionBeadStrict checks only the two highest-confidence
+// canonical signals: an exact configured_named_session identity match
+// (IsNamedSessionBead + NamedSessionIdentity), or an exact session_name match
+// corroborated by NamedSessionBeadMatchesSpec. It deliberately excludes
+// FindCanonicalNamedSessionBead's third signal, the alias-only-uniqueness
+// fallback (#5487 / ga-4of1nc) -- see namedSessionCandidateIsSelf's doc
+// comment for why that fallback is unsafe for callers reached through
+// conflict-scoped alias queries. lookupConfiguredNamedSession's own
+// alias-metadata candidate stage has the identical shape (a store query
+// keyed on `alias`, whose results would otherwise flow into
+// FindCanonicalNamedSessionBead's unsafe branch) and uses this strict
+// version for the same reason.
+func findCanonicalNamedSessionBeadStrict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)
 	for _, b := range candidates {
 		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
@@ -893,6 +935,14 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 			return b, true
 		}
 	}
+	return beads.Bead{}, false
+}
+
+// FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.
+func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	if bead, ok := findCanonicalNamedSessionBeadStrict(candidates, spec); ok {
+		return bead, true
+	}
 	// A bead whose only configured-named-session signal is `alias == identity`
 	// (no exact configured_named_identity/session_name metadata) is its own
 	// canonical session when it is the sole live, eligible, template-matching
@@ -906,29 +956,83 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 	// count -- keeps a true collision (two distinct live beads that both
 	// genuinely match the backing template) falling through to conflict
 	// detection instead of one silently winning as first-match.
-	if identity != "" {
-		var aliasCanonical beads.Bead
-		aliasMatchCount := 0
-		for _, b := range candidates {
-			if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
-				continue
-			}
-			if !NamedSessionBeadMatchesSpec(b, spec) {
-				continue
-			}
-			if strings.TrimSpace(b.Metadata["alias"]) != identity {
-				continue
-			}
-			aliasMatchCount++
-			if aliasMatchCount == 1 {
-				aliasCanonical = b
-			}
+	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
+}
+
+// aliasOnlyCanonicalNamedSessionBead implements FindCanonicalNamedSessionBead's
+// alias-only-uniqueness fallback (#5487 / ga-4of1nc), factored out so
+// findCanonicalNamedSessionBeadForLookup can reuse it under an extra gate.
+// See FindCanonicalNamedSessionBead's call site for the fallback's rationale.
+func aliasOnlyCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	identity := NormalizeNamedSessionTarget(spec.Identity)
+	if identity == "" {
+		return beads.Bead{}, false
+	}
+	var aliasCanonical beads.Bead
+	aliasMatchCount := 0
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
+			continue
 		}
+		if !NamedSessionBeadMatchesSpec(b, spec) {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["alias"]) != identity {
+			continue
+		}
+		aliasMatchCount++
 		if aliasMatchCount == 1 {
-			return aliasCanonical, true
+			aliasCanonical = b
 		}
 	}
+	if aliasMatchCount == 1 {
+		return aliasCanonical, true
+	}
 	return beads.Bead{}, false
+}
+
+// findCanonicalNamedSessionBeadForLookup is the canonical-detection predicate
+// for lookupConfiguredNamedSession's own alias-metadata candidate stage. It
+// adds FindCanonicalNamedSessionBead's alias-only-uniqueness fallback on top
+// of findCanonicalNamedSessionBeadStrict, but only when spec carries genuine
+// corroborating identity (NamedSessionBackingTemplate(spec) != "") -- never
+// for a degenerate spec (spec.Agent and spec.Named both nil).
+//
+// FindCanonicalNamedSessionBead's own alias fallback has no such gate: its
+// direct callers (TestFindCanonicalNamedSessionBead_AliasSoleLiveCandidateIsCanonical)
+// intentionally accept a degenerate spec matching a bare alias-only bead when
+// it is the sole live candidate -- a reasonable contract for a caller that
+// already knows candidates is an exhaustive, deliberately-scoped set. It is
+// not reasonable for lookupConfiguredNamedSession's alias-metadata query
+// stage: that reaches arbitrary store-resident beads through a wide
+// `alias`-keyed query, where a degenerate spec makes NamedSessionBeadMatchesSpec
+// vacuously true for any bead that simply never set template/agent_name --
+// indistinguishable from a zero-cost decoy (ga-t3a0fv round 2; see
+// TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf).
+// Requiring a non-empty backing template restores the corroboration
+// NamedSessionBeadMatchesSpec's contract implies, while still letting a real
+// pool-instance bead whose alias/template/agent_name authentically match a
+// fully-specified spec resolve as canonical here
+// (TestLookupNamedSession_LiveAliasOwnedBeadResolvesCanonically).
+//
+// namedSessionCandidateIsSelf deliberately does not use this function (or
+// any alias fallback): it is invoked once per candidate from
+// lookupConfiguredNamedSession's conflictCandidates loop, so the uniqueness
+// count aliasOnlyCanonicalNamedSessionBead relies on to reject a genuine
+// collision would always observe exactly 1 (itself) and could never detect a
+// second live colliding candidate. By the time that loop runs,
+// findCanonicalNamedSessionBeadForLookup has already evaluated the same
+// alias-matching pool as a whole at the call site below and found no safe
+// winner, so re-attempting the same fallback per-candidate could only
+// reintroduce that false-uniqueness bug, never legitimately succeed.
+func findCanonicalNamedSessionBeadForLookup(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
+	if bead, ok := findCanonicalNamedSessionBeadStrict(candidates, spec); ok {
+		return bead, true
+	}
+	if NamedSessionBackingTemplate(spec) == "" {
+		return beads.Bead{}, false
+	}
+	return aliasOnlyCanonicalNamedSessionBead(candidates, spec)
 }
 
 // FindConflictingNamedSessionSpecForBead finds the configured named session blocked by a bead.
