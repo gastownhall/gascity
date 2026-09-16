@@ -291,12 +291,8 @@ func (a *convergenceStoreAdapter) FindByIdempotencyKey(key string) (string, bool
 		// so any error here is a real store failure — propagate it.
 		return "", false, fmt.Errorf("listing children of %s: %w", parentID, err)
 	}
-	for _, b := range children {
-		if b.Metadata != nil && b.Metadata["idempotency_key"] == key {
-			return b.ID, true, nil
-		}
-	}
-	return "", false, nil
+	id, found := liveWispWithKey(children, key)
+	return id, found, nil
 }
 
 func (a *convergenceStoreAdapter) findByKeyScan(key string) (string, bool, error) {
@@ -306,12 +302,31 @@ func (a *convergenceStoreAdapter) findByKeyScan(key string) (string, bool, error
 	if err != nil {
 		return "", false, err
 	}
-	for _, b := range all {
-		if b.Metadata != nil && b.Metadata["idempotency_key"] == key {
-			return b.ID, true, nil
+	id, found := liveWispWithKey(all, key)
+	return id, found, nil
+}
+
+// liveWispWithKey returns the first candidate stamped with key that is not the
+// remains of a pour that aborted partway. Such a root is marked molecule_failed
+// with the key already stamped, and every adopt path — the handler's
+// pour-failure fallback, the reconciler's active_wisp repair, the manual-resume
+// retry — comes through FindByIdempotencyKey: adopting the corpse re-activates
+// every child of a workflow that cannot progress, and those steps are hidden
+// from every hook, so the loop would wait on a wisp nobody can close
+// (ga-033u0e). Passing over it sends the handler to waiting_manual and the
+// reconciler to a fresh pour, whose live root under the same key is what this
+// then finds.
+func liveWispWithKey(candidates []beads.Bead, key string) (string, bool) {
+	for _, b := range candidates {
+		if b.Metadata == nil || b.Metadata["idempotency_key"] != key {
+			continue
 		}
+		if beadmeta.MoleculeFailed(b.Metadata[beadmeta.MoleculeFailedMetadataKey]) {
+			continue
+		}
+		return b.ID, true
 	}
-	return "", false, nil
+	return "", false
 }
 
 func (a *convergenceStoreAdapter) CountActiveConvergenceLoops(targetAgent string) (int, error) {
