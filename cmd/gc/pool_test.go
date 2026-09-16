@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -112,9 +113,11 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -156,9 +159,11 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if err != nil {
 		t.Skip("jq not installed")
 	}
+	pinTestOwnedBDHome(t)
 	t.Setenv("PATH", filepath.Dir(bdPath)+":"+filepath.Dir(jqPath)+":"+os.Getenv("PATH"))
 
 	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
@@ -192,6 +197,56 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if got != 0 {
 		t.Fatalf("evaluatePool with routed in-progress work = %d, want 0", got)
 	}
+}
+
+// TestCmdGCRealBDTestsUseTestOwnedDoltContext is a regression test for
+// ga-us7c35: cmd/gc's real-bd tests only override BEADS_DIR per bd
+// invocation (see runExternalOutput), but that alone does not stop a
+// machine-level dolt.shared-server config or ambient BEADS_DOLT_*/GC_DOLT_*
+// env vars from routing the subprocess to a shared server instead of an
+// embedded per-test store. bd's config precedence falls through, as a last
+// resort, to $HOME/.beads/config.yaml -- pinning a test-owned HOME via
+// pinTestOwnedBDHome removes that fallback entirely. Same root cause as
+// ga-8pkpor/ga-zxpfic (internal/doctor package). The isolation check below
+// runs before any real bd subprocess call, so a not-yet-isolating helper can
+// never itself reach a real shared server.
+func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
+	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
+	if err != nil {
+		t.Skip("bd not installed")
+	}
+
+	ambientHome := os.Getenv("HOME")
+	home := pinTestOwnedBDHome(t)
+	if home == ambientHome {
+		t.Fatalf("pinTestOwnedBDHome did not isolate HOME (still ambient %q); a machine-level dolt.shared-server config there can route real-bd subprocess calls to the fleet server instead of an embedded per-test store", home)
+	}
+
+	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	registerRealBDServerStop(t, dir)
+	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+
+	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
+	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no config.yaml under test-owned HOME %s, but Stat returned err=%v", homeConfigPath, err)
+	}
+
+	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, metadataPath)
+	if err != nil || !ok {
+		t.Fatalf("LoadMetadataState(%s): ok=%v err=%v", metadataPath, ok, err)
+	}
+	if meta.DoltMode != "embedded" {
+		t.Fatalf("metadata.json dolt_mode = %q, want %q", meta.DoltMode, "embedded")
+	}
+}
+
+func pinTestOwnedBDHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
 }
 
 func TestEvaluatePoolNewDemandDoesNotApplyMinOrMax(t *testing.T) {
