@@ -548,7 +548,7 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
-gc beads list --assignee gastown.mayor --status in_progress
+gc beads list --assignee city.agent-a --status in_progress
 ```
 
 | Flag | Type | Default | Description |

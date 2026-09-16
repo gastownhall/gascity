@@ -6,13 +6,17 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+const (
+	primaryAssignee   = "city.agent-a"
+	secondaryAssignee = "city.agent-b"
+	rigAssignee       = "rig.agent-c"
+)
+
 // The regression under test (ga-rp4k): a bead that lives on a RIG ledger but is
-// assigned to a city-scoped agent (gastown.mayor) is invisible to bare
-// `bd list --assignee`, because bare bd reads one ledger. `gc beads list`
-// already sweeps every rig store plus the city store, so pairing that sweep
-// with --assignee is the cross-ledger read. Three P1/P2 delays on 2026-07-26
-// traced to the mayor reporting an empty hook while holding assigned
-// rig-ledger work.
+// assigned to a city-scoped agent is invisible to bare `bd list --assignee`,
+// because bare bd reads one ledger. `gc beads list` already sweeps every rig
+// store plus the city store, so pairing that sweep with --assignee is the
+// cross-ledger read.
 
 // newAssigneeTestStore returns an in-memory store seeded with the given beads.
 // Assignee and Status are preserved as supplied so the filters under test see
@@ -38,50 +42,49 @@ func newAssigneeTestStore(t *testing.T, seed []beads.Bead) beads.Store {
 // TestCollectBeadsAcrossStores_AssigneeSpansRigLedgers is the core regression
 // pin: an assignee filter must reach beads held in a NON-city store. The city
 // store here stands in for the town ledger and the second store for a rig
-// ledger; only the rig store holds the mayor's bead, which is exactly the shape
-// that made ga-6s9 / ga-0562 invisible.
+// ledger; only the rig store holds the primary agent's bead.
 func TestCollectBeadsAcrossStores_AssigneeSpansRigLedgers(t *testing.T) {
 	cityStore := newAssigneeTestStore(t, []beads.Bead{
-		{Title: "town bead for someone else", Assignee: "gastown.witness", Status: "open"},
+		{Title: "city bead for someone else", Assignee: secondaryAssignee, Status: "open"},
 	})
 	rigStore := newAssigneeTestStore(t, []beads.Bead{
-		{Title: "rig bead for the mayor", Assignee: "gastown.mayor", Status: "open"},
-		{Title: "rig bead for a polecat", Assignee: "gascity/gastown.polecat", Status: "open"},
+		{Title: "rig bead for the primary agent", Assignee: primaryAssignee, Status: "open"},
+		{Title: "rig bead for another agent", Assignee: rigAssignee, Status: "open"},
 	})
 	stores := []convoyStoreView{
 		{path: "city", store: cityStore},
 		{path: "rig", store: rigStore},
 	}
 
-	got, err := collectBeadsAcrossStores(stores, beadFilters{assignee: "gastown.mayor"})
+	got, err := collectBeadsAcrossStores(stores, beadFilters{assignee: primaryAssignee})
 	if err != nil {
 		t.Fatalf("collectBeadsAcrossStores: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("assignee sweep returned %d beads, want 1; got=%+v", len(got), got)
 	}
-	if got[0].Title != "rig bead for the mayor" {
+	if got[0].Title != "rig bead for the primary agent" {
 		t.Errorf("assignee sweep returned %q, want the rig-ledger bead", got[0].Title)
 	}
-	if got[0].Assignee != "gastown.mayor" {
-		t.Errorf("returned bead assignee = %q, want %q", got[0].Assignee, "gastown.mayor")
+	if got[0].Assignee != primaryAssignee {
+		t.Errorf("returned bead assignee = %q, want %q", got[0].Assignee, primaryAssignee)
 	}
 }
 
 // TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus verifies the assignee
-// filter composes with --status instead of overriding it. The mayor's startup
-// check is an in_progress query, so an assignee sweep that ignored status would
-// hand back already-open backlog as if it were resumable work.
+// filter composes with --status instead of overriding it. A startup check is an
+// in_progress query, so an assignee sweep that ignored status would hand back
+// already-open backlog as if it were resumable work.
 func TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus(t *testing.T) {
 	rigStore := newAssigneeTestStore(t, []beads.Bead{
-		{Title: "mayor in progress", Assignee: "gastown.mayor", Status: "in_progress"},
-		{Title: "mayor still open", Assignee: "gastown.mayor", Status: "open"},
-		{Title: "other in progress", Assignee: "gastown.witness", Status: "in_progress"},
+		{Title: "primary in progress", Assignee: primaryAssignee, Status: "in_progress"},
+		{Title: "primary still open", Assignee: primaryAssignee, Status: "open"},
+		{Title: "other in progress", Assignee: secondaryAssignee, Status: "in_progress"},
 	})
 	stores := []convoyStoreView{{path: "rig", store: rigStore}}
 
 	got, err := collectBeadsAcrossStores(stores, beadFilters{
-		assignee: "gastown.mayor",
+		assignee: primaryAssignee,
 		status:   "in_progress",
 	})
 	if err != nil {
@@ -90,8 +93,8 @@ func TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("assignee+status returned %d beads, want 1; got=%+v", len(got), got)
 	}
-	if got[0].Title != "mayor in progress" {
-		t.Errorf("assignee+status returned %q, want %q", got[0].Title, "mayor in progress")
+	if got[0].Title != "primary in progress" {
+		t.Errorf("assignee+status returned %q, want %q", got[0].Title, "primary in progress")
 	}
 }
 
@@ -101,9 +104,9 @@ func TestCollectBeadsAcrossStores_AssigneeCombinesWithStatus(t *testing.T) {
 // town and read as "this agent owns everything".
 func TestFilterBeads_Assignee(t *testing.T) {
 	all := []beads.Bead{
-		{ID: "ga-1", Assignee: "gastown.mayor", Status: "open"},
-		{ID: "ga-2", Assignee: "gastown.witness", Status: "open"},
-		{ID: "ga-3", Assignee: "gastown.mayor", Status: "in_progress"},
+		{ID: "ga-1", Assignee: primaryAssignee, Status: "open"},
+		{ID: "ga-2", Assignee: secondaryAssignee, Status: "open"},
+		{ID: "ga-3", Assignee: primaryAssignee, Status: "in_progress"},
 		{ID: "ga-4", Assignee: "", Status: "open"},
 	}
 
@@ -114,22 +117,22 @@ func TestFilterBeads_Assignee(t *testing.T) {
 	}{
 		{
 			name:    "assignee only is not short-circuited",
-			filters: beadFilters{assignee: "gastown.mayor"},
+			filters: beadFilters{assignee: primaryAssignee},
 			wantIDs: []string{"ga-1", "ga-3"},
 		},
 		{
 			name:    "assignee with status",
-			filters: beadFilters{assignee: "gastown.mayor", status: "in_progress"},
+			filters: beadFilters{assignee: primaryAssignee, status: "in_progress"},
 			wantIDs: []string{"ga-3"},
 		},
 		{
 			name:    "assignee matches exactly, not by prefix",
-			filters: beadFilters{assignee: "gastown.may"},
+			filters: beadFilters{assignee: "city.agent"},
 			wantIDs: nil,
 		},
 		{
 			name:    "unassigned beads are excluded",
-			filters: beadFilters{assignee: "gastown.witness"},
+			filters: beadFilters{assignee: secondaryAssignee},
 			wantIDs: []string{"ga-2"},
 		},
 		{
@@ -166,20 +169,20 @@ func TestParseBeadFilters_Assignee(t *testing.T) {
 	}{
 		{
 			name:         "equals form",
-			args:         []string{"--assignee=gastown.mayor"},
-			wantAssignee: "gastown.mayor",
+			args:         []string{"--assignee=" + primaryAssignee},
+			wantAssignee: primaryAssignee,
 			wantRest:     nil,
 		},
 		{
 			name:         "space-separated form",
-			args:         []string{"--assignee", "gastown.mayor"},
-			wantAssignee: "gastown.mayor",
+			args:         []string{"--assignee", primaryAssignee},
+			wantAssignee: primaryAssignee,
 			wantRest:     nil,
 		},
 		{
 			name:         "alongside other filters, positional preserved",
-			args:         []string{"--status", "in_progress", "--assignee", "gastown.mayor", "ga-xyz"},
-			wantAssignee: "gastown.mayor",
+			args:         []string{"--status", "in_progress", "--assignee", primaryAssignee, "ga-xyz"},
+			wantAssignee: primaryAssignee,
 			wantRest:     []string{"ga-xyz"},
 		},
 		{

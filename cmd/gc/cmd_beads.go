@@ -84,7 +84,7 @@ it.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
   gc beads list --status open --format=json
-  gc beads list --assignee gastown.mayor --status in_progress`,
+  gc beads list --assignee city.agent-a --status in_progress`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all}, stdout, stderr) != 0 {

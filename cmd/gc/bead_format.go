@@ -41,11 +41,10 @@ type beadFilters struct {
 	status string
 	// assignee restricts the listing to beads whose assignee matches exactly.
 	// It is the cross-ledger counterpart to `bd list --assignee`: bare bd reads
-	// one ledger, so a bead living on a RIG ledger but assigned to a
-	// city-scoped agent (e.g. gastown.mayor) is invisible to it. `gc beads
-	// list` already sweeps every rig store plus the city store, so pairing that
-	// sweep with an assignee filter answers "what work is assigned to me
-	// anywhere in town" in one command (ga-rp4k).
+	// one ledger, so a bead living on a rig ledger but assigned to a city-scoped
+	// agent is invisible to it. `gc beads list` already sweeps every rig store
+	// plus the city store, so pairing that sweep with an assignee filter answers
+	// "what work is assigned to me anywhere in town" in one command (ga-rp4k).
 	assignee string
 	all      bool
 }
