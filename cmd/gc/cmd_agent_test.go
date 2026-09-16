@@ -1472,6 +1472,50 @@ name = "test-city"
 	}
 }
 
+// TestLoadCityConfigWithBuiltinPacksAppliesFeatureFlags is the #6236
+// regression: the supervisor's per-city loader (loadSupervisorCityConfig ->
+// loadCityConfigWithBuiltinPacks) never called applyFeatureFlags, so a
+// supervisor-run city dispatched on the sequential instantiation path
+// (graph apply disabled) until something incidental -- the first per-city
+// API request, or a reload -- flipped the process-global flag. The CLI
+// loader (loadCityConfigFS, pinned above by
+// TestLoadCityConfigFSAppliesFeatureFlags) already applied flags correctly;
+// this mirrors that test against the loader the supervisor actually uses.
+// Kept alongside its sibling here, in an already-legacy-coupled test file,
+// rather than in cmd_config_test.go: internal/testenv/legacy_flag_freeze_test.go
+// caps cmd/gc at 5 test files referencing the legacy formula_v2 mechanism, and
+// a new file would have been the 6th.
+func TestLoadCityConfigWithBuiltinPacksAppliesFeatureFlags(t *testing.T) {
+	formulatest.HoldV2ForTest(t)
+	oldGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() {
+		molecule.SetGraphApplyEnabled(oldGraphApply)
+	})
+
+	clearGCEnv(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	if err := os.MkdirAll(".gc", 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	writeCityToml(t, dir, "[workspace]\nname = \"test-city\"\n")
+
+	cfg, _, err := loadCityConfigWithBuiltinPacks(dir)
+	if err != nil {
+		t.Fatalf("loadCityConfigWithBuiltinPacks() error = %v", err)
+	}
+	if !cfg.Daemon.FormulaV2Enabled() {
+		t.Fatalf("cfg.Daemon.FormulaV2 = false, want true")
+	}
+	if !formula.IsFormulaV2Enabled() {
+		t.Fatalf("formula.IsFormulaV2Enabled() = false, want true")
+	}
+	if !molecule.IsGraphApplyEnabled() {
+		t.Fatalf("molecule.IsGraphApplyEnabled() = false, want true")
+	}
+}
+
 // Regression for the ga-lurp5d follow-up review: the CLI fallback for
 // `gc agent suspend`/`gc agent resume` re-marshals pack.toml for
 // pack-declared agents; when pack.toml is a symlink (e.g., into a
