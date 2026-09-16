@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -100,6 +101,12 @@ func TestProviderListRunningReportsPartialOnNoServer(t *testing.T) {
 	fe := &fakeExecutor{err: ErrNoServer}
 	p := NewProviderWithConfig(Config{SocketName: "x"})
 	p.tm.exec = fe
+	p.tm.serverSocketObserver = func(context.Context, string) error {
+		// nil is observeNamedSocketWith's confirmed-absent contract (its
+		// os.ErrNotExist and stale/absent-after-ECONNREFUSED branches both
+		// return nil) — see server_socket_probe.go.
+		return nil
+	}
 
 	names, err := p.ListRunning("")
 	if names != nil {
@@ -110,6 +117,41 @@ func TestProviderListRunningReportsPartialOnNoServer(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoServer) {
 		t.Fatalf("ListRunning err = %v, want wrapped ErrNoServer cause", err)
+	}
+	if !runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("ListRunning err = %v, want ServerAbsent set when the socket observation corroborates absence", err)
+	}
+}
+
+// TestProviderListRunningWithheldServerAbsentOnWedgedLiveServer is the #6176
+// regression: a tmux server that answers ErrNoServer over the control
+// protocol while its socket is still observable is wedged, not absent.
+// ListRunning must not set ServerAbsent on protocol failure alone — that
+// field gates the destructive reapPreBootSessionBeads sweep, and a
+// misclassified absence on a long-uptime host can reap live sessions.
+func TestProviderListRunningWithheldServerAbsentOnWedgedLiveServer(t *testing.T) {
+	fe := &fakeExecutor{err: ErrNoServer}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+	p.tm.serverSocketObserver = func(context.Context, string) error {
+		// A non-nil error is observeNamedSocketWith's live/inconclusive
+		// contract (its "reason=live-unix-socket" dial-succeeded branch, and
+		// every fail-closed branch, return non-nil) — see
+		// server_socket_probe.go and TestNewSessionErrNoServerRefusesObservedLiveNamedSocket,
+		// which pins the identical shape for probeServerAlive's own use of
+		// this observer.
+		return errors.New("live socket path=x inode=97 peer_pid=4242")
+	}
+
+	names, err := p.ListRunning("")
+	if names != nil {
+		t.Fatalf("ListRunning names = %v, want nil on unreachable server", names)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning err = %v, want runtime.PartialListError so reconciler guards defer", err)
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatalf("ListRunning err = %v, want ServerAbsent withheld: the socket is still observable, so this is a wedged server, not a dead one", err)
 	}
 }
 
