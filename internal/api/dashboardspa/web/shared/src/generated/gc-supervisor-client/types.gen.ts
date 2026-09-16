@@ -2756,6 +2756,7 @@ export type RigCreateSucceededPayload = {
 
 export type RigPatch = {
     DefaultBranch: string | null;
+    DefaultMergeStrategy: string | null;
     FormulaVars: {
         [key: string]: string;
     };

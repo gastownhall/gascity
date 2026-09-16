@@ -594,6 +594,14 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead
+	// routed into this rig when the caller passes no --merge flag. One of
+	// "direct", "mr", or "local"; empty leaves the bead unstamped, which
+	// consumers read as their own implicit default. Set it to "mr" on rigs
+	// that deliver work through a pull request instead of a push to the
+	// target branch, so a bare `gc sling` records the shape the rig actually
+	// uses rather than one every caller has to remember to pass.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated pre-runtime-state suspension flag.
 	// Parsed for backwards compatibility and treated as an alias for
 	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
@@ -1193,6 +1201,13 @@ const (
 // (e.g., git symbolic-ref) when this returns "".
 func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
+}
+
+// EffectiveDefaultMergeStrategy returns the rig's recorded default merge
+// strategy, or the empty string if none is set. An empty result means `gc
+// sling` leaves merge_strategy unstamped on beads routed into this rig.
+func (r *Rig) EffectiveDefaultMergeStrategy() string {
+	return strings.TrimSpace(r.DefaultMergeStrategy)
 }
 
 // EffectiveSuspendedOnStart returns the rig's committable startup
@@ -4395,6 +4410,10 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 
 		if branch := r.EffectiveDefaultBranch(); branch != "" && !defaultBranchCharset.MatchString(branch) {
 			return fmt.Errorf("rig %q: default_branch %q contains characters outside [A-Za-z0-9._/@+=-]; the value is interpolated into prompts, formula variables, and pre_start shell commands, so shell-active characters are refused", r.Name, branch)
+		}
+		if strategy := r.EffectiveDefaultMergeStrategy(); strategy != "" && !beadmeta.IsKnownMergeStrategy(strategy) {
+			return fmt.Errorf("rig %q: default_merge_strategy %q is not one of %s",
+				r.Name, strategy, strings.Join(beadmeta.KnownMergeStrategies, ", "))
 		}
 	}
 	return nil
