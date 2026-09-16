@@ -713,6 +713,29 @@ func projectCredentialProviderEnv(env map[string]string) {
 	}
 }
 
+// hostedCredentialProbeLoad is the load option set for the hosted Beads
+// credential probe below, which loads city.toml only to read one boolean off
+// the storage binding and then discards the Provenance.
+//
+// The load-time revision snapshot content-hashes every pack directory —
+// reading and SHA-256ing every file, recursively — so that a later
+// config.Revision() can compare against the tree as it was loaded. This probe
+// never computes a Revision, so nothing it loads can observe the snapshot.
+//
+// It is declined here rather than left as harmless prefetch because of where
+// this probe sits: beadsCommandRunnerForHostedCity calls it once per bd
+// command-runner construction, which is once per bd subprocess. On a
+// long-running controller that is thousands of loads per reconcile tick.
+// Measured on gc-management 2026-09-16 (ga-s3cnmy): 72.7% of ALL controller
+// CPU sat inside config.LoadWithIncludesOptions, 80% of that under this
+// function, and declining the snapshot cut one load from 94.6ms to 38.8ms.
+//
+// Same reasoning as advisoryLoad in cmd_agent.go, whose own guard test
+// (TestCityConfigLoadersDeclineTheRevisionSnapshot) deliberately scoped itself
+// to that file and left the other Provenance-discarding call sites — this one
+// among them — for later.
+var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
 	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
@@ -720,7 +743,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	} else if err != nil {
 		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 	}
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, cityConfigPath)
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
