@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -638,15 +639,18 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	payload := json.RawMessage(`{"id":"gc-42","status":"closed"}`)
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test", Subject: "gc-42", Payload: payload})
 	headSeq, err := eventLog.LatestSeq()
 	if err != nil {
 		t.Fatalf("LatestSeq(): %v", err)
 	}
 
 	var calls int
-	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+	var deliveredEnv []string
+	execRun := func(_ context.Context, _, _ string, env []string) ([]byte, error) {
 		calls++
+		deliveredEnv = append([]string(nil), env...)
 		return []byte("ok"), nil
 	}
 
@@ -676,6 +680,26 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("exec calls after first dispatch = %d, want 1", calls)
 	}
+	env := map[string]string{}
+	for _, entry := range deliveredEnv {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+	if env[orderEventCursorEnv] != fmt.Sprintf("%d", headSeq) {
+		t.Errorf("%s = %q, want %d", orderEventCursorEnv, env[orderEventCursorEnv], headSeq)
+	}
+	if env[orderEventPayloadEnv] != env[orderEventJSONEnv] {
+		t.Errorf("%s and %s differ", orderEventPayloadEnv, orderEventJSONEnv)
+	}
+	var delivered events.Event
+	if err := json.Unmarshal([]byte(env[orderEventJSONEnv]), &delivered); err != nil {
+		t.Fatalf("decode %s: %v", orderEventJSONEnv, err)
+	}
+	if delivered.Seq != headSeq || delivered.Type != events.BeadClosed || delivered.Subject != "gc-42" || string(delivered.Payload) != string(payload) {
+		t.Errorf("delivered event = %+v, want exact recorded envelope", delivered)
+	}
 
 	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(10*time.Second))
 	ad.drain(context.Background())
@@ -686,6 +710,48 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("exec calls after second dispatch = %d, want 1", calls)
+	}
+}
+
+func TestOrderDispatchEventExecDeliversMatchingEventsWithoutSkipping(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Subject: "gc-first"})
+	eventLog.Record(events.Event{Type: events.BeadClosed, Subject: "gc-second"})
+
+	var subjects []string
+	execRun := func(_ context.Context, _, _ string, env []string) ([]byte, error) {
+		for _, entry := range env {
+			key, value, ok := strings.Cut(entry, "=")
+			if key != orderEventJSONEnv || !ok {
+				continue
+			}
+			var delivered events.Event
+			if err := json.Unmarshal([]byte(value), &delivered); err != nil {
+				t.Fatalf("decode %s: %v", orderEventJSONEnv, err)
+			}
+			subjects = append(subjects, delivered.Subject)
+		}
+		return []byte("ok"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:    "event-exec",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "true",
+	}}, store, eventLog, execRun, events.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(time.Second))
+	ad.drain(context.Background())
+
+	if got, want := strings.Join(subjects, ","), "gc-first,gc-second"; got != want {
+		t.Fatalf("delivered subjects = %q, want %q", got, want)
 	}
 }
 
