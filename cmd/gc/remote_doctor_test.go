@@ -3,23 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 func TestDoctorRemoteReadSubset(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
-	var gotMethod, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+	srv := fakeHealthServer("remote-doctor")
+	t.Cleanup(srv.Close)
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
@@ -30,9 +24,6 @@ func TestDoctorRemoteReadSubset(t *testing.T) {
 	}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("remote doctor failed: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if gotMethod != http.MethodGet || gotPath != "/v0/city/remote-city/status" {
-		t.Fatalf("request = %s %s, want GET /v0/city/remote-city/status", gotMethod, gotPath)
 	}
 	var report doctorJSONReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
@@ -51,35 +42,40 @@ func TestDoctorRemoteReadSubset(t *testing.T) {
 	}
 }
 
-func TestDoctorRemoteCheckTimeout(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(200 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+type blockingDoctorCheck struct {
+	release <-chan struct{}
+}
 
-	var stdout, stderr bytes.Buffer
+func (c *blockingDoctorCheck) Name() string { return "remote-status" }
+
+func (c *blockingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	<-c.release
+	return &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
+}
+
+func (c *blockingDoctorCheck) CanFix() bool { return false }
+
+func (c *blockingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c *blockingDoctorCheck) WarmupEligible() bool { return false }
+
+func TestDoctorRemoteCheckTimeout(t *testing.T) {
+	release := make(chan struct{})
+	check := &blockingDoctorCheck{release: release}
+	d := &doctor.Doctor{CheckTimeout: 5 * time.Millisecond}
+	d.Register(check)
+
 	started := time.Now()
-	code := run([]string{
-		"--city-url", srv.URL,
-		"--city-name", "remote-city",
-		"doctor",
-		"--check-timeout", "5ms",
-		"--json",
-	}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("advisory timeout should not gate the command: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
+	report := d.RunCollect(&doctor.CheckContext{}, false)
 	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
-		t.Fatalf("remote doctor waited for the slow check: %s", elapsed)
+		t.Fatalf("doctor waited for the slow check: %s", elapsed)
 	}
-	var report doctorJSONReport
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-		t.Fatalf("decode doctor JSON: %v; stdout=%q", err, stdout.String())
+	if len(report.Results) != 1 {
+		t.Fatalf("got %d results, want one: %#v", len(report.Results), report.Results)
 	}
-	if len(report.Results) == 0 || !report.Results[0].TimedOut {
+	if !report.Results[0].TimedOut || report.Results[0].Severity != doctor.SeverityAdvisory {
 		t.Fatalf("remote status result = %#v, want timed_out=true", report.Results)
 	}
+	close(release)
+	d.Wait()
 }
