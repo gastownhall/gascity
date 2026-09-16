@@ -357,7 +357,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   match. `mol-dog-backup.sh` wraps `dolt backup sync` in this helper, and
   `dolt` publishes a backup archive under its final name before writing the
   manifest that references it; a SIGKILL mid-sync left the archive
-  permanently unreferenced (`dolt backup` has no prune verb). The fallback
+  unreferenced. (Dolt 2.3.0 added `dolt backup sync
+  --prune-with-grace-period`, which reclaims such archives; this entry
+  predates it, and `mol-dog-backup.sh` now passes that flag.) The fallback
   now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
   streaming output instead of buffering it. (gascity#4823)
 
