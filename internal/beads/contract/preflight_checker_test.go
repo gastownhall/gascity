@@ -834,3 +834,146 @@ func TestComparableReleaseVersion(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckVersionCompatPseudoVersionLockstep covers the case ga-40qh1's
+// widening left uncovered and the 2026-09-08 srvcity outage walked through: gc
+// and bd BOTH built from untagged commits, so both report pseudo-versions.
+//
+// ga-40qh1 was right that a pseudo-version cannot be compared to a bd RELEASE —
+// the two strings name different kinds of thing. It is comparable to another
+// pseudo-version, because both name a commit in the same repository, and that
+// comparison is the only evidence available in gc's normal configuration: gc
+// pins beads at an untagged commit whenever it tracks beads ahead of its last
+// tag.
+//
+// The stakes are why this must FAIL rather than warn. Opening the native store
+// runs MigrateUp, so a gc built from a newer beads commit migrates every store
+// it touches past what an older bd can read — irreversibly, on first contact.
+// A Fail routes the factory to openBdFallback, so the migration never runs.
+func TestCheckVersionCompatPseudoVersionLockstep(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
+	}
+	const (
+		gcPin  = "1.1.1-0.20260805093327-bf97b73749ac" // gc's go.mod pin, 2026-09-08
+		bdOld  = "0.0.0-20260713082743-98b4b79e6a4d"   // the bd that went blind
+		bdSame = "0.0.0-20260805093327-bf97b73749ac"   // same commit, different stamp
+	)
+	tests := []struct {
+		name       string
+		libVersion string
+		replaced   bool
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+		wantRev    string // substring the summary must name, when non-empty
+	}{
+		{
+			name:       "different commits — the live outage — fails",
+			libVersion: gcPin,
+			ctx:        validCtx(bdOld),
+			want:       PreflightCheckFail,
+			wantRev:    "98b4b79e6a4d",
+		},
+		{
+			// The version STAMPS differ (bd stamps its own 0.0.0-date-sha while
+			// gc records the module's v1.1.1-0.date-sha) but the commit is the
+			// same, which is the only thing that matters. A string compare would
+			// call this drift; it is lockstep.
+			name:       "same commit under different version stamps — passes",
+			libVersion: gcPin,
+			ctx:        validCtx(bdSame),
+			want:       PreflightCheckPass,
+			wantRev:    "bf97b73749ac",
+		},
+		{
+			// A replaced module's revision belongs to the replacement, not to
+			// beads. Comparing it to bd's revision would assert agreement between
+			// commits in two different repositories, so this stays unconfirmable
+			// — the ga-40qh1 enterprise-fork case, preserved.
+			name:       "replaced module with a pseudo-version stays unconfirmable",
+			libVersion: "0.0.0-20260810084121-1aa7bf160786",
+			replaced:   true,
+			ctx:        validCtx(bdOld),
+			want:       PreflightCheckPass,
+		},
+		{
+			// Only one side names a commit; equality of the underlying source is
+			// not establishable, so the pre-existing "unknown, pass" holds.
+			name:       "pseudo library vs bd release stays unconfirmable",
+			libVersion: gcPin,
+			ctx:        validCtx("1.1.0"),
+			want:       PreflightCheckPass,
+		},
+		{
+			// The mirror direction is NOT touched by this change and is already
+			// conservative: a released library pin is comparable, so the existing
+			// string compare runs, and a bd pseudo-version cannot be shown to be a
+			// newer release of it (major 0 vs 1) — so it fails to BdStore. Pinned
+			// here so the lockstep compare is never mistaken for having widened it.
+			name:       "release library vs bd pseudo-version keeps failing",
+			libVersion: "1.1.0",
+			ctx:        validCtx(bdOld),
+			want:       PreflightCheckFail,
+		},
+		{
+			// "(devel)" names no commit at all. gc and bd built from one tree both
+			// report it, and so would two unrelated trees; nothing to compare.
+			name:       "source build stays unconfirmable",
+			libVersion: "(devel)",
+			ctx:        validCtx(bdOld),
+			want:       PreflightCheckPass,
+		},
+		{
+			// A v prefix on either side is cosmetic and must not change the answer.
+			name:       "v-prefixed pseudo-versions on the same commit pass",
+			libVersion: "v" + gcPin,
+			ctx:        validCtx("v" + bdSame),
+			want:       PreflightCheckPass,
+			wantRev:    "bf97b73749ac",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion, BeadsLibraryReplaced: tt.replaced}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.ID != PreflightCheckVersionCompat {
+				t.Fatalf("ID = %q, want %q", got.ID, PreflightCheckVersionCompat)
+			}
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+			if tt.wantRev != "" && !strings.Contains(got.Summary, tt.wantRev) {
+				t.Errorf("summary = %q, want it to name commit %q", got.Summary, tt.wantRev)
+			}
+		})
+	}
+}
+
+// TestPseudoVersionRev pins the parse the lockstep compare rests on. "Not
+// comparable" and "different" must stay distinct answers: only the second is
+// evidence of drift, and conflating them either blinds the check or takes
+// healthy scopes offline.
+func TestPseudoVersionRev(t *testing.T) {
+	tests := []struct {
+		in      string
+		wantRev string
+		wantOK  bool
+	}{
+		{"1.1.1-0.20260805093327-bf97b73749ac", "bf97b73749ac", true},
+		{"v1.1.1-0.20260805093327-bf97b73749ac", "bf97b73749ac", true},
+		{"0.0.0-20260713082743-98b4b79e6a4d", "98b4b79e6a4d", true},
+		{"1.1.0", "", false},   // a release names no commit
+		{"v1.1.0", "", false},  // ditto
+		{"(devel)", "", false}, // a source build names no commit
+		{"", "", false},
+		{"not-a-version", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			rev, ok := pseudoVersionRev(tt.in)
+			if ok != tt.wantOK || rev != tt.wantRev {
+				t.Fatalf("pseudoVersionRev(%q) = (%q, %v), want (%q, %v)", tt.in, rev, ok, tt.wantRev, tt.wantOK)
+			}
+		})
+	}
+}
