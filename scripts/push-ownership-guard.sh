@@ -198,8 +198,8 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
+#   1. The current branch name, matched against the rig-neutral
+#      [a-z][a-z]-[0-9a-z]+(\.[0-9]+)* bead-id form, extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
@@ -277,7 +277,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE '(^|/)[a-z][a-z]-[0-9a-z]+(\.[0-9]+)*' <<<"$branch" | head -1 | sed 's#^/##' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
