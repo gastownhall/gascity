@@ -175,8 +175,9 @@ schema = 2
 	if code != 0 {
 		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if got := stdout.String(); got != "Agent: ada\n" {
-		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	want := appendFilesystemSearchGuidance("Agent: ada\n")
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 
@@ -285,7 +286,7 @@ path = "./rigs/bravo"
 	if code != 0 {
 		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if got := stdout.String(); got != "alpha-work-query" {
+	if got := stdout.String(); got != appendFilesystemSearchGuidance("alpha-work-query") {
 		t.Fatalf("stdout = %q, want alpha rig fragment; stderr=%q", got, stderr.String())
 	}
 	if strings.Contains(stdout.String(), "bravo-work-query") {
