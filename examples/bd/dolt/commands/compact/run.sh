@@ -889,14 +889,9 @@ remote_exists() {
     "SELECT COUNT(*) FROM dolt_remotes WHERE name = '$remote'"
 }
 
-single_remote_name() {
-  db="$1"
-  query_single_cell "$db" "remote probe failed" \
-    "SELECT name FROM dolt_remotes ORDER BY name LIMIT 1"
-}
-
 # list_remotes emits one "name<TAB>url" line per configured remote, sorted by
-# name. The only current consumer is backup_remotes' scheme filter.
+# name. Consumed by select_remote's locality scan and backup_remotes' scheme
+# filter.
 list_remotes() {
   db="$1"
   out_tmp=$(mktemp)
@@ -944,18 +939,31 @@ select_remote() {
     printf '\n'
     return 0
   fi
-  if [ "$count" -eq 1 ]; then
-    single_remote_name "$db"
-    return $?
-  fi
 
-  origin_exists=$(remote_exists "$db" "origin") || return 1
-  if [ "$origin_exists" = "1" ]; then
-    printf 'origin\n'
+  remotes_tmp=$(mktemp)
+  if ! list_remotes "$db" > "$remotes_tmp"; then
+    rm -f "$remotes_tmp"
+    return 1
+  fi
+  local_pick=""
+  while read -r name url; do
+    [ -n "$name" ] || continue
+    case "$url" in
+      file://*)
+        local_pick="$name"
+        break
+        ;;
+    esac
+  done < "$remotes_tmp"
+  rm -f "$remotes_tmp"
+
+  if [ -n "$local_pick" ]; then
+    printf '%s\n' "$local_pick"
     return 0
   fi
-  printf 'compact: db=%s multiple remotes found without origin; set GC_DOLT_COMPACT_REMOTE — fail\n' \
-    "$db" >&2
+
+  printf 'compact: db=%s no local (file://) remote found among %s configured remotes; set GC_DOLT_COMPACT_REMOTE to override — fail\n' \
+    "$db" "$count" >&2
   return 1
 }
 
