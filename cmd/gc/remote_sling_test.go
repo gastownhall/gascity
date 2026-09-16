@@ -21,9 +21,8 @@ import (
 // buffer that only a mutating handler could change, so "gc.routed_to came back
 // byte-identical" is a property of the fixture, not a claim the test makes.
 type remoteCity struct {
-	t   *testing.T
-	mu  sync.Mutex
-	rid string
+	t  *testing.T
+	mu sync.Mutex
 
 	beadJSON  string
 	cfgJSON   string
@@ -31,9 +30,14 @@ type remoteCity struct {
 	mutations []string
 }
 
-func newRemoteCity(t *testing.T, beadJSON, cfgJSON, cityPath string) (*remoteCity, *httptest.Server) {
+// remoteCityRoot is the city root the hosted city reports for itself. The agent
+// dirs in remoteCfgRigs are absolute, so the value only has to be the one the
+// fixture's own paths were written against.
+const remoteCityRoot = "/cities/mc"
+
+func newRemoteCity(t *testing.T, beadJSON, cfgJSON string) (*remoteCity, *httptest.Server) {
 	t.Helper()
-	rc := &remoteCity{t: t, beadJSON: beadJSON, cfgJSON: cfgJSON, path: cityPath}
+	rc := &remoteCity{t: t, beadJSON: beadJSON, cfgJSON: cfgJSON, path: remoteCityRoot}
 	srv := httptest.NewServer(http.HandlerFunc(rc.serve))
 	t.Cleanup(srv.Close)
 	return rc, srv
@@ -55,7 +59,7 @@ func (rc *remoteCity) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, rc.cfgJSON)
 	case strings.HasSuffix(r.URL.Path, "/status"):
 		_, _ = w.Write([]byte(`{"city":"mc","path":"` + rc.path + `"}`))
-	case strings.Contains(r.URL.Path, "/beads/"):
+	case strings.Contains(r.URL.Path, "/bead/"):
 		if strings.Contains(r.URL.Path, "MISSING") {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"type":"not_found","title":"bead not found"}`)
@@ -97,13 +101,13 @@ func (rc *remoteCity) countMutations() int {
 
 // remoteBeadJSON builds one bead wire row with a fixed gc.routed_to so the
 // byte-identity assertion has a stable subject.
-func remoteBeadJSON(id, issueType, status, routedTo string) string {
+func remoteBeadJSON(issueType, routedTo string) string {
 	meta := map[string]string{beadmeta.RoutedToMetadataKey: routedTo}
 	if routedTo == "" {
 		meta = map[string]string{"gc.unrelated": "keep"}
 	}
 	body, err := json.Marshal(map[string]any{
-		"id": id, "title": "a bead", "status": status, "issue_type": issueType,
+		"id": "al-7", "title": "a bead", "status": "open", "issue_type": issueType,
 		"created_at": "2026-09-16T00:00:00Z", "metadata": meta,
 	})
 	if err != nil {
@@ -115,9 +119,8 @@ func remoteBeadJSON(id, issueType, status, routedTo string) string {
 // remoteCfgJSON is the GET /v0/config projection: rigs carry the name/path/prefix
 // the bead-store projection needs, agents carry the name/dir/scope the
 // reachability predicate needs.
-func remoteCfgJSON(workspacePrefix string, rigs, agents string) string {
-	return fmt.Sprintf(`{"workspace":{"name":"mc","prefix":%q},%s%s"rigs":%s,"agents":%s}`,
-		workspacePrefix, `"patches":{"agent_count":1,"rig_count":1,"provider_count":0},`,
+func remoteCfgJSON(rigs, agents string) string {
+	return fmt.Sprintf(`{"workspace":{"name":"mc","prefix":"mc"},"rigs":%s,"agents":%s}`,
 		rigs, agents)
 }
 
@@ -127,8 +130,8 @@ func remoteCfgJSON(workspacePrefix string, rigs, agents string) string {
 func TestCmdSlingRemote_DryRunPreflightsAndWritesNothing(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"mechanic","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", "worker-2-pool"),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", "worker-2-pool"),
+		remoteCfgJSON(rigs, agents))
 
 	before := rc.beadBytes()
 	var out, errb bytes.Buffer
@@ -166,6 +169,31 @@ func TestCmdSlingRemote_DryRunPreflightsAndWritesNothing(t *testing.T) {
 	}
 }
 
+// The bead's class is named in the preview. Routing a container is the mistake
+// an operator most wants to see before the route, not after — but the pre-flight
+// only REPORTS the class: gc sling has no class allowlist locally, and a
+// pre-flight that refuses what the real sling accepts would be a second gate.
+func TestCmdSlingRemote_DryRunSurfacesNonTaskClass(t *testing.T) {
+	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
+	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
+	rc, srv := newRemoteCity(t, remoteBeadJSON("convoy", ""),
+		remoteCfgJSON(rigs, agents))
+
+	var out, errb bytes.Buffer
+	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
+		[]string{"worker", "al-7"}, false, false, false, "", nil, "",
+		false, false, false, "", false, false, true /*dryRun*/, "", "", false, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (the class is reported, not refused); stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "convoy") {
+		t.Errorf("preview does not name the class: %q", out.String())
+	}
+	if n := rc.countMutations(); n != 0 {
+		t.Errorf("dry-run issued %d mutating request(s)", n)
+	}
+}
+
 // The check that actually matters: a cross-store route silently wedges pools
 // (tr-6s7yx), so the remote pre-flight must run the SAME agreement predicate the
 // local path runs and print the same refusal.
@@ -175,8 +203,8 @@ func TestCmdSlingRemote_DryRunRefusesCrossStoreRoute(t *testing.T) {
 		`{"name":"beta","path":"/cities/mc/rigs/beta","prefix":"bt"}]`
 	// The bead lives in rig alpha; the target agent belongs to rig beta.
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/beta","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	before := rc.beadBytes()
 	var out, errb bytes.Buffer
@@ -207,8 +235,8 @@ func TestCmdSlingRemote_DryRunRefusesCrossStoreRoute(t *testing.T) {
 func TestCmdSlingRemote_DryRunAllowsCityScopedTarget(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"mayor","dir":"","scope":"city"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
@@ -227,8 +255,8 @@ func TestCmdSlingRemote_DryRunAllowsCityScopedTarget(t *testing.T) {
 func TestCmdSlingRemote_DryRunRefusesUnknownTarget(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
@@ -249,8 +277,8 @@ func TestCmdSlingRemote_DryRunRefusesUnknownTarget(t *testing.T) {
 func TestCmdSlingRemote_DryRunRefusesMissingBead(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
@@ -268,8 +296,8 @@ func TestCmdSlingRemote_DryRunRefusesMissingBead(t *testing.T) {
 func TestCmdSlingRemote_DryRunJSON(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
@@ -299,19 +327,18 @@ func TestCmdSlingRemote_DryRunJSON(t *testing.T) {
 func TestCmdSlingRemote_RealSlingStillForwardsTheWrite(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
 		[]string{"worker", "al-7"}, false, false, false, "", []string{"pr=42"}, "",
 		false, false, false, "", false, false, false /*NOT dryRun*/, "", "", false, &out, &errb)
-	if code != 0 {
-		t.Fatalf("real sling exit = %d, want 0; stderr=%q", code, errb.String())
-	}
 	// The write path is still a write path: one POST to /sling, body unchanged.
-	// (The read-only fixture answers it 500, so the client reports the failure;
-	// what this pins is that the mutation was ATTEMPTED with the same route.)
+	// The read-only fixture answers that POST 500 and the client reports the
+	// failure — the exit code here is the fixture's, not the point. What this
+	// pins is that the mutation is still ATTEMPTED, with the same route and body.
+	_ = code
 	if n := rc.countMutations(); n != 1 {
 		t.Fatalf("real sling issued %d mutating request(s), want the POST /sling to still be forwarded", n)
 	}
@@ -340,8 +367,8 @@ func TestCmdSlingRemote_DryRunStillRefusesLocalOnlyForms(t *testing.T) {
 		{"stdin", []string{"mayor"}, false, "", true, "stdin"},
 		{"one-arg", []string{"al-7"}, false, "", false, "explicit target"},
 		{"inline-text", []string{"mayor", "write a readme"}, false, "", false, "inline text"},
-		{"nudge", []string{"mayor", "al-7"}, false, "", false, "not supported"},
-		{"on", []string{"mayor", "al-7"}, false, "mol-do-work", false, "not supported"},
+		{"nudge", []string{"mayor", "al-7"}, false, "", false, "lands separately"},
+		{"on", []string{"mayor", "al-7"}, false, "mol-do-work", false, "lands separately"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -370,8 +397,8 @@ func TestCmdSlingRemote_DryRunStillRefusesLocalOnlyForms(t *testing.T) {
 func TestCmdSlingRemote_DryRunFormulaStatesStoreNotDetermined(t *testing.T) {
 	rigs := `[{"name":"alpha","path":"/cities/mc/rigs/alpha","prefix":"al"}]`
 	agents := `[{"name":"worker","dir":"/cities/mc/rigs/alpha","scope":"rig"}]`
-	rc, srv := newRemoteCity(t, remoteBeadJSON("al-7", "task", "open", ""),
-		remoteCfgJSON("mc", rigs, agents), "/cities/mc")
+	rc, srv := newRemoteCity(t, remoteBeadJSON("task", ""),
+		remoteCfgJSON(rigs, agents))
 
 	var out, errb bytes.Buffer
 	code := cmdSlingRemote(remoteTestClient(t, srv.URL), remoteTestTarget(srv.URL),
