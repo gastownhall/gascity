@@ -122,6 +122,17 @@ func installServiceManagerShims(gcHome string) (string, error) {
 	return shimDir, nil
 }
 
+// Clone returns an independent copy. Tier A shares one Env across the whole
+// package, and With mutates in place, so a test that needs its own PATH or
+// provider selection must take a copy rather than reach into the shared one.
+func (e *Env) Clone() *Env {
+	clone := &Env{vars: make(map[string]string, len(e.vars))}
+	for k, v := range e.vars {
+		clone.vars[k] = v
+	}
+	return clone
+}
+
 // With sets a variable, returning the Env for chaining.
 func (e *Env) With(key, val string) *Env {
 	e.vars[key] = val

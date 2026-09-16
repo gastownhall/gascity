@@ -585,11 +585,19 @@ jobs:
           GO_TEST_TIMING_NAME: cmd-gc-process-${{ matrix.shard }}-of-12
           GO_TEST_TIMING_VARIANT: linux-default
           GO_TEST_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+          # A bd proxied-server failure names a log file and carries nothing
+          # else ("proxy child exited before publishing its OS-assigned port
+          # (see <root>/.beads/dolt/server.log)"). That file lives under the
+          # test's temp dir, which t.Cleanup removes before any workflow step
+          # could read it, so a red shard used to arrive with no evidence at
+          # all. Failing tests copy the allowlisted logs here first.
+          GC_TEST_FAILURE_ARTIFACT_DIR: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
           EXTRA_TEST_ENV: >-
             GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}"
             GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}"
             GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}"
             GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}"
+            GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}"
             GITHUB_SHA="$${GITHUB_SHA}"
             GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}"
             GITHUB_RUN_ID="$${GITHUB_RUN_ID}"
@@ -599,6 +607,14 @@ jobs:
             RUNNER_OS="$${RUNNER_OS}"
             RUNNER_ARCH="$${RUNNER_ARCH}"
         run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
+      - name: Upload cmd/gc process failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload cmd/gc process timing
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

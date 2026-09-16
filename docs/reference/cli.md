@@ -344,7 +344,9 @@ gc beads
 Manage the canonical city endpoint topology for bd-backed beads stores.
 
 Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.
+city to an external Dolt endpoint and rewrite inherited rig mirrors. Use
+migrate-proxied to move a legacy GC-managed city onto bd's proxied-server
+topology.
 
 ```
 gc beads city
@@ -352,8 +354,37 @@ gc beads city
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads city migrate-proxied](#gc-beads-city-migrate-proxied) | Migrate a legacy GC-managed city to bd's proxied-server topology |
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+
+## gc beads city migrate-proxied
+
+Migrate a legacy GC-managed city, and the rigs that share its Dolt data
+directory, onto bd's proxied-server topology.
+
+The city's gc-managed `dolt sql-server` must already be stopped: run gc stop
+first. bd cannot see a server gc started (it looks only for its own pid file),
+so migrating against a live one commits the mode flip and leaves the scope
+unusable until the server dies.
+
+Each scope is migrated with bd's own `bd migrate from-server-to-proxied-server`,
+city first. The command is idempotent — an already-proxied scope reports
+"already migrated" — so a partially failed run can simply be rerun. It also
+retires gc's own runtime publication for the city it just handed over.
+
+On rc.2 this is the only supported migration for a legacy GC-managed city.
+Procedure, refusals and recovery: engdocs/runbooks/beads-migrate-proxied.md.
+
+```
+gc beads city migrate-proxied [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the plan without migrating anything |
+| `--json` | bool |  | emit the per-scope report as JSON |
+| `--rig` | stringArray |  | migrate only this rig (repeatable; default is every rig in city.toml) |
 
 ## gc beads city use-external
 
@@ -2282,6 +2313,8 @@ gc init --template gascity --default-provider claude \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
+| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Any fresh init, with or without a selector, requires bd &gt;= 1.3.0 |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |

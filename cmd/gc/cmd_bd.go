@@ -164,7 +164,48 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
+	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
+	// recursive calls to this exact executable rather than inheriting an
+	// ambient GC_BIN or resolving an unrelated gc from PATH.
+	executable, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return nil, err
+	}
+	overrides["GC_BIN"] = executable
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func resolveBdInvokingGCBinary() (string, error) {
+	executable, err := resolveInvokingExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if !filepath.IsAbs(executable) {
+		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
+	}
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat invoking gc executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
+	}
+	return canonical, nil
+}
+
+// pinBdGCEnvironment replaces ambient GC_BIN with the physical invoking
+// executable before the beads runner merges the child environment.
+func pinBdGCEnvironment(env map[string]string) error {
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {

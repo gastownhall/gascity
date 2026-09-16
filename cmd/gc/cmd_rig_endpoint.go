@@ -341,6 +341,10 @@ func ensureCanonicalScopeConfig(fs fsys.FS, scopeRoot string, state contract.Con
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
 	}
+	// Same rule as ensureCanonicalScopeConfigState: the topology belongs in
+	// metadata.json, and EnsureCanonicalConfig now drops the key when the
+	// state does not set it. See canonicalConfigDoltMode.
+	state.DoltMode = canonicalConfigDoltMode(state.DoltMode)
 	_, err := contract.EnsureCanonicalConfig(fs, filepath.Join(beadsDir, "config.yaml"), state)
 	return err
 }
@@ -387,11 +391,20 @@ func requireCanonicalizedScopeMetadata(fs fsys.FS, scopeRoot string) error {
 		return err
 	}
 	doltDatabase = strings.TrimSpace(doltDatabase)
-	announceStorageModeChange(fs, path, "server", doltDatabase)
+	doltMode := "server"
+	if existingMode, ok, modeErr := contract.ReadDoltMode(fs, path); modeErr == nil && ok && strings.TrimSpace(existingMode) != "" {
+		var raw struct {
+			Backend string `json:"backend"`
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil && json.Unmarshal(data, &raw) == nil && strings.EqualFold(strings.TrimSpace(raw.Backend), "dolt") {
+			doltMode = strings.TrimSpace(existingMode)
+		}
+	}
+	announceStorageModeChange(fs, path, doltMode, doltDatabase)
 	_, err = contract.EnsureCanonicalMetadata(fs, path, contract.MetadataState{
 		Database:     "dolt",
 		Backend:      "dolt",
-		DoltMode:     "server",
+		DoltMode:     doltMode,
 		DoltDatabase: doltDatabase,
 	})
 	return err

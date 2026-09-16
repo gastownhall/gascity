@@ -63,10 +63,16 @@ func managedCityHostRequiresLocalPID(host string) bool {
 
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
-	Host           string
-	Port           string
-	Database       string
-	User           string
+	Host string
+	Port string
+	// Socket is a Unix-domain socket path. It is mutually exclusive with Host/Port.
+	Socket   string
+	Database string
+	User     string
+	// DoltMode records the beads storage mode. proxied-server targets are
+	// intentionally returned without a direct host/port because beads owns
+	// the proxy and child Dolt lifecycle.
+	DoltMode       string
 	EndpointOrigin EndpointOrigin
 	EndpointStatus EndpointStatus
 	External       bool
@@ -142,11 +148,55 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	} else if ok && strings.TrimSpace(db) != "" {
 		target.Database = strings.TrimSpace(db)
 	}
+	mode, err := authoritativeScopeDoltMode(fs, scopeRoot, cfg.DoltMode)
+	if err != nil {
+		return DoltConnectionTarget{}, err
+	}
+	target.DoltMode = mode
+	// Beads persists externally-owned proxied upstreams in its provider
+	// sidecar. This authority applies to city and inherited rig scopes alike;
+	// do not force inherited scopes through the city's managed runtime path.
+	if strings.EqualFold(target.DoltMode, "proxied-server") {
+		if sidecar, ok, err := readProxiedClientInfo(fs, filepath.Join(scopeRoot, ".beads", "proxied_server_client_info.json")); err != nil {
+			return DoltConnectionTarget{}, err
+		} else if ok {
+			target.Host, target.Port, target.Socket, target.User = sidecar.External.Host, strconv.Itoa(sidecar.External.Port), sidecar.External.Socket, sidecar.External.User
+			target.External = true
+			target.EndpointStatus = EndpointStatusVerified
+			if sameScope(scopeRoot, cityRoot) {
+				target.EndpointOrigin = EndpointOriginCityCanonical
+			} else {
+				target.EndpointOrigin = EndpointOriginExplicit
+			}
+			return target, nil
+		}
+	}
 
 	switch cfg.EndpointOrigin {
 	case EndpointOriginManagedCity:
+		if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") {
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" {
+				return populateExternalTarget(target, cfg)
+			}
+			return target, nil
+		}
 		port, err := readManagedRuntimePort(fs, cityRoot)
 		if err != nil {
+			// No runtime state of gc's own. A scope whose store bd owns never
+			// has one: bd records the server it started, or the upstream it was
+			// pointed at, in the scope itself. Reading those records is the
+			// difference between the documented direct topologies working and
+			// every command on them reporting the store as down.
+			if IsManagedRuntimeUnavailable(err) {
+				if bdPort, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
+					return localServerTarget(target, bdPort), nil
+				}
+				if resolved, ok, bindErr := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); bindErr != nil {
+					return DoltConnectionTarget{}, bindErr
+				} else if ok {
+					return resolved, nil
+				}
+			}
 			return DoltConnectionTarget{}, err
 		}
 		target.Host = managedCityHost()
@@ -155,10 +205,48 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
 		return populateExternalTarget(target, cfg)
 	case EndpointOriginInheritedCity:
-		return resolveInheritedCityConnectionTarget(fs, cityRoot, target, cfg)
+		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg)
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
+}
+
+type proxiedClientInfo struct {
+	External *struct {
+		Host   string `json:"host"`
+		Port   int    `json:"port"`
+		Socket string `json:"socket"`
+		User   string `json:"user"`
+	} `json:"external"`
+}
+
+func readProxiedClientInfo(fs fsys.FS, path string) (proxiedClientInfo, bool, error) {
+	b, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return proxiedClientInfo{}, false, nil
+		}
+		return proxiedClientInfo{}, false, err
+	}
+	var info proxiedClientInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return proxiedClientInfo{}, false, fmt.Errorf("read proxied client info: %w", err)
+	}
+	if info.External == nil {
+		// Managed-local proxied scopes persist the same sidecar with only
+		// proxy lifecycle fields. The absence of an external block is valid and
+		// means Beads owns the upstream locally.
+		return proxiedClientInfo{}, false, nil
+	}
+	e := info.External
+	if strings.TrimSpace(e.Socket) != "" {
+		if e.Host != "" || e.Port != 0 || !filepath.IsAbs(e.Socket) {
+			return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info socket target")
+		}
+	} else if e.Host == "" || e.Port < 1 || e.Port > 65535 {
+		return proxiedClientInfo{}, false, fmt.Errorf("invalid proxied client info host/port target")
+	}
+	return proxiedClientInfo{External: e}, true, nil
 }
 
 // ValidateCanonicalConfigState validates canonical scope config invariants.
@@ -172,6 +260,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 		case "":
 			return nil
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("canonical %s config requires both dolt.host and dolt.port", cfg.EndpointOrigin)
 			}
@@ -183,6 +274,9 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	case "":
 		return nil
 	case EndpointOriginExplicit:
+		if strings.TrimSpace(cfg.DoltSocket) != "" {
+			return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+		}
 		if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 			return fmt.Errorf("canonical explicit rig config requires both dolt.host and dolt.port")
 		}
@@ -201,6 +295,15 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 				return fmt.Errorf("inherited rig under managed city must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cityState.DoltSocket) != "" {
+				if err := validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort); err != nil {
+					return err
+				}
+				if strings.TrimSpace(cityState.DoltSocket) != strings.TrimSpace(cfg.DoltSocket) {
+					return fmt.Errorf("canonical inherited rig config must mirror the city endpoint")
+				}
+				return nil
+			}
 			if strings.TrimSpace(cfg.DoltHost) == "" || strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("canonical inherited rig config requires both dolt.host and dolt.port")
 			}
@@ -214,6 +317,26 @@ func ValidateCanonicalConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return nil
 }
 
+// authoritativeScopeDoltMode reports the Dolt mode a scope is actually in.
+//
+// metadata.json is the topology authority (D1): bd persists the mode only
+// there, and it is the only file bd rewrites when a mode migration commits.
+// config.yaml's dolt.mode is a legacy gc-owned mirror bd never updates, so it
+// answers only for scopes whose metadata predates the field — reading it first
+// shadows a migrated scope with its pre-migration mode, which sends a proxied
+// scope down the managed-runtime path and fails on the dolt-state.json gc no
+// longer publishes.
+func authoritativeScopeDoltMode(fs fsys.FS, scopeRoot, configMode string) (string, error) {
+	mode, ok, err := ReadDoltMode(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil {
+		return "", err
+	}
+	if ok && strings.TrimSpace(mode) != "" {
+		return strings.TrimSpace(mode), nil
+	}
+	return strings.TrimSpace(configMode), nil
+}
+
 // ResolveAuthoritativeConfigState returns a normalized authoritative scope config when present.
 func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (ConfigState, bool, error) {
 	existing, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
@@ -222,6 +345,14 @@ func ResolveAuthoritativeConfigState(fs fsys.FS, cityRoot, scopeRoot, issuePrefi
 	}
 	existing.IssuePrefix = issuePrefix
 	if err := ValidateCanonicalConfigState(fs, cityRoot, scopeRoot, existing); err != nil {
+		return ConfigState{}, false, err
+	}
+	// The mode this scope is authoritatively in is metadata.json's answer, not
+	// config.yaml's — same rule as ResolveDoltConnectionTarget. Without this,
+	// the state gc canonicalises from is the pre-migration one, and every
+	// canonical write would reinstate the stale `dolt.mode: server` a migrated
+	// scope just had removed.
+	if existing.DoltMode, err = authoritativeScopeDoltMode(fs, scopeRoot, existing.DoltMode); err != nil {
 		return ConfigState{}, false, err
 	}
 
@@ -358,7 +489,7 @@ func ValidateInheritedCityEndpointMirror(fs fsys.FS, cityRoot, scopeRoot string)
 	if cityTarget.EndpointOrigin != EndpointOriginCityCanonical {
 		return nil
 	}
-	if strings.TrimSpace(rigCfg.DoltHost) != strings.TrimSpace(cityTarget.Host) || strings.TrimSpace(rigCfg.DoltPort) != strings.TrimSpace(cityTarget.Port) || strings.TrimSpace(rigCfg.DoltUser) != strings.TrimSpace(cityTarget.User) {
+	if strings.TrimSpace(rigCfg.DoltHost) != strings.TrimSpace(cityTarget.Host) || strings.TrimSpace(rigCfg.DoltPort) != strings.TrimSpace(cityTarget.Port) || strings.TrimSpace(rigCfg.DoltSocket) != strings.TrimSpace(cityTarget.Socket) || strings.TrimSpace(rigCfg.DoltUser) != strings.TrimSpace(cityTarget.User) || rigCfg.EndpointOrigin != EndpointOriginInheritedCity || rigCfg.EndpointStatus != cityTarget.EndpointStatus {
 		return fmt.Errorf("local inherited endpoint mirror drifts from canonical city endpoint")
 	}
 	return nil
@@ -391,10 +522,12 @@ func inheritedAuthoritativeRigConfigState(prefix string, cityState ConfigState) 
 	state := ConfigState{
 		IssuePrefix:    prefix,
 		EndpointOrigin: EndpointOriginInheritedCity,
+		DoltMode:       cityState.DoltMode,
 	}
 	if cityState.EndpointOrigin == EndpointOriginCityCanonical {
 		state.DoltHost = cityState.DoltHost
 		state.DoltPort = cityState.DoltPort
+		state.DoltSocket = cityState.DoltSocket
 		state.DoltUser = strings.TrimSpace(cityState.DoltUser)
 		state.EndpointStatus = cityState.EndpointStatus
 		return state
@@ -413,6 +546,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 				return fmt.Errorf("managed city config must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if strings.TrimSpace(cfg.DoltPort) == "" {
 				return fmt.Errorf("city_canonical config requires dolt.port")
 			}
@@ -428,6 +564,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 	case EndpointOriginManagedCity, EndpointOriginCityCanonical:
 		return fmt.Errorf("%s endpoint origin is invalid for rig scope", cfg.EndpointOrigin)
 	case EndpointOriginExplicit:
+		if strings.TrimSpace(cfg.DoltSocket) != "" {
+			return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+		}
 		if strings.TrimSpace(cfg.DoltPort) == "" {
 			return fmt.Errorf("explicit rig config requires dolt.port")
 		}
@@ -449,6 +588,9 @@ func ValidateConnectionConfigState(fs fsys.FS, cityRoot, scopeRoot string, cfg C
 				return fmt.Errorf("inherited rig under managed city must not track dolt.host, dolt.port, or dolt.user")
 			}
 		case EndpointOriginCityCanonical:
+			if strings.TrimSpace(cfg.DoltSocket) != "" {
+				return validateSocketTarget(cfg.DoltSocket, cfg.DoltHost, cfg.DoltPort)
+			}
 			if err := validateExternalHostValue(cfg.DoltHost, cfg.DoltPort); err != nil {
 				return err
 			}
@@ -465,7 +607,7 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 		return cfg
 	}
 	derived := cfg
-	hasExternalEndpoint := strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != ""
+	hasExternalEndpoint := strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != ""
 	scopeIsCity := sameScope(scopeRoot, cityRoot)
 
 	if derived.EndpointOrigin == "" {
@@ -513,7 +655,18 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return derived
 }
 
-func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
+func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
+	// A rig whose store bd owns carries its own binding, so that binding
+	// outranks anything inherited. Without this a bd-owned direct rig resolves
+	// to the city's server, where its database does not exist.
+	if port, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
+		return localServerTarget(target, port), nil
+	}
+	if resolved, ok, err := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); err != nil {
+		return DoltConnectionTarget{}, err
+	} else if ok {
+		return resolved, nil
+	}
 	cityState, err := resolveCityTopologyState(fs, cityRoot)
 	if err != nil {
 		return DoltConnectionTarget{}, err
@@ -526,6 +679,10 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot string, target Do
 		}
 		return populateExternalTarget(target, cityState)
 	case EndpointOriginManagedCity:
+		if strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+			target.DoltMode = "proxied-server"
+			return target, nil
+		}
 		if cityState.EndpointStatus != "" {
 			target.EndpointStatus = cityState.EndpointStatus
 		}
@@ -561,6 +718,12 @@ func deriveRigLegacyExternalOrigin(fs fsys.FS, cityRoot string, rigCfg ConfigSta
 }
 
 func sameExternalEndpoint(a, b ConfigState) bool {
+	if strings.TrimSpace(a.DoltSocket) != strings.TrimSpace(b.DoltSocket) {
+		return false
+	}
+	if strings.TrimSpace(a.DoltSocket) != "" {
+		return strings.TrimSpace(a.DoltUser) == strings.TrimSpace(b.DoltUser)
+	}
 	if strings.TrimSpace(a.DoltPort) != strings.TrimSpace(b.DoltPort) {
 		return false
 	}
@@ -623,30 +786,40 @@ func configStateFromDoltTarget(target DoltConnectionTarget) ConfigState {
 			EndpointStatus: target.EndpointStatus,
 			DoltHost:       target.Host,
 			DoltPort:       target.Port,
+			DoltSocket:     target.Socket,
 			DoltUser:       target.User,
 		}
 	}
 	return ConfigState{
 		EndpointOrigin: EndpointOriginManagedCity,
 		EndpointStatus: target.EndpointStatus,
+		DoltMode:       target.DoltMode,
 	}
 }
 
 // ConfigHasEndpointAuthority reports whether config carries endpoint authority.
 func ConfigHasEndpointAuthority(cfg ConfigState) bool {
-	return cfg.EndpointOrigin != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != ""
+	return cfg.EndpointOrigin != "" || strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != ""
 }
 
 // IsLegacyMinimalEndpointConfig reports whether config only carries legacy minimal endpoint data.
 func IsLegacyMinimalEndpointConfig(cfg ConfigState) bool {
-	return cfg.EndpointOrigin == "" && cfg.EndpointStatus == "" && strings.TrimSpace(cfg.DoltHost) == "" && strings.TrimSpace(cfg.DoltPort) == "" && strings.TrimSpace(cfg.DoltUser) == ""
+	return cfg.EndpointOrigin == "" && cfg.EndpointStatus == "" && strings.TrimSpace(cfg.DoltHost) == "" && strings.TrimSpace(cfg.DoltPort) == "" && strings.TrimSpace(cfg.DoltSocket) == "" && strings.TrimSpace(cfg.DoltUser) == ""
 }
 
 func configTracksEndpoint(cfg ConfigState) bool {
-	return strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltUser) != ""
+	return strings.TrimSpace(cfg.DoltHost) != "" || strings.TrimSpace(cfg.DoltPort) != "" || strings.TrimSpace(cfg.DoltSocket) != "" || strings.TrimSpace(cfg.DoltUser) != ""
 }
 
 func populateExternalTarget(target DoltConnectionTarget, cfg ConfigState) (DoltConnectionTarget, error) {
+	if socket := strings.TrimSpace(cfg.DoltSocket); socket != "" {
+		if err := validateSocketTarget(socket, cfg.DoltHost, cfg.DoltPort); err != nil {
+			return DoltConnectionTarget{}, err
+		}
+		target.Socket = socket
+		target.External = true
+		return target, nil
+	}
 	port := strings.TrimSpace(cfg.DoltPort)
 	if port == "" {
 		return DoltConnectionTarget{}, fmt.Errorf("missing dolt.port for external scope")
@@ -665,6 +838,129 @@ func populateExternalTarget(target DoltConnectionTarget, cfg ConfigState) (DoltC
 	target.Port = port
 	target.External = true
 	return target, nil
+}
+
+func validateSocketTarget(socket, host, port string) error {
+	socket = strings.TrimSpace(socket)
+	if socket == "" {
+		return fmt.Errorf("missing dolt socket path")
+	}
+	if strings.TrimSpace(host) != "" || strings.TrimSpace(port) != "" {
+		return fmt.Errorf("dolt socket is mutually exclusive with dolt.host and dolt.port")
+	}
+	if !filepath.IsAbs(socket) || strings.ContainsRune(socket, '\x00') {
+		return fmt.Errorf("invalid dolt socket path %q", socket)
+	}
+	return nil
+}
+
+// bdExternalBindingTarget resolves the external upstream bd persisted for a
+// scope, if it recorded one.
+//
+// `bd init --server --external --server-host <h> --server-port <p>` writes
+// dolt_server_host/dolt_server_port (or dolt_server_socket) into the scope's
+// metadata.json, and that is the only place the endpoint lives. gc deliberately
+// leaves a provider-owned scope's config.yaml alone, so a direct-external city
+// carries no gc endpoint keys at all and used to resolve as a managed city with
+// no runtime state.
+//
+// It ranks below a live local server for the same reason the sidecar ranks
+// above config: a record naming a process that exists here and now beats a
+// marker pointing somewhere else.
+func bdExternalBindingTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget) (DoltConnectionTarget, bool, error) {
+	binding, ok, err := ReadPersistedServerBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return DoltConnectionTarget{}, false, err
+	}
+	if sameScope(scopeRoot, cityRoot) {
+		target.EndpointOrigin = EndpointOriginCityCanonical
+	} else {
+		target.EndpointOrigin = EndpointOriginExplicit
+	}
+	target.EndpointStatus = EndpointStatusVerified
+	resolved, err := populateExternalTarget(target, binding)
+	if err != nil {
+		return DoltConnectionTarget{}, false, err
+	}
+	return resolved, true, nil
+}
+
+// ReadPersistedServerBinding reads the server endpoint bd persisted for a
+// scope out of its metadata.json — dolt_server_host and dolt_server_port, or
+// dolt_server_socket. `bd init --server --external --server-host <h>
+// --server-port <p>` writes them, and that is the only place the endpoint
+// lives: gc leaves a provider-owned scope's config.yaml alone, so nothing else
+// records which server the scope is bound to.
+//
+// Absent or malformed metadata reports no binding. This is a discovery step,
+// and the metadata contract's own loader owns rejection.
+func ReadPersistedServerBinding(fs fsys.FS, path string) (ConfigState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ConfigState{}, false, nil
+		}
+		return ConfigState{}, false, err
+	}
+	var meta struct {
+		Host   string `json:"dolt_server_host"`
+		Port   int    `json:"dolt_server_port"`
+		Socket string `json:"dolt_server_socket"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ConfigState{}, false, nil
+	}
+	if socket := strings.TrimSpace(meta.Socket); socket != "" {
+		return ConfigState{DoltSocket: socket}, true, nil
+	}
+	host := strings.TrimSpace(meta.Host)
+	if host == "" || meta.Port <= 0 {
+		return ConfigState{}, false, nil
+	}
+	return ConfigState{DoltHost: host, DoltPort: strconv.Itoa(meta.Port)}, true, nil
+}
+
+// localServerTarget pins a target to a loopback server this host runs.
+func localServerTarget(target DoltConnectionTarget, port string) DoltConnectionTarget {
+	target.Host = managedCityHost()
+	target.Port = port
+	target.External = false
+	target.EndpointStatus = EndpointStatusVerified
+	return target
+}
+
+// readProviderOwnedServerPort reads the server-mode Dolt bd owns for a scope.
+//
+// bd records a server it started in the scope's own .beads/dolt-server.pid
+// and .beads/dolt-server.port. Gas City's managed lifecycle writes no pid file
+// there — it mirrors only the port — so requiring the pair is what keeps a
+// stale mirror from a stopped managed city out of this path. The record counts
+// only while the process it names is alive and its port answers; anything less
+// is a crashed server, not a binding.
+func readProviderOwnedServerPort(fs fsys.FS, scopeRoot string) (string, bool) {
+	if strings.TrimSpace(scopeRoot) == "" {
+		return "", false
+	}
+	pidRaw, err := fs.ReadFile(filepath.Join(scopeRoot, ".beads", "dolt-server.pid"))
+	if err != nil {
+		return "", false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidRaw)))
+	if err != nil || pid <= 0 || !contractPIDAlive(pid) {
+		return "", false
+	}
+	portRaw, err := fs.ReadFile(filepath.Join(scopeRoot, ".beads", "dolt-server.port"))
+	if err != nil {
+		return "", false
+	}
+	port := strings.TrimSpace(string(portRaw))
+	if value, err := strconv.Atoi(port); err != nil || value <= 0 {
+		return "", false
+	}
+	if !contractPortReachable(managedCityHost(), port) {
+		return "", false
+	}
+	return port, true
 }
 
 func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {

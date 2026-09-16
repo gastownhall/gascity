@@ -429,12 +429,15 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
+		env, err := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",
 			Prefix:    prefix,
 			RigName:   rigName,
 		}, provider)
+		if err != nil {
+			return nil, err
+		}
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
 			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
 			if err != nil {
@@ -2640,18 +2643,60 @@ func ensurePublicGitHost(gitURL string) (resolveOverride string, err error) {
 // UpdateRig partially updates a rig in city.toml.
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateRig(name, configedit.RigUpdate{
+		var updatedBindings []config.Rig
+		if strings.TrimSpace(patch.Path) != "" {
+			cfg, err := loadCityConfig(cs.cityPath, io.Discard)
+			if err != nil {
+				return fmt.Errorf("load rig before updating its path: %w", err)
+			}
+			resolveRigPaths(cs.cityPath, cfg.Rigs)
+			for i := range cfg.Rigs {
+				if cfg.Rigs[i].Name != name {
+					continue
+				}
+				newPath := strings.TrimSpace(patch.Path)
+				if !filepath.IsAbs(newPath) {
+					newPath = filepath.Join(cs.cityPath, newPath)
+				}
+				if !samePath(cfg.Rigs[i].Path, newPath) {
+					// Detach before city.toml changes. A failed write leaves the old
+					// configured path resolvable through its physical record so retry
+					// remains safe; the new root receives its own admission later.
+					if err := removeProviderScopeOwnershipRecord(cs.cityPath, "rig:"+name); err != nil {
+						return fmt.Errorf("retiring provider scope ownership: %w", err)
+					}
+				}
+				cfg.Rigs[i].Path = newPath
+				updatedBindings = append([]config.Rig(nil), cfg.Rigs...)
+				break
+			}
+		}
+		if err := cs.editor.UpdateRig(name, configedit.RigUpdate{
 			Path:          patch.Path,
 			Prefix:        patch.Prefix,
 			DefaultBranch: patch.DefaultBranch,
 			Suspended:     patch.Suspended,
-		})
+		}); err != nil {
+			return err
+		}
+		if len(updatedBindings) != 0 {
+			if err := config.PersistRigSiteBindings(fsys.OSFS{}, cs.cityPath, updatedBindings); err != nil {
+				return fmt.Errorf("persist updated rig site binding: %w", err)
+			}
+		}
+		return nil
 	})
 }
 
 // DeleteRig removes a rig from city.toml.
 func (cs *controllerState) DeleteRig(name string) error {
 	return cs.mutateAndPoke(func() error {
+		// Retire the configured label before editing city.toml. If the config
+		// write fails, the still-configured rig resolves through its detached
+		// path record and a retry can finish the removal.
+		if err := removeProviderScopeOwnershipRecord(cs.cityPath, "rig:"+name); err != nil {
+			return fmt.Errorf("retiring provider scope ownership: %w", err)
+		}
 		return cs.editor.DeleteRig(name)
 	})
 }

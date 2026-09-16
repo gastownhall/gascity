@@ -48,6 +48,9 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env := cityRuntimeEnvMapForCity(cityPath)
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		bdBin, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return nil, err
@@ -56,6 +59,8 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		env["GC_RIG"] = ""
 		env["GC_RIG_ROOT"] = ""
+		// Direct-path guard only; inert on bd's proxied path (see
+		// applyProxiedDoltEnv and beads cmd/bd/main.go:1758).
 		env["BEADS_DOLT_AUTO_START"] = "0"
 		env["BD_EXPORT_AUTO"] = "false"
 		hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
@@ -527,6 +532,13 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	if env == nil {
 		return
 	}
+	if socket := strings.TrimSpace(target.Socket); socket != "" {
+		delete(env, "GC_DOLT_HOST")
+		delete(env, "GC_DOLT_PORT")
+		env["BEADS_DOLT_SERVER_SOCKET"] = socket
+		return
+	}
+	delete(env, "BEADS_DOLT_SERVER_SOCKET")
 	// GC-owned projections must use the resolved target, not ambient parent
 	// shell host/port. Stale GC_DOLT_HOST/PORT was causing gc bd and projected
 	// session flows to drift away from the canonical external endpoint.
@@ -936,6 +948,7 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_CREDENTIALS_FILE",
 	"BEADS_DOLT_SERVER_HOST",
 	"BEADS_DOLT_SERVER_PORT",
+	"BEADS_DOLT_SERVER_SOCKET",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_PASSWORD",
 	// BEADS_DOLT_SERVER_TLS is intentionally NOT a projected key: it is an
@@ -1020,6 +1033,13 @@ var (
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	gcBin, err := resolveProviderLifecycleGCBinary()
+	if err != nil {
+		return fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if gcBin != "" {
+		overrides["GC_BIN"] = gcBin
+	}
 	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
 		return err
 	}
@@ -1029,10 +1049,6 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	applyBdContributorRoutingOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
-	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
-		environ = removeEnvKey(environ, "GC_BIN")
-		environ = append(environ, "GC_BIN="+gcBin)
-	}
 	return runProviderOpWithEnv(script, environ, "recover")
 }
 
@@ -1051,9 +1067,47 @@ func ensureProjectedDoltEnvExplicit(env map[string]string) {
 }
 
 func clearProjectedDoltEnv(env map[string]string) {
+	delete(env, "BEADS_DOLT_PROXIED_SERVER")
 	for _, key := range projectedDoltEnvKeys {
 		delete(env, key)
 	}
+}
+
+// clearManagedDoltLifecycleEnv removes Gas City's direct sql-server control
+// plane when beads owns a proxied server and its child Dolt process.
+func clearManagedDoltLifecycleEnv(env map[string]string) {
+	for _, key := range []string{
+		"GC_PACK_STATE_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_LOG_FILE",
+		"GC_DOLT_STATE_FILE", "GC_DOLT_PID_FILE", "GC_DOLT_LOCK_FILE",
+		"GC_DOLT_CONFIG_FILE", "GC_DOLT_ARCHIVE_LEVEL", "GC_DOLT_AUTO_GC_ENABLED",
+		"GC_DOLT_MAX_CONNECTIONS", "GC_DOLT_READ_TIMEOUT_MILLIS",
+		"GC_DOLT_WRITE_TIMEOUT_MILLIS", "GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
+		"GC_DOLT_WAIT_TIMEOUT", "GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS",
+		"BEADS_DOLT_AUTO_START", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_DATABASE",
+		"BEADS_DOLT_SERVER_MODE",
+	} {
+		delete(env, key)
+	}
+}
+
+// applyProxiedDoltEnv projects the environment a child bd process needs when
+// beads owns the scope through its proxied-server UOW path.
+//
+// clearManagedDoltLifecycleEnv deliberately drops BEADS_DOLT_AUTO_START here,
+// and that removal is the honest state of the world rather than a policy: on
+// bd v1.3.0-rc.2 the variable is INERT on the proxied path. Every ordinary
+// command short-circuits into the proxied UOW provider (beads
+// cmd/bd/main.go:1758) before the Dolt auto-start policy is consulted, so any
+// bd read — a dashboard sample, gc doctor, a straggler agent — restarts the
+// proxy and its Dolt child. Retiring them is `gc stop`'s job (see
+// shutdownBeadsProvider and cmdStopBodyWithoutSuccess), not an env var's.
+func applyProxiedDoltEnv(env map[string]string) {
+	clearProjectedDoltEnv(env)
+	clearManagedDoltLifecycleEnv(env)
+	env["GC_BEADS_BACKEND"] = "dolt"
+	env["BEADS_BACKEND"] = "dolt"
+	env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 }
 
 var projectedBeadsBackendEnvKeys = []string{
@@ -1077,6 +1131,9 @@ func managedLocalDoltHost(host string) bool {
 }
 
 func externalDoltEnvOverrideTarget() (contract.DoltConnectionTarget, bool) {
+	if socket := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_SOCKET")); socket != "" {
+		return contract.DoltConnectionTarget{Socket: socket, External: true}, true
+	}
 	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
 	if hostOverride == "" || managedLocalDoltHost(hostOverride) {
 		return contract.DoltConnectionTarget{}, false
@@ -1402,6 +1459,9 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if env == nil {
 			env = map[string]string{}
 		}
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		ensureProjectedDoltEnvExplicit(env)
 		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
 		if runnerErr != nil {
@@ -1423,6 +1483,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
+		}
+		if retryEnv == nil {
+			retryEnv = map[string]string{}
+		}
+		if err := pinBdGCEnvironment(retryEnv); err != nil {
+			return nil, err
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
@@ -1576,6 +1642,10 @@ func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigP
 }
 
 func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, rigPath)
+	if ok {
+		return cached, nil
+	}
 	env, cityErr := bdRuntimeEnvWithErrorRecoveryContext(ctx, cityPath, allowRecovery)
 	rigPath = normalizePathForCompare(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
@@ -1598,6 +1668,17 @@ func bdRuntimeEnvForRigWithErrorRecoveryContext(ctx context.Context, cityPath st
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
+	}
+	// Each proxied workspace has its own proxy root, so a rig answers from its
+	// own binding rather than inheriting the city's endpoint.
+	if scopeUsesProxiedDoltMode(cityPath, rigPath) {
+		if err := applyProxiedScopeRuntimeEnvFn(env, rigPath); err != nil {
+			return env, err
+		}
+		if cityErr != nil {
+			return env, cityErr
+		}
+		return rememberProxiedScopeRuntimeEnv(cityPath, rigPath, stamp, env), nil
 	}
 	if err := applyResolvedRigDoltEnvContext(ctx, env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
@@ -1703,6 +1784,10 @@ func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[str
 }
 
 func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, allowRecovery bool) (map[string]string, error) {
+	cached, stamp, ok := cachedProxiedScopeRuntimeEnv(cityPath, cityPath)
+	if ok {
+		return cached, nil
+	}
 	env := cityRuntimeEnvMapForCity(cityPath)
 	if err := applyWorkspacePinnedBdBinary(env, cityPath); err != nil {
 		return env, err
@@ -1714,6 +1799,13 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 	// Dolt server lifecycle via gc-beads-bd; bd's CLI auto-start ignores the
 	// dolt.auto-start:false config (beads resolveAutoStart priority bug) and
 	// starts rogue servers from the agent's cwd with the wrong data_dir.
+	//
+	// This governs the DIRECT server path only. It is inert for a proxied
+	// scope: bd v1.3.0-rc.2 routes every ordinary command into the proxied UOW
+	// provider (beads cmd/bd/main.go:1758) before auto-start policy is read,
+	// so a proxied scope's proxy comes back on the next bd read regardless.
+	// applyProxiedDoltEnv drops the variable for those scopes rather than
+	// projecting a promise bd does not keep.
 	env["BEADS_DOLT_AUTO_START"] = "0"
 	// Suppress bd's auto-export of issues.jsonl on every write. The canonical
 	// config also persists export.auto:false (see internal/beads/contract/files.go),
@@ -1751,6 +1843,17 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 		env["BEADS_BACKEND"] = "doltlite"
 		mirrorBeadsDoltEnv(env)
 		return env, nil
+	}
+	// bd owns a proxied scope's listener and its readiness. Answer from the
+	// persisted binding and stop: the managed-Dolt ladder below can only fail
+	// to find a port that does not exist, and its last rung is a city-wide
+	// health fan-out that would run one `bd ping` per provider-owned scope for
+	// every bd command gc makes. See bd_env_proxied.go.
+	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		if err := applyProxiedScopeRuntimeEnvFn(env, cityPath); err != nil {
+			return env, err
+		}
+		return rememberProxiedScopeRuntimeEnv(cityPath, cityPath, stamp, env), nil
 	}
 	if bound, err := applyCityStorageBindingEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
@@ -2101,6 +2204,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_PASSWORD",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_SOCKET",
 		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",
 		"GC_CITY_ROOT", // kept for stripping: no code emits this anymore, but inherited values must be cleaned

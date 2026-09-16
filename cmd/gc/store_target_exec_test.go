@@ -225,14 +225,17 @@ func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t
 func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	env := gcExecStoreEnv(cityDir, execStoreTarget{
+	env, err := gcExecStoreEnv(cityDir, execStoreTarget{
 		ScopeRoot: cityDir,
 		ScopeKind: "city",
 		Prefix:    "gc",
 	}, "exec:/tmp/gc-beads-bd")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(gc-beads-bd): %v", err)
+	}
 
 	if got := env["GC_BIN"]; got != "/opt/gc/bin/gc" {
 		t.Fatalf("GC_BIN = %q, want %q", got, "/opt/gc/bin/gc")
@@ -242,17 +245,48 @@ func TestGcExecStoreEnvProjectsGCBinForGcBeadsBd(t *testing.T) {
 func TestGcExecStoreEnvDoesNotProjectGCBinForUnrelatedExecProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
-	env := gcExecStoreEnv(cityDir, execStoreTarget{
+	env, err := gcExecStoreEnv(cityDir, execStoreTarget{
 		ScopeRoot: cityDir,
 		ScopeKind: "city",
 		Prefix:    "gc",
 	}, "exec:/tmp/custom-provider")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(custom): %v", err)
+	}
 
 	if got := env["GC_BIN"]; got != "" {
 		t.Fatalf("GC_BIN = %q, want empty for unrelated exec provider", got)
+	}
+}
+
+func TestGcExecStoreEnvRejectsGCBinaryResolutionFailureForGcBeadsBd(t *testing.T) {
+	cityDir := t.TempDir()
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", fmt.Errorf("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	_, err := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/gc-beads-bd")
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("gcExecStoreEnv() error = %v, want resolver failure", err)
+	}
+
+	env, err := gcExecStoreEnv(cityDir, execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "gc",
+	}, "exec:/tmp/custom-provider")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(custom provider): %v", err)
+	}
+	if got := env["GC_BIN"]; got != "" {
+		t.Fatalf("GC_BIN = %q, want empty for unrelated provider", got)
 	}
 }
 
@@ -315,7 +349,10 @@ func TestGcExecStoreEnvProjectsCityAndRigTargets(t *testing.T) {
 		ScopeKind: "city",
 		Prefix:    "ct",
 	}
-	cityEnv := gcExecStoreEnv(cityDir, cityTarget, "exec:/tmp/spy")
+	cityEnv, err := gcExecStoreEnv(cityDir, cityTarget, "exec:/tmp/spy")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(city): %v", err)
+	}
 	if got := cityEnv["GC_PROVIDER"]; got != "exec:/tmp/spy" {
 		t.Fatalf("GC_PROVIDER = %q, want exec:/tmp/spy", got)
 	}
@@ -348,7 +385,10 @@ func TestGcExecStoreEnvProjectsCityAndRigTargets(t *testing.T) {
 		Prefix:    "ra",
 		RigName:   "rig-a",
 	}
-	rigEnv := gcExecStoreEnv(cityDir, rigTarget, "exec:/tmp/spy")
+	rigEnv, err := gcExecStoreEnv(cityDir, rigTarget, "exec:/tmp/spy")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(rig): %v", err)
+	}
 	if got := rigEnv["GC_STORE_ROOT"]; got != rigDir {
 		t.Fatalf("GC_STORE_ROOT = %q, want %q", got, rigDir)
 	}
@@ -588,12 +628,15 @@ dolt.auto-start: false
 	}})
 	t.Setenv("GC_DOLT_HOST", "ambient-dolt")
 
-	env := gcExecStoreEnv(cityDir, execStoreTarget{
+	env, err := gcExecStoreEnv(cityDir, execStoreTarget{
 		ScopeRoot: rigDir,
 		ScopeKind: "rig",
 		Prefix:    "fe",
 		RigName:   "frontend",
 	}, "exec:/tmp/gc-beads-bd")
+	if err != nil {
+		t.Fatalf("gcExecStoreEnv(gc-beads-bd): %v", err)
+	}
 	projected, err := bdRuntimeEnvForRigWithError(cityDir, &config.City{Rigs: []config.Rig{{
 		Name:   "frontend",
 		Path:   "rigs/frontend",
