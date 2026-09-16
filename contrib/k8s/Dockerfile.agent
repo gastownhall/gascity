@@ -29,14 +29,16 @@ ARG BD_SOURCE_SHA256=3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd059
 ARG BD_BUILD=c185735c38
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
+ARG THRIFT_VERSION=0.24.0
 
 # Rebuild the exact released source with its production CGO/pure-Go-regex
-# configuration and release identity. GRPC_VERSION overrides the source's
-# v1.83.0 requirement with the current security floor. Keep the `go get` and the
-# trailing `go version -m` check: together they fail the build if a future beads
-# release regresses below this grpc instead of silently shipping it. Raise
-# GRPC_VERSION with the upstream requirement -- never leave it behind, or the
-# `go get` downgrades the release while the check still passes.
+# configuration and release identity. GRPC_VERSION and THRIFT_VERSION override
+# the source's own requirements with the current security floor. Keep each
+# `go get` and its trailing `go version -m` check: together they fail the
+# build if a future beads release regresses below these versions instead of
+# silently shipping it. Raise them with the upstream requirement -- never
+# leave either behind, or the `go get` downgrades the release while the check
+# still passes.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
@@ -49,6 +51,7 @@ WORKDIR /src/bd
 RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -56,7 +59,8 @@ RUN bd_version="${BD_VERSION#v}" \
        -o /out/bd \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "
 
 FROM ${BASE_IMAGE}
 
