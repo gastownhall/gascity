@@ -172,4 +172,69 @@ else
     fail "T3: GC_REAPER_SESSION_BEAD_PATTERN='' via env → expected SQL path; bd=$bd_called dolt=$dolt_called"
 fi
 
+# run_step6_sql_empty_batch exercises the #6284 regression: the SQL path's
+# per-batch SELECT returning zero data rows (a CSV header line only, the
+# normal case for the first 30 days of any city) must not abort Step 6.
+# Pre-fix, BATCH_IDS=$(... | grep -v '^$') has no matching lines against a
+# truly empty input and exits 1; under this script's own set -euo pipefail
+# that aborts the whole sourced block, so nothing after the loop -- not even
+# the escalation logic two blocks later -- ever runs. A completed-marker file
+# written immediately after the source line proves execution reached the end.
+run_step6_sql_empty_batch() {
+    local tmpdir dolt_flag completed_flag step6_file run_script exit_code
+    tmpdir=$(mktemp -d)
+    dolt_flag="$tmpdir/dolt_called"
+    completed_flag="$tmpdir/completed"
+    step6_file="$tmpdir/step6.sh"
+    run_script="$tmpdir/run.sh"
+
+    mkdir -p "$tmpdir/.beads/backup"
+    printf '{"dolt_database":"test_db"}' > "$tmpdir/.beads/metadata.json"
+    _NOW_TS=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '{"last_dolt_commit":"test","timestamp":"%s"}\n' "$_NOW_TS" \
+        > "$tmpdir/.beads/backup/backup_state.json"
+
+    printf '%s\n' "$STEP6" > "$step6_file"
+
+    cat > "$run_script" << RUNEOF
+#!/usr/bin/env bash
+set -euo pipefail
+gc()            { printf '{"pruned_count":0}'; }
+dolt_sql()      { touch '$dolt_flag'; printf 'id\n'; }
+record_anomaly(){ :; }
+export -f gc dolt_sql record_anomaly
+CITY_ABS='$tmpdir'
+CITY_BEADS_DIR='$tmpdir/.beads'
+SESSION_BEAD_PATTERN=''
+SESSION_PURGE_AGE='720h'
+DRY_RUN=''
+TOTAL_SESSIONS_PRUNED=0
+SESSION_PRUNE_ATTEMPTED=0
+CITY_DB='test_db'
+GC_BACKUP_MAX_AGE_FOR_BULK_DELETE=86400
+. '$step6_file'
+touch '$completed_flag'
+RUNEOF
+
+    bash "$run_script" >/dev/null 2>&1
+    exit_code=$?
+
+    local completed dolt_result
+    completed=$([ -f "$completed_flag" ] && echo yes || echo no)
+    dolt_result=$([ -f "$dolt_flag" ] && echo yes || echo no)
+    rm -rf "$tmpdir"
+    printf '%s|%s|%s\n' "$exit_code" "$completed" "$dolt_result"
+}
+
+# ── T4: SQL path, zero-row (header-only) dolt result must not abort Step 6 ────
+result=$(run_step6_sql_empty_batch)
+exit_code=$(printf '%s' "$result" | cut -d'|' -f1)
+completed=$(printf '%s' "$result" | cut -d'|' -f2)
+dolt_called=$(printf '%s' "$result" | cut -d'|' -f3)
+if [ "$exit_code" = "0" ] && [ "$completed" = "yes" ] && [ "$dolt_called" = "yes" ]; then
+    pass "T4: SQL path with zero-row dolt result completes Step 6 without aborting"
+else
+    fail "T4: SQL path with zero-row dolt result aborted Step 6 (exit=$exit_code completed=$completed dolt=$dolt_called)"
+fi
+
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1
