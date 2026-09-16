@@ -130,6 +130,14 @@ func managedDoltScopeGone(configFile string) bool {
 // observe the same managedDoltStartedProcess shape as a direct spawn plus
 // the supervising WatchdogPID.
 func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath string, logFile *os.File) (managedDoltStartedProcess, error) {
+	return startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFilePath, logFile, os.Environ())
+}
+
+// startManagedDoltSQLServerWithScopeWatchdogEnv is
+// startManagedDoltSQLServerWithScopeWatchdog with the parent environment
+// passed in rather than read from the process, so a test can spawn the real
+// watchdog under a session-stamped environment without mutating its own.
+func startManagedDoltSQLServerWithScopeWatchdogEnv(cityPath, configFile, logFilePath string, logFile *os.File, parentEnv []string) (managedDoltStartedProcess, error) {
 	watchdogExecutable, err := managedDoltWatchdogExecutable()
 	if err != nil {
 		return managedDoltStartedProcess{}, err
@@ -138,7 +146,7 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
-	cmd.Env = doltServerEnv(cityPath, os.Environ())
+	cmd.Env = doltServerEnv(cityPath, parentEnv)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return managedDoltStartedProcess{}, fmt.Errorf("prepare dolt scope watchdog: %w", err)
