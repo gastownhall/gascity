@@ -76,7 +76,7 @@ func TestCoreMolPolecatReportWriteReportStepRecordsNoteAndAvoidsPRFlow(t *testin
 		"gc convoy status {{convoy_id}}",
 		"WORK_BEAD_ID",
 		"bd update",
-		"--notes",
+		"--append-notes",
 		"bd close",
 	} {
 		if !strings.Contains(description, want) {
