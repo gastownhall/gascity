@@ -1266,6 +1266,129 @@ func TestSyncSessionBeads_ConfiguredNamedSessionIsNotPoolManaged(t *testing.T) {
 	})
 }
 
+func TestSyncSessionBeads_HealsConfiguredNamedMarkersWhenPoolTickReusesOwnerName(t *testing.T) {
+	// A reconciliation tick can temporarily classify an existing configured
+	// named session as a pool instance. Its session_name is still the
+	// configured owner's canonical runtime name, so that durable ownership must
+	// win over the transient classification and restore the named markers.
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name: "template",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "template",
+			Mode:     "on_demand",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "template")
+	bead, err := store.Create(beads.Bead{
+		Title:  "template",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "template",
+			"agent_name":   "template",
+			"state":        "active",
+			// Simulate the transient pool-managed classification that previously
+			// cleared the named markers during the metadata refresh.
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		sessionName: {
+			SessionName:  sessionName,
+			TemplateName: "template",
+			InstanceName: "template-1",
+			PoolSlot:     1,
+			Command:      "true",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(session bead): %v", err)
+	}
+	if got.Metadata[namedSessionMetadataKey] != boolMetadata(true) {
+		t.Fatalf("configured_named_session = %q, want true", got.Metadata[namedSessionMetadataKey])
+	}
+	if got.Metadata[namedSessionIdentityMetadata] != "template" {
+		t.Fatalf("configured_named_identity = %q, want template", got.Metadata[namedSessionIdentityMetadata])
+	}
+	if got.Metadata[namedSessionModeMetadata] != "on_demand" {
+		t.Fatalf("configured_named_mode = %q, want on_demand", got.Metadata[namedSessionModeMetadata])
+	}
+}
+
+func TestSyncSessionBeads_DoesNotPromoteForeignPoolBeadWithReservedRuntimeName(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "template"},
+			{Name: "foreign"},
+		},
+		NamedSessions: []config.NamedSession{{
+			Template: "template",
+			Mode:     "on_demand",
+		}},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "template")
+	bead, err := store.Create(beads.Bead{
+		Title:  "foreign",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         sessionName,
+			"template":             "foreign",
+			"agent_name":           "foreign",
+			"state":                "active",
+			poolManagedMetadataKey: boolMetadata(true),
+			"pool_slot":            "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(foreign pool bead): %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		sessionName: {
+			SessionName:  sessionName,
+			TemplateName: "foreign",
+			InstanceName: "foreign-1",
+			PoolSlot:     1,
+			Command:      "true",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, false)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(foreign pool bead): %v", err)
+	}
+	if got.Metadata[namedSessionMetadataKey] != "" ||
+		got.Metadata[namedSessionIdentityMetadata] != "" ||
+		got.Metadata[namedSessionModeMetadata] != "" {
+		t.Fatalf("foreign pool bead was promoted as configured named: metadata=%v", got.Metadata)
+	}
+}
+
 func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
