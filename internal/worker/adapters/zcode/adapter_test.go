@@ -58,8 +58,12 @@ if os.environ.get("STUB_IGNORE_INT"):
 
 sleep_for = float(os.environ.get("STUB_SLEEP", "0"))
 if sleep_for:
+    # STUB_RELEASE_FILE ends the sleep as soon as it exists: STUB_SLEEP is then
+    # only a ceiling, and a test holds the turn open exactly as long as it needs
+    # to observe something.
+    release = os.environ.get("STUB_RELEASE_FILE")
     deadline = time.time() + sleep_for
-    while time.time() < deadline:
+    while time.time() < deadline and not (release and os.path.exists(release)):
         time.sleep(0.1)
     done = os.environ.get("STUB_DONE_FILE")
     if done:
@@ -87,6 +91,42 @@ print(json.dumps({
     "usage": {"inputTokens": 11, "outputTokens": 3, "totalTokens": 14},
     "projection": {"turnCount": 1, "totalTokenCount": 14},
 }))
+`
+
+// ptyDriver runs its arguments behind a pseudo-terminal, standing in for a
+// tmux pane: our stdin is relayed into the pty and everything the child writes
+// comes back out on our stdout, escape sequences and all. TERM is forwarded to
+// the child, so the harness's signal path ends a session the way it does off a
+// tty; a child that exits ends the relay, and its status becomes ours.
+const ptyDriver = `#!/usr/bin/env python3
+import os, pty, select, signal, sys
+
+child, master = pty.fork()
+if child == 0:
+    os.execvp(sys.argv[1], sys.argv[1:])
+
+signal.signal(signal.SIGTERM, lambda *_: os.kill(child, signal.SIGTERM))
+
+fds = [master, 0]
+while True:
+    ready, _, _ = select.select(fds, [], [])
+    if master in ready:
+        try:
+            data = os.read(master, 65536)
+        except OSError:  # EIO: the child closed its side
+            data = b""
+        if not data:
+            break
+        os.write(1, data)
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if data:
+            os.write(master, data)
+        else:
+            fds.remove(0)
+
+_, status = os.waitpid(child, 0)
+sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
 `
 
 // installedAdapter materializes the adapter once per test binary. Installing
@@ -122,6 +162,10 @@ type harness struct {
 	ctlPath   string
 	mirrorDir string
 	workDir   string
+	// ptyDriver wraps the adapter in a pseudo-terminal when tty is set, so it
+	// takes the branches it takes in a tmux pane.
+	ptyDriver string
+	tty       bool
 	env       map[string]string
 	// stderr holds the last run's stderr. The adapter's die_config sites all
 	// exit 78 and only stderr says which precondition tripped (ga-xx7x9).
@@ -151,6 +195,10 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 	if err := os.WriteFile(bundle, []byte("// stub bundle\n"), 0o644); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
+	driver := filepath.Join(root, "pty-driver")
+	if err := os.WriteFile(driver, []byte(ptyDriver), 0o755); err != nil {
+		t.Fatalf("write pty driver: %v", err)
+	}
 
 	h := &harness{
 		t:         t,
@@ -160,6 +208,7 @@ func newHarness(t *testing.T, stubEnv map[string]string) *harness {
 		ctlPath:   filepath.Join(root, "stub.ctl"),
 		mirrorDir: mirrorDir,
 		workDir:   workDir,
+		ptyDriver: driver,
 		env: map[string]string{
 			"HOME":                    home,
 			"XDG_STATE_HOME":          filepath.Join(home, ".local", "state"),
@@ -189,7 +238,11 @@ func (h *harness) envList() []string {
 }
 
 func (h *harness) command() *exec.Cmd {
-	cmd := exec.Command(h.adapter)
+	name, args := h.adapter, []string(nil)
+	if h.tty {
+		name, args = "python3", []string{h.ptyDriver, h.adapter}
+	}
+	cmd := exec.Command(name, args...)
 	cmd.Dir = h.workDir
 	cmd.Env = h.envList()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -281,6 +334,15 @@ func (h *harness) start() *session {
 		}
 	})
 	return s
+}
+
+// startOnTTY is start with the adapter's stdio on a pseudo-terminal: it then
+// takes the branches it takes in a tmux pane (echo off, announcements drawn in
+// place) and its output arrives with the escape sequences it actually emits.
+func (h *harness) startOnTTY() *session {
+	h.t.Helper()
+	h.tty = true
+	return h.start()
 }
 
 func (s *session) send(line string) {
@@ -852,6 +914,123 @@ func TestTurnInFlightIsAnnouncedBeforeTheReadyMarker(t *testing.T) {
 	// reads as ready, not busy.
 	if first := strings.Index(out, "zcode-repl ready"); first > busy {
 		t.Fatalf("startup marker must precede the first in-flight line:\n%s", out)
+	}
+}
+
+// A turn is silent from its announcement until the reply lands, and gc's
+// execution backstop reads a pane with no output inside its grace window as a
+// stalled seat and drains it — which is what happened to every turn longer
+// than ~90 s (2026-09-09). On a tty the adapter therefore redraws the busy
+// line in place while the turn runs: fresh output for tmux, an unchanged pane
+// for everything that reads the tail.
+func TestTurnHeartbeatRedrawsTheBusyLineInPlaceOnATTY(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ready = "zcode-repl ready"
+		busy  = "zcode-repl turn in flight (C-c to interrupt)"
+	)
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "20", // a ceiling only: the turn is released below
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+	release := filepath.Join(h.workDir, "turn-release")
+	h.env["STUB_RELEASE_FILE"] = release
+
+	s := h.startOnTTY()
+	// The CRLF is the line discipline's, so this also proves stdout is a tty.
+	s.waitForOutput(ready+"\r\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+
+	// A heartbeat is the busy line redrawn directly over itself: carriage
+	// return and erase, no newline, nothing in between.
+	redraw := busy + "\r\x1b[2K" + busy
+	s.waitForOutput(redraw, adapterWaitBudget)
+	pane := renderPane(t, through(t, s.output(), redraw))
+	if last := pane[len(pane)-1]; last != busy {
+		t.Fatalf("pane tail mid-turn = %q, want the busy line:\n%q", last, pane)
+	}
+	if n := strings.Count(strings.Join(pane, "\n"), busy); n != 1 {
+		t.Fatalf("busy line drawn %d times mid-turn, want exactly one (redraws must not stack):\n%q", n, pane)
+	}
+	if containsString(pane, ready) {
+		t.Fatalf("ready marker visible while a turn is in flight:\n%q", pane)
+	}
+
+	if err := os.WriteFile(release, nil, 0o644); err != nil {
+		t.Fatalf("release turn: %v", err)
+	}
+	finished := "ok\r\n" + ready + "\r\n"
+	s.waitForOutput(finished, adapterWaitBudget)
+	pane = renderPane(t, through(t, s.output(), finished))
+	if last := pane[len(pane)-1]; last != ready {
+		t.Fatalf("pane tail after the turn = %q, want the ready marker:\n%q", last, pane)
+	}
+	if containsString(pane, busy) {
+		t.Fatalf("busy line survived the turn:\n%q", pane)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The heartbeat is tty-only, and that guard is the whole reason every piped
+// consumer of this adapter is unaffected by it. Nothing else pins the guard:
+// no other piped test runs a turn longer than a beat, so a regression would
+// stack redraw bytes into every piped reader unnoticed.
+func TestTurnHeartbeatIsSuppressedOffATTY(t *testing.T) {
+	t.Parallel()
+
+	const busy = "zcode-repl turn in flight (C-c to interrupt)"
+	// The stub holds the turn open for several beat periods: had the guard
+	// regressed, the redraws would have landed before the turn completes.
+	h := newHarness(t, map[string]string{
+		"STUB_SLEEP":                "3",
+		"ZCODE_REPL_HEARTBEAT_SECS": "1",
+	})
+
+	s := h.start()
+	s.waitForOutput("zcode-repl ready\n", adapterWaitBudget)
+	s.send("a turn longer than the heartbeat")
+	s.waitForOutput(busy+"\n", adapterWaitBudget)
+	s.waitForOutput("ok\n", adapterWaitBudget)
+
+	out := s.output()
+	if strings.Contains(out, "\r\x1b[2K") {
+		t.Fatalf("heartbeat redraw bytes reached a piped consumer:\n%q", out)
+	}
+	if n := strings.Count(out, busy); n != 1 {
+		t.Fatalf("busy line printed %d times off a tty, want exactly one:\n%q", n, out)
+	}
+
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// A malformed heartbeat interval is a config error like the adapter's other
+// preconditions: exit 78 naming the variable, rather than reaching sleep with
+// a value it cannot use.
+func TestMalformedHeartbeatIntervalIsAConfigError(t *testing.T) {
+	t.Parallel()
+
+	// An empty value is deliberately absent: ${ZCODE_REPL_HEARTBEAT_SECS:-30}
+	// treats unset and empty alike, so both take the default rather than dying.
+	for _, value := range []string{"0", "-1", "30s", "abc"} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Parallel()
+
+			h := newHarness(t, map[string]string{"ZCODE_REPL_HEARTBEAT_SECS": value})
+			if _, code := h.run("hello\n"); code != 78 {
+				t.Fatalf("ZCODE_REPL_HEARTBEAT_SECS=%q exit code = %d, want 78 (EX_CONFIG)", value, code)
+			}
+			if !strings.Contains(h.stderr, "ZCODE_REPL_HEARTBEAT_SECS") {
+				t.Fatalf("exit 78 did not name the rejected variable; stderr = %q", h.stderr)
+			}
+		})
 	}
 }
 
@@ -1584,6 +1763,70 @@ func equalStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// through returns raw up to and including its last occurrence of needle, so a
+// pane rendered from it is the pane the instant that output landed rather than
+// whatever a later chunk had half-delivered. An absent needle fails the test
+// rather than returning a silently truncated prefix, the same way renderPane
+// refuses to misrender input it does not understand.
+func through(t *testing.T, raw, needle string) string {
+	t.Helper()
+	i := strings.LastIndex(raw, needle)
+	if i < 0 {
+		t.Fatalf("needle %q never arrived in the output:\n%q", needle, raw)
+	}
+	return raw[:i+len(needle)]
+}
+
+// renderPane replays a tty byte stream the way a terminal would, for the
+// controls the adapter emits: CR, LF, erase-line (ESC[2K) and cursor-up
+// (ESC[1A). Any other escape fails the test rather than misrendering. Trailing
+// empty rows are dropped, as tmux capture-pane drops them.
+func renderPane(t *testing.T, raw string) []string {
+	t.Helper()
+	rows := []string{""}
+	row, col := 0, 0
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; c {
+		case '\r':
+			col = 0
+		case '\n':
+			row++
+			if row == len(rows) {
+				rows = append(rows, "")
+			}
+		case 0x1b:
+			switch {
+			case strings.HasPrefix(raw[i:], "\x1b[2K"):
+				rows[row] = ""
+			case strings.HasPrefix(raw[i:], "\x1b[1A"):
+				if row == 0 {
+					t.Fatalf("cursor moved above the pane at byte %d:\n%q", i, raw)
+				}
+				row--
+			default:
+				t.Fatalf("unrendered escape at byte %d: %q", i, raw[i:])
+			}
+			i += 3
+		default:
+			line := rows[row]
+			for len(line) < col {
+				line += " "
+			}
+			if col < len(line) {
+				line = line[:col] + string([]byte{c}) + line[col+1:]
+			} else {
+				line += string([]byte{c})
+			}
+			rows[row] = line
+			col++
+		}
+	}
+	for len(rows) > 1 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return rows
 }
 
 // extractPyFunc slices a top-level function definition out of the embedded
