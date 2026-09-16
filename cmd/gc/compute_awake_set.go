@@ -498,6 +498,16 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 		// specific session, so an idle window that predates it (e.g. from a
 		// supervisor-restart re-projection) must not silently cancel it. See
 		// #5739.
+		//
+		// Scaled pool members woken by pool scale demand ("scaled:demand",
+		// "scaled:creating") are also exempt: that demand means a routed bead
+		// is still waiting for a member of this template to claim it, so an
+		// idle window must not put the member back to sleep. Without this, a
+		// fresh member minted for a routed bead primes, detaches (setting its
+		// idle reference), and is re-slept as soon as its own idle timeout
+		// elapses — draining the slot while the trigger bead still waits.
+		// The exemption ends by itself when the member claims the work (the
+		// reason becomes "assigned-work") or the demand disappears.
 		agent, hasAgent := lookupAgent(bead.Template)
 		holdsClaimedWork := hasAgent && !agent.Suspended && sessionHasClaimedInProgressWork(input.WorkBeads, input.NamedSessions, bead)
 		if decision.ShouldWake && !input.AttachedSessions[name] && !input.PendingSessions[name] && !bead.Pinned && !holdsClaimedWork && !bead.IdleSince.IsZero() &&
@@ -506,6 +516,7 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			desired[name] != "reset-pending" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" && desired[name] != "explicit-wake" &&
+			desired[name] != "scaled:demand" && desired[name] != "scaled:creating" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {
 			var idleTimeout time.Duration
 			switch {

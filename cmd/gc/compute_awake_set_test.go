@@ -1288,11 +1288,15 @@ func TestIdleSleep_AgentSleepAfterIdle(t *testing.T) {
 				IdleSince: now.Add(-3 * time.Hour),
 			},
 		},
-		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
-		RunningSessions:  map[string]bool{"polecat-mc-1": true},
-		Now:              now,
+		// wait-ready wakes the session but is not exempt from the
+		// idle-sleep gate, so a member idle past SleepAfterIdle still
+		// sleeps. Scale demand IS exempt, so it cannot be the wake
+		// source for this gate coverage (see TestRegression_ below).
+		ReadyWaitSet: map[string]bool{"mc-1": true},
+		Now:          now,
 	})
 	assertAsleep(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "idle-sleep")
 }
 
 func TestIdleSleep_PendingInteractionSuppressesAgentSleepAfterIdle(t *testing.T) {
@@ -2317,12 +2321,16 @@ func TestGracePeriod_NonManualSession_NoEffect(t *testing.T) {
 			IdleSince: now.Add(-3 * time.Minute),
 			CreatedAt: now.Add(-3 * time.Minute),
 		}},
-		ScaleCheckCounts:  map[string]int{"hello-world/polecat": 1},
-		RunningSessions:   map[string]bool{"polecat-mc-1": true},
+		// wait-ready wakes the session but is not exempt from the
+		// idle-sleep gate, so the grace period granting nothing extra is
+		// still observable as sleep. Scale demand IS exempt, so it cannot
+		// be the wake source here.
+		ReadyWaitSet:      map[string]bool{"mc-1": true},
 		ManualGracePeriod: 10 * time.Minute,
 		Now:               now,
 	})
 	assertAsleep(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "idle-sleep")
 }
 
 func TestGracePeriod_ReasonIsGracePeriod(t *testing.T) {
@@ -2481,4 +2489,52 @@ func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
 	if d.RequiresFreshCycle {
 		t.Fatal("RequiresFreshCycle = true, want false — no recorded current means no divergence")
 	}
+}
+
+// TestRegression_ScaledDemandStaysAwakePastIdleTimeout is the pool-member
+// wedge: a fresh pool member created for pool scale demand (a routed but
+// unclaimed bead) must not be idle-slept before it claims its trigger bead.
+// The priming detach sets the idle reference, so without the scaled:demand
+// exemption the idle-sleep gate re-sleeps the member as soon as its own
+// sleep_after_idle elapses — draining the slot while the routed bead waits
+// for a replacement member.
+func TestRegression_ScaledDemandStaysAwakePastIdleTimeout(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/polecat",
+			SleepAfterIdle: idleTimeout,
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active",
+			IdleSince: now.Add(-30 * time.Minute),
+		}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 1},
+		Now:              now,
+	})
+	assertAwake(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "scaled:demand")
+}
+
+// TestRegression_ScaledDemandAbsent_IdleSleepStillFires bounds the exemption:
+// with no scale demand for the template, a long-idle pool member is still
+// put to sleep. The wait-ready wake source drives the session into the
+// idle-sleep gate (a session with no wake source at all never reaches the
+// gate), proving the gate itself is intact — only scaled demand is exempt.
+func TestRegression_ScaledDemandAbsent_IdleSleepStillFires(t *testing.T) {
+	idleTimeout := 10 * time.Minute
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/polecat",
+			SleepAfterIdle: idleTimeout,
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "polecat-mc-1", Template: "hello-world/polecat", State: "active",
+			IdleSince: now.Add(-30 * time.Minute),
+		}},
+		ReadyWaitSet: map[string]bool{"mc-1": true},
+		Now:          now,
+	})
+	assertAsleep(t, result, "polecat-mc-1")
+	assertReason(t, result, "polecat-mc-1", "idle-sleep")
 }
