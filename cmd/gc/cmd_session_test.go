@@ -100,13 +100,20 @@ func TestSessionKillHelpDistinguishesProviderConversationContinuity(t *testing.T
 		"Gas City bead continuity",
 		"provider resume",
 		"provider conversation continuity is not guaranteed",
+		"lifecycle state to asleep",
 	} {
 		if !strings.Contains(long, want) {
 			t.Fatalf("session kill help missing %q:\n%s", want, long)
 		}
 	}
-	if strings.Contains(long, "without losing its conversation history") {
-		t.Fatalf("session kill help still promises provider history preservation:\n%s", long)
+	for _, unwanted := range []string{
+		"without losing its conversation history",
+		"remains marked as active",
+		"without changing its bead state",
+	} {
+		if strings.Contains(long, unwanted) {
+			t.Fatalf("session kill help still carries stale claim %q:\n%s", unwanted, long)
+		}
 	}
 }
 
