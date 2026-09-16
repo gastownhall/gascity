@@ -69,7 +69,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43"
 		bdBuild        = "c185735c38"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.0"
+		grpcVersion    = "1.83.2"
 	)
 
 	root := repoRoot(t)
@@ -343,23 +343,21 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	}
 	// Waivers that survive, checked as present so an entry cannot be dropped without
 	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
-	// cannot grow without one either. The gc path of the grpc pair is governed by
-	// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold instead, so it is not listed.
+	// cannot grow without one either. The bd and gc paths of the grpc pair were
+	// removed after both moved to 1.83.2.
 	reviewedWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
 			"usr/local/bin/kubectl": true,
 		},
 		// grpc, fixed in 1.83.1 (CVE-2026-84304) and 1.82.2 / 1.83.2 (CVE-2026-84445);
-		// the gh and Dolt rebuilds pin 1.82.1 and the bd rebuild pins 1.83.0.
+		// the gh and Dolt rebuilds still pin 1.82.1.
 		"CVE-2026-84304": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
 		},
 		"CVE-2026-84445": {
 			"usr/bin/gh":         true,
 			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
 		},
 		// thrift, fixed in 0.24.0; the Dolt rebuild pins 0.23.0 and bd's pinned source selects it.
 		"CVE-2026-43871": {
@@ -581,13 +579,13 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	wantEntries := []wantEntry{
 		{
 			id:         "CVE-2026-84304",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "go.mod"},
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt"),
+			substrings: []string{"grpc", "1.83.1", "GRPC_VERSION", "1.83.2"},
 		},
 		{
 			id:         "CVE-2026-84445",
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd", "usr/local/bin/gc"),
-			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
+			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt"),
+			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION"},
 		},
 		{
 			id:         "CVE-2026-43871",
