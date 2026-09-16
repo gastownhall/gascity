@@ -14,6 +14,18 @@ import (
 
 const syncScript = "commands/sync/run.sh"
 
+// syncFakeDoltTipProbeArms answers the post-push tip verification probes
+// (commands/sync/run.sh verify_pushed_tip) with a matching local and
+// remote-tracking hash, modeling a push that landed. Spliced into every fake
+// whose push succeeds; the push-failure fakes never reach the probes.
+const syncFakeDoltTipProbeArms = `  *"SELECT hash FROM dolt_branches WHERE name = '"*)
+    printf 'hash\npushedtip\n'
+    ;;
+  *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/"*)
+    printf 'hash\npushedtip\n'
+    ;;
+`
+
 // syncFilteredEnv returns os.Environ() with every env var the sync script reads
 // stripped, so a test's GC_DOLT_* config is exactly what the test sets and never
 // what the developer/CI happens to export. GC_DOLT_SYNC_PUSH_TIMEOUT_SECS is in
@@ -106,7 +118,7 @@ case "$*" in
   *"dolt_log('remotes/origin/"*)
     printf 'n\n1\n'
     ;;
-esac
+` + syncFakeDoltTipProbeArms + `esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
@@ -136,7 +148,7 @@ case "$*" in
   *"SELECT active_branch()"*)
     printf 'active_branch()\n` + activeBranch + `\n'
     ;;
-esac
+` + syncFakeDoltTipProbeArms + `esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
@@ -166,7 +178,7 @@ case "$*" in
   *"SELECT active_branch()"*)
     printf 'active_branch()\n--force\n'
     ;;
-esac
+` + syncFakeDoltTipProbeArms + `esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
@@ -328,12 +340,54 @@ case "$*" in
     fi
     exit 0
     ;;
+` + syncFakeDoltTipProbeArms + `esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+}
+
+// writeSyncFakeDoltPushTipUnmoved installs a fake dolt whose SQL-mode
+// DOLT_PUSH and CLI-mode `dolt push` both exit 0 without moving the
+// remote-tracking ref — the shape of a proxied push the managed sql-server
+// killed at read_timeout while the client still exited 0 (a production
+// incident that `gc dolt sync` and the compactor both reported as pushed).
+// The local tip probe answers newtip; the remote-tracking probe answers oldtip.
+func writeSyncFakeDoltPushTipUnmoved(t *testing.T, dir string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "dolt.log")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "` + logPath + `"
+case "$*" in
+  *"SELECT name, url FROM dolt_remotes"*)
+    printf 'name,url\norigin,https://example.invalid/repo\n'
+    ;;
+  *"CALL DOLT_FETCH("*)
+    :
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
+    ;;
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    ;;
+  *"SELECT hash FROM dolt_branches WHERE name = '"*)
+    printf 'hash\nnewtip\n'
+    ;;
+  *"SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/"*)
+    printf 'hash\noldtip\n'
+    ;;
 esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)
 	}
+	return logPath
 }
 
 // writeSyncFakeDoltPushEchoesArgs installs a fake dolt that, on the SQL-mode
@@ -1752,5 +1806,94 @@ func TestSyncSummaryNamesFailedDatabaseAmongHealthyOnes(t *testing.T) {
 	}
 	if strings.Contains(output, "3/3 database(s) failed") {
 		t.Fatalf("summary must not read as if every database failed, got:\n%s", output)
+	}
+}
+
+// TestSyncSQLPushReportsSuccessButRemoteTipUnmoved verifies the SQL-mode push
+// re-probes the remote-tracking ref after a zero-exit DOLT_PUSH and refuses to
+// report "pushed" when it did not advance to the local tip: both hashes are
+// surfaced and the database fails instead of silently diverging.
+func TestSyncSQLPushReportsSuccessButRemoteTipUnmoved(t *testing.T) {
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writeSyncFakeDoltPushTipUnmoved(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	// runSync's extraEnv lands after its own GC_DOLT_PORT=1, and os/exec keeps
+	// the last value for a duplicated key, so this selects the SQL path
+	// (reachable server) without a second exec call site.
+	out, err := runSync(t, binDir, cityPath, []string{fmt.Sprintf("GC_DOLT_PORT=%d", port)}, "--db", "app")
+	if err == nil {
+		t.Fatalf("a push whose remote tip did not move must fail, output:\n%s", out)
+	}
+	if !strings.Contains(out, "app: ERROR: push returned 0 but remote HEAD=oldtip does not match local HEAD=newtip") {
+		t.Fatalf("expected both hashes in the failure message, got:\n%s", out)
+	}
+	if strings.Contains(out, "app: pushed") {
+		t.Fatalf("unverified push must not be reported as pushed:\n%s", out)
+	}
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("read fake dolt log: %v", err)
+	}
+	log := string(data)
+	pushAt := strings.Index(log, "CALL DOLT_PUSH('origin', 'main')")
+	if pushAt < 0 {
+		t.Fatalf("dolt log missing push:\n%s", log)
+	}
+	if !strings.Contains(log[pushAt:], "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main'") {
+		t.Fatalf("remote tip must be re-probed after the push:\n%s", log)
+	}
+}
+
+// TestSyncCLIPushReportsSuccessButRemoteTipUnmoved is the CLI-mode twin: with
+// no server running the tip probes go through an offline `dolt sql` inside the
+// database directory, and a zero-exit `dolt push` that did not advance the
+// remote-tracking ref is reported as a failure, not as pushed.
+func TestSyncCLIPushReportsSuccessButRemoteTipUnmoved(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	dbDir := filepath.Join(dataDir, "app")
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	remotes := `{"remotes":[{"name":"origin","url":"https://example.invalid/repo"}]}`
+	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "remotes.json"), []byte(remotes), 0o644); err != nil {
+		t.Fatalf("write remotes: %v", err)
+	}
+
+	binDir := t.TempDir()
+	doltLog := writeSyncFakeDoltPushTipUnmoved(t, binDir)
+	_ = writeSyncFakeBeadsBD(t, cityPath)
+
+	out, err := runSync(t, binDir, cityPath, nil, "--db", "app")
+	if err == nil {
+		t.Fatalf("a CLI push whose remote tip did not move must fail, output:\n%s", out)
+	}
+	if !strings.Contains(out, "app: ERROR: push returned 0 but remote HEAD=oldtip does not match local HEAD=newtip") {
+		t.Fatalf("expected both hashes in the failure message, got:\n%s", out)
+	}
+	if strings.Contains(out, "app: pushed") {
+		t.Fatalf("unverified push must not be reported as pushed:\n%s", out)
+	}
+	data, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("read fake dolt log: %v", err)
+	}
+	log := string(data)
+	pushAt := strings.Index(log, "push origin main")
+	if pushAt < 0 {
+		t.Fatalf("dolt log missing CLI push:\n%s", log)
+	}
+	if !strings.Contains(log[pushAt:], "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/origin/main'") {
+		t.Fatalf("remote tip must be re-probed after the CLI push:\n%s", log)
 	}
 }
