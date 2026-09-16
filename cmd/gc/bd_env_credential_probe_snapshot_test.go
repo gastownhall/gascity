@@ -32,6 +32,10 @@ import (
 // Like that guard, this requires a *named* options value rather than an inline
 // literal, so the reasoning above stays attached to the option instead of to a
 // call site the next edit can silently drop.
+//
+// If citySelectsHostedBeadsCredentialProvider is ever changed to RETURN the
+// Provenance rather than discard it, it should keep the default load instead,
+// and this guard should be updated rather than deleted.
 func TestHostedCredentialProbeDeclinesTheRevisionSnapshot(t *testing.T) {
 	const guarded = "bd_env.go"
 	// capturingCall ends in '(' so it does not also match
@@ -56,19 +60,57 @@ func TestHostedCredentialProbeDeclinesTheRevisionSnapshot(t *testing.T) {
 			"value that sets %s", guarded, capturingCall, option)
 	}
 
-	// Every config.LoadOptions value this file declares must decline the
-	// snapshot. A zero value declared without a literal captures it just as
-	// surely, so match on the type name rather than on an opening brace.
-	for _, line := range strings.Split(text, "\n") {
+	lines := strings.Split(text, "\n")
+
+	// First half: every options value this file declares must decline the
+	// snapshot. Record each declining name so the call scan can recognize it.
+	declining := map[string]bool{}
+	optionsFound := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
 		if !strings.Contains(line, optionsType) {
 			continue
 		}
-		if strings.Contains(line, "LoadWithIncludesOptions") {
-			continue // a call passing a value, checked by the declaration itself
+		if strings.HasPrefix(trimmed, "//") {
+			continue // a comment naming the type declares nothing
 		}
+		if strings.HasPrefix(trimmed, "func ") {
+			continue // a signature, not a declaration
+		}
+		optionsFound++
 		if !strings.Contains(line, option) {
-			t.Errorf("%s declares a %s that does not set %s: %s",
-				guarded, optionsType, option, strings.TrimSpace(line))
+			t.Errorf("%s:%d declares options that capture the revision snapshot: %s",
+				guarded, i+1, trimmed)
+			continue
 		}
+		if name, ok := declaredVarName(line); ok {
+			declining[name] = true
+		}
+	}
+	if optionsFound == 0 {
+		t.Fatalf("no %s declaration in %s; this guard is no longer watching anything", optionsType, guarded)
+	}
+
+	// Second half: every load call must be handed one of those values. Without
+	// this, the first half passes while the call site is switched to an inline
+	// config.LoadOptions{} or to a non-declining value declared elsewhere.
+	loadCalls := []string{"config.LoadWithIncludesOptions("}
+	callsFound := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "func ") {
+			continue
+		}
+		if !containsAny(line, loadCalls) {
+			continue
+		}
+		callsFound++
+		if !hasIdentifierIn(line, declining) {
+			t.Errorf("%s:%d loads config without passing one of this file's named declining options values %s: %s",
+				guarded, i+1, sortedKeys(declining), trimmed)
+		}
+	}
+	if callsFound == 0 {
+		t.Fatalf("no config load call in %s; this guard is no longer watching anything", guarded)
 	}
 }
