@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -951,6 +952,11 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
 }
 
+// newEventsProviderForNameWithConfig builds the events provider for an
+// already-resolved provider name. On failure it returns a nil provider and an
+// error: the file-backed branch must not hand back the *events.FileRecorder
+// directly, because a failed open boxes a typed nil into the events.Provider
+// interface, where it reads as non-nil to every caller's nil guard.
 func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
 		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
@@ -961,8 +967,54 @@ func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, 
 	case "fail":
 		return events.NewFailFake(), nil
 	default:
-		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		recorder, err := newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		if err != nil {
+			return nil, err
+		}
+		return recorder, nil
 	}
+}
+
+var (
+	cliFactoryRecordersMu sync.Mutex
+	cliFactoryRecorders   = map[string]events.Recorder{}
+)
+
+// cliFactoryEventsRecorder resolves a live events.Recorder for cityPath,
+// memoized per city path for the process lifetime. worker.Factory is built
+// on every session-reconciliation tick (cmd/gc/session_reconciler.go) as
+// well as per CLI invocation, so opening a fresh events.FileRecorder on
+// every call would leak a file handle and spawn a rotation goroutine each
+// tick; memoizing keeps that a one-time cost per city. This gives the CLI
+// factory path the live recorder the API server already gets for free from
+// its long-lived controllerState.EventProvider() (internal/api/worker_factory.go:21).
+// Falls back to events.Discard when cityPath is empty or the provider
+// cannot be opened — telemetry must never block session lifecycle.
+func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return events.Discard
+	}
+	cliFactoryRecordersMu.Lock()
+	defer cliFactoryRecordersMu.Unlock()
+	if r, ok := cliFactoryRecorders[cityPath]; ok {
+		return r
+	}
+	eventsCfg := config.EventsConfig{}
+	if cfg != nil {
+		eventsCfg = cfg.Events
+	}
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		eventsCfg.Provider = v
+	}
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	provider, err := newEventsProviderForNameWithConfig(eventsCfg.Provider, eventsPath, io.Discard, eventsCfg)
+	if err != nil || provider == nil {
+		cliFactoryRecorders[cityPath] = events.Discard
+		return events.Discard
+	}
+	cliFactoryRecorders[cityPath] = provider
+	return provider
 }
 
 // newUsageSinkByName returns a usage.Sink for the resolved provider name.
