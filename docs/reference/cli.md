@@ -536,7 +536,9 @@ assigned to a city-scoped agent is invisible to it; this command sweeps
 every rig store plus the city store, so it answers "what is assigned to
 this agent anywhere in town" in one call. Use it when an agent's own
 startup work check comes back empty but work is genuinely assigned to
-it.
+it. The match is an exact comparison against the bead's stored assignee
+— no identity resolution happens, so pass the identity form the work is
+actually assigned under.
 
 ```
 gc beads list [flags]
@@ -554,7 +556,7 @@ gc beads list --assignee city.agent-a --status in_progress
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
-| `--assignee` | string |  | filter to beads assigned to this identity (across every rig and the city) |
+| `--assignee` | string |  | filter to beads whose stored assignee matches this string exactly (across every rig and the city) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |

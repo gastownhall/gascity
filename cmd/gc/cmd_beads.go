@@ -80,7 +80,9 @@ assigned to a city-scoped agent is invisible to it; this command sweeps
 every rig store plus the city store, so it answers "what is assigned to
 this agent anywhere in town" in one call. Use it when an agent's own
 startup work check comes back empty but work is genuinely assigned to
-it.`,
+it. The match is an exact comparison against the bead's stored assignee
+— no identity resolution happens, so pass the identity form the work is
+actually assigned under.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
   gc beads list --status open --format=json
@@ -95,7 +97,7 @@ it.`,
 	}
 	cmd.Flags().StringVar(&label, "label", "", "filter to beads carrying this label")
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
-	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads assigned to this identity (across every rig and the city)")
+	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads whose stored assignee matches this string exactly (across every rig and the city)")
 	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
@@ -177,12 +179,20 @@ var beadsListAPIClient = func(cityPath string) (*api.Client, string) {
 // an error, not a shorter list: the direct read fails the same way on a store it
 // cannot open or read, so neither route prints part of the city as the whole.
 //
-// --assignee is deliberately NOT sent as a query parameter: the endpoint has no
-// assignee filter, and renderBeadsListFromAPI re-applies every filter through
-// filterBeads anyway. The API lane therefore over-fetches and narrows on the
-// client, which is exact because ListBeads follows next_cursor to completion
-// rather than truncating to page 1. Adding a server-side assignee filter is a
-// pure efficiency change and must keep filterBeads as the authority.
+// --assignee is deliberately NOT sent as a query parameter. The endpoint does
+// accept ?assignee (BeadListInput.Assignee), but the server resolves that term
+// against session beads and expands it across every identity form of the
+// resolved session — bead ID, session_name, alias, configured name, prior
+// aliases — via beadListAssigneeTerms. Both CLI lanes instead match the stored
+// assignee exactly: filterBeads on the API lane, ListQuery.Assignee on the
+// fallback lane. Forwarding the term and trusting the server's answer would
+// make the API lane return that expanded set while the fallback lane returned
+// only exact matches, so the same command would answer differently depending on
+// whether the controller was up. renderBeadsListFromAPI re-applies every filter
+// through filterBeads, so the API lane over-fetches and narrows on the client,
+// which is exact because ListBeads follows next_cursor to completion rather than
+// truncating to page 1. Forwarding ?assignee is therefore a pure efficiency
+// change and must keep filterBeads as the authority.
 func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, filters beadFilters, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[api.BeadListView]
 	return routeRead(c, "beads list", nilReason, stderr,
