@@ -369,6 +369,13 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 	}
 	setFormulaCompilerConstraints(merged, compilerConstraints)
 
+	// Oversized description_file references are first created while each
+	// formula is parsed, before parent variables are inherited. Clone the
+	// composed steps so cached parent formulas remain immutable, then render
+	// every retained reference from the full effective variable contract.
+	merged.Steps = refreshDescriptionFileReferences(merged.Steps, merged.Vars)
+	merged.Template = refreshDescriptionFileReferences(merged.Template, merged.Vars)
+
 	if err := merged.Validate(); err != nil {
 		return nil, err
 	}
@@ -816,14 +823,17 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 				}
 			} else {
 				if len(data) > descriptionFileInlineMaxBytes {
-					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
-					// Record the resolved path out-of-band so a later
-					// substitution pass over Description (expansion
-					// templates, loop bodies) can recognize this stub and
-					// leave its embedded path untouched (gastownhall/gascity#4860).
+					step.descriptionFileReference = &descriptionFileReference{
+						rawPath:      step.DescriptionFile,
+						resolvedPath: path,
+						size:         len(data),
+					}
+					step.Description = step.descriptionFileReference.render(vars)
+					// Preserve the path token during subsequent expansion substitution.
 					step.DescriptionFileResolvedPath = path
 				} else {
 					step.Description = string(data)
+					step.descriptionFileReference = nil
 					step.DescriptionFileResolvedPath = ""
 				}
 				step.DescriptionFile = "" // consumed; don't serialize
@@ -839,6 +849,55 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 		}
 	}
 	return nil
+}
+
+type descriptionFileReference struct {
+	rawPath      string
+	resolvedPath string
+	size         int
+}
+
+func (r *descriptionFileReference) render(vars map[string]*VarDef) string {
+	return descriptionFileReferenceDescription(r.rawPath, r.resolvedPath, r.size, vars)
+}
+
+func refreshDescriptionFileReferences(steps []*Step, vars map[string]*VarDef) []*Step {
+	if !hasDescriptionFileReferences(steps) {
+		return steps
+	}
+	cloned := cloneStepsRecursive(steps)
+	refreshDescriptionFileReferencesInPlace(cloned, vars)
+	return cloned
+}
+
+func hasDescriptionFileReferences(steps []*Step) bool {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if step.descriptionFileReference != nil || hasDescriptionFileReferences(step.Children) {
+			return true
+		}
+		if step.Loop != nil && hasDescriptionFileReferences(step.Loop.Body) {
+			return true
+		}
+	}
+	return false
+}
+
+func refreshDescriptionFileReferencesInPlace(steps []*Step, vars map[string]*VarDef) {
+	for _, step := range steps {
+		if step == nil {
+			continue
+		}
+		if step.descriptionFileReference != nil {
+			step.Description = step.descriptionFileReference.render(vars)
+		}
+		refreshDescriptionFileReferencesInPlace(step.Children, vars)
+		if step.Loop != nil {
+			refreshDescriptionFileReferencesInPlace(step.Loop.Body, vars)
+		}
+	}
 }
 
 func (p *Parser) readDescriptionFile(rawPath, baseDir string) ([]byte, string, error) {
