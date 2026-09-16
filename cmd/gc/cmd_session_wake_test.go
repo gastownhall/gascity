@@ -12,7 +12,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -505,10 +507,21 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 // line, since no reconciler will ever act on the wake. The non-suspended
 // case is the regression guard -- the same session/agent/rig shape must
 // still wake normally when the rig isn't suspended.
+//
+// Both legs of EffectiveRigSuspended are covered: the authored
+// suspended_on_start default, and the runtime override `gc rig
+// suspend`/`gc rig resume` writes to .gc/runtime/suspension-state.json,
+// which must win over the authored default in either direction.
 func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
+	suspendOverride, resumeOverride := true, false
 	tests := []struct {
-		name             string
-		rigSuspended     bool
+		name string
+		// rigSuspended is the rig's authored suspended_on_start.
+		rigSuspended bool
+		// runtimeOverride, when non-nil, is seeded into the runtime
+		// suspension state as an explicit `gc rig suspend`/`gc rig
+		// resume` choice, which must beat rigSuspended.
+		runtimeOverride  *bool
 		wantCode         int
 		wantStderrSubstr string
 	}{
@@ -522,6 +535,19 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 			name:         "non-suspended rig wakes normally",
 			rigSuspended: false,
 			wantCode:     0,
+		},
+		{
+			name:             "runtime suspend beats authored default",
+			rigSuspended:     false,
+			runtimeOverride:  &suspendOverride,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
+		{
+			name:            "runtime resume beats authored default",
+			rigSuspended:    true,
+			runtimeOverride: &resumeOverride,
+			wantCode:        0,
 		},
 	}
 
@@ -549,10 +575,19 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
 				Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: tt.rigSuspended}},
 			}
+			cityPath := "/city"
+			if tt.runtimeOverride != nil {
+				cityPath = t.TempDir()
+				st := suspensionstate.State{}
+				suspensionstate.SetRig(&st, "frontend", tt.runtimeOverride)
+				if err := saveSuspensionState(fsys.OSFS{}, cityPath, st); err != nil {
+					t.Fatalf("saveSuspensionState: %v", err)
+				}
+			}
 			deps := sessionWakeDeps{
 				store:        store,
 				cfg:          cfg,
-				cityPath:     "/city",
+				cityPath:     cityPath,
 				cityResolved: true,
 				now:          time.Now,
 				withdrawQueuedWaitNudges: func(string, []string) error {

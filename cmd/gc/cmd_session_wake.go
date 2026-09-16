@@ -9,7 +9,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
@@ -206,16 +205,24 @@ func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Ag
 // suspended_on_start), returning the rig name for the caller's error
 // message. An agent with no configured rig (city-scoped) is never
 // blocked here.
+//
+// This is deliberately rig-only. The canonical superset predicate is
+// isAgentEffectivelySuspendedWith (cmd/gc/cmd_suspend.go), which also
+// covers city-level suspension and the per-agent `suspended` flag;
+// both gates resolve the owning rig through configuredRigName so they
+// cannot drift on rig-bound agents whose Dir is a filesystem path.
+// The narrower scope here keeps this wake-time message specific to the
+// one case that carries an actionable `gc rig resume` hint.
 func sessionWakeOwningRigSuspended(agent *config.Agent, cfg *config.City, cityPath string) (rigName string, suspended bool) {
 	rigName = configuredRigName(cityPath, agent, cfg.Rigs)
 	if rigName == "" {
 		return "", false
 	}
+	suspState := loadSuspensionStateBestEffort(cityPath)
 	for i := range cfg.Rigs {
 		if cfg.Rigs[i].Name != rigName {
 			continue
 		}
-		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 		return rigName, suspensionstate.EffectiveRigSuspended(suspState, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart())
 	}
 	return "", false
