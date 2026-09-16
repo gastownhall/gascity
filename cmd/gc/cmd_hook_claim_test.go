@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -318,6 +319,55 @@ func TestPreassignHookContinuationGroupPinsSiblingsToSessionID(t *testing.T) {
 			}
 			want := []string{tc.wantAssignee, tc.wantAssignee}
 			if !reflect.DeepEqual(gotAssignees, want) {
+				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
+			}
+		})
+	}
+}
+
+// TestPreassignHookContinuationGroupSkipsHeldSiblings is the #6026 regression:
+// a continuation sibling carrying a canonical dispatch hold label
+// (beadmeta.DispatchHoldLabels) must never be pre-assigned to the claimant,
+// even when otherwise eligible (open, unassigned, route-matching). Pinning an
+// agent's name onto a bead deliberately parked hold:mayor/hold:external
+// contradicts the hold contract: the required next actor is, by construction,
+// not this session.
+func TestPreassignHookContinuationGroupSkipsHeldSiblings(t *testing.T) {
+	for _, label := range beadmeta.DispatchHoldLabels {
+		t.Run(label, func(t *testing.T) {
+			claimed := beads.Bead{
+				ID:       "work-1",
+				Status:   "in_progress",
+				Metadata: map[string]string{"gc.kind": "workflow", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a", "gc.run_target": "route-1"},
+			}
+			var gotAssignees []string
+			var assignedIDs []string
+			opts := hookClaimOptions{Assignee: "worker-1", RouteTargets: []string{"route-1"}}
+			ops := hookClaimOps{
+				ListContinuation: func(_ context.Context, _ string, _ []string, _, _ string) ([]beads.Bead, error) {
+					return []beads.Bead{
+						{ID: "sib-held", Status: "open", Metadata: claimed.Metadata, Labels: []string{label}},
+						{ID: "sib-open", Status: "open", Metadata: claimed.Metadata},
+					}, nil
+				},
+				AssignContinuation: func(_ context.Context, _ string, _ []string, beadID, assignee string) error {
+					assignedIDs = append(assignedIDs, beadID)
+					gotAssignees = append(gotAssignees, assignee)
+					return nil
+				},
+			}
+
+			assigned, err := preassignHookContinuationGroup(claimed, opts, ops, ".")
+			if err != nil {
+				t.Fatalf("preassignHookContinuationGroup() error = %v", err)
+			}
+			if want := []string{"sib-open"}; !reflect.DeepEqual(assigned, want) {
+				t.Fatalf("REGRESSION #6026: assigned = %#v, want %#v (held sibling must be skipped, non-held sibling must still be assigned)", assigned, want)
+			}
+			if want := []string{"sib-open"}; !reflect.DeepEqual(assignedIDs, want) {
+				t.Fatalf("REGRESSION #6026: AssignContinuation called for %#v, want %#v; held sibling must never reach the assign mutation", assignedIDs, want)
+			}
+			if want := []string{"worker-1"}; !reflect.DeepEqual(gotAssignees, want) {
 				t.Fatalf("pinned assignees = %#v, want %#v", gotAssignees, want)
 			}
 		})
