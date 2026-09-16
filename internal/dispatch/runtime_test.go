@@ -4107,6 +4107,65 @@ func TestProcessWorkflowFinalizeClosesCrossStoreSourceBead(t *testing.T) {
 	}
 }
 
+func TestProcessWorkflowFinalizeMapsSourceWorkOutcomeToStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name          string
+		formula       string
+		initialStatus string
+		workOutcome   string
+		wantStatus    string
+	}{
+		{name: "completed", formula: "mol-do-work", wantStatus: "closed"},
+		{name: "no-op", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeNoOp, wantStatus: "closed"},
+		{name: "blocked do-work", formula: "mol-do-work", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "blocked"},
+		{name: "blocked report", formula: "mol-polecat-report", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "blocked"},
+		{name: "preclosed blocked", formula: "mol-do-work", initialStatus: "closed", workOutcome: beadmeta.WorkOutcomeBlocked, wantStatus: "closed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			source := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:    "source work",
+				Type:     "task",
+				Status:   tt.initialStatus,
+				Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: tt.workOutcome},
+			})
+			root := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: tt.formula,
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+					beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+					beadmeta.SourceBeadIDMetadataKey:    source.ID,
+				},
+			})
+			finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:       beadmeta.KindWorkflowFinalize,
+					beadmeta.RootBeadIDMetadataKey: root.ID,
+				},
+			})
+			mustDepAdd(t, store, root.ID, finalizer.ID, "blocks")
+
+			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+			}
+			if !result.Processed || result.Action != "workflow-pass" {
+				t.Fatalf("workflow result = %+v, want processed workflow-pass", result)
+			}
+			if got := mustGetBead(t, store, source.ID).Status; got != tt.wantStatus {
+				t.Fatalf("source status = %q, want %q for gc.work_outcome=%q", got, tt.wantStatus, tt.workOutcome)
+			}
+		})
+	}
+}
+
 type sourceChainFinalizeFixture struct {
 	cityStore  *beads.MemStore
 	rigStore   *beads.MemStore
