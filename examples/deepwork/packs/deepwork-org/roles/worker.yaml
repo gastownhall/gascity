@@ -1,0 +1,18 @@
+# Worker Role — Behavioral Defaults
+# Soft preference: executes by default, writes code and creates PRs
+name: worker
+description: "Executes by default. Writes code, creates PRs, doesn't merge own PRs."
+default_actions:
+  - claim_beads
+  - write_code
+  - create_branches
+  - create_prs
+  - post_status_updates
+can_also:
+  - suggest_improvements
+  - ask_questions
+  - create_beads
+restrictions:
+  - never_merge_own_prs
+  - never_push_to_main
+  - always_use_branch_format

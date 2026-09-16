@@ -1,0 +1,35 @@
+# Release & Documentation Automation — Blueprint Level
+# Applied to ALL rigs via deepwork-base pack
+
+# Daily README check: regenerate if code changed
+readme_update:
+  schedule: "0 6 * * *"  # 6am daily
+  command: "mesh-readme-update.sh"
+  description: "Check for code changes and update README if needed"
+  scope: "all-rigs"
+  executor: "chad-ji"  # Content work → Kimi
+
+# Release detection: check if enough work accumulated for a release
+release_check:
+  schedule: "0 8 * * 1"  # Monday 8am
+  command: "mesh-release-check.sh"
+  description: "Check if dev has enough changes for a release PR"
+  scope: "all-rigs"
+  executor: "mayor"
+
+# Changelog generation: auto-generate from git log
+changelog_gen:
+  schedule: "on-release"  # Triggered, not cron
+  command: "mesh-changelog-gen.sh"
+  description: "Generate CHANGELOG.md from conventional commits"
+  scope: "all-rigs"
+  executor: "chad-ji"
+
+# Daily status to Telegram
+daily_status:
+  schedule: "0 9 * * *"  # 9am daily
+  command: "mesh-daily-status.sh"
+  description: "Post daily status to Telegram Status topic"
+  scope: "coordinator"
+  executor: "mayor"
+  telegram_topic: 13
