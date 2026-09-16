@@ -4072,7 +4072,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					"should_wake": shouldWake,
 				})
 			}
-			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			// Capture-at-append: the recordCurrentBeadIDOnWake fold above lands on
@@ -4099,7 +4099,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// See #1893 (controller: alive on_demand session ignores
 			// bd update --assignee).
 			if decision.RequiresFreshCycle && info.WakeMode == "fresh" {
-				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, clk.Now(), stdout, stderr, trace); ran {
 					if fold != nil {
 						tick.apply(target.info.ID, fold)
 					}
@@ -4110,7 +4110,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// check has a baseline. Backfills legacy sessions that were
 			// already alive before this metadata existed and refreshes the
 			// record after the agent picks up its next bead in resume mode.
-			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
+			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, decision.AssignedWorkflowRoot, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
 			// Session is correctly awake. Cancel any non-drift drain
