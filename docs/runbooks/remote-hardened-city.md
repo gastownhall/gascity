@@ -101,6 +101,45 @@ public hostname in `[supervisor] allowed_hosts` or every request dies **421**.
 The standalone `gc controller` allows any host (the network front is the
 boundary), so it needs no `allowed_hosts`.
 
+**Supervisor that is ALSO a local control plane: `[supervisor.hardened]`.**
+`[supervisor] write_auth_verify_key` gates *every* per-city mutation on the
+supervisor's single listener — including the ones first-party callers make with
+only the CSRF header (the dashboard SPA, workspace-service adapters such as a
+chat bridge posting `POST /v0/city/{c}/session/{id}/messages`, the local gc
+client). On a machine where the supervisor is the trusted loopback control
+plane *and* must accept remote writes, put the grant gate on a **second
+listener** instead and leave the primary loopback listener as it is:
+
+```toml
+[supervisor]
+port = 8372                       # primary, loopback, first-party (unchanged)
+allowed_hosts = ["city.example.ts.net"]
+
+[supervisor.hardened]
+bind = "127.0.0.1"                # default; reachable only through the TLS front on this host
+port = 8447
+write_auth_verify_key = "peer:<base64 ed25519 pubkey>"   # REQUIRED; no unverified ack knob
+```
+
+The hardened listener serves the same mux, host/CORS/audit chain, and
+read-auth posture as the primary, with its own write gate **plus a front door
+the primary does not have**: it refuses (403) every supervisor-scope mutation
+(above all `POST /v0/city` — city creation with a caller-chosen
+`start_command`, which write-auth exempts because a not-yet-created city has
+no name to bind a grant to), the whole `/svc/*` workspace-service pass-through
+(any method — a GET can be a WebSocket upgrade the proxy then tunnels), and any
+protocol upgrade on any path. Only safe reads and grant-signed
+`/v0/city/{city}/…` mutations are served. Front the hardened port with your
+TLS edge (e.g. `tailscale serve --https=8443 http://127.0.0.1:8447`,
+tailnet-only) and register that URL as the peer's context. Boot is fail-closed
+and all-or-nothing: an enabled hardened port without a key, a hardened port
+equal to the primary address, a hardened kid that also appears in the primary
+key list (each verifier keeps its own single-use replay guard), a read-only
+primary bind, or a hardened bind failure refuses to start with **no** listener
+up. `GC_CITY_WRITE_PUBKEY` is *not* consulted for the hardened key — that env
+override belongs to the primary gate. The read plane on the hardened port is
+exactly the primary's (see §1), so it still needs the network front.
+
 ## 4. Configure the client context
 
 ```bash
@@ -156,6 +195,33 @@ gc --context prod events --follow --type rig.provision.progress \
 existing-bead** shape only: `gc --context prod sling <agent> <bead-id>`. Inline
 text, `--stdin`, and the 1-arg target-inference form are refused (a remote city
 cannot see your local rig config or create a local bead).
+
+### 5a. Cross-city mail (city ↔ city, real sender identity)
+
+Two hardened cities can mail each other with `gc` alone — no ssh, no
+`--from human`. Each city holds its own private key and configures the *peer's*
+public key (kid = peer city name) on its hardened listener:
+
+```bash
+# on city A (context "b" points at city B's hardened port; grant signed with A's key, kid "a")
+gc --context b mail send mayor -s "hello from A" -m "…"
+# -> stored in B with From "a/<A's identity>" (e.g. a/mayor); B's `gc mail inbox mayor` shows it.
+gc --context b mail inbox           # mail addressed to "a/<identity>" inside B — where B's plain `gc mail reply` lands
+# on city B, answering
+gc --context a mail send mayor -s "Re: hello from A" -m "…"
+```
+
+The sender defaults to `<local city>/<identity>` (`--from` overrides it); `--all`
+and `--notify` are refused for a remote city. gc has no cross-city addressing
+yet, so answer with `gc --context <city> mail send`, not a bare `gc mail reply`.
+`gc --context <peer> mail inbox` pages through the peer's whole unread mailbox
+and refuses to render a partial (degraded) read.
+
+**Naming rule.** The peer stores an unknown sender literally, but if it has a
+*session* whose alias equals the qualified sender (a rig named after the sending
+city, so `citadel/mayor` is one of its own agents) its beadmail binds the
+message to that local session and a reply routes there. Do not name a rig after
+a city that mails you.
 
 ## 6. Failure and resume recipes
 

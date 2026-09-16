@@ -1056,3 +1056,197 @@ func TestResolveWriteAuthVerifier_WarnsOnKeyWithoutCID(t *testing.T) {
 		}
 	})
 }
+
+// A hardened listener serves the SAME mux as the primary listener but with its
+// own write-auth verifier: a first-party mutation carrying only the CSRF header
+// passes the primary handler (gate off there) yet is refused with 401 by the
+// hardened handler, and a valid request-bound grant is admitted on the hardened
+// handler. This is the [supervisor.hardened] contract — one supervisor that is
+// both the trusted loopback control plane and a grant-gated remote city.
+func TestSupervisorMux_HardenedHandlerGatesOnlyItsOwnListener(t *testing.T) {
+	now := time.Now()
+	pub, priv := mustKeypair(t)
+	v := newTestWriteVerifier(t, pub, now)
+	sm := NewSupervisorMux(nil, nil, false, "test", "", now).WithAnyHostAllowed()
+	if sm.writeAuth != nil {
+		t.Fatal("primary write-auth must stay off in this scenario")
+	}
+	primary := httptest.NewServer(sm.Handler())
+	defer primary.Close()
+	hardened := httptest.NewServer(sm.HardenedHandler(v))
+	defer hardened.Close()
+
+	post := func(base string, grant string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, base+"/v0/city/acme/mail", strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-GC-Request", "true")
+		if grant != "" {
+			req.Header.Set(writeAuthHeader, grant)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		return resp
+	}
+	isWriteAuthReject := func(resp *http.Response) bool {
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusUnauthorized {
+			return false
+		}
+		body, _ := io.ReadAll(resp.Body)
+		return strings.Contains(string(body), writeAuthHeader)
+	}
+
+	// Primary: first-party mutation is not turned away by write-auth.
+	if isWriteAuthReject(post(primary.URL, "")) {
+		t.Fatal("primary listener gated a first-party mutation although its write-auth is off")
+	}
+	// Hardened: the same request without a grant is refused.
+	if !isWriteAuthReject(post(hardened.URL, "")) {
+		t.Fatal("hardened listener admitted a grant-less mutation")
+	}
+	// Hardened: a valid, request-bound grant is admitted (the backend-less mux
+	// then answers whatever it answers — but never the write-auth rejection).
+	tok := mintToken(t, priv, grantFor(now, "acme", http.MethodPost, "/v0/city/acme/mail", []byte(`{}`), "jti-hardened-1"))
+	if isWriteAuthReject(post(hardened.URL, tok)) {
+		t.Fatal("hardened listener refused a valid grant")
+	}
+	// Reads stay ungated on the hardened listener (its read plane is the primary's).
+	resp, err := http.Get(hardened.URL + "/v0/city/acme/mail")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if isWriteAuthReject(resp) {
+		t.Fatal("hardened listener applied write-auth to a read")
+	}
+}
+
+// HardenedHandler can never come up ungated: a nil verifier is refused.
+func TestSupervisorMux_HardenedHandlerRefusesNilVerifier(t *testing.T) {
+	sm := NewSupervisorMux(nil, nil, false, "test", "", time.Now()).WithAnyHostAllowed()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("HardenedHandler(nil) must panic")
+		}
+	}()
+	_ = sm.HardenedHandler(nil)
+}
+
+// The hardened verifier resolves from ITS config key only: an empty key is a
+// fail-closed error even when GC_CITY_WRITE_PUBKEY (the primary's env override)
+// is set, and a malformed key errors.
+func TestResolveHardenedWriteAuthVerifier(t *testing.T) {
+	pub, _ := mustKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "k1:"+b64)
+	if v, err := ResolveHardenedWriteAuthVerifier(""); err == nil || v != nil {
+		t.Fatalf("empty hardened key must fail closed regardless of GC_CITY_WRITE_PUBKEY, got v=%v err=%v", v, err)
+	}
+	if _, err := ResolveHardenedWriteAuthVerifier("k1:not-base64!!"); err == nil {
+		t.Fatal("malformed hardened key must error")
+	}
+	v, err := ResolveHardenedWriteAuthVerifier("citadel:" + b64)
+	if err != nil || v == nil {
+		t.Fatalf("valid hardened key: v=%v err=%v", v, err)
+	}
+}
+
+// The hardened listener's front door: supervisor-scope mutations (above all
+// POST /v0/city — city creation with a caller-chosen start_command, exempt from
+// write-auth by design), the /svc pass-through (any method: a GET can be a
+// WebSocket upgrade the proxy then tunnels), and protocol upgrades on any path
+// are refused with 403; safe reads and grant-signed per-city mutations pass to
+// the gates behind it. The primary handler is untouched by the guard.
+func TestSupervisorMux_HardenedHandlerRefusesUngatableSurfaces(t *testing.T) {
+	now := time.Now()
+	pub, priv := mustKeypair(t)
+	v := newTestWriteVerifier(t, pub, now)
+	sm := NewSupervisorMux(nil, nil, false, "test", "", now).WithAnyHostAllowed()
+	primary := httptest.NewServer(sm.Handler())
+	defer primary.Close()
+	hardened := httptest.NewServer(sm.HardenedHandler(v))
+	defer hardened.Close()
+
+	do := func(base, method, path string, hdr map[string]string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, base+path, strings.NewReader(`{}`))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-GC-Request", "true")
+		for k, val := range hdr {
+			req.Header.Set(k, val)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	refused := func(code int, body, marker string) bool {
+		return code == http.StatusForbidden && strings.Contains(body, marker)
+	}
+
+	// 1. Supervisor-scope mutation: city registry creation is refused on the
+	//    hardened listener even with the CSRF header, and NOT by this guard on
+	//    the primary.
+	if code, body := do(hardened.URL, http.MethodPost, "/v0/city", nil); !refused(code, body, "hardened listener") {
+		t.Fatalf("hardened POST /v0/city: %d %s (want 403 hardened refusal)", code, body)
+	}
+	if code, body := do(primary.URL, http.MethodPost, "/v0/city", nil); refused(code, body, "hardened listener") {
+		t.Fatalf("primary POST /v0/city was refused by the hardened guard: %d %s", code, body)
+	}
+	// Other non-city mutation surfaces on the same listener are refused too.
+	if code, body := do(hardened.URL, http.MethodPost, "/api/client-errors", nil); !refused(code, body, "hardened listener") {
+		t.Fatalf("hardened POST /api/client-errors: %d %s", code, body)
+	}
+	// 2. /svc pass-through: every method, GET included.
+	for _, m := range []string{http.MethodGet, http.MethodPost, "MKCOL"} {
+		if code, body := do(hardened.URL, m, "/v0/city/acme/svc/app/x", nil); !refused(code, body, "/svc") {
+			t.Fatalf("hardened %s /svc: %d %s", m, code, body)
+		}
+	}
+	// 3. Protocol upgrades on any path, either header spelling.
+	if code, body := do(hardened.URL, http.MethodGet, "/v0/city/acme/mail", map[string]string{"Connection": "keep-alive, Upgrade", "Upgrade": "websocket"}); !refused(code, body, "upgrade") {
+		t.Fatalf("hardened websocket upgrade: %d %s", code, body)
+	}
+	if code, body := do(hardened.URL, http.MethodGet, "/v0/city/acme/mail", map[string]string{"Connection": "UPGRADE"}); !refused(code, body, "upgrade") {
+		t.Fatalf("hardened Connection: UPGRADE (case-insensitive): %d %s", code, body)
+	}
+	// 4. Safe reads and grant-signed per-city mutations pass the guard.
+	if code, body := do(hardened.URL, http.MethodGet, "/v0/city/acme/mail", map[string]string{"Connection": "keep-alive"}); code == http.StatusForbidden {
+		t.Fatalf("hardened plain GET refused: %d %s", code, body)
+	}
+	tok := mintToken(t, priv, grantFor(now, "acme", http.MethodPost, "/v0/city/acme/mail", []byte(`{}`), "jti-guard-1"))
+	if code, body := do(hardened.URL, http.MethodPost, "/v0/city/acme/mail", map[string]string{writeAuthHeader: tok}); code == http.StatusForbidden || (code == http.StatusUnauthorized && strings.Contains(body, writeAuthHeader)) {
+		t.Fatalf("hardened grant-signed per-city mutation refused: %d %s", code, body)
+	}
+}
+
+// Kids must be disjoint between the primary and hardened key lists (each
+// verifier has its own single-use replay guard); the primary's
+// GC_CITY_WRITE_PUBKEY env override counts as its effective list.
+func TestHardenedVerifierKidsDisjoint(t *testing.T) {
+	pub, _ := mustKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "")
+	if err := HardenedVerifierKidsDisjoint("", "peer:"+b64); err != nil {
+		t.Fatalf("no primary key: %v", err)
+	}
+	if err := HardenedVerifierKidsDisjoint("k1:"+b64, "peer:"+b64+",k2:"+b64); err != nil {
+		t.Fatalf("disjoint kids: %v", err)
+	}
+	if err := HardenedVerifierKidsDisjoint("k1:"+b64+",peer:"+b64, "peer:"+b64); err == nil {
+		t.Fatal("overlapping kid must be refused")
+	}
+	t.Setenv("GC_CITY_WRITE_PUBKEY", "peer:"+b64)
+	if err := HardenedVerifierKidsDisjoint("", "peer:"+b64); err == nil {
+		t.Fatal("overlap via the primary's env override must be refused")
+	}
+}

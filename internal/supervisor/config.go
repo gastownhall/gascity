@@ -57,6 +57,40 @@ type Section struct {
 	// open. See config.APIConfig for the key format and full semantics.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
+	// Hardened is an OPTIONAL second listener ([supervisor.hardened]) that
+	// serves the same mux as the primary listener but with a write-auth verify
+	// key of its own, so every per-city mutation arriving on it must carry a
+	// signed X-GC-City-Write grant while the primary (loopback) listener keeps
+	// serving first-party callers — the dashboard SPA, workspace-service
+	// adapters, the local gc client — that mint no grant. It exists for the
+	// deployment where one supervisor must be BOTH the trusted local control
+	// plane and a grant-gated remote city (front the hardened port with a TLS /
+	// private-network edge; gc has no TLS of its own). See HardenedListener.
+	Hardened HardenedListener `toml:"hardened,omitempty"`
+}
+
+// HardenedListener holds the [supervisor.hardened] table: an additional
+// grant-gated listener. Enabled when Port > 0. WriteAuthVerifyKey is REQUIRED
+// when enabled — there is no unverified acknowledgement knob for this listener
+// because its whole purpose is to require grants; a hardened port without a key
+// is a boot error (fail closed). The read plane on it is exactly the primary
+// listener's (city-scoped read-auth applies to both when configured).
+type HardenedListener struct {
+	Bind               string `toml:"bind,omitempty"`
+	Port               int    `toml:"port,omitempty"`
+	WriteAuthVerifyKey string `toml:"write_auth_verify_key,omitempty"`
+}
+
+// Enabled reports whether the hardened listener is configured (Port > 0).
+func (h HardenedListener) Enabled() bool { return h.Port > 0 }
+
+// BindOrDefault returns the hardened bind address, defaulting to "127.0.0.1"
+// (the intended posture: reachable only through the TLS front on this host).
+func (h HardenedListener) BindOrDefault() string {
+	if h.Bind == "" {
+		return "127.0.0.1"
+	}
+	return h.Bind
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

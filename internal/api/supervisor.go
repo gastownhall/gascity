@@ -233,19 +233,49 @@ func (sm *SupervisorMux) serveCityHookProxy(w http.ResponseWriter, r *http.Reque
 //   - /svc/* paths bypass CSRF/read-only entirely (workspace services apply
 //     their own publication rules).
 func (sm *SupervisorMux) Handler() http.Handler {
+	return sm.handlerWithAuth(sm.writeAuth, sm.readAuth, nil)
+}
+
+// HardenedHandler returns the handler for the OPTIONAL hardened listener
+// ([supervisor.hardened]): the same mux, host/CORS/audit chain, and read-auth
+// posture as Handler(), but with city-scoped mutations gated on the given
+// write-auth verifier regardless of whether the primary listener gates them.
+// This is what lets one supervisor serve first-party loopback callers (which
+// mint no grant) on the primary listener while a TLS-fronted remote port
+// requires a signed X-GC-City-Write grant on every mutation. A nil verifier is
+// a programming error — the caller resolves the key fail-closed first — and is
+// refused here as well so a hardened listener can never come up ungated.
+func (sm *SupervisorMux) HardenedHandler(writeAuth *citywriteauth.Verifier) http.Handler {
+	if writeAuth == nil {
+		panic("api: HardenedHandler requires a write-auth verifier")
+	}
+	return sm.handlerWithAuth(writeAuth, sm.readAuth, hardenedListenerGuard)
+}
+
+// handlerWithAuth builds the full middleware chain around the mux with the
+// given write/read verifiers (either may be nil = that gate not installed).
+// extraGuard, when non-nil, wraps AROUND the write/read gates (still inside
+// host/CORS/audit) so it runs first: a request it refuses never reaches the
+// gates and can never consume a single-use grant. The hardened listener uses
+// it to refuse the surfaces its per-request grant model cannot cover (see
+// hardenedListenerGuard).
+func (sm *SupervisorMux) handlerWithAuth(writeAuth, readAuth *citywriteauth.Verifier, extraGuard func(http.Handler) http.Handler) http.Handler {
 	var root http.Handler = http.HandlerFunc(sm.ServeHTTP)
 	// When a verifying key is configured, gate city-scoped mutations on a
 	// signed grant. Wrapping root (innermost, after host/CORS checks) gives the
 	// middleware the request body to bind the grant to, just before dispatch.
-	if sm.writeAuth != nil {
-		root = writeAuthMiddleware(sm.writeAuth, sm.readOnly, root)
+	if writeAuth != nil {
+		root = writeAuthMiddleware(writeAuth, sm.readOnly, root)
 	}
 	// When a verifying key is configured, gate city-scoped reads on a signed
 	// grant. Disjoint from the write gate by method (GET/HEAD vs mutations), so
 	// the relative wrap order is correctness-irrelevant; both stay innermost
 	// (after host/CORS) so preflight and host rejection never need a grant.
-	if sm.readAuth != nil {
-		root = readAuthMiddleware(sm.readAuth, root)
+	if readAuth != nil {
+		root = readAuthMiddleware(readAuth, root)
+	}
+	if extraGuard != nil {
+		root = extraGuard(root)
 	}
 	audit := requestAuditConfig{
 		recorder:       sm.supervisorEventRecorder(),
