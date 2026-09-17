@@ -353,6 +353,52 @@ find_remote_sql() {
   select_remote "$db" "$pairs" || return 2
 }
 
+# branch_tip_sql <db> <query> / branch_tip_cli <db-dir> <query> — emit the
+# single hash cell of a tip probe (a missing branch yields an empty string).
+# The SQL twin goes through the live server; the CLI twin runs an offline
+# `dolt sql` inside the database directory because no server is up in CLI
+# mode. Both stay under the metadata ceiling: a tip probe is a local read.
+branch_tip_sql() {
+  bt_out=$(dolt_sql "USE \`$1\`; $2") || return 1
+  printf '%s\n' "$bt_out" | awk 'NR == 2 { gsub(/^"|"$/, ""); print; exit }'
+}
+
+branch_tip_cli() {
+  bt_out=$(cd "$1" && run_bounded 120 dolt sql --result-format csv -q "$2") || return 1
+  printf '%s\n' "$bt_out" | awk 'NR == 2 { gsub(/^"|"$/, ""); print; exit }'
+}
+
+# verify_pushed_tip <probe-fn> <probe-target> <db> <remote> <local> <remote-branch>
+#   After a push that exited 0, confirm remotes/<remote>/<remote-branch> now
+#   points at the local branch tip. Dolt advances that tracking ref only once
+#   the remote has accepted the push, so a zero exit whose tracking ref still
+#   lags is a push that never landed — seen in production when the proxied
+#   client outlived the managed sql-server's read_timeout and exited 0, which
+#   this command then reported as "pushed". Mismatch and probe failure both
+#   return 1 with an actionable ERROR: an unverifiable push is never reported
+#   as pushed.
+verify_pushed_tip() {
+  vp_probe="$1"
+  vp_target="$2"
+  vp_db="$3"
+  vp_remote="$4"
+  vp_local_branch="$5"
+  vp_remote_branch="$6"
+  vp_local=$("$vp_probe" "$vp_target" "SELECT hash FROM dolt_branches WHERE name = '$vp_local_branch'") || {
+    echo "  $vp_db: ERROR: push returned 0 but the local $vp_local_branch tip could not be probed — push unverified" >&2
+    return 1
+  }
+  vp_remote_tip=$("$vp_probe" "$vp_target" "SELECT hash FROM dolt_remote_branches WHERE name = 'remotes/$vp_remote/$vp_remote_branch'") || {
+    echo "  $vp_db: ERROR: push returned 0 but remotes/$vp_remote/$vp_remote_branch could not be probed — push unverified" >&2
+    return 1
+  }
+  if [ -z "$vp_local" ] || [ "$vp_local" != "$vp_remote_tip" ]; then
+    echo "  $vp_db: ERROR: push returned 0 but remote HEAD=${vp_remote_tip:-<none>} does not match local HEAD=${vp_local:-<none>} — push did not land (retry; if it persists, raise the server read timeout or push directly with dolt push)" >&2
+    return 1
+  fi
+  return 0
+}
+
 # resolve_refspec_sql <db> — emit two lines: local-branch and remote-branch.
 # Honors GC_DOLT_REFSPEC_<DB> first, then falls back to active_branch() over SQL,
 # then to 'main' if both fail.
@@ -592,8 +638,12 @@ sync_database_sql() {
   dolt_sql "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
 
   if [ "$push_rc" -eq 0 ]; then
-    echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
     rm -f "$push_err_tmp"
+    verify_pushed_tip branch_tip_sql "$name" "$name" "$remote_name" "$local_branch" "$remote_branch" || {
+      last_fail_reason="push reported success but the remote tip did not move"
+      return 1
+    }
+    echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
     return 0
   fi
 
@@ -699,6 +749,10 @@ sync_database_cli() {
   fi
 
   if [ "$cli_rc" -eq 0 ]; then
+    verify_pushed_tip branch_tip_cli "$d" "$name" "$remote_name" "$local_branch" "$remote_branch" || {
+      last_fail_reason="push reported success but the remote tip did not move"
+      return 1
+    }
     echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote)"
     return 0
   fi
