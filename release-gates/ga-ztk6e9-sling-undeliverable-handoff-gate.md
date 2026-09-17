@@ -47,3 +47,44 @@ Both failures map to the open condition tracker `ga-lejnse`, created 2026-09-13 
 - `TestAdoptPRFormulaRetriesTransientReviewerStep -> ga-lejnse | clause 1: test/integration/review_formula_test.go is not diff-owned | clause 2: predating open tracker inspected and updated | clause 3(a): setupReviewFormulaCity failed inside initCityWithManagedDoltRecovery when external bd refused 11 pending shared-server migrations (v55 -> v66), before startReviewWorkflow and before changed attachFormulaToBead could execute | clause 4: failing test package test/integration has no path overlap with internal/sling/sling_core.go or cmd/gc/cmd_sling_undeliverable_test.go`
 
 No retry was used to turn either failure green. The first-run results remain preserved and attributed under the non-diff-owned gate-failure protocol.
+
+## Maintainer follow-up
+
+Applied on top of the reviewed source at `8e23dd297` (the gate commit merged
+with `origin/main`) during PR #6449 integration. The criteria table above is
+unchanged: both findings are integration defects in the new warning, not
+regressions in the behavior the table certifies.
+
+1. **Routing identity.** The guard compared `holder.Assignee` against
+   `a.QualifiedName()`, but every writer and reader of `gc.routed_to` derives
+   its identity through `agentutil.RoutedToIdentity` — which collapses a pool
+   instance to its pool name — and a pool session claims work as
+   `"<pool>-<session id>"`. A bead legitimately held by the target pool's own
+   session therefore drew a spurious "undeliverable" warning. The comparison
+   now goes through `RoutedToIdentity` plus the same `claimedByOwnPoolSession`
+   prefix carve-out `CheckBeadState` already makes
+   (`internal/sling/sling_attachment.go`).
+2. **graph.v2 parity.** The graph.v2 default-formula fallback in
+   `attachFormulaToBead` strands the bead identically and emitted only the
+   molecule-conflict warning. Both branches now call the shared
+   `undeliverableHandoffWarning` helper.
+
+Each fix is pinned by a test that fails without it:
+`TestDefaultFormulaFallbackPoolSessionClaimIsNotUndeliverable`
+(`cmd/gc/cmd_sling_undeliverable_test.go`) and the undeliverable assertion
+added to
+`TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Formula`
+(`internal/sling/sling_core_test.go`); the legacy-branch test carries the
+mirrored assertion so neither branch can silently drop the warning.
+
+Re-run evidence:
+
+- `go build ./...` — PASS
+- `go vet ./...` — PASS
+- `gofmt -l` on the three changed files — no output
+- `go test ./internal/sling/... -run 'DefaultFormula|AttachFormula|CheckBeadState' -count=2` — PASS
+- `go test ./internal/sling/... -count=1` — PASS
+- `go test ./cmd/gc/ -run 'DefaultFormulaFallback|TestOnFormulaExistingMolecule' -count=2` — PASS (4 tests x2, 0 FAIL)
+- `go test ./internal/agentutil/ -run 'RoutedToIdentity' -count=1` — PASS
+- `make test-ci-policy` — PASS
+- `GC_FAST_UNIT=0 GO_TEST_COUNT=1 ./scripts/test-go-test-shard ./cmd/gc 4 12` — PASS, exit 0, 0 FAIL. This is the shard that was red in CI on the reviewed SHA; `TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync` (a `TempDir` cleanup race unrelated to this diff) passed on re-run.

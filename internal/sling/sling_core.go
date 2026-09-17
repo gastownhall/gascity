@@ -495,6 +495,28 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	return result, err
 }
 
+// undeliverableHandoffWarning reports a plain-route fallback that strands the
+// bead: routed to the target, but still claimed by a third party with no
+// molecule to drive it (gm-2kyaqy). Identity matches the routing write
+// (agentutil.RoutedToIdentity), so a pool target compares against its pool
+// name and a claim by one of its own sessions ("<pool>-<id>") is not
+// undeliverable -- the same carve-out CheckBeadState already makes. Returns
+// false when the bead is unassigned, unreadable, or already held by the
+// target, since none of those strand the hand-off.
+func undeliverableHandoffWarning(querier BeadQuerier, deps SlingDeps, beadID string, a config.Agent, molErr *MoleculeAttachedError) (string, bool) {
+	holder, ok := BeadFromGetters(beadID, querier, deps.Store)
+	if !ok || holder.Assignee == "" {
+		return "", false
+	}
+	target := agentutil.RoutedToIdentity(&a)
+	claimedByOwnPoolSession := agentutil.IsMultiSessionAgent(&a) && strings.HasPrefix(holder.Assignee, target+"-")
+	if holder.Assignee == target || claimedByOwnPoolSession {
+		return "", false
+	}
+	return fmt.Sprintf("bead %s is still assigned to %q and undeliverable to %s: will not be picked up while %s %s remains attached",
+		beadID, holder.Assignee, target, molErr.Label, molErr.AttachmentID), true
+}
+
 // attachFormulaToBead runs the shared formula-attachment pipeline for both the
 // --on-formula and default-formula paths: prepare the graph invocation,
 // validate runtime vars, then either drive the graph-v2 branch
@@ -546,6 +568,13 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 					// success path too, since prepareGraphV2FormulaInvocation
 					// already minted that convoy before this check ran.
 					result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("skipped attaching %s %q on %s: %v; routed as a plain bead instead", errLabel, formulaName, beadID, molErr))
+					// Same stranded state as the legacy branch: routed to the
+					// target, still claimed by a third party, no molecule to
+					// drive it. Warn identically so the two branches stay at
+					// parity (gm-2kyaqy).
+					if w, ok := undeliverableHandoffWarning(querier, deps, beadID, a, molErr); ok {
+						result.BeadWarnings = append(result.BeadWarnings, w)
+					}
 					fellBackToPlainRoute = true
 					return finalize(opts, deps, beadID, "bead", result)
 				}
@@ -631,8 +660,8 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			// queries (bd ready, a wisp) can ever reach it: the hand-off is
 			// undeliverable, not merely downgraded. Surface that distinctly
 			// (gm-2kyaqy) instead of reporting unqualified success.
-			if holder, gerr := querier.Get(beadID); gerr == nil && holder.Assignee != "" && holder.Assignee != a.QualifiedName() {
-				result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf("bead %s is still assigned to %q and undeliverable to %s: will not be picked up while %s %s remains attached", beadID, holder.Assignee, a.QualifiedName(), molErr.Label, molErr.AttachmentID))
+			if w, ok := undeliverableHandoffWarning(querier, deps, beadID, a, molErr); ok {
+				result.BeadWarnings = append(result.BeadWarnings, w)
 			}
 			return finalize(opts, deps, beadID, "bead", result)
 		}

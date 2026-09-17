@@ -13,14 +13,16 @@ import (
 // slingHandoffCase builds the hand-off scenario: a task bead that already
 // carries one live attached molecule, slung to an agent whose
 // default_sling_formula implies a formula attach. `assignee` is the ONLY thing
-// callers vary, so any difference in outcome is attributable to it alone.
+// callers vary by default, so any difference in outcome is attributable to it
+// alone; the optional agentMut hooks exist solely for the pool case, where the
+// target's routing identity is itself the variable under test.
 //
 // Both the bead and its molecule are seeded into deps.Store as well as the
 // child querier: CheckNoMoleculeChildren discovers the attachment through the
 // querier, but CloseAttachedSubtree burns it through the store, so a
 // store-only-holds-the-parent setup makes the burn fail for a reason that has
 // nothing to do with the behavior under test.
-func slingHandoffCase(t *testing.T, beadID, moleculeID, assignee string) (slingOpts, slingDeps, *fakeChildQuerier, *bytes.Buffer, *bytes.Buffer) {
+func slingHandoffCase(t *testing.T, beadID, moleculeID, assignee string, agentMut ...func(*config.Agent)) (slingOpts, slingDeps, *fakeChildQuerier, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
@@ -32,6 +34,9 @@ func slingHandoffCase(t *testing.T, beadID, moleculeID, assignee string) (slingO
 		Name:                "builder",
 		MaxActiveSessions:   intPtr(1),
 		DefaultSlingFormula: strPtr("code-review"),
+	}
+	for _, mut := range agentMut {
+		mut(&a)
 	}
 
 	parent := beads.Bead{
@@ -178,5 +183,52 @@ func TestDefaultFormulaFallbackControlUnassignedBeadAttaches(t *testing.T) {
 	}
 	if strings.Contains(errText, "routed as a plain bead instead") {
 		t.Errorf("stderr = %q, an unassigned parent must not fall back to plain routing", errText)
+	}
+}
+
+// TestDefaultFormulaFallbackPoolSessionClaimIsNotUndeliverable guards the
+// identity the undeliverable warning compares against. A pool target routes
+// under its POOL name (agentutil.RoutedToIdentity collapses a pool instance
+// back to its template), and a pool session claims work as "<pool>-<id>", so a
+// bead held by one of the target pool's own sessions IS deliverable -- the
+// claim belongs to the target, not to a third party. Comparing against
+// QualifiedName() instead would read "builders-1" as a foreign holder and warn
+// spuriously on every pool hand-off. CheckBeadState
+// (internal/sling/sling_attachment.go) already makes exactly this carve-out.
+//
+// The molecule conflict is real either way, so its warning must still appear;
+// only the undeliverable warning is suppressed.
+func TestDefaultFormulaFallbackPoolSessionClaimIsNotUndeliverable(t *testing.T) {
+	const (
+		beadID     = "BL-44"
+		moleculeID = "MOL-3"
+		poolName   = "builders"
+		holder     = poolName + "-1"
+	)
+
+	opts, deps, q, stdout, stderr := slingHandoffCase(t, beadID, moleculeID, holder, func(a *config.Agent) {
+		a.PoolName = poolName
+		a.MaxActiveSessions = intPtr(3)
+	})
+	code := doSling(opts, deps, q, stdout, stderr)
+
+	errText := stderr.String()
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0 (the molecule conflict still falls back to plain routing); stderr=%s", code, errText)
+	}
+	if !strings.Contains(errText, "already has attached molecule "+moleculeID) {
+		t.Fatalf("stderr = %q, want the attachment conflict that triggers the fallback", errText)
+	}
+	if !strings.Contains(errText, "routed as a plain bead instead") {
+		t.Fatalf("stderr = %q, want the plain-bead fallback", errText)
+	}
+
+	if strings.Contains(errText, "undeliverable") || strings.Contains(errText, "still assigned to") {
+		t.Errorf(`sling warned that %s is undeliverable, but %q is a session of the target pool %q.
+
+A pool session's claim is the target's own claim, so the hand-off is
+deliverable and the warning is spurious.
+
+stderr = %q`, beadID, holder, poolName, errText)
 	}
 }
