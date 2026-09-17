@@ -220,6 +220,79 @@ func configuredNamedIdentitySignalsMatch(b beads.Bead, owner string) bool {
 	return false
 }
 
+// RecyclableDeadConfiguredNamePhantom reports whether a session bead is a
+// process-dead phantom squatting a configured named-session runtime name
+// without being that identity's recognized canonical owner, returning the
+// squatted identity when so. The caller must independently confirm the backing
+// process is gone — process-absence alone is not a trigger (a healthy asleep
+// on_demand session is also process-absent), which is why this predicate keys
+// on the registry-vs-config name collision instead.
+//
+// This is the residual ga-n2d Gap B deadlock: such a phantom is registry-asleep
+// with its backing process gone, still holds the configured runtime name (so a
+// fresh canonical bead collides with ErrSessionNameExists on materialization),
+// and still holds work assigned to the configured identity (so the reconciler's
+// standard close guard, which refuses to close a bead with assigned work, keeps
+// it open). Closing it anyway is safe: the work is assigned to the stable
+// configured identity — not to this dead bead's ephemeral ID — so a freshly
+// materialized canonical bead re-adopts it; only the dead bead is discarded.
+// A closed configured-named bead also releases its reserved runtime name (see
+// ensureSessionNameAvailableForSelfAndOwner), unblocking respawn.
+//
+// Healthy asleep canonical sessions never qualify: they carry a
+// configured_named_identity, so preserveConfiguredNamedSessionBead keeps them
+// open upstream and the non-empty recorded identity short-circuits here. Only
+// the empty-identity legacy phantom (the documented Gap B class) is recyclable.
+// Recognition is gated on wasConfiguredNamedSession OR
+// configuredNamedIdentitySignalsMatch — the same recognition the closed-bead
+// name release uses (ga-841 / Gap A) — so that closing actually frees the name.
+func RecyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(b.Metadata["session_name"])
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentity(b) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, identity) {
+		return identity, true
+	}
+	return "", false
+}
+
+// configuredIdentityForRuntimeName returns the configured named-session identity
+// whose resolved runtime session name equals sessionName, if any.
+func configuredIdentityForRuntimeName(cfg *config.City, cityName, sessionName string) (string, bool) {
+	sessionName = strings.TrimSpace(sessionName)
+	if cfg == nil || sessionName == "" {
+		return "", false
+	}
+	if strings.TrimSpace(cityName) == "" {
+		cityName = config.EffectiveCityName(cfg, "")
+	}
+	for i := range cfg.NamedSessions {
+		identity := cfg.NamedSessions[i].QualifiedName()
+		if identity == "" {
+			continue
+		}
+		if config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity) == sessionName {
+			return identity, true
+		}
+	}
+	return "", false
+}
+
 // NamedSessionMode returns the configured named session mode stored on a bead.
 func NamedSessionMode(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionModeMetadata])
@@ -244,6 +317,64 @@ func IsNamedSessionInfo(i Info) bool {
 // value).
 func NamedSessionIdentityInfo(i Info) string {
 	return strings.TrimSpace(i.ConfiguredNamedIdentity)
+}
+
+// wasConfiguredNamedSessionInfo is the session.Info mirror of
+// wasConfiguredNamedSession.
+func wasConfiguredNamedSessionInfo(i Info) bool {
+	return IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != ""
+}
+
+// configuredNamedIdentitySignalsMatchInfo is the session.Info mirror of
+// configuredNamedIdentitySignalsMatch, reading the same four identity signals
+// off their Info projections.
+func configuredNamedIdentitySignalsMatchInfo(i Info, owner string) bool {
+	owner = NormalizeNamedSessionTarget(owner)
+	if owner == "" {
+		return false
+	}
+	for _, signal := range []string{
+		i.ConfiguredNamedIdentity,
+		i.Alias,
+		i.AgentName,
+		i.Template,
+	} {
+		if NormalizeNamedSessionTarget(strings.TrimSpace(signal)) == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// RecyclableDeadConfiguredNamePhantomInfo is the session.Info mirror of
+// RecyclableDeadConfiguredNamePhantom.
+//
+// It reads Info.SessionNameMetadata — the RAW session_name metadata — and not
+// Info.SessionName, which applies a sessionNameFor(ID) fallback that would make
+// every bead appear to squat a runtime name and defeat the empty-name guard.
+func RecyclableDeadConfiguredNamePhantomInfo(i Info, cfg *config.City, cityName string) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	sessionName := strings.TrimSpace(i.SessionNameMetadata)
+	if sessionName == "" {
+		return "", false
+	}
+	identity, ok := configuredIdentityForRuntimeName(cfg, cityName, sessionName)
+	if !ok {
+		return "", false
+	}
+	// A bead already tagged with any configured identity is handled by the
+	// canonical preserve/desired paths: a bead tagged for the squatted identity
+	// is its recognized owner (never churn it), and a bead tagged for a
+	// different identity is out of scope for this name-collision recovery.
+	if NamedSessionIdentityInfo(i) != "" {
+		return "", false
+	}
+	if wasConfiguredNamedSessionInfo(i) || configuredNamedIdentitySignalsMatchInfo(i, identity) {
+		return identity, true
+	}
+	return "", false
 }
 
 // NamedSessionInfoMatchesSpec is the session.Info mirror of

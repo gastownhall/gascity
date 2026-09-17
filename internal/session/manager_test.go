@@ -1761,6 +1761,34 @@ func TestCreateInjectsUnifiedSessionRuntimeEnv(t *testing.T) {
 			t.Fatalf("Env[%s] = %q, want %q (env=%v)", key, got, want, env)
 		}
 	}
+	if !strings.Contains(env["GIT_SSH_COMMAND"], "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want SSH keepalive", env["GIT_SSH_COMMAND"])
+	}
+}
+
+func TestCreateMergesSSHKeepaliveIntoExistingGitSSHCommand(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	_, err := mgr.CreateSession(
+		context.Background(), CreateOptions{Alias: "", ExplicitName: "test-city--worker", Template: "worker", Title: "Worker", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: map[string]string{"GIT_SSH_COMMAND": "ssh -i /keys/id -o IdentitiesOnly=yes"}, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{
+			"session_origin": "ephemeral",
+		}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	cfg := sp.LastStartConfig("test-city--worker")
+	if cfg == nil {
+		t.Fatalf("Start call not recorded: %#v", sp.Calls)
+	}
+	got := cfg.Env["GIT_SSH_COMMAND"]
+	if !strings.Contains(got, "ServerAliveInterval") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want keepalive", got)
+	}
+	if !strings.Contains(got, "-i /keys/id") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want original key flags", got)
+	}
 }
 
 func TestCreateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) {
@@ -4654,7 +4682,14 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 	t.Run("ambiguous", func(t *testing.T) {
 		workDir := t.TempDir()
 		searchBase := t.TempDir()
-		mgr, infos := newManagerWithSession(t, workDir, "one", "two")
+		mgr, infos := newManagerWithSession(t, workDir, "one")
+		if err := mgr.Kill(infos[0].ID); err != nil {
+			t.Fatalf("Kill(one): %v", err)
+		}
+		two, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "two", Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create two: %v", err)
+		}
 
 		slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
 		if err := os.MkdirAll(slugDir, 0o755); err != nil {
@@ -4664,9 +4699,10 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 			t.Fatalf("WriteFile: %v", err)
 		}
 
-		// Two keyless sessions share the workdir: the refusal is deliberate, not a
-		// missing file — the transcript above exists and is still not resolved.
-		path, lookup, err := mgr.TranscriptPathClassified(infos[1].ID, []string{searchBase})
+		// "one" was killed, not closed, while sharing the workdir with "two": the
+		// refusal is deliberate, not a missing file — the transcript above exists
+		// and is still not resolved.
+		path, lookup, err := mgr.TranscriptPathClassified(two.ID, []string{searchBase})
 		if err != nil {
 			t.Fatalf("TranscriptPathClassified: %v", err)
 		}

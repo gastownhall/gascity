@@ -477,6 +477,13 @@ export const zEventRotateResponse = z.object({
     rotated: z.boolean()
 });
 
+export const zExecutionClaimStalledPayload = z.object({
+    attempts: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    bead_id: z.string(),
+    root_bead_id: z.string().optional(),
+    session_id: z.string()
+});
+
 export const zExecutionClaimWindowExpiredPayload = z.object({
     bead_id: z.string(),
     invocation_age_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -736,6 +743,12 @@ export const zHealthOutputBody = z.object({
 
 export const zHeartbeatEvent = z.object({
     timestamp: z.string()
+});
+
+export const zHookClaimReclaimedStalePayload = z.object({
+    bead_id: z.string(),
+    new_assignee: z.string(),
+    previous_owner: z.string()
 });
 
 export const zInboundEventPayload = z.object({
@@ -1096,6 +1109,7 @@ export const zAgentPatch = z.object({
     Args: z.array(z.string()).nullable(),
     AssignedWorkDeferLimit: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     Attach: z.boolean().nullable(),
+    AutoReclaimStaleClaims: z.boolean().nullable(),
     ContextAdvisory: zContextAdvisory,
     DefaultSlingFormula: z.string().nullable(),
     DependsOn: z.array(z.string()).nullable(),
@@ -3308,9 +3322,11 @@ export const zEventPayload = z.union([
     zConditionalWritesDegradedPayload,
     zControlRootSettleFailedPayload,
     zControlStalledPayload,
+    zExecutionClaimStalledPayload,
     zExecutionClaimWindowExpiredPayload,
     zExecutionStepStalledPayload,
     zGroupCreatedEventPayload,
+    zHookClaimReclaimedStalePayload,
     zInboundEventPayload,
     zMailEventPayload,
     zMoleculeResolvedPayload,
@@ -3890,6 +3906,24 @@ export const zTypedEventStreamEnvelopeEventsRotated = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope execution.claim_stalled
+ */
+export const zTypedEventStreamEnvelopeExecutionClaimStalled = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zExecutionClaimStalledPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('execution.claim_stalled'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope execution.claim_window_expired
  */
 export const zTypedEventStreamEnvelopeExecutionClaimWindowExpired = z.object({
@@ -4228,6 +4262,24 @@ export const zTypedEventStreamEnvelopeGcStoreMaintenanceFailed = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('gc.store.maintenance.failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope hook.claim.reclaimed_stale
+ */
+export const zTypedEventStreamEnvelopeHookClaimReclaimedStale = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zHookClaimReclaimedStalePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('hook.claim.reclaimed_stale'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5215,6 +5267,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),
+    zTypedEventStreamEnvelopeExecutionClaimStalled.extend({ type: z.literal('execution.claim_stalled') }),
     zTypedEventStreamEnvelopeExecutionClaimWindowExpired.extend({ type: z.literal('execution.claim_window_expired') }),
     zTypedEventStreamEnvelopeExecutionRunAnchored.extend({ type: z.literal('execution.run_anchored') }),
     zTypedEventStreamEnvelopeExecutionStepCompleted.extend({ type: z.literal('execution.step_completed') }),
@@ -5234,6 +5287,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeGcStoreDiskWarn.extend({ type: z.literal('gc.store.disk_warn') }),
     zTypedEventStreamEnvelopeGcStoreMaintenanceDone.extend({ type: z.literal('gc.store.maintenance.done') }),
     zTypedEventStreamEnvelopeGcStoreMaintenanceFailed.extend({ type: z.literal('gc.store.maintenance.failed') }),
+    zTypedEventStreamEnvelopeHookClaimReclaimedStale.extend({ type: z.literal('hook.claim.reclaimed_stale') }),
     zTypedEventStreamEnvelopeMailArchived.extend({ type: z.literal('mail.archived') }),
     zTypedEventStreamEnvelopeMailDeleted.extend({ type: z.literal('mail.deleted') }),
     zTypedEventStreamEnvelopeMailMarkedRead.extend({ type: z.literal('mail.marked_read') }),
@@ -5774,6 +5828,25 @@ export const zTypedTaggedEventStreamEnvelopeEventsRotated = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope execution.claim_stalled
+ */
+export const zTypedTaggedEventStreamEnvelopeExecutionClaimStalled = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zExecutionClaimStalledPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('execution.claim_stalled'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope execution.claim_window_expired
  */
 export const zTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired = z.object({
@@ -6131,6 +6204,25 @@ export const zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed = z.object(
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('gc.store.maintenance.failed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope hook.claim.reclaimed_stale
+ */
+export const zTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zHookClaimReclaimedStalePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('hook.claim.reclaimed_stale'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -7171,6 +7263,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedTaggedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedTaggedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),
+    zTypedTaggedEventStreamEnvelopeExecutionClaimStalled.extend({ type: z.literal('execution.claim_stalled') }),
     zTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired.extend({ type: z.literal('execution.claim_window_expired') }),
     zTypedTaggedEventStreamEnvelopeExecutionRunAnchored.extend({ type: z.literal('execution.run_anchored') }),
     zTypedTaggedEventStreamEnvelopeExecutionStepCompleted.extend({ type: z.literal('execution.step_completed') }),
@@ -7190,6 +7283,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeGcStoreDiskWarn.extend({ type: z.literal('gc.store.disk_warn') }),
     zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone.extend({ type: z.literal('gc.store.maintenance.done') }),
     zTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed.extend({ type: z.literal('gc.store.maintenance.failed') }),
+    zTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale.extend({ type: z.literal('hook.claim.reclaimed_stale') }),
     zTypedTaggedEventStreamEnvelopeMailArchived.extend({ type: z.literal('mail.archived') }),
     zTypedTaggedEventStreamEnvelopeMailDeleted.extend({ type: z.literal('mail.deleted') }),
     zTypedTaggedEventStreamEnvelopeMailMarkedRead.extend({ type: z.literal('mail.marked_read') }),

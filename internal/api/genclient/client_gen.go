@@ -966,6 +966,7 @@ type AgentPatch struct {
 	Args                    *[]string         `json:"Args"`
 	AssignedWorkDeferLimit  *int64            `json:"AssignedWorkDeferLimit"`
 	Attach                  *bool             `json:"Attach"`
+	AutoReclaimStaleClaims  *bool             `json:"AutoReclaimStaleClaims"`
 	ContextAdvisory         ContextAdvisory   `json:"ContextAdvisory"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
@@ -1790,6 +1791,14 @@ type EventStreamEnvelope struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// ExecutionClaimStalledPayload defines model for ExecutionClaimStalledPayload.
+type ExecutionClaimStalledPayload struct {
+	Attempts   int64   `json:"attempts"`
+	BeadId     string  `json:"bead_id"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	SessionId  string  `json:"session_id"`
+}
+
 // ExecutionClaimWindowExpiredPayload defines model for ExecutionClaimWindowExpiredPayload.
 type ExecutionClaimWindowExpiredPayload struct {
 	BeadId          string `json:"bead_id"`
@@ -2179,6 +2188,13 @@ type HealthOutputBody struct {
 type HeartbeatEvent struct {
 	// Timestamp ISO 8601 timestamp when the heartbeat was sent.
 	Timestamp string `json:"timestamp"`
+}
+
+// HookClaimReclaimedStalePayload defines model for HookClaimReclaimedStalePayload.
+type HookClaimReclaimedStalePayload struct {
+	BeadId        string `json:"bead_id"`
+	NewAssignee   string `json:"new_assignee"`
+	PreviousOwner string `json:"previous_owner"`
 }
 
 // InboundEventPayload defines model for InboundEventPayload.
@@ -5729,6 +5745,22 @@ type TypedEventStreamEnvelopeEventsRotated struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeExecutionClaimStalled defines model for TypedEventStreamEnvelopeExecutionClaimStalled.
+type TypedEventStreamEnvelopeExecutionClaimStalled struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          ExecutionClaimStalledPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedEventStreamEnvelopeExecutionClaimWindowExpired.
 type TypedEventStreamEnvelopeExecutionClaimWindowExpired struct {
 	Actor            string                             `json:"actor"`
@@ -6031,6 +6063,22 @@ type TypedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
 	Ts               time.Time                     `json:"ts"`
 	Type             string                        `json:"type"`
 	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeHookClaimReclaimedStale defines model for TypedEventStreamEnvelopeHookClaimReclaimedStale.
+type TypedEventStreamEnvelopeHookClaimReclaimedStale struct {
+	Actor            string                         `json:"actor"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          HookClaimReclaimedStalePayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeMailArchived defines model for TypedEventStreamEnvelopeMailArchived.
@@ -7311,6 +7359,23 @@ type TypedTaggedEventStreamEnvelopeEventsRotated struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeExecutionClaimStalled defines model for TypedTaggedEventStreamEnvelopeExecutionClaimStalled.
+type TypedTaggedEventStreamEnvelopeExecutionClaimStalled struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          ExecutionClaimStalledPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired defines model for TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired.
 type TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired struct {
 	Actor            string                             `json:"actor"`
@@ -7632,6 +7697,23 @@ type TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed struct {
 	Ts               time.Time                     `json:"ts"`
 	Type             string                        `json:"type"`
 	Workflow         *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale defines model for TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale.
+type TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale struct {
+	Actor            string                         `json:"actor"`
+	City             string                         `json:"city"`
+	DependsOnStepIds *[]string                      `json:"depends_on_step_ids,omitempty"`
+	Message          *string                        `json:"message,omitempty"`
+	Payload          HookClaimReclaimedStalePayload `json:"payload"`
+	RunId            *string                        `json:"run_id,omitempty"`
+	Seq              int64                          `json:"seq"`
+	SessionId        *string                        `json:"session_id,omitempty"`
+	StepId           *string                        `json:"step_id,omitempty"`
+	Subject          *string                        `json:"subject,omitempty"`
+	Ts               time.Time                      `json:"ts"`
+	Type             string                         `json:"type"`
+	Workflow         *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMailArchived defines model for TypedTaggedEventStreamEnvelopeMailArchived.
@@ -10506,6 +10588,32 @@ func (t *EventPayload) MergeControlStalledPayload(v ControlStalledPayload) error
 	return err
 }
 
+// AsExecutionClaimStalledPayload returns the union data inside the EventPayload as a ExecutionClaimStalledPayload
+func (t EventPayload) AsExecutionClaimStalledPayload() (ExecutionClaimStalledPayload, error) {
+	var body ExecutionClaimStalledPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromExecutionClaimStalledPayload overwrites any union data inside the EventPayload as the provided ExecutionClaimStalledPayload
+func (t *EventPayload) FromExecutionClaimStalledPayload(v ExecutionClaimStalledPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeExecutionClaimStalledPayload performs a merge with any union data inside the EventPayload, using the provided ExecutionClaimStalledPayload
+func (t *EventPayload) MergeExecutionClaimStalledPayload(v ExecutionClaimStalledPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsExecutionClaimWindowExpiredPayload returns the union data inside the EventPayload as a ExecutionClaimWindowExpiredPayload
 func (t EventPayload) AsExecutionClaimWindowExpiredPayload() (ExecutionClaimWindowExpiredPayload, error) {
 	var body ExecutionClaimWindowExpiredPayload
@@ -10574,6 +10682,32 @@ func (t *EventPayload) FromGroupCreatedEventPayload(v GroupCreatedEventPayload) 
 
 // MergeGroupCreatedEventPayload performs a merge with any union data inside the EventPayload, using the provided GroupCreatedEventPayload
 func (t *EventPayload) MergeGroupCreatedEventPayload(v GroupCreatedEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsHookClaimReclaimedStalePayload returns the union data inside the EventPayload as a HookClaimReclaimedStalePayload
+func (t EventPayload) AsHookClaimReclaimedStalePayload() (HookClaimReclaimedStalePayload, error) {
+	var body HookClaimReclaimedStalePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromHookClaimReclaimedStalePayload overwrites any union data inside the EventPayload as the provided HookClaimReclaimedStalePayload
+func (t *EventPayload) FromHookClaimReclaimedStalePayload(v HookClaimReclaimedStalePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeHookClaimReclaimedStalePayload performs a merge with any union data inside the EventPayload, using the provided HookClaimReclaimedStalePayload
+func (t *EventPayload) MergeHookClaimReclaimedStalePayload(v HookClaimReclaimedStalePayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13867,6 +14001,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeEventsRotated(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeExecutionClaimStalled returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionClaimStalled
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionClaimStalled() (TypedEventStreamEnvelopeExecutionClaimStalled, error) {
+	var body TypedEventStreamEnvelopeExecutionClaimStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExecutionClaimStalled overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExecutionClaimStalled
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExecutionClaimStalled(v TypedEventStreamEnvelopeExecutionClaimStalled) error {
+	v.Type = "execution.claim_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExecutionClaimStalled performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExecutionClaimStalled
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExecutionClaimStalled(v TypedEventStreamEnvelopeExecutionClaimStalled) error {
+	v.Type = "execution.claim_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeExecutionClaimWindowExpired returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExecutionClaimWindowExpired
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExecutionClaimWindowExpired() (TypedEventStreamEnvelopeExecutionClaimWindowExpired, error) {
 	var body TypedEventStreamEnvelopeExecutionClaimWindowExpired
@@ -14389,6 +14551,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeGcStoreMaintenanc
 // MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeGcStoreMaintenanceFailed
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
 	v.Type = "gc.store.maintenance.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeHookClaimReclaimedStale returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeHookClaimReclaimedStale() (TypedEventStreamEnvelopeHookClaimReclaimedStale, error) {
+	var body TypedEventStreamEnvelopeHookClaimReclaimedStale
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeHookClaimReclaimedStale overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeHookClaimReclaimedStale(v TypedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeHookClaimReclaimedStale performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeHookClaimReclaimedStale(v TypedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15975,6 +16165,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedEventStreamEnvelopeEventsRotated()
+	case "execution.claim_stalled":
+		return t.AsTypedEventStreamEnvelopeExecutionClaimStalled()
 	case "execution.claim_window_expired":
 		return t.AsTypedEventStreamEnvelopeExecutionClaimWindowExpired()
 	case "execution.run_anchored":
@@ -16013,6 +16205,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
 		return t.AsTypedEventStreamEnvelopeGcStoreMaintenanceFailed()
+	case "hook.claim.reclaimed_stale":
+		return t.AsTypedEventStreamEnvelopeHookClaimReclaimedStale()
 	case "mail.archived":
 		return t.AsTypedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":
@@ -16806,6 +17000,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeEven
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionClaimStalled
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled() (TypedTaggedEventStreamEnvelopeExecutionClaimStalled, error) {
+	var body TypedTaggedEventStreamEnvelopeExecutionClaimStalled
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExecutionClaimStalled overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExecutionClaimStalled
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExecutionClaimStalled(v TypedTaggedEventStreamEnvelopeExecutionClaimStalled) error {
+	v.Type = "execution.claim_stalled"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExecutionClaimStalled performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExecutionClaimStalled
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExecutionClaimStalled(v TypedTaggedEventStreamEnvelopeExecutionClaimStalled) error {
+	v.Type = "execution.claim_stalled"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired() (TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired, error) {
 	var body TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired
@@ -17328,6 +17550,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeGcSto
 // MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed(v TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed) error {
 	v.Type = "gc.store.maintenance.failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale() (TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale, error) {
+	var body TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale(v TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale(v TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale) error {
+	v.Type = "hook.claim.reclaimed_stale"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18914,6 +19164,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencySignaled()
 	case "events.rotated":
 		return t.AsTypedTaggedEventStreamEnvelopeEventsRotated()
+	case "execution.claim_stalled":
+		return t.AsTypedTaggedEventStreamEnvelopeExecutionClaimStalled()
 	case "execution.claim_window_expired":
 		return t.AsTypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired()
 	case "execution.run_anchored":
@@ -18952,6 +19204,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone()
 	case "gc.store.maintenance.failed":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed()
+	case "hook.claim.reclaimed_stale":
+		return t.AsTypedTaggedEventStreamEnvelopeHookClaimReclaimedStale()
 	case "mail.archived":
 		return t.AsTypedTaggedEventStreamEnvelopeMailArchived()
 	case "mail.deleted":

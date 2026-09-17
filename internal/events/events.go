@@ -53,6 +53,15 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
+	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
+	// candidate whose only claim blocker was another worker's stale (lease-
+	// expired) assignee, and then wins the retried claim in the same hook
+	// cycle. Scoped to exactly the one candidate bd reclaim --id targeted —
+	// this is not a sweep. Lets mayor/watchers see the recovery happen instead
+	// of only ever observing the fresh claim with no story for how the prior
+	// assignee's abandoned work moved.
+	HookClaimReclaimedStale = "hook.claim.reclaimed_stale"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a
 	// claim command that outlived the agent turn that invoked it (an abandoned
@@ -85,6 +94,15 @@ const (
 	// LIVENESS fact, not a graph execution fact — nothing about the step's
 	// topology is asserted, and no projector consumes it.
 	ExecutionStepStalled = "execution.step_stalled"
+	// ExecutionClaimStalled records that a seat had its OWN ready work sitting
+	// open and unclaimed while it was awake and quiet, past the bounded nudges
+	// the controller's claim backstop spent on it. It is the never-claimed
+	// counterpart of ExecutionStepStalled's never-executed claim, and the
+	// remedies differ: nothing here is stranded in_progress, so no drain
+	// follows and the backstop keeps re-nudging. Subject carries the unclaimed
+	// bead, RunID the workflow root, SessionID the seat. A controller LIVENESS
+	// fact, not a graph execution fact; no projector consumes it.
+	ExecutionClaimStalled = "execution.claim_stalled"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -405,10 +423,12 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
+	ExecutionClaimStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

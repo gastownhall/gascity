@@ -181,6 +181,12 @@
               "null"
             ]
           },
+          "AutoReclaimStaleClaims": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ContextAdvisory": {
             "$ref": "#/components/schemas/ContextAdvisory"
           },
@@ -537,6 +543,7 @@
           "MaxSessionAgeJitter",
           "AssignedWorkDeferLimit",
           "SleepAfterIdle",
+          "AutoReclaimStaleClaims",
           "InstallAgentHooks",
           "Skills",
           "MCP",
@@ -2600,6 +2607,9 @@
             "$ref": "#/components/schemas/ControlStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          {
             "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
           },
           {
@@ -2607,6 +2617,9 @@
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
           },
           {
             "$ref": "#/components/schemas/InboundEventPayload"
@@ -2859,6 +2872,30 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionClaimStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "session_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -3897,6 +3934,26 @@
         },
         "required": [
           "timestamp"
+        ],
+        "type": "object"
+      },
+      "HookClaimReclaimedStalePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "new_assignee": {
+            "type": "string"
+          },
+          "previous_owner": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "previous_owner",
+          "new_assignee"
         ],
         "type": "object"
       },
@@ -12282,6 +12339,7 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
@@ -12301,6 +12359,7 @@
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed",
+            "hook.claim.reclaimed_stale": "#/components/schemas/TypedEventStreamEnvelopeHookClaimReclaimedStale",
             "mail.archived": "#/components/schemas/TypedEventStreamEnvelopeMailArchived",
             "mail.deleted": "#/components/schemas/TypedEventStreamEnvelopeMailDeleted",
             "mail.marked_read": "#/components/schemas/TypedEventStreamEnvelopeMailMarkedRead",
@@ -12431,6 +12490,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
           },
           {
@@ -12486,6 +12548,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeHookClaimReclaimedStale"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMailArchived"
@@ -13916,6 +13981,7 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.claim_released",
+                "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.run_anchored",
@@ -13924,6 +13990,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -14172,6 +14239,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionClaimWindowExpired": {
@@ -15255,6 +15379,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope gc.store.maintenance.failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeHookClaimReclaimedStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "hook.claim.reclaimed_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope hook.claim.reclaimed_stale",
         "type": "object"
       },
       "TypedEventStreamEnvelopeMailArchived": {
@@ -18306,6 +18487,7 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
@@ -18325,6 +18507,7 @@
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed",
+            "hook.claim.reclaimed_stale": "#/components/schemas/TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale",
             "mail.archived": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived",
             "mail.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailDeleted",
             "mail.marked_read": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailMarkedRead",
@@ -18455,6 +18638,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
           },
           {
@@ -18510,6 +18696,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived"
@@ -20027,6 +20216,7 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.claim_released",
+                "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.run_anchored",
@@ -20035,6 +20225,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -20296,6 +20487,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired": {
@@ -21455,6 +21707,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope gc.store.maintenance.failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "hook.claim.reclaimed_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope hook.claim.reclaimed_stale",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeMailArchived": {

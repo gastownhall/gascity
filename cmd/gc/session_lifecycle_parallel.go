@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1265,6 +1266,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
 		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
 	}
+	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate:       candidate,
@@ -1452,7 +1454,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
 	if resolveErr != nil {
-		log.Printf("session %s: template option resolution error: %v", sessionID, resolveErr)
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, resolveErr)
 		return
 	}
 	if len(args) > 0 {
