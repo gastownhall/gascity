@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -462,11 +464,13 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 	}
 
 	statusByID := make(map[string]string, len(m.beads))
+	workOutcomeByID := make(map[string]string, len(m.beads))
 	for _, bead := range m.beads {
 		if err := contextErr(); err != nil {
 			return nil, err
 		}
 		statusByID[bead.ID] = bead.Status
+		workOutcomeByID[bead.ID] = bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
 	}
 
 	var result []Bead
@@ -494,7 +498,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			default:
 				continue
 			}
-			if statusByID[dep.DependsOnID] != "closed" {
+			if !DependencySatisfied(statusByID[dep.DependsOnID], workOutcomeByID[dep.DependsOnID]) {
 				blocked = true
 				break
 			}

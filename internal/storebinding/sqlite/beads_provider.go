@@ -432,6 +432,15 @@ func (p *beadsProvider) Open(ctx context.Context, request storebinding.OpenReque
 		}
 	}
 
+	// This open is NOT fenced, and componentOf has just proved it is the same
+	// database the serving seam fences: it refuses any descriptor resolving to a
+	// path other than p.path, which is what OpenEngine (beads_engine.go) opens
+	// with storebinding.EngineReservedPrefixes(classes). Only the mint prefix is
+	// configured here, so a pinned id from any namespace is admitted through
+	// this lifecycle door. That is tolerable only because it has no production
+	// caller today; the first one has to thread the fence in too, or invariant
+	// 16 (engdocs/architecture/beads.md) holds for the engine and not for the
+	// database underneath it.
 	options := []beads.SQLiteStoreOption{beads.WithSQLiteStoreIDPrefix(graphIDPrefix)}
 	if readOnly {
 		options = append(options, beads.WithSQLiteStoreReadOnly())

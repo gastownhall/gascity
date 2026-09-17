@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -708,6 +709,8 @@ func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.
 			if shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 				desiredCommand = command
 			}
+		} else {
+			log.Printf("WARNING: unhonored option pin (%v); launching without schema flags", err)
 		}
 	}
 	if !shouldPreserveStoredRuntimeCommand(command, desiredCommand) {

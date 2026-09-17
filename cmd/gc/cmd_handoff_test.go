@@ -143,8 +143,8 @@ func TestWaitForControllerRestartHandoffFlagCleared(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 5*time.Second, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		5*time.Second, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0 when flag cleared; stderr: %s", code, stderr.String())
 	}
@@ -173,8 +173,8 @@ func TestWaitForControllerRestartHandoffFlagClearedButSessionStillRunning(t *tes
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, sp, "worker", "gc handoff",
-		10*time.Millisecond, 50*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, sp, "worker",
+		50*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 (flag cleared but session still running is not success); stderr: %s", code, stderr.String())
 	}
@@ -190,8 +190,8 @@ func TestWaitForControllerRestartHandoffTimeout(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -211,8 +211,8 @@ func TestWaitForControllerRestartHandoffTimeoutReportsLastPollError(t *testing.T
 	dops.restartReadErr = errors.New("metadata read failed")
 
 	var stderr bytes.Buffer
-	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker", "gc handoff",
-		10*time.Millisecond, 25*time.Millisecond, &stderr)
+	code := waitForControllerRestart(context.Background(), dops, runtime.NewFake(), "worker",
+		25*time.Millisecond, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d, want 1 on timeout", code)
 	}
@@ -232,8 +232,8 @@ func TestWaitForControllerRestartHandoffContextCancel(t *testing.T) {
 
 	done := make(chan int, 1)
 	go func() {
-		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker", "gc handoff",
-			10*time.Millisecond, 30*time.Second, &stderr)
+		done <- waitForControllerRestart(ctx, dops, runtime.NewFake(), "worker",
+			30*time.Second, &stderr)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -412,7 +412,7 @@ func (errWriter) Write([]byte) (int, error) {
 
 func TestCmdHandoffAutoRejectsTarget(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "mayor", true, "", &stdout, &stderr); code == 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "mayor", true, "", false, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdHandoff returned 0 for --auto with --target")
 	}
 	if !strings.Contains(stderr.String(), "--auto cannot be used with --target") {
@@ -715,7 +715,7 @@ func TestCmdHandoff_Regression744_NamedSessionReturnsWithoutBlocking(t *testing.
 	var stdout, stderr bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- cmdHandoff([]string{"HANDOFF: context full"}, "", false, "", &stdout, &stderr)
+		done <- cmdHandoffWithForce([]string{"HANDOFF: context full"}, "", false, "", false, &stdout, &stderr)
 	}()
 
 	select {
@@ -1022,7 +1022,7 @@ func TestHandoffMailWritesTheBindingOnAMigratedCity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// --auto: the send without the restart request, so the assertion is about
 	// the message bead and nothing else.
-	if code := cmdHandoff([]string{"context cycle"}, "", true, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", true, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff --auto exited %d: %s", code, stderr.String())
 	}
 	match := handoffMailIDPattern.FindStringSubmatch(stdout.String())
@@ -1068,7 +1068,7 @@ func TestHandoffLocalArmMailLandsInTheBindingOnAMigratedCity(t *testing.T) {
 	seedNamedOnDemandSession(t, cityPath, cfg, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdHandoff([]string{"context cycle"}, "", false, "", &stdout, &stderr); code != 0 {
+	if code := cmdHandoffWithForce([]string{"context cycle"}, "", false, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc handoff exited %d: %s", code, stderr.String())
 	}
 	id := handoffMailIDFromOutput(t, stdout.String(), "sent mail ")
@@ -1202,10 +1202,28 @@ func TestHandoffRootsRouteMailThroughTheMessagingClassStore(t *testing.T) {
 			t.Errorf("cmd_handoff.go contains unrouted messaging-class write %q — the handoff roots must derive their message store through cliMailStore(store, cfg, cityPath) so a [beads.classes.messaging] relocation reaches them", needle)
 		}
 	}
-	if got := strings.Count(content, "cliMailStore("); got != 2 {
-		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", got)
+	calls := strings.Count(content, "cliMailStore(")
+	if calls != 2 {
+		t.Errorf("cmd_handoff.go calls cliMailStore( %d time(s), want 2 — one per command root (cmdHandoff, cmdHandoffRemote); a third root needs its own store-identity row beside the two above, not just this scan", calls)
+	}
+	// Every one of those calls must unwrap. beads.MailStore embeds beads.Store,
+	// so handing the wrapper to doHandoff* compiles and delivers mail correctly
+	// — and moves every optional-capability assertion downstream onto the
+	// wrapper, which answers no to all of them. Nothing else in the tree fails
+	// on that, so the shape is pinned here.
+	if unwrapped := len(mailStoreUnwrapCall.FindAllString(content, -1)); unwrapped != calls {
+		t.Errorf("cmd_handoff.go unwraps %d of its %d cliMailStore( call(s); the messaging leg of beadmail.NewWithStores is a beads.Store and must be the embedded store, not the typed wrapper around it", unwrapped, calls)
 	}
 }
+
+// mailStoreUnwrapCall matches a cliMailStore call that reads its embedded store.
+// The argument list is matched without nested parens because both roots pass
+// three plain identifiers; a call that grew a nested expression would stop
+// matching and fail the count above, which is the direction that wants a human.
+//
+// It is scoped to cmd_handoff.go on purpose. `gc order` holds the wrapper
+// deliberately (cmd_order.go), and a tree-wide scan would call that a defect.
+var mailStoreUnwrapCall = regexp.MustCompile(`cliMailStore\([^()]*\)\.Store`)
 
 // TestHandoffMessagingScanDetectsTheDefectItGuards is the control the scan above
 // cannot supply for itself. A source scan over a clean file passes identically

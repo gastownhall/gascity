@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	sqlitebinding "github.com/gastownhall/gascity/internal/storebinding/sqlite"
@@ -339,6 +340,51 @@ func TestTheReadOnlyDiagnosticsLeaveALiveWALIntact(t *testing.T) {
 				t.Errorf("a read-only command rewrote the binding's -wal; a stopped writer's uncheckpointed rows are not a diagnostic's to move")
 			}
 		})
+	}
+}
+
+// TestInfraMigrationClassesCoverEveryClassTheBindingsClaim pins the seam
+// between the hand-listed set that MOVES beads and the derived set that CLAIMS
+// them.
+//
+// infraMigrationClasses is written out by hand. infrastructureClasses() is
+// derived — every coordclass.Class whose IsInfrastructure() says so — and it is
+// what residencyBindingsFor builds bindings over and what
+// storeref.ReservedPrefixesFor turns into the namespaces a binding covers. A
+// sixth infrastructure class declared in coordclass therefore joins the derived
+// set the day it is declared and joins the hand-listed one never.
+//
+// The failure that gap produces is silent and permanent: the new class's beads
+// stay on the work axis because nothing migrated them, while the plan routes
+// every read of that prefix to a binding that has never held one. Reads report
+// absent for beads sitting in the work store, and no migration row notices,
+// because the migration was asked to move five classes and moved five classes.
+//
+// The reverse direction is pinned too. Work in the migration list would copy
+// the entire work ledger into the infrastructure binding — the one thing the
+// list's own doc says is excluded by construction.
+func TestInfraMigrationClassesCoverEveryClassTheBindingsClaim(t *testing.T) {
+	migrated := make(map[coordclass.Class]bool, len(infraMigrationClasses))
+	for _, class := range infraMigrationClasses {
+		resolved := coordclassFor(string(class))
+		if resolved == coordclass.ClassWork {
+			t.Errorf("infraMigrationClasses names %q, which this build resolves to the work class; migrating work would copy the whole ledger into the infrastructure binding", class)
+			continue
+		}
+		migrated[resolved] = true
+	}
+
+	infra := infrastructureClasses()
+	if len(infra) == 0 {
+		t.Fatal("no infrastructure classes at all, so the comparison below is vacuous and would pass against any drift")
+	}
+	for _, class := range infra {
+		if !migrated[class] {
+			t.Errorf("coordclass %s is infrastructure — it gets a binding and a reserved prefix — but infraMigrationClasses does not move it, so its beads stay on the work axis while every read of its prefix is routed at a binding that never held one", class)
+		}
+	}
+	if len(migrated) != len(infra) {
+		t.Errorf("infraMigrationClasses moves %d class(es) and the bindings claim %d; the two sets must be the same set, not merely overlapping", len(migrated), len(infra))
 	}
 }
 

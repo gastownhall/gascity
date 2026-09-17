@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // Start ensures the worker exists and its runtime is live.
@@ -226,7 +227,14 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		state.Phase = PhaseReady
-		if strings.TrimSpace(info.SessionKey) == "" {
+		provider := h.historyProvider(info)
+		// A family that derives activity from history (zcode) has no tail
+		// chunk: its verdict needs the whole mirror parsed. Keyless, it used to
+		// take the history load below on every poll; the probe memoizes that
+		// derivation per mirror generation instead. Keyless tail-chunk
+		// families keep the history-backed probe, whose tail read is not fenced
+		// to the adapter's search roots.
+		if strings.TrimSpace(info.SessionKey) == "" && !sessionlog.DerivesActivityFromHistory(provider) {
 			if history, histErr := h.historyWithRequest(HistoryRequest{TailCompactions: 1}); histErr == nil && history != nil {
 				if history.TailState.Activity == TailActivityInTurn {
 					state.Phase = PhaseBusy
@@ -235,7 +243,7 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return state, nil
 		}
 		if path, pathErr := h.manager.TranscriptPath(id, h.adapter.SearchPaths); pathErr == nil && strings.TrimSpace(path) != "" {
-			if activity, actErr := h.adapter.TailActivityForProvider(h.historyProvider(info), path); actErr == nil && activity == TailActivityInTurn {
+			if activity, actErr := h.adapter.TailActivityForProvider(provider, path); actErr == nil && activity == TailActivityInTurn {
 				state.Phase = PhaseBusy
 			}
 		}
@@ -491,9 +499,25 @@ func (h *SessionHandle) providerLabel() string {
 	return h.session.Provider
 }
 
+// historyProvider resolves the provider string sessionlog dispatches transcript
+// reads and tail-activity derivation on. The worker_profile override wins; after
+// that the raw provider_kind takes precedence over the provider name because a
+// custom alias's name carries no family signal ("glm53" is a zcode seat) or a
+// misleading one ("kimi-k3-manifold" is a claude seat). Sessions without a
+// stamped kind keep resolving by name. Mirrors the kind-over-name precedence
+// used by transcript discovery (session.Manager.TranscriptPathClassified),
+// which is the rung that keeps the file found and the reader used on the same
+// family; the Profile override above and the spec.Provider fallback below have
+// no discovery counterpart. Like discovery, this skips the builtin_ancestor
+// rung that session.ProviderFamilyFromInfo walks first — every current stamping
+// site writes provider_kind from that same ancestor, so skipping it cannot
+// change the answer.
 func (h *SessionHandle) historyProvider(info sessionpkg.Info) string {
 	if h.session.Profile != "" {
 		return string(h.session.Profile)
+	}
+	if kind := strings.TrimSpace(info.ProviderKind); kind != "" {
+		return kind
 	}
 	if strings.TrimSpace(info.Provider) != "" {
 		return info.Provider

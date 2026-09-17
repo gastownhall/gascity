@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -29,13 +30,16 @@ func TestApplyTrapRunsBeforeKill(t *testing.T) {
 	script := `trap 'echo restored > "$MARKER"; exit 130' INT TERM; sleep 30`
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.Env = append(os.Environ(), "MARKER="+marker)
-	Apply(cmd, 5*time.Second)
+	result := Apply(cmd, 5*time.Second)
 
 	if err := cmd.Run(); err == nil {
 		t.Fatal("expected the canceled command to report an error")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("rollback trap never ran — staged state would have been lost: %v", err)
+	}
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled, got %v", outcome)
 	}
 }
 
@@ -48,7 +52,7 @@ func TestApplyForceKillsUncooperative(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", `trap '' INT TERM; sleep 30`)
-	Apply(cmd, 1*time.Second)
+	result := Apply(cmd, 1*time.Second)
 
 	start := time.Now()
 	err := cmd.Run()
@@ -60,6 +64,17 @@ func TestApplyForceKillsUncooperative(t *testing.T) {
 	if elapsed > 10*time.Second {
 		t.Fatalf("uncooperative command outlived the grace escalation: %v", elapsed)
 	}
+	// The group signal is still delivered successfully here — the ignoring
+	// process just doesn't act on it. That makes this CancelGroupSignaled,
+	// not CancelForceKilled: os/exec's own WaitDelay escalation (SIGKILL) is
+	// what actually ends the process, running independently of — and after —
+	// our cmd.Cancel closure, which already reported delivery. CancelForceKilled
+	// is reserved for when interruptProcessGroup itself fails to deliver and
+	// *our* fallback cmd.Process.Kill() is what fires (see
+	// TestApplyForceKilledWhenGroupSignalFails).
+	if outcome := result.Outcome(); outcome != CancelGroupSignaled {
+		t.Fatalf("expected CancelGroupSignaled (signal delivered; os/exec's own WaitDelay kill finishes the job), got %v", outcome)
+	}
 }
 
 // TestApplyAcceptedFlag proves the delivered-cancellation flag contract that
@@ -70,22 +85,90 @@ func TestApplyAcceptedFlag(t *testing.T) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", `sleep 30`)
-	accepted := Apply(cmd, 2*time.Second)
+	result := Apply(cmd, 2*time.Second)
 	if err := cmd.Run(); err == nil {
 		t.Fatal("expected the canceled command to report an error")
 	}
-	if !accepted.Load() {
+	if !result.Delivered() {
 		t.Fatal("accepted flag must record the delivered cancellation")
 	}
 
 	// A command that finishes on its own must not set the flag. (Cancel
 	// requires a context-created command even when the context never fires.)
 	cmd2 := exec.CommandContext(context.Background(), "sh", "-c", "true")
-	accepted2 := Apply(cmd2, 2*time.Second)
+	result2 := Apply(cmd2, 2*time.Second)
 	if err := cmd2.Run(); err != nil {
 		t.Fatalf("healthy command failed: %v", err)
 	}
-	if accepted2.Load() {
+	if result2.Delivered() {
 		t.Fatal("accepted flag must stay false when the command completes normally")
+	}
+}
+
+// TestApplyLeaderSignaledOnlyWhenGetpgidFails proves the leader-only signal
+// fallback: when the process group cannot be resolved, Apply must still
+// interrupt the process leader directly, and record that no group signal
+// was ever attempted.
+//
+// Not parallel: overrides the package-level getpgid seam.
+func TestApplyLeaderSignaledOnlyWhenGetpgidFails(t *testing.T) {
+	origGetpgid := getpgid
+	getpgid = func(_ int) (int, error) {
+		return 0, syscall.EINVAL
+	}
+	defer func() { getpgid = origGetpgid }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	result := Apply(cmd, 2*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if !result.Delivered() {
+		t.Fatal("accepted flag must record the delivered cancellation")
+	}
+	if outcome := result.Outcome(); outcome != CancelLeaderSignaledOnly {
+		t.Fatalf("expected CancelLeaderSignaledOnly, got %v", outcome)
+	}
+}
+
+// TestApplyForceKilledWhenGroupSignalFails proves the last-resort fallback:
+// when the process-group signal itself fails outright (not just "already
+// gone"), Apply must fall back to killing the leader directly rather than
+// leaving the command to run out the clock on WaitDelay.
+//
+// Not parallel: overrides the package-level killProcessGroup seam.
+func TestApplyForceKilledWhenGroupSignalFails(t *testing.T) {
+	origKill := killProcessGroup
+	killProcessGroup = func(_ int, _ syscall.Signal) error {
+		return syscall.EPERM
+	}
+	defer func() { killProcessGroup = origKill }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	result := Apply(cmd, 2*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if !result.Delivered() {
+		t.Fatal("accepted flag must record the delivered cancellation")
+	}
+	if outcome := result.Outcome(); outcome != CancelForceKilled {
+		t.Fatalf("expected CancelForceKilled, got %v", outcome)
+	}
+
+	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("expected a syscall.WaitStatus, got %T", cmd.ProcessState.Sys())
+	}
+	if !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("expected the process to be killed by SIGKILL, got signaled=%v signal=%v", status.Signaled(), status.Signal())
 	}
 }

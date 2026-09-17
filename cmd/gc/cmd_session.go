@@ -1280,6 +1280,10 @@ type attachmentCachingProvider struct {
 	cache map[string]bool
 }
 
+func (p *attachmentCachingProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessWithError(p.Provider, name, processNames)
+}
+
 func (p *attachmentCachingProvider) GetMeta(name, key string) (string, error) {
 	if p.Provider == nil {
 		return "", nil
@@ -2331,19 +2335,24 @@ func outputLineCount(output string) int {
 // newSessionKillCmd creates the "gc session kill <id-or-alias>" command.
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime (reconciler restarts)",
-		Long: `Force-kill the runtime process for a session without changing its bead state.
+		Long: `Force-kill the runtime process for a session without discarding its work.
 
-The session remains marked as active, so the reconciler will detect the dead
-process and restart it according to the session's lifecycle rules. This is
-useful for unsticking a session without losing its conversation history.
+The kill syncs the session's lifecycle state to asleep and pokes the controller,
+so the reconciler observes the dead process promptly and restarts the session
+according to its lifecycle rules. This keeps Gas City bead continuity: hooks,
+assignments, and work still point at the same session bead. If the provider has
+resume metadata, Gas City may attempt provider resume, but
+provider conversation continuity is not guaranteed; confirm it with the agent or
+provider after restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKill(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionKillWithForce(args, stdout, stderr, jsonOutput, force) != 0 {
 				return errExit
 			}
 			return nil
@@ -2351,6 +2360,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents")
 	return cmd
 }
 
@@ -2359,8 +2369,11 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 var sessionKillPokeController = pokeController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
-func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
+	return cmdSessionKillWithForce(args, stdout, stderr, false, false)
+}
+
+func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
@@ -2369,7 +2382,7 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	cityPath, err := resolveCity()
 	var cfg *config.City
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
+		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
@@ -2406,6 +2419,9 @@ func cmdSessionKill(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if !force && !runtimeAlreadyInactive && refuseKillForLiveSubagents("gc session kill", workerHandleForSessionTargetWithConfig, cityPath, sessStore, sp, cfg, sessionID, stderr) {
 		return 1
 	}
 
