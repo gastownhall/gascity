@@ -1049,7 +1049,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 				children, _ := dryRunBatchChildren(querier, b.ID)
 				var open []beads.Bead
 				for _, c := range children {
-					if c.Status == "open" {
+					if beads.IsOpenStatus(c.Status) {
 						open = append(open, c)
 					}
 				}
@@ -1954,7 +1954,7 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	w(fmt.Sprintf("  Children (%d total, %d open):", len(children), len(open)))
 	for _, c := range children {
 		clabel := sling.FormatBeadLabel(c.ID, c.Title)
-		if c.Status == "open" {
+		if beads.IsOpenStatus(c.Status) {
 			check := sling.CheckBeadStateWithOptions(querier, c.ID, a, deps, sling.BeadCheckOptions{
 				NoConvoy: opts.NoConvoy,
 			})

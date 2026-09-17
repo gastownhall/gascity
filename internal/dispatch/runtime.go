@@ -155,7 +155,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	if opts.routeCfg == nil {
 		opts.routeCfg = &routeConfigCache{}
 	}
-	if bead.Status != "open" {
+	if !beads.IsOpenStatus(bead.Status) {
 		// A control bead that is not open — typically stuck at in_progress
 		// after a rogue `bd update --status in_progress` from a worker —
 		// can silently strand an entire workflow because the serve loop
@@ -695,7 +695,7 @@ func (s scopeSnapshot) hasOpenScopeMembers(ignoreIDs ...string) bool {
 		ignored[id] = struct{}{}
 	}
 	for _, member := range s.members {
-		if member.Status != "open" {
+		if !beads.IsOpenStatus(member.Status) {
 			continue
 		}
 		if _, skip := ignored[member.ID]; skip {
@@ -781,7 +781,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 	}
 	pending := make(map[string]beads.Bead)
 	for _, member := range s.members {
-		if member.ID == skipControlID || member.Status != "open" {
+		if member.ID == skipControlID || !beads.IsOpenStatus(member.Status) {
 			continue
 		}
 		if member.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindSpec {
@@ -804,7 +804,7 @@ func (s scopeSnapshot) skipOpenScopeMembers(store beads.Store, skipControlID str
 			continue
 		}
 		for _, candidate := range all {
-			if candidate.Status != "open" {
+			if !beads.IsOpenStatus(candidate.Status) {
 				continue
 			}
 			if !isLogicalDescendant(member, candidate) {

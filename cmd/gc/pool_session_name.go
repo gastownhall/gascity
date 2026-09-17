@@ -270,7 +270,7 @@ func releaseOrphanedPoolAssignments(
 
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
+		if !beads.IsOpenStatus(wb.Status) && wb.Status != "in_progress" {
 			continue
 		}
 		workStoreRef := ""
@@ -443,7 +443,7 @@ func releaseConfirmedOrphanSessionWork(
 
 	var released []releasedPoolAssignment
 	for i, wb := range assignedWorkBeads {
-		if wb.Status != "open" && wb.Status != "in_progress" {
+		if !beads.IsOpenStatus(wb.Status) && wb.Status != "in_progress" {
 			continue
 		}
 		assignee := strings.TrimSpace(wb.Assignee)

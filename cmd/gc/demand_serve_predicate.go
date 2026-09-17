@@ -300,7 +300,7 @@ func collapseSlotSuffixedRoutedWork(cfg *config.City, workBeads []beads.Bead, wo
 		return
 	}
 	for i, wb := range workBeads {
-		if wb.Status != "open" || strings.TrimSpace(wb.Assignee) != "" {
+		if !beads.IsOpenStatus(wb.Status) || strings.TrimSpace(wb.Assignee) != "" {
 			continue
 		}
 		store := workStores[i]
