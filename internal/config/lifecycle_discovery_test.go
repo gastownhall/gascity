@@ -75,6 +75,26 @@ func TestDiscoverPackLifecycleHooksIgnoresUnknownAndNonRegularEntries(t *testing
 	}
 }
 
+// TestDiscoverPackLifecycleHooksIgnoresSymlinkedScript pins the symlink
+// rejection the doc comment promises: discovery Lstats the hook path, so a
+// symlink is rejected even when it points at a perfectly valid regular script.
+// A pack directory is not a trust boundary for what it links out to.
+func TestDiscoverPackLifecycleHooksIgnoresSymlinkedScript(t *testing.T) {
+	packDir := t.TempDir()
+	target := writePackLifecycleScript(t, packDir, "city-stop.sh")
+	if err := os.Symlink(target, filepath.Join(packDir, "lifecycle", "city-start.sh")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	hooks := DiscoverPackLifecycleHooks(fsys.OSFS{}, packDir, "gasburger")
+	if len(hooks) != 1 {
+		t.Fatalf("hooks = %+v, want only the regular city-stop hook", hooks)
+	}
+	if hooks[0].Event != LifecycleEventCityStop {
+		t.Errorf("event = %q, want %q", hooks[0].Event, LifecycleEventCityStop)
+	}
+}
+
 func TestDiscoverPackLifecycleHooksNoLifecycleDir(t *testing.T) {
 	if hooks := DiscoverPackLifecycleHooks(fsys.OSFS{}, t.TempDir(), "gasburger"); hooks != nil {
 		t.Fatalf("hooks = %+v, want nil", hooks)

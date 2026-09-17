@@ -56,13 +56,15 @@ func (h DiscoveredLifecycleHook) Name() string { return h.PackName + ":" + h.Eve
 // DiscoverPackLifecycleHooks scans a pack's lifecycle/ directory and returns
 // the hooks it ships, ordered by LifecycleEvents. A pack with no lifecycle/
 // directory, or with no script for any known event, yields no hooks. Entries
-// that are not regular files (directories, dangling symlinks) are ignored, so
-// an unrelated lifecycle/ layout cannot be executed by accident.
+// that are not regular files (directories, symlinks) are ignored, so an
+// unrelated lifecycle/ layout cannot be executed by accident.
 func DiscoverPackLifecycleHooks(fs fsys.FS, packDir, packName string) []DiscoveredLifecycleHook {
 	var hooks []DiscoveredLifecycleHook
 	for _, event := range LifecycleEvents {
 		script := filepath.Join(packDir, lifecycleDirName, event+".sh")
-		info, err := fs.Stat(script)
+		// Lstat, not Stat: a symlink is not a regular file, so a symlinked
+		// hook is rejected rather than followed to its target.
+		info, err := fs.Lstat(script)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}

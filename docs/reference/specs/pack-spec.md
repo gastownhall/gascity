@@ -85,6 +85,7 @@ A pack may contain the following abstract content:
 | Named sessions | `[[named_session]]` in `pack.toml` | current |
 | Services | `[[service]]` in `pack.toml` | current |
 | Providers | `[providers.<name>]` in `pack.toml` | current |
+| Runtimes | `[runtimes.<name>]` in `pack.toml` | current |
 | Formulas | `formulas/` | preferred |
 | Orders | `orders/<name>.toml` | preferred |
 | Skills | `skills/` | preferred |
@@ -184,6 +185,7 @@ Conceptually, the file may contain these tables:
 | `[[named_session]]` | Pack-provided named sessions. | current |
 | `[[service]]` | Pack-provided services. | current |
 | `[providers.<name>]` | Pack-provided provider presets. | current |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. | current |
 | `[[patches.agent]]` | Pack-level agent patches. | current |
 | `[global]` | Pack-wide live session commands. | current |
 | `[[pricing]]` | Pack-provided pricing estimates. | current |
@@ -747,6 +749,7 @@ New packs should use these authoring constructs:
 | `[[named_session]]` | Pack named sessions. |
 | `[[service]]` | Pack services. |
 | `[providers.<name>]` | Pack provider presets. |
+| `[runtimes.<name>]` | Pack-shipped runtime provider executables. |
 | `[[patches.agent]]` | Pack-level agent patches. |
 | `[global]` | Pack-wide live session commands. |
 | `[[pricing]]` | Pack pricing estimates. |

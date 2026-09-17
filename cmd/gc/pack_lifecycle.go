@@ -54,7 +54,7 @@ func packLifecycleHooks(cfg *config.City, event string) []packlifecycle.Hook {
 // container, an external daemon) up with the city and down with it. Execution
 // is best-effort and never changes the exit status: a hook that fails or hangs
 // is reported on stderr so the operator can act, but it cannot wedge start or
-// stop. logPrefix identifies the caller in those warnings ("gc stop").
+// stop.
 func runPackLifecycleHooks(cityPath string, cfg *config.City, event string, stdout, stderr io.Writer) {
 	hooks := packLifecycleHooks(cfg, event)
 	if len(hooks) == 0 {
