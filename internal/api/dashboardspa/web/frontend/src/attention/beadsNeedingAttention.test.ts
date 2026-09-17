@@ -33,7 +33,6 @@ function select(
   inputs: {
     beads?: readonly Bead[];
     escalations?: readonly Bead[];
-    sessions?: readonly BeadAttentionSession[];
   },
   now = NOW,
 ) {
@@ -41,39 +40,20 @@ function select(
     {
       beads: inputs.beads ?? [],
       escalations: inputs.escalations ?? [],
-      ...(inputs.sessions === undefined ? {} : { sessions: inputs.sessions }),
     },
     now,
   );
 }
 
 describe('selectBeadsNeedingAttention (gascity-dashboard-2j8e.3)', () => {
-  it('includes a ready-unclaimed bead once it has aged past the watch window', () => {
+  it('excludes an unassigned open bead regardless of age — unclaimed ready work is machine-operable', () => {
     const rows = select({
-      beads: [bead({ id: 'B-ready', status: 'open', created_at: '2026-06-05T11:00:00.000Z' })],
-    });
-    expect(rows).toEqual([
-      expect.objectContaining({ beadId: 'B-ready', reason: 'ready-unclaimed', severity: 'watch' }),
-    ]);
-  });
-
-  it('escalates a long-stale ready-unclaimed bead to attention', () => {
-    const rows = select({
-      beads: [bead({ id: 'B-stale', status: 'open', created_at: '2026-06-01T11:00:00.000Z' })],
-    });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({ reason: 'ready-unclaimed', severity: 'attention' }),
-    );
-  });
-
-  it('does not surface a freshly-filed open bead as noise', () => {
-    const rows = select({
-      beads: [bead({ id: 'B-fresh', status: 'open', created_at: '2026-06-07T11:30:00.000Z' })],
+      beads: [bead({ id: 'B-ready', status: 'open', created_at: '2026-05-01T11:00:00.000Z' })],
     });
     expect(rows).toEqual([]);
   });
 
-  it('does not surface an assigned open bead as ready-unclaimed', () => {
+  it('excludes an open bead assigned to an agent session (not the reserved human alias)', () => {
     const rows = select({
       beads: [
         bead({
@@ -87,7 +67,38 @@ describe('selectBeadsNeedingAttention (gascity-dashboard-2j8e.3)', () => {
     expect(rows).toEqual([]);
   });
 
-  it('includes an abnormally-blocked (escalated) bead immediately, regardless of age', () => {
+  it('includes a nonclosed open bead explicitly assigned to the reserved human alias', () => {
+    const rows = select({
+      beads: [bead({ id: 'B-human', status: 'open', assignee: 'human' })],
+    });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        beadId: 'B-human',
+        reason: 'human-assigned',
+        severity: 'attention',
+        summary: expect.stringContaining('assigned to human'),
+      }),
+    ]);
+  });
+
+  it('includes a human-assigned bead in any nonclosed status', () => {
+    const rows = select({
+      beads: [
+        bead({ id: 'B-human-blocked', status: 'blocked', assignee: 'human' }),
+        bead({ id: 'B-human-doing', status: 'in_progress', assignee: 'human' }),
+      ],
+    });
+    expect(rows.map((row) => row.beadId).sort()).toEqual(['B-human-blocked', 'B-human-doing']);
+  });
+
+  it('excludes a closed bead even when assigned to human', () => {
+    const rows = select({
+      beads: [bead({ id: 'B-human-done', status: 'closed', assignee: 'human' })],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it('includes an open escalation because the queue records its human escalation', () => {
     const rows = select({
       escalations: [
         bead({
@@ -103,14 +114,28 @@ describe('selectBeadsNeedingAttention (gascity-dashboard-2j8e.3)', () => {
     ]);
   });
 
-  it('excludes a plain dependency-blocked bead (working-as-intended queuing)', () => {
+  it('includes an open escalation even while an agent remains assigned', () => {
+    const rows = select({
+      escalations: [
+        bead({
+          id: 'B-esc-agent',
+          status: 'blocked',
+          assignee: 'worker-1',
+          labels: ['gc:escalation'],
+        }),
+      ],
+    });
+    expect(rows.map((row) => row.beadId)).toEqual(['B-esc-agent']);
+  });
+
+  it('excludes a plain dependency-blocked bead with no human assignee (working-as-intended queuing)', () => {
     const rows = select({
       beads: [bead({ id: 'B-dep', status: 'blocked', created_at: '2026-06-01T11:00:00.000Z' })],
     });
     expect(rows).toEqual([]);
   });
 
-  it('excludes a closed (resolved) escalation', () => {
+  it('excludes a closed escalation', () => {
     const rows = select({
       escalations: [bead({ id: 'B-done', status: 'closed', labels: ['gc:escalation'] })],
     });
@@ -132,18 +157,27 @@ describe('selectBeadsNeedingAttention (gascity-dashboard-2j8e.3)', () => {
     expect(rows).toEqual([]);
   });
 
-  it('combines ready-unclaimed and escalated across both inputs', () => {
+  // gascity-sc-4oix8: the regression this fix exists for. A stale unassigned
+  // workflow root is machine-claimable however long it has aged, so it must
+  // not count as "needs you"; a bead explicitly handed to the reserved
+  // `human` alias must, every time. Both together must surface only the
+  // human-owned bead.
+  it('surfaces only the human-assigned bead when a stale unassigned root and a human-assigned bead are both present', () => {
     const rows = select({
-      beads: [bead({ id: 'B-ready', status: 'open', created_at: '2026-06-05T11:00:00.000Z' })],
-      escalations: [bead({ id: 'B-esc', status: 'blocked', labels: ['gc:escalation'] })],
+      beads: [
+        bead({ id: 'B-stale-root', status: 'open', created_at: '2026-05-01T11:00:00.000Z' }),
+        bead({ id: 'B-human', status: 'open', assignee: 'human' }),
+      ],
     });
-    expect(rows.map((row) => `${row.beadId}:${row.reason}`)).toEqual([
-      'B-esc:escalated',
-      'B-ready:ready-unclaimed',
-    ]);
+    expect(rows.map((row) => row.beadId)).toEqual(['B-human']);
   });
 });
 
+// gascity-sc-4oix8: stalled in-progress detection is no longer part of
+// selectBeadsNeedingAttention membership (a stalled agent is machine work,
+// not a human need) — it now surfaces only through inProgressCardNote's board
+// card, so these cases exercise that entry point directly. The underlying
+// stalledRow/stalledDetail logic is unchanged.
 describe('stalled in-progress detection (gp-6xd)', () => {
   const inProgress = (overrides: Partial<Bead> = {}) =>
     bead({
@@ -154,135 +188,101 @@ describe('stalled in-progress detection (gp-6xd)', () => {
       ...overrides,
     });
 
+  const cardNote = (b: Bead, sessions?: readonly BeadAttentionSession[]) =>
+    inProgressCardNote(b, sessions, NOW);
+
+  it('does not surface stalled membership on the "Needs you" selector — stalled is machine work', () => {
+    const rows = select({ beads: [inProgress()] });
+    expect(rows).toEqual([]);
+  });
+
   it('marks an in-progress bead with no assignee as stalled', () => {
-    const rows = select({
-      beads: [
-        bead({ id: 'B-doing', status: 'in_progress', updated_at: '2026-06-07T10:00:00.000Z' }),
-      ],
-    });
-    expect(rows).toEqual([
-      expect.objectContaining({
-        beadId: 'B-doing',
-        reason: 'stalled',
-        severity: 'attention',
-        summary: expect.stringContaining('no assignee'),
-      }),
-    ]);
+    const note = cardNote(
+      bead({ id: 'B-doing', status: 'in_progress', updated_at: '2026-06-07T10:00:00.000Z' }),
+    );
+    expect(note).toContain('stalled');
+    expect(note).toContain('no assignee');
   });
 
   it('marks an in-progress bead as stalled when no session resolves to the assignee', () => {
-    const rows = select({
-      beads: [inProgress()],
-      sessions: [session({ session_name: 'someone-else' })],
-    });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        reason: 'stalled',
-        summary: expect.stringContaining('no live session for worker-ci-1'),
-      }),
-    );
+    const note = cardNote(inProgress(), [session({ session_name: 'someone-else' })]);
+    expect(note).toContain('no live session for worker-ci-1');
   });
 
   it('marks an in-progress bead as stalled when its session is not in a live state', () => {
-    const rows = select({
-      beads: [inProgress()],
-      sessions: [session({ state: 'dead' })],
-    });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        reason: 'stalled',
-        summary: expect.stringContaining('session dead'),
-      }),
-    );
+    const note = cardNote(inProgress(), [session({ state: 'dead' })]);
+    expect(note).toContain('session dead');
   });
 
   // A closed session decodes to the empty state ("closed beads have no runtime
   // state", internal/session/info_codec.go), which must not render as the
   // dangling "stalled 3h — session ".
   it('names an ended session rather than emitting a dangling empty state', () => {
-    const rows = select({
-      beads: [inProgress()],
-      sessions: [session({ state: '' })],
-    });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        reason: 'stalled',
-        summary: expect.stringContaining('session ended'),
-      }),
-    );
-    expect(rows[0]?.summary).not.toMatch(/session\s*$/);
+    const note = cardNote(inProgress(), [session({ state: '' })]);
+    expect(note).toContain('session ended');
+    expect(note).not.toMatch(/session\s*$/);
   });
 
   // `state` is free-form with no enum upstream, and the sibling reader
   // (shared/src/agents/needsYou.ts) matches it case-insensitively — a differently
   // cased spelling must not paint a healthy worker stalled.
   it('treats a live state as live regardless of case', () => {
-    const rows = select({ beads: [inProgress()], sessions: [session({ state: 'Active' })] });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress(), [session({ state: 'Active' })]);
+    expect(note).not.toContain('stalled');
   });
 
   it('marks an in-progress bead as stalled when activity is older than an hour', () => {
-    const rows = select({
-      beads: [inProgress()],
-      sessions: [session({ last_active: '2026-06-07T10:00:00.000Z' })],
-    });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        reason: 'stalled',
-        summary: expect.stringContaining('no activity'),
-      }),
-    );
+    const note = cardNote(inProgress(), [session({ last_active: '2026-06-07T10:00:00.000Z' })]);
+    expect(note).toContain('no activity');
   });
 
   it('does not mark a bead with a live, recently-active session', () => {
-    const rows = select({ beads: [inProgress()], sessions: [session({})] });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress(), [session({})]);
+    expect(note).not.toContain('stalled');
   });
 
   it('a fresh bead heartbeat keeps a quiet session from reading as stalled', () => {
-    const rows = select({
-      beads: [inProgress({ metadata: { 'gc.last_heartbeat_at': '2026-06-07T11:59:00.000Z' } })],
-      sessions: [session({ last_active: '2026-06-07T09:00:00.000Z' })],
-    });
-    expect(rows).toEqual([]);
+    const note = cardNote(
+      inProgress({ metadata: { 'gc.last_heartbeat_at': '2026-06-07T11:59:00.000Z' } }),
+      [session({ last_active: '2026-06-07T09:00:00.000Z' })],
+    );
+    expect(note).not.toContain('stalled');
   });
 
   it('resolves the session by gc.session_id when the assignee name does not match', () => {
-    const rows = select({
-      beads: [inProgress({ metadata: { 'gc.session_id': 'ci-9' } })],
-      sessions: [session({ id: 'ci-9', session_name: 'renamed' })],
-    });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress({ metadata: { 'gc.session_id': 'ci-9' } }), [
+      session({ id: 'ci-9', session_name: 'renamed' }),
+    ]);
+    expect(note).not.toContain('stalled');
   });
 
   it('skips session-dependent checks when the session read failed (sessions omitted)', () => {
-    const rows = select({ beads: [inProgress()] });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress());
+    expect(note).not.toContain('stalled');
   });
 
   it('does not guess stalled from a stale heartbeat alone when the session read failed', () => {
     // The worker may be alive but not heartbeating (the common pre-fix state);
     // only session data can distinguish that from a dead worker — do not guess.
-    const rows = select({
-      beads: [inProgress({ metadata: { 'gc.last_heartbeat_at': '2026-06-07T09:00:00.000Z' } })],
-    });
-    expect(rows).toEqual([]);
+    const note = cardNote(
+      inProgress({ metadata: { 'gc.last_heartbeat_at': '2026-06-07T09:00:00.000Z' } }),
+    );
+    expect(note).not.toContain('stalled');
   });
 
   it('prefers a live session over a dead one carrying the same recycled name', () => {
-    const rows = select({
-      beads: [inProgress()],
-      sessions: [session({ id: 'ci-old', state: 'dead' }), session({ id: 'ci-new' })],
-    });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress(), [
+      session({ id: 'ci-old', state: 'dead' }),
+      session({ id: 'ci-new' }),
+    ]);
+    expect(note).not.toContain('stalled');
   });
 
   it('resolves an assignee that is a bare session id', () => {
-    const rows = select({
-      beads: [inProgress({ assignee: 'ci-1' })],
-      sessions: [session({ session_name: 'unrelated-name' })],
-    });
-    expect(rows).toEqual([]);
+    const note = cardNote(inProgress({ assignee: 'ci-1' }), [
+      session({ session_name: 'unrelated-name' }),
+    ]);
+    expect(note).not.toContain('stalled');
   });
 });
 
@@ -398,15 +398,22 @@ describe('waiting-on-human detection (gp-6xd)', () => {
     expect(rows[0]).toEqual(expect.objectContaining({ severity: 'attention' }));
   });
 
-  it('takes precedence over stalled — a parked worker is not lost, it is waiting', () => {
-    const rows = select({
-      beads: [held()],
-      sessions: [session({ state: 'dead' })],
-    });
+  it('surfaces a waiting hold without treating a parked worker as lost', () => {
+    const rows = select({ beads: [held()] });
     expect(rows.map((row) => row.reason)).toEqual(['waiting-human']);
   });
 
-  it('takes precedence over ready-unclaimed — an open unassigned gate bead is waiting, not claimable', () => {
+  it('excludes a closed waiting-human bead', () => {
+    const rows = select({ beads: [held({ status: 'closed' })] });
+    expect(rows).toEqual([]);
+  });
+
+  it('emits one waiting row when a held bead is also assigned to human', () => {
+    const rows = select({ beads: [held({ assignee: 'human' })] });
+    expect(rows.map((row) => row.reason)).toEqual(['waiting-human']);
+  });
+
+  it('surfaces an open, unassigned gate bead as waiting-human', () => {
     const rows = select({
       beads: [
         bead({

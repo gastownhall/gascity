@@ -91,8 +91,8 @@ describe('BeadAttentionPanel (gascity-dashboard-2j8e.3)', () => {
           decisionLabel: 'needs/stephanie',
           nowMs: Date.parse('2026-06-07T12:00:00.000Z'),
           items: [
-            bead({ id: 'B-ready', status: 'open', created_at: '2026-06-04T11:00:00.000Z' }),
-            // plain dependency-blocked — excluded from both badge and page.
+            bead({ id: 'B-human', status: 'open', assignee: 'human' }),
+            // Plain dependency-blocked work remains machine-operable and is excluded.
             bead({ id: 'B-dep', status: 'blocked' }),
           ],
           escalations: [bead({ id: 'B-esc', status: 'blocked', labels: ['gc:escalation'] })],

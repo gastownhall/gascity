@@ -431,46 +431,6 @@ describe('useLiveAttentionContributors', () => {
     expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
   });
 
-  // The sessions leg is best-effort: it feeds the stall check only. A failure
-  // must degrade silently — no `sessions` on the facts (so the selector skips
-  // session-dependent stall checks rather than painting the board stalled),
-  // and no fourth error identity, because "sessions unavailable" is not an
-  // operator-facing bead alert.
-  it('degrades silently when only the sessions leg fails, leaving the other three intact', async () => {
-    mockSupervisorApi.listSessions.mockRejectedValue(
-      new SupervisorApiError(503, 'sessions unavailable', undefined),
-    );
-
-    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
-
-    expect(facts.sessions).toBeUndefined();
-    expect(facts.error).toBeUndefined();
-    expect(facts.decisionsError).toBeUndefined();
-    expect(facts.escalationsError).toBeUndefined();
-    expect(facts.cityUnavailable).toBeUndefined();
-    // The three sibling reads still ran and still landed.
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
-    expect(facts.items).toBeDefined();
-  });
-
-  // Regression guard for the shape that broke CI: a supervisor client with no
-  // `listSessions` at all must still produce a rejected leg, not a synchronous
-  // TypeError that abandons the three siblings before allSettled sees them.
-  it('survives a supervisor client that is missing listSessions entirely', async () => {
-    const withoutSessions = mockSupervisorApi.listSessions;
-    // @ts-expect-error -- deliberately modelling a partial client double.
-    mockSupervisorApi.listSessions = undefined;
-    try {
-      const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
-
-      expect(facts.sessions).toBeUndefined();
-      expect(facts.error).toBeUndefined();
-      expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(4);
-    } finally {
-      mockSupervisorApi.listSessions = withoutSessions;
-    }
-  });
-
   it('propagates cancellation to every in-flight bead-attention read', async () => {
     const controller = new AbortController();
     const fallbackResolvers: Array<(value: { total: number; items: never[] }) => void> = [];
