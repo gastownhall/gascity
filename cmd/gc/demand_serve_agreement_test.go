@@ -131,6 +131,25 @@ func agreementRows() []agreementRow {
 			wantServable: false, wantRewrittenTo: agreementTemplate,
 		},
 		{
+			// The ga-033u0e row. A pour that aborts partway marks every bead it
+			// already wrote molecule_failed, and a non-graph (v1) recipe is never
+			// fenced, so its steps keep the gc.routed_to they were created with:
+			// the reader serves the row and the hook then strips it
+			// (isFailedPartialMoleculeHookCandidate). No worker ever holds it, so
+			// counting it is a seat that spawns, reads empty, drains and is
+			// counted again next tick — the loop this predicate exists to close.
+			name: "step of a partially-instantiated workflow",
+			bead: beads.Bead{
+				ID: "a-13", Status: "open", Type: "task",
+				Metadata: map[string]string{
+					beadmeta.RoutedToMetadataKey:       agreementTemplate,
+					beadmeta.MoleculeFailedMetadataKey: "true",
+					beadmeta.InstantiatingMetadataKey:  "",
+				},
+			},
+			wantServable: false,
+		},
+		{
 			name: "assigned row",
 			bead: beads.Bead{
 				ID: "a-9", Status: "open", Type: "task", Assignee: "someone",
