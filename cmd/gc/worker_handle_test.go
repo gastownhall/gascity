@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2658,5 +2660,91 @@ func assertControllerTokenWithheld(t *testing.T, name string, env map[string]str
 	}
 	if val != "" {
 		t.Errorf("%s[%s] = %q, want empty", name, convergence.TokenEnvVar, val)
+	}
+}
+
+// TestWorkerFactoryWithConfigRecordsWorkerOperationToCityEventLog is the
+// assertion #5859 is about: the CLI-built worker.Factory carries a live event
+// recorder, so a lifecycle op driven through it lands a worker.operation
+// record in <city>/.gc/events.jsonl. Before the recorder was wired in, the
+// factory held none and the record was dropped on the floor.
+func TestWorkerFactoryWithConfigRecordsWorkerOperationToCityEventLog(t *testing.T) {
+	resetCLIFactoryRecorders(t)
+	t.Setenv("GC_EVENTS", "")
+
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
+		Template:  "worker",
+		Title:     "Probe",
+		Command:   "stub",
+		WorkDir:   t.TempDir(),
+		Provider:  "stub",
+		Hints:     runtime.Config{},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	factory, err := workerFactoryWithConfig(cityDir, store, sp, cfg)
+	if err != nil {
+		t.Fatalf("workerFactoryWithConfig: %v", err)
+	}
+	handle, err := factory.SessionByID(info.ID)
+	if err != nil {
+		t.Fatalf("factory.SessionByID: %v", err)
+	}
+	if err := handle.Kill(context.Background()); err != nil {
+		t.Fatalf("handle.Kill: %v", err)
+	}
+
+	eventsPath := filepath.Join(cityDir, ".gc", "events.jsonl")
+	raw, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", eventsPath, err)
+	}
+	var found *events.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var e events.Event
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("unmarshaling %q: %v", line, err)
+		}
+		if e.Type == events.WorkerOperation {
+			found = &e
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %q record in %s; log = %s", events.WorkerOperation, eventsPath, string(raw))
+	}
+	if !strings.Contains(string(found.Payload), info.SessionName) {
+		t.Fatalf("%q payload = %s, want it to name session %q", events.WorkerOperation, string(found.Payload), info.SessionName)
 	}
 }

@@ -990,6 +990,16 @@ var (
 // its long-lived controllerState.EventProvider() (internal/api/worker_factory.go:21).
 // Falls back to events.Discard when cityPath is empty or the provider
 // cannot be opened — telemetry must never block session lifecycle.
+//
+// A failed open is deliberately NOT memoized: a transient ENOSPC or a
+// mid-rotation rename would otherwise pin this city to events.Discard for the
+// rest of the process, silently disabling the very telemetry this path exists
+// to carry. The next factory construction retries.
+//
+// Wiring this recorder live has one visible side effect on the CLI path:
+// worker's operation telemetry re-enriches session identity after a runtime
+// mutation, so EnrichInfo now issues a trailing IsRunning probe that callers
+// (and tests) see after Start/Stop.
 func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
 	cityPath = strings.TrimSpace(cityPath)
 	if cityPath == "" {
@@ -1004,17 +1014,53 @@ func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder
 	if cfg != nil {
 		eventsCfg = cfg.Events
 	}
+	// The memo key is cityPath alone, but resolution also reads GC_EVENTS and
+	// cfg.Events: a controller hot-reload of [events].provider is not picked
+	// up by an already-memoized city.
 	if v := os.Getenv("GC_EVENTS"); v != "" {
 		eventsCfg.Provider = v
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	provider, err := newEventsProviderForNameWithConfig(eventsCfg.Provider, eventsPath, io.Discard, eventsCfg)
-	if err != nil || provider == nil {
-		cliFactoryRecorders[cityPath] = events.Discard
+	recorder, err := newCLIFactoryRecorder(eventsCfg, eventsPath)
+	if err != nil || recorder == nil {
 		return events.Discard
 	}
-	cliFactoryRecorders[cityPath] = provider
-	return provider
+	cliFactoryRecorders[cityPath] = recorder
+	return recorder
+}
+
+// newCLIFactoryRecorder opens the recorder behind cliFactoryEventsRecorder.
+//
+// The file-backed branch deliberately bypasses newFileEventsRecorder's rotation
+// options: the controller already holds one long-lived rotating recorder on
+// <city>/.gc/events.jsonl (cmd_start.go), and a city must keep exactly one.
+// FileRecorder.rotateLocked is close + rename + reopen on its own handle, so a
+// second rotating writer leaves the first appending into a rotating-* file that
+// gets gzipped away. events.WithMaxSize(0) makes this a secondary writer that
+// never rotates, and events.WithoutStartupSweep keeps it from racing the
+// long-lived recorder mid-rotation — a concurrent sweep can double-gzip the
+// same in-flight rotating-* file through a shared .tmp path. Neither option
+// makes the open free: NewFileRecorder reads the log directory either way, to
+// continue the sequence past the archives.
+//
+// The exec:/fake/fail branches carry no file handle at all, so they stay on the
+// shared newEventsProviderForNameWithConfig resolution.
+func newCLIFactoryRecorder(eventsCfg config.EventsConfig, eventsPath string) (events.Recorder, error) {
+	v := eventsCfg.Provider
+	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
+		return newEventsProviderForNameWithConfig(v, eventsPath, io.Discard, eventsCfg)
+	}
+	recorder, err := events.NewFileRecorder(
+		eventsPath,
+		io.Discard,
+		events.WithMaxSize(0),
+		events.WithoutStartupSweep(),
+	)
+	if err != nil {
+		// Never box a typed-nil *events.FileRecorder into events.Recorder.
+		return nil, err
+	}
+	return recorder, nil
 }
 
 // newUsageSinkByName returns a usage.Sink for the resolved provider name.
