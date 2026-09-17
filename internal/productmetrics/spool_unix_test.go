@@ -121,6 +121,39 @@ func TestRecordOnceWritesOneImmutableEventAndConservativeQuotaWithoutScanning(t 
 	}
 }
 
+// TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget proves the
+// lock deadline is real wall-clock time even though the frozen test clock
+// reports the full decision budget as always remaining: a genuine state.lock
+// hold longer than defaultRecordDecisionBudget must not make RecordOnce
+// drop the event.
+func TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget(t *testing.T) {
+	home, service, permit := newRecordServiceFixture(t, testEventIDOne)
+
+	holder := mustOpenMutableRoot(t, home)
+	defer func() { _ = holder.Close() }()
+	lock, err := holder.acquireLock(context.Background(), stateLockName)
+	if err != nil {
+		t.Fatalf("acquire contending lock: %v", err)
+	}
+
+	const holdDuration = 200 * time.Millisecond
+	if holdDuration <= defaultRecordDecisionBudget {
+		t.Fatalf("test hold %v must exceed defaultRecordDecisionBudget %v", holdDuration, defaultRecordDecisionBudget)
+	}
+	var wait sync.WaitGroup
+	wait.Add(1)
+	go func() {
+		defer wait.Done()
+		time.Sleep(holdDuration)
+		_ = lock.Release()
+	}()
+	t.Cleanup(wait.Wait)
+
+	if got := service.RecordOnce(permit, CommandHelp); got != RecordStored {
+		t.Fatalf("RecordOnce = %v, want stored (a real %v lock hold must not defeat the frozen-clock %v decision budget)", got, holdDuration, defaultRecordDecisionBudget)
+	}
+}
+
 func TestRecordOnceMissingQuotaRequiresExactEmptySpoolProof(t *testing.T) {
 	for _, test := range []struct {
 		name  string
