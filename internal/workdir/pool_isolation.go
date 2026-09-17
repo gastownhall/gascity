@@ -29,7 +29,7 @@ import (
 func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Agent, rigs []config.Rig) error {
 	for i := range agents {
 		a := agents[i]
-		if !requiresPoolWorkDirIsolationCheck(a) {
+		if !RequiresPoolWorkDirIsolationCheck(a) {
 			continue
 		}
 
@@ -56,7 +56,7 @@ func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Age
 	return nil
 }
 
-// requiresPoolWorkDirIsolationCheck reports whether the agent carries an
+// RequiresPoolWorkDirIsolationCheck reports whether the agent carries an
 // explicit configuration signal that it may run more than one concurrently
 // active session — as opposed to merely defaulting to an unset
 // max_active_sessions, which SupportsExpandedSessionIdentities treats as
@@ -64,7 +64,12 @@ func ValidatePoolWorkDirIsolation(cityPath, cityName string, agents []config.Age
 // ordinary shape of a default singleton/named-session agent. Isolation
 // enforcement needs the narrower, explicit-only reading so it does not hard
 // fail every minimally-configured agent that never opted into pooling.
-func requiresPoolWorkDirIsolationCheck(a config.Agent) bool {
+//
+// Exported for reuse by callers outside this package that need the same
+// narrow "explicit pool signal" reading — e.g. cmd/gc's MCP-projection
+// session-specific-target heuristic, which must agree with this package on
+// which agents get isolated per-instance working directories.
+func RequiresPoolWorkDirIsolationCheck(a config.Agent) bool {
 	if !a.SupportsExpandedSessionIdentities() {
 		return false
 	}

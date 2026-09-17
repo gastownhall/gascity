@@ -141,7 +141,7 @@ func TestValidatePoolWorkDirIsolationRejectsUnlimitedMaxActiveSessionsWithShared
 // min_active_sessions, scale_check, namepool, or work_dir at all. Nothing in
 // today's system spontaneously creates a second concurrent "mayor" instance
 // for that shape, so it must not be hard-rejected merely because
-// max_active_sessions was never set (see requiresPoolWorkDirIsolationCheck).
+// max_active_sessions was never set (see RequiresPoolWorkDirIsolationCheck).
 func TestValidatePoolWorkDirIsolationAcceptsUnsetMaxActiveSessionsWithoutExplicitPoolSignal(t *testing.T) {
 	cityPath := t.TempDir()
 	agents := []config.Agent{{
