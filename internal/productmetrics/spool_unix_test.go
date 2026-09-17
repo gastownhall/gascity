@@ -157,6 +157,29 @@ func TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget(t *testing.T
 	}
 }
 
+// TestOpenWithDependenciesDefaultWithDeadlineUsesRealWallClockBudget covers the
+// non-fixture side of the decision-budget contract: with no withDeadline
+// override, openWithDependencies defaults it to context.WithTimeout
+// (service.go:403-404), and spool.go:215 calls it as
+// service.deps.withDeadline(context.Background(), remaining). This calls it
+// the same way, with no manufactured delay, so it cannot flake.
+func TestOpenWithDependenciesDefaultWithDeadlineUsesRealWallClockBudget(t *testing.T) {
+	home := newMetricsTestHome(t)
+	deps := defaultTestServiceDependencies(home, 2)
+	service := mustOpenTestService(t, deps)
+
+	ctx, cancel := service.deps.withDeadline(context.Background(), defaultRecordDecisionBudget)
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("unoverridden withDeadline default did not attach a deadline to the context")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > defaultRecordDecisionBudget {
+		t.Fatalf("time.Until(deadline) = %v, want in (0, %v] (the unoverridden default must carry a real wall-clock deadline)", remaining, defaultRecordDecisionBudget)
+	}
+}
+
 func TestRecordOnceMissingQuotaRequiresExactEmptySpoolProof(t *testing.T) {
 	for _, test := range []struct {
 		name  string
