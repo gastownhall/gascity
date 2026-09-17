@@ -49,8 +49,8 @@ func TestKindPathNamesAreUnique(t *testing.T) {
 // this test runs without a live claude binary.
 func TestKindPathNamesWorkThroughFakeProviderLifecycle(t *testing.T) {
 	session, agent := kindPathNames()
-	p, _, _ := newFakeHerdrProviderForSession(t, session)
-	listenHerdrSocket(t, session)
+	p, _ := newFakeHerdrProviderForSession(t, session)
+	listenHerdrSocket(t, p)
 
 	ctx := context.Background()
 	cfg := runtime.Config{

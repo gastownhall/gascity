@@ -66,6 +66,16 @@ base            = "builtin:claude"
 option_defaults = { model = "haiku" }
 ```
 
+When `command` points to a launcher wrapper, also set `resume_command` to
+invoke that wrapper with the harness's resume arguments and `{{.SessionKey}}`.
+The inherited resume command is a separate setting; changing `command` alone
+can leave resumed sessions launching the original executable.
+
+If a wrapper redirects the harness to a private configuration directory,
+prepare required startup state in that directory too. Verify a fresh interactive
+launch as well as resume: a non-interactive prompt can skip first-run screens
+that would block an interactive agent.
+
 For copy-paste setup of each built-in harness — the env vars it reads and the
 direct / custom-endpoint / model permutations — see
 [Harness Recipes](/guides/harness-recipes). See

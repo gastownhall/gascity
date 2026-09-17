@@ -40,7 +40,7 @@ func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 // newFakeHerdrProviderForSession is newFakeHerdrProvider with caller-supplied
 // session naming, for callers (e.g. kindpath_live_test.go) that must exercise
 // their own generated names rather than this file's own sequence.
-func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string, string) {
+func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string) {
 	t.Helper()
 	state := t.TempDir()
 	metaDir := t.TempDir()
