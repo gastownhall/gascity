@@ -66,6 +66,9 @@ func TestRecordOnceWritesOneImmutableEventAndConservativeQuotaWithoutScanning(t 
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDOne)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	var enumerations int
 	deps.storageHooks.beforeStep = func(step storageStep) error {
 		if step == storageStepEnumerate {
@@ -573,6 +576,9 @@ func TestRecordOnceSpentBudgetAfterReservationLeavesOnlySafeOvercount(t *testing
 	start := testRecordHour
 	current := start
 	deps.now = func() time.Time { return current }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	deps.beforeRecordOperation = func(operation recordOperation) {
 		if operation == recordOperationQueueOpen {
 			current = start.Add(defaultRecordDecisionBudget + time.Nanosecond)
@@ -10107,6 +10113,9 @@ func TestEventInstallCrashWindowCannotLeaveTwoNamesForOneReservation(t *testing.
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, testEventIDTwo)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	secondService := mustOpenTestService(t, deps)
 	secondPermit := secondService.RecordingPermit(recordableInvocationAt(testRecordHour))
 	secondResult := secondService.RecordOnce(secondPermit, CommandVersion)
@@ -11104,6 +11113,9 @@ func newRecordServiceFixture(t *testing.T, eventID string) (gchome.ProductUsageH
 	deps := defaultTestServiceDependencies(home, 2)
 	deps.newUUID = uuidSequence(t, eventID)
 	deps.now = func() time.Time { return testRecordHour }
+	deps.withDeadline = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	service := mustOpenTestService(t, deps)
 	permit := service.RecordingPermit(recordableInvocationAt(testRecordHour))
 	if !permit.Valid() {
