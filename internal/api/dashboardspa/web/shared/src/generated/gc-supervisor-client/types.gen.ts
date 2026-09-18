@@ -280,12 +280,14 @@ export type BackendCredentialResolvedPayload = {
 };
 
 export type Bead = {
+    acceptance_criteria?: string;
     assignee?: string;
     created_at: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
     ephemeral?: boolean;
+    external_ref?: string;
     from?: string;
     id: string;
     is_blocked?: boolean;

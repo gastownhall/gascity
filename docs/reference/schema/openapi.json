@@ -901,6 +901,9 @@
       "Bead": {
         "additionalProperties": false,
         "properties": {
+          "acceptance_criteria": {
+            "type": "string"
+          },
           "assignee": {
             "type": "string"
           },
@@ -926,6 +929,9 @@
           },
           "ephemeral": {
             "type": "boolean"
+          },
+          "external_ref": {
+            "type": "string"
           },
           "from": {
             "type": "string"

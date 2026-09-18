@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 207,
+  "next_id": 209,
   "permanent_ids": [
     {
       "name": "help",
@@ -334,6 +334,40 @@
       "classification": "beads-show",
       "owner": "immediate",
       "id": 16
+    },
+    {
+      "path": "gc beads snapshot",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-snapshot",
+      "owner": "immediate",
+      "id": 208
+    },
+    {
+      "path": "gc beads update-cas",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-update-cas",
+      "owner": "immediate",
+      "id": 207
     },
     {
       "path": "gc build-image",

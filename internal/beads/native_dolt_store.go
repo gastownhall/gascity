@@ -1075,6 +1075,19 @@ func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
 
 // Get retrieves a bead by ID from the upstream beads storage layer.
 func (s *NativeDoltStore) Get(id string) (Bead, error) {
+	return s.get(id, false)
+}
+
+// ReadUpdateCASBead is the narrow exact-store readback used by the
+// revision-guarded projection command. Gas City's ordinary Store view
+// intentionally normalizes blocked/deferred/hooked statuses for scheduler
+// semantics; a whole-row CAS must instead compare the exact persisted status
+// or it cannot distinguish a successful write from a conflict.
+func (s *NativeDoltStore) ReadUpdateCASBead(id string) (Bead, error) {
+	return s.get(id, true)
+}
+
+func (s *NativeDoltStore) get(id string, preserveUpstreamStatus bool) (Bead, error) {
 	var out Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
 		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
@@ -1089,6 +1102,9 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 				bead, err := beadFromNativeIssue(issue)
 				if err != nil {
 					return err
+				}
+				if preserveUpstreamStatus {
+					bead.Status = string(issue.Status)
 				}
 				out = bead
 				return nil
@@ -2037,6 +2053,12 @@ func (s *NativeDoltStore) nativeUpdates(ctx context.Context, storage nativeIssue
 	if opts.Description != nil {
 		updates["description"] = *opts.Description
 	}
+	if opts.AcceptanceCriteria != nil {
+		updates["acceptance_criteria"] = *opts.AcceptanceCriteria
+	}
+	if opts.ExternalRef != nil {
+		updates["external_ref"] = *opts.ExternalRef
+	}
 	if opts.Assignee != nil {
 		updates["assignee"] = *opts.Assignee
 	}
@@ -2383,19 +2405,23 @@ func nativeIssueFromBead(b Bead) (*beadslib.Issue, error) {
 		issueType = "task"
 	}
 	issue := &beadslib.Issue{
-		ID:          b.ID,
-		Title:       b.Title,
-		Description: b.Description,
-		Status:      beadslib.Status(status),
-		IssueType:   beadslib.IssueType(issueType),
-		Assignee:    b.Assignee,
-		Sender:      b.From,
-		CreatedAt:   b.CreatedAt,
-		Labels:      append([]string(nil), b.Labels...),
-		Ephemeral:   b.Ephemeral,
-		NoHistory:   b.NoHistory,
-		DeferUntil:  cloneTimePtr(b.DeferUntil),
-		RowVersion:  b.Revision,
+		ID:                 b.ID,
+		Title:              b.Title,
+		Description:        b.Description,
+		AcceptanceCriteria: b.AcceptanceCriteria,
+		Status:             beadslib.Status(status),
+		IssueType:          beadslib.IssueType(issueType),
+		Assignee:           b.Assignee,
+		Sender:             b.From,
+		CreatedAt:          b.CreatedAt,
+		Labels:             append([]string(nil), b.Labels...),
+		Ephemeral:          b.Ephemeral,
+		NoHistory:          b.NoHistory,
+		DeferUntil:         cloneTimePtr(b.DeferUntil),
+		RowVersion:         b.Revision,
+	}
+	if b.ExternalRef != "" {
+		issue.ExternalRef = &b.ExternalRef
 	}
 	if b.Priority != nil {
 		issue.Priority = *b.Priority
@@ -2456,6 +2482,8 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		Assignee:             issue.Assignee,
 		From:                 issue.Sender,
 		Description:          issue.Description,
+		AcceptanceCriteria:   issue.AcceptanceCriteria,
+		ExternalRef:          nativeExternalRef(issue),
 		Labels:               append([]string(nil), issue.Labels...),
 		Metadata:             metadata,
 		Ephemeral:            issue.Ephemeral,
@@ -2479,6 +2507,13 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		}
 	}
 	return b, nil
+}
+
+func nativeExternalRef(issue *beadslib.Issue) string {
+	if issue == nil || issue.ExternalRef == nil {
+		return ""
+	}
+	return *issue.ExternalRef
 }
 
 func isNativeIssueMetadataParseError(err error) bool {

@@ -261,7 +261,7 @@ func validateJSONAgainstResultSchemaE(command []string, data []byte) error {
 		return fmt.Errorf("parse payload for %v: %w", command, err)
 	}
 	compiler := jsonschema.NewCompiler()
-	schemaURL := strings.Join(command, "/") + "/result.schema.json"
+	schemaURL := "gc://schemas/" + strings.Join(command, "/") + "/result.schema.json"
 	if err := compiler.AddResource(schemaURL, schemaDoc); err != nil {
 		return fmt.Errorf("add schema resource for %v: %w", command, err)
 	}

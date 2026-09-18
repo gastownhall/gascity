@@ -939,6 +939,7 @@ func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool strin
 		"-f", f.productionMakefile,
 		"GOLANGCI_LINT="+f.fakeLint,
 		"CI_STATIC_GO="+goTool,
+		"CI_STATIC_SELECT="+filepath.Join(filepath.Dir(f.productionMakefile), "scripts", "ci-static-select"),
 		"LINT_CHANGED_SCOPE=tracked",
 		"LINT_CHANGED_REF="+ref,
 		"LINT_FLAGS=",

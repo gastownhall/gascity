@@ -1,0 +1,62 @@
+# Exact-store revision-guarded row update user contract.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+cd $WORK/city
+
+# A live positive revision and request file are mandatory.
+! exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=0 --request-file=patch.json --json
+stdout '"ok":false'
+stderr 'nonzero opaque token'
+
+# A win, its safe replay, and an ordinary conflict all exit zero.
+exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=1 --request-file=patch.json --json
+stdout '^\{"schema_version":"1","ok":true,"bead_id":"gc-1","store_ref":"city:city","outcome":"updated","expected_revision":1,"revision":2\}$'
+! stdout 'projected title'
+
+exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=1 --request-file=patch.json --format=json
+stdout '"outcome":"already_applied"'
+stdout '"revision":2'
+
+exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=1 --request-file=conflict.json --json
+stdout '"outcome":"conflict"'
+stdout '"revision":2'
+! stdout 'losing title'
+
+# Stdin carries free-form content without placing it in argv.
+stdin metadata.json
+exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=2 --request-file=- --json
+stdout '"outcome":"updated"'
+stdout '"revision":3'
+
+# Unknown fields fail before a store mutation.
+! exec gc beads update-cas gc-1 --store-ref=city:city --expected-revision=3 --request-file=unknown.json --json
+stdout '"ok":false'
+stderr 'unknown field'
+
+exec gc beads update-cas --help
+stdout '--store-ref'
+stdout '--expected-revision'
+stdout '--request-file'
+stdout '--json'
+
+-- city/city.toml --
+[workspace]
+name = "city"
+
+[beads]
+provider = "file"
+-- city/.gc/file-beads-layout --
+scope-local-v1
+-- city/.gc/beads.json --
+{"seq":1,"beads":[{"id":"gc-1","title":"base","status":"open","issue_type":"task"}],"revisions":{"gc-1":1},"revisions_sealed":true}
+-- city/patch.json --
+{"title":"projected title","description":"projected body","status":"in_progress","priority":1,"type":"feature","metadata":{"github.projection_hash":"sha256:abc"}}
+-- city/conflict.json --
+{"title":"losing title"}
+-- city/metadata.json --
+{"metadata":{"github.delivery_id":"delivery-1"}}
+-- city/unknown.json --
+{"labels":["not-row-backed"]}

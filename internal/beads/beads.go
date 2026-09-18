@@ -135,11 +135,13 @@ type Bead struct {
 	// ga-6od57 tracks making the provider comply or un-skipping that run; until
 	// one of them lands, a caller pointing a bd-backed store at a parent in
 	// another ledger gets a refusal, not a weak reference.
-	ParentID    string   `json:"parent,omitempty"`
-	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
-	Needs       []string `json:"needs,omitempty"`       // dependency step refs
-	Description string   `json:"description,omitempty"` // step instructions
-	Labels      []string `json:"labels,omitempty"`
+	ParentID           string   `json:"parent,omitempty"`
+	Ref                string   `json:"ref,omitempty"`                 // formula step ID or formula name
+	Needs              []string `json:"needs,omitempty"`               // dependency step refs
+	Description        string   `json:"description,omitempty"`         // step instructions
+	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"` // completion contract
+	ExternalRef        string   `json:"external_ref,omitempty"`        // stable external tracker binding
+	Labels             []string `json:"labels,omitempty"`
 	// Metadata uses StringMap (not map[string]string) so decode tolerates the
 	// non-string JSON values the external bd CLI emits — `--set-metadata
 	// key=true` is type-inferred to a JSON boolean, and a strict decode of a
@@ -212,16 +214,18 @@ type Bead struct {
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
 type UpdateOpts struct {
-	Title        *string // set title (nil = no change)
-	Status       *string // set status (nil = no change)
-	Type         *string // set issue type (nil = no change)
-	Priority     *int    // set priority (nil = no change)
-	Description  *string
-	ParentID     *string
-	Assignee     *string  // set assignee (nil = no change)
-	Labels       []string // append these labels (nil = no change)
-	RemoveLabels []string // remove these labels (nil = no change)
-	Metadata     map[string]string
+	Title              *string // set title (nil = no change)
+	Status             *string // set status (nil = no change)
+	Type               *string // set issue type (nil = no change)
+	Priority           *int    // set priority (nil = no change)
+	Description        *string
+	AcceptanceCriteria *string
+	ExternalRef        *string
+	ParentID           *string
+	Assignee           *string  // set assignee (nil = no change)
+	Labels             []string // append these labels (nil = no change)
+	RemoveLabels       []string // remove these labels (nil = no change)
+	Metadata           map[string]string
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
@@ -370,7 +374,8 @@ func validateConditionalUpdateOpts(o UpdateOpts) error {
 // isEmptyUpdateOpts reports whether opts carries no mutation at all.
 func isEmptyUpdateOpts(o UpdateOpts) bool {
 	return o.Title == nil && o.Status == nil && o.Type == nil && o.Priority == nil &&
-		o.Description == nil && o.ParentID == nil && o.Assignee == nil &&
+		o.Description == nil && o.AcceptanceCriteria == nil && o.ExternalRef == nil &&
+		o.ParentID == nil && o.Assignee == nil &&
 		len(o.Labels) == 0 && len(o.RemoveLabels) == 0 && len(o.Metadata) == 0
 }
 
