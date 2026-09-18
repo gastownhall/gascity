@@ -847,6 +847,42 @@ func TestCmdMailSendFromRejectsUnresolvableCallerIdentity(t *testing.T) {
 	}
 }
 
+// TestCmdMailSendFromRejectsOverriddenAliasWhenSessionIDResolves pins the
+// candidate order: GC_SESSION_ID is resolved before GC_ALIAS, so a live
+// session that overrides only GC_ALIAS=mayor is still itself and cannot
+// claim --from mayor. Clearing every identity var still reads as the
+// operator (TestCmdMailSendFromHumanAllowedForInteractiveHuman); this check
+// is a guard, not authentication.
+func TestCmdMailSendFromRejectsOverriddenAliasWhenSessionIDResolves(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "mayor")
+	t.Setenv("GC_SESSION_ID", "worker-session")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+	createMailIdentitySession(t, store, "test-city/worker", "worker", "worker-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "forged advisory", "not really from mayor", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from mayor, GC_SESSION_ID=worker-session, GC_ALIAS=mayor) = 0, want non-zero; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "does not match this session's own identity") {
+		t.Fatalf("stderr = %q, want own-identity rejection", stderr.String())
+	}
+}
+
 // TestCmdMailSendFromHumanRejectedForLiveAgentSession closes the reserved
 // "human" bucket as a --from bypass: "human" is the operator's identity, so a
 // live agent session claiming it forges operator-authority mail just as
