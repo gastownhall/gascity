@@ -1,6 +1,7 @@
 # Converted from formula+pool to exec. All reaper operations are
 # deterministic: SQL age comparisons, gc bd close, count thresholds.
 # No LLM judgment needed — runs inline in the controller.
+# GC_REAPER_STALE_ISSUE_AGE defaults to 720h; off, never, or 0 (case-insensitive, trimmed) disables only age-based issue closes.
 [order]
 description = "Reap stale wisps and purge closed molecules"
 exec = "$PACK_DIR/assets/scripts/reaper.sh"

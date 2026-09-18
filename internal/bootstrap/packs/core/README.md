@@ -27,6 +27,12 @@ none requires per-city configuration.
 
 The **event-driven nudge orders** are documented in detail below.
 
+## Reaper thresholds
+
+`GC_REAPER_STALE_ISSUE_AGE` defaults to `720h`; set it to `off`, `never`, or `0`
+(case-insensitive, with surrounding whitespace ignored) to disable age-based
+issue closes while retaining wisp cleanup, purge, and `expires_at` closes.
+
 ## `nudge-on-route`
 
 **Why.** `gc sling` does not nudge warm-idle workers (issue #1129, closed by

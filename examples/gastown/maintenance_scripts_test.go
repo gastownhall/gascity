@@ -6972,6 +6972,83 @@ exit 0
 	}
 }
 
+// Disabling stale closes must skip the age query in every database while
+// retaining TTL queries and reporting the configured value only once per run.
+func TestReaperStaleCloseDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		age         string
+		dryRun      string
+		disabled    bool
+		noDatabases bool
+	}{
+		{name: "off dry run", age: "off", dryRun: "1", disabled: true},
+		{name: "never", age: "never", disabled: true},
+		{name: "zero", age: "0", disabled: true},
+		{name: "trimmed mixed case off", age: " \tOfF \r\n", disabled: true},
+		{name: "trimmed mixed case never", age: " \tNeVeR \r\n", disabled: true},
+		{name: "trimmed zero", age: " \t0 \r\n", disabled: true},
+		{name: "positive duration", age: "48h"},
+		{name: "off without databases", age: "off", dryRun: "1", disabled: true, noDatabases: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if !tc.noDatabases {
+				writeCityBeadsMetadata(t, cityDir, "citydb")
+			}
+			binDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GC_CALL_LOG\"\n")
+			databases := "citydb rigdb"
+			if tc.noDatabases {
+				databases = "information_schema"
+			}
+			out, err := runScriptResult(t, coreScriptPath("reaper.sh"), map[string]string{
+				"GC_CITY":                    cityDir,
+				"GC_CITY_PATH":               cityDir,
+				"GC_DOLT_HOST":               "127.0.0.1",
+				"GC_DOLT_PORT":               "3307",
+				"GC_DOLT_USER":               "root",
+				"GC_DOLT_PASSWORD":           "",
+				"GC_REAPER_STALE_ISSUE_AGE":  tc.age,
+				"GC_REAPER_DRY_RUN":          tc.dryRun,
+				"GC_MAINTENANCE_DONE_TARGET": "",
+				"DOLT_DBS":                   databases,
+				"DOLT_ARGS_LOG":              doltLog,
+				"GC_CALL_LOG":                gcLog,
+				"PATH":                       binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			})
+			if err != nil {
+				t.Fatalf("reaper failed: %v\n%s", err, out)
+			}
+			queries, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(queries), "updated_at < DATE_SUB"); got == tc.disabled {
+				t.Errorf("stale age query present = %v, disabled = %v", got, tc.disabled)
+			}
+			if !tc.noDatabases && !strings.Contains(string(queries), "STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '$.expires_at'))") {
+				t.Error("disabling stale closes must retain the expires_at query")
+			}
+			text := string(out)
+			if tc.disabled {
+				want := "stale_issue_close:disabled (GC_REAPER_STALE_ISSUE_AGE=" + strings.TrimSpace(tc.age) + ")"
+				if strings.Count(text, want) != 1 {
+					t.Errorf("want exactly one disabled summary %q, got:\n%s", want, text)
+				}
+				if !strings.Contains(text, "closed:0,") || !strings.Contains(text, "skipped_non_city_issues:0,") {
+					t.Errorf("disabled stale close changed counters:\n%s", text)
+				}
+			} else if strings.Contains(text, "stale_issue_close:disabled") {
+				t.Errorf("positive duration unexpectedly disabled stale closes:\n%s", text)
+			}
+		})
+	}
+}
+
 func TestReaperOrderAndScriptDefaults(t *testing.T) {
 	scriptPath := coreScriptPath("reaper.sh")
 	scriptData, err := os.ReadFile(scriptPath)
