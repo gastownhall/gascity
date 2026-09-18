@@ -400,7 +400,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	} {
 		t.Setenv(key, "")
 	}
-	t.Setenv("HOME", t.TempDir())
+	testOwnedHome(t)
 	t.Setenv("BD_BACKUP_ENABLED", "false")
 	t.Setenv("BEADS_BACKUP_ENABLED", "false")
 
@@ -423,8 +423,8 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		return out
 	}
 
-	targetDir := t.TempDir()
-	decoyDir := t.TempDir()
+	targetDir := guardedTempDir(t)
+	decoyDir := guardedTempDir(t)
 	var targetPort, decoyPort string
 	t.Cleanup(func() {
 		for _, store := range []struct {
@@ -439,7 +439,6 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 				env = customTypesTestEnv(env, "127.0.0.1", store.port)
 			}
 			_, _ = runBD(store.dir, env, "dolt", "stop")
-			retryRemoveAllForTest(t, store.dir, os.RemoveAll)
 		}
 	})
 
