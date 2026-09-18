@@ -782,13 +782,13 @@ func TestCmdMailSendFromAllowsSelfIdentity(t *testing.T) {
 	}
 }
 
-// TestCmdMailSendFromControllerAllowedEvenWithLiveCallerIdentity guards the
-// reserved-identity exemption: the "controller" bucket (the documented
-// pattern for scripted automation, e.g. examples/bd/dolt/commands/compact/
-// run.sh's quarantine alert) must stay usable by a live agent session, not
-// only by an env-empty interactive human -- the #4070 fix must not narrow
-// this existing, intentional escape hatch.
-func TestCmdMailSendFromControllerAllowedEvenWithLiveCallerIdentity(t *testing.T) {
+// TestCmdMailSendFromControllerRejectedForLiveAgentSession guards the
+// reserved "controller" bucket: it is a structured sender identity, so a
+// live agent session must not claim it. Scripted automation (e.g. the exec
+// order behind examples/bd/dolt/commands/compact/run.sh) runs with the
+// supervisor's environment, carries no session env vars, and keeps using
+// --from controller (TestCmdMailSendFromControllerCreatesMessage).
+func TestCmdMailSendFromControllerRejectedForLiveAgentSession(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")
 	t.Setenv("GC_ALIAS", "worker")
@@ -809,8 +809,11 @@ func TestCmdMailSendFromControllerAllowedEvenWithLiveCallerIdentity(t *testing.T
 
 	var stdout, stderr bytes.Buffer
 	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "quarantine alert", "dolt compact quarantine", &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdMailSend(--from controller, caller=worker) = %d, want 0 (reserved identity must stay exempt); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from controller, caller=worker) = 0, want nonzero (live agent must not claim controller); stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "does not match this session's own identity") {
+		t.Fatalf("stderr = %q, want own-identity rejection", stderr.String())
 	}
 }
 
