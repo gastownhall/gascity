@@ -7447,6 +7447,10 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -7475,6 +7479,10 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 	if err := os.MkdirAll(sockPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
+	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// cleanup will not reap it.
+	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
