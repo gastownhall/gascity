@@ -111,6 +111,14 @@ type CityRuntime struct {
 	watchMu      sync.Mutex
 	watchCleanup func()
 
+	// nudgeDispatcherActive mirrors, for cross-goroutine reads by the
+	// controller socket's identity command, whether this runtime is
+	// currently hosting the supervisor-mode nudge dispatcher. Kept in sync
+	// with cfg on construction and on every reload commit (see
+	// nudgeDispatcherIsSupervisor). May be nil in tests that build a
+	// CityRuntime directly without going through runController/gc supervisor.
+	nudgeDispatcherActive *atomic.Bool
+
 	serviceStateMu          sync.RWMutex
 	cfg                     *config.City
 	sp                      runtime.Provider
@@ -287,6 +295,11 @@ type CityRuntimeParams struct {
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
+	// NudgeDispatcherActive, when set, is kept in sync with the runtime's
+	// live cfg (construction and every reload commit) so the controller
+	// socket's identity command can report supervisor-dispatch hosting from
+	// another goroutine without racing cfg itself. May be nil.
+	NudgeDispatcherActive *atomic.Bool
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
@@ -364,6 +377,11 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if configDirty == nil {
 		configDirty = &atomic.Bool{}
 	}
+	nudgeDispatcherActive := p.NudgeDispatcherActive
+	if nudgeDispatcherActive == nil {
+		nudgeDispatcherActive = &atomic.Bool{}
+	}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(p.Cfg))
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
@@ -420,6 +438,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		nudgeDispatcherActive:   nudgeDispatcherActive,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -2262,6 +2281,9 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.sp = nextSp
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
+	if cr.nudgeDispatcherActive != nil {
+		cr.nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(nextCfg))
+	}
 	cr.demandSnapshot = nil
 
 	// Re-point the session-event pump at the new provider's stream (or

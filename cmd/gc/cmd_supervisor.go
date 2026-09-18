@@ -2254,6 +2254,8 @@ func startOneCity(
 	configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 	pokeCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
+	nudgeDispatcherActive := &atomic.Bool{}
+	nudgeDispatcherActive.Store(nudgeDispatcherIsSupervisor(cfg))
 	forceShutdown := &atomic.Bool{}
 	reloadReqCh := make(chan reloadRequest)
 	cityCtx, cityCancel := context.WithCancel(context.Background())
@@ -2273,6 +2275,7 @@ func startOneCity(
 			WatchTargets:            watchTargets,
 			ConfigRev:               configRev,
 			ConfigDirty:             configDirty,
+			NudgeDispatcherActive:   nudgeDispatcherActive,
 			Cfg:                     cfg,
 			SP:                      sp,
 			Publication:             publication,
@@ -2443,7 +2446,7 @@ func startOneCity(
 	// Start controller socket AFTER the alreadyRunning check so we
 	// never destroy a live city's socket or leak a listener.
 	sockPath := controllerSocketPath(path)
-	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, lisErr := startControllerSocket(path, controllerHostingSupervisor, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, nudgeDispatcherActive)
 	if lisErr != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 		lock.Close()                                                                               //nolint:errcheck // no socket to race with
