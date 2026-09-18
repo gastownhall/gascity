@@ -1383,11 +1383,12 @@ func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.
 }
 
 // mailSenderAuthorizedCached reports whether the calling session may claim
-// resolvedSender as its --from identity (#4070). Reserved identities
-// (human, controller) are exempt: they're generic buckets, not another live
-// session's specific mailbox, and "--from controller" is the documented
-// pattern for scripted automation (e.g.
-// examples/bd/dolt/commands/compact/run.sh's quarantine alert). A caller
+// resolvedSender as its --from identity (#4070). The reserved "controller"
+// bucket is exempt: "--from controller" is the documented pattern for
+// scripted automation (e.g. examples/bd/dolt/commands/compact/run.sh's
+// quarantine alert). The reserved "human" bucket is NOT exempt: it is the
+// operator's identity, so a live agent claiming it forges operator
+// authority exactly as claiming a coordinator's mailbox would. A caller
 // with no live-session env vars set at all (own identity resolves to
 // "human", an interactive terminal user) is exempt too -- shell access to
 // the city is already a stronger trust boundary than mail-sender identity,
@@ -1404,7 +1405,7 @@ func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.
 // comes from GC_SESSION_ID/GC_ALIAS/GC_AGENT, which the caller controls, and
 // a caller that clears all three resolves as "human" and is exempt by design.
 func mailSenderAuthorizedCached(cityPath string, cfg *config.City, store beads.Store, resolvedSender string, cache *mailIdentitySessionCache) bool {
-	if _, reserved := reservedMailSenderIdentity(resolvedSender); reserved {
+	if resolvedSender == controllerMailIdentity {
 		return true
 	}
 	own, ok := callerOwnMailIdentityCached(cityPath, cfg, store, cache)
@@ -1849,7 +1850,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 		} else {
 			sender = defaultMailIdentity()
 		}
-	} else if sender != "human" && store != nil {
+	} else if store != nil {
 		requested := sender
 		resolved, resolveErr := resolveMailIdentityWithConfigCached(cityPath, cfg, sessStore, requested, idCache)
 		if resolveErr != nil {
