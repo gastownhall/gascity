@@ -1,0 +1,1 @@
+- 2026-09-18 - Convoy child status projection repair - Upstream PR 6463 resolves authoritative convoy child status across city and rig stores - HANDOFF-2026-09-18-115315-26067.md — key:pr-6463
