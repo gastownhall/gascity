@@ -1812,32 +1812,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Phase 1: Forward pass (topo order) — wake sessions, handle alive state.
 	var startCandidates []startCandidate
 	var wakeTargets []wakeTarget
-	// Rate-limit rollbacks per tick. Each rollbackPendingCreate fires three
-	// bd subprocess calls (~2s each at the bd dolt-commit cost), so an
-	// unbounded rollback storm easily blows the tick past
-	// staleCreatingStateTimeout (60s) and starves executePlannedStartsTraced
-	// — fresh pending-create beads age out before op=start fires. Capping
-	// rollbacks per tick lets the rest of the tick make forward progress;
-	// remaining stale beads roll back on subsequent ticks.
-	const maxRollbacksPerTick = 5
 	rollbacksThisTick := 0
 	// attemptRollbackPendingCreate returns the metadata batch the rollback mirrored
-	// onto the raw bead (nil when the per-tick budget is exhausted, i.e. nothing was
-	// rolled back), so each forward-pass caller can fold it onto the typed snapshot
-	// (Step 6d write-returns-Info). The batch carries NO Closed change: the close is
-	// store-only, so a raw re-projection of *session still sees it open — the fold
-	// must match that.
+	// onto the raw bead, so each forward-pass caller can fold it onto the typed
+	// snapshot (Step 6d write-returns-Info). The batch carries NO Closed change:
+	// the close is store-only, so a raw re-projection of *session still sees it
+	// open — the fold must match that.
 	attemptRollbackPendingCreate := func(info sessionpkg.Info, templateName, name, action, detail string, clearClaim bool) map[string]string {
-		if rollbacksThisTick >= maxRollbacksPerTick {
-			fmt.Fprintf(stderr, "session reconciler: deferring rollback of %s (%s): rollback budget exhausted this tick\n", name, detail) //nolint:errcheck
-			if trace != nil {
-				trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonCode(action), TraceOutcomeRollbackDeferred, templateName, name, traceRecordPayload{
-					"rollbacks_this_tick":    rollbacksThisTick,
-					"max_rollbacks_per_tick": maxRollbacksPerTick,
-				})
-			}
-			return nil
-		}
 		rollbacksThisTick++
 		fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: %s\n", name, detail) //nolint:errcheck
 		if trace != nil {
@@ -2467,6 +2448,39 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"store_query_partial":          storeQueryPartial,
 								"defer_session_closes_on_boot": reconcileOpts.deferSessionClosesOnBoot,
 							})
+						}
+						continue
+					}
+					// ga-n2d Gap B: a process-dead bead squatting a configured
+					// named-session runtime name without being that identity's
+					// canonical owner is a phantom. The guarded close below
+					// refuses it because work is assigned to the squatted
+					// identity — but that work belongs to the configured
+					// identity, not this dead bead, so closing frees the runtime
+					// name and a fresh canonical bead re-adopts the work and
+					// respawns (restart-free). Healthy asleep canonical sessions
+					// are preserved upstream and excluded by the predicate.
+					if identity, ok := recyclableDeadConfiguredNamePhantomInfo(infoByID[id], cfg, cityName); ok {
+						// The work belongs to the configured identity, not this
+						// dead bead. Preserve both forms a claim can carry
+						// (namedSessionAssigneeMatchesSpec): the qualified
+						// identity and its runtime session name — exactly the
+						// forms namedWorkReady needs intact to re-materialize
+						// the canonical bead. Under the default (empty)
+						// session_template the two coincide; a template that
+						// prefixes the city makes them diverge.
+						preserve := []string{identity}
+						if rn := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity); rn != "" && rn != identity {
+							preserve = append(preserve, rn)
+						}
+						if closeBeadPreservingAssignees(store, id, reason, preserve, clk.Now().UTC(), stderr) {
+							tick.markClosed(id)
+							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerRecycleNamedPhantom, TraceReasonCode(reason), TraceOutcomeRecycled, template, name, traceRecordPayload{
+									"identity": identity,
+								})
+							}
 						}
 						continue
 					}
@@ -3812,7 +3826,6 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		"ordered_session_count":  len(orderedRows),
 		"wake_target_count":      len(wakeTargets),
 		"rollback_count":         rollbacksThisTick,
-		"rollback_budget":        maxRollbacksPerTick,
 		"start_candidate_count":  len(startCandidates),
 		"assigned_work_bead_cnt": len(assignedWorkBeads),
 	})
@@ -6010,7 +6023,11 @@ func applyTemplateOverridesToConfigInfo(agentCfg *runtime.Config, info sessionpk
 		fullOptions[k] = v
 	}
 	extra, err := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
-	if err != nil || len(extra) == 0 {
+	if err != nil {
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", info.ID, err)
+		return
+	}
+	if len(extra) == 0 {
 		return
 	}
 	agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, extra)

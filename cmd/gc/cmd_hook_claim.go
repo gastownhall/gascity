@@ -159,6 +159,10 @@ type hookClaimOptions struct {
 	Env                []string
 	DrainAck           bool
 	JSON               bool
+	// AutoReclaimStaleClaims opts into a scoped stale-lease reclaim attempt
+	// (ga-7rj87d) when a route-matched candidate's only claim blocker is an
+	// existing assignee. Off by default; wired from config.Agent.
+	AutoReclaimStaleClaims bool
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -265,6 +269,14 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// ReclaimStale attempts a scoped stale-lease reclaim (ga-7rj87d FR1/FR2)
+	// for exactly one candidate bead ID. Only consulted when
+	// hookClaimOptions.AutoReclaimStaleClaims is set.
+	ReclaimStale hookClaimReclaimFunc
+	// EmitHookClaimReclaimedStale publishes hook.claim.reclaimed_stale
+	// (ga-7rj87d FR5) after a successful reclaim-then-claim in the same
+	// cycle. Best-effort, like the other Emit* seams.
+	EmitHookClaimReclaimedStale func(beadID, previousOwner, newAssignee string)
 }
 
 type (
@@ -280,6 +292,10 @@ type (
 	hookStampSessionClaimFunc     func(sessionID, beadID string) error
 	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
+	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
+	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
+	// the lease and, if so, the previous owner.
+	hookClaimReclaimFunc func(context.Context, string, []string, string) (bool, string, error)
 )
 
 type hookClaimJSONResult struct {
@@ -522,6 +538,12 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitClaimReleased == nil {
 		ops.EmitClaimReleased = hookEmitClaimReleased
 	}
+	if ops.ReclaimStale == nil {
+		ops.ReclaimStale = hookClaimReclaimWithBdStore
+	}
+	if ops.EmitHookClaimReclaimedStale == nil {
+		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
+	}
 	if ops.Now == nil {
 		ops.Now = time.Now
 	}
@@ -761,8 +783,31 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
+		reclaimedFrom := ""
 		if !hookCandidateClaimable(candidate, opts.RouteTargets, now) {
-			continue
+			// ga-7rj87d FR1/FR2: a route-matched candidate whose ONLY claim
+			// blocker is an existing (possibly stale) assignee gets a scoped,
+			// opt-in reclaim attempt before being skipped. Off by default
+			// (NFR4/NFR5): the flag check short-circuits before
+			// hookCandidateReclaimEligible or ops.ReclaimStale ever run, so the
+			// flag-off path is byte-for-byte unchanged.
+			if !opts.AutoReclaimStaleClaims || !hookCandidateReclaimEligible(candidate, opts.RouteTargets, now) {
+				continue
+			}
+			if ops.claimWindowSpent() {
+				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			if err != nil || !reclaimed {
+				// Best-effort optimization, not a claim path of its own: any
+				// non-reclaim outcome leaves the candidate untouched (FR4) and
+				// the hook moves on to the next candidate.
+				continue
+			}
+			reclaimedFrom = previousOwner
 		}
 		// F-B. The fresh-claim CAS is the mutation that mints a new obligation,
 		// so it is the one the turn-binding window most directly guards.
@@ -842,6 +887,12 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if result.Assignee == "" {
 			result.Assignee = opts.Assignee
 		}
+		if reclaimedFrom != "" {
+			// ga-7rj87d FR5: only fires once the retried Claim above actually
+			// succeeded -- a reclaim followed by a lost claim race reports nothing,
+			// since the bead was never ours to begin with.
+			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
+		}
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 
@@ -890,6 +941,19 @@ func hookCandidateBudgetDeferred(candidate beads.Bead, now time.Time) bool {
 		return false
 	}
 	return deferAt.After(now)
+}
+
+// hookCandidateReclaimEligible reports whether a route-matched candidate's ONLY
+// claim-eligibility failure is a non-empty (possibly stale) assignee -- the exact
+// shape ga-7rj87d FR1 scopes a stale-lease reclaim attempt to. A candidate still
+// inside its gc.budget_deferred_until window is never reclaim-eligible: the
+// budget gate must hold across both the fresh-claim and reclaim paths, or a
+// stale assignee lets a deferred candidate bypass the daily build budget.
+func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, now time.Time) bool {
+	return strings.TrimSpace(candidate.ID) != "" &&
+		strings.TrimSpace(candidate.Assignee) != "" &&
+		hookClaimMatchesRoute(candidate, routeTargets) &&
+		!hookCandidateBudgetDeferred(candidate, now)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1292,6 +1356,16 @@ func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID,
 	return hookClaimThroughStore(beadID, assignee,
 		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
 		store.Get)
+}
+
+// hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
+// FR1/FR2) via `bd reclaim --id beadID`, inheriting bd's own default staleness
+// threshold (NFR3) rather than passing --older-than. No assignee: a reclaim only
+// reverts a stale bead to ready, it never assigns -- the caller retries a normal
+// Claim to actually take it.
+func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
+	store := hookClaimBdStoreContext(ctx, dir, env, "")
+	return store.ReclaimStale(beadID)
 }
 
 // hookClaimThroughStore is the post-mutation classification shared by every
@@ -2657,6 +2731,30 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	}
 }
 
+// hookEmitClaimReclaimedStale publishes a best-effort hook.claim.reclaimed_stale
+// event (ga-7rj87d FR5) so a scoped stale-lease recovery is observable to
+// mayor/watchers instead of surfacing only as an ordinary fresh claim.
+func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
+	payload, err := json.Marshal(events.HookClaimReclaimedStalePayload{
+		BeadID:        beadID,
+		PreviousOwner: previousOwner,
+		NewAssignee:   newAssignee,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    events.HookClaimReclaimedStale,
+		Actor:   newAssignee,
+		Subject: beadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
 	store := hookClaimBdStore(dir, env, "")
 	return store.List(beads.ListQuery{
@@ -2848,13 +2946,32 @@ func hookRouteIdentitiesEqual(a, b string) bool {
 	return agent.UnsanitizeQualifiedNameFromSession(a) == agent.UnsanitizeQualifiedNameFromSession(b)
 }
 
+// workflowRunTargetFallbackEligible reports whether candidate is a
+// KindWorkflow root the gc.run_target fallback may apply to. The fallback
+// exists so a genuinely root-only (#2763-shape) molecule - whose root IS the
+// unit of work, with no compiled children - is claimable via its
+// gc.run_target authoring hint. It must not also resurrect a fully-expanded
+// root: once compile.go gives a graph.v2 root real child steps, it stamps
+// gc.workflow_expanded=true, and that root's only remaining path to
+// dependency-readiness is every real child closing while workflow-finalize
+// has not yet run and closed it (#5900) - a state the fallback must not
+// treat as claimable (WorkflowTopologyKinds document workflow roots as never
+// claimable). A candidate without the stamp predates this fix or was never
+// expanded, so it keeps the original permissive behavior.
+func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
+	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
+	if kind != beadmeta.KindWorkflow {
+		return false
+	}
+	return strings.TrimSpace(candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) != "true"
+}
+
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 	if len(routeTargets) == 0 {
 		return false
 	}
 	routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey])
 	runTarget := strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
-	kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 	for _, target := range routeTargets {
 		target = strings.TrimSpace(target)
 		if target == "" {
@@ -2863,7 +2980,7 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		if hookRouteIdentitiesEqual(routedTo, target) {
 			return true
 		}
-		if routedTo == "" && kind == beadmeta.KindWorkflow && hookRouteIdentitiesEqual(runTarget, target) {
+		if routedTo == "" && workflowRunTargetFallbackEligible(candidate) && hookRouteIdentitiesEqual(runTarget, target) {
 			return true
 		}
 	}
@@ -2894,7 +3011,7 @@ func hookClaimRoute(candidate beads.Bead) string {
 	if routedTo := strings.TrimSpace(candidate.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
 		return routedTo
 	}
-	if strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow {
+	if workflowRunTargetFallbackEligible(candidate) {
 		return strings.TrimSpace(candidate.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 	return ""

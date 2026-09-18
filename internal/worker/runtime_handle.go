@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -295,6 +296,11 @@ func (h *RuntimeHandle) TranscriptPath(context.Context) (string, error) {
 
 // AgentMappings reports unavailable because runtime-only handles have no agent transcripts.
 func (h *RuntimeHandle) AgentMappings(context.Context) ([]AgentMapping, error) {
+	return nil, ErrHistoryUnavailable
+}
+
+// TranscriptRecords reports unavailable because runtime-only handles have no transcript.
+func (h *RuntimeHandle) TranscriptRecords(context.Context) ([]json.RawMessage, error) {
 	return nil, ErrHistoryUnavailable
 }
 
