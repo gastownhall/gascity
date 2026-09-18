@@ -2171,8 +2171,29 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // with pre-ga-eld2x workflow roots. It matches the shell claim/count shape:
 // canonical gc.routed_to first, then gc.run_target only for workflow roots
 // stamped before root routing switched to gc.routed_to.
+//
+// The gc.run_target half applies workflowRunTargetFallbackEligible, so the
+// demand side counts exactly the roots hookClaimMatchesRoute will accept
+// (#5900). Without it a fully-expanded root whose real children have all
+// closed stays permanent capacity demand for a template whose own workers
+// refuse the claim: the seat spawns, its hook reads empty, it drains, and the
+// row is counted again next tick. The gate lives here rather than in
+// legacyWorkflowRunTarget because route recovery and pool session naming read
+// that helper for identity, not claimability, and must keep resolving an
+// expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
-	return routedToAndLegacyWorkflowCandidates(b)
+	candidates := routedToAndLegacyWorkflowCandidates(b)
+	if len(candidates) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+		return candidates
+	}
+	// The lone remaining candidate is the legacy gc.run_target fallback.
+	if !workflowRunTargetFallbackEligible(b) {
+		return nil
+	}
+	return candidates
 }
 
 func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {
