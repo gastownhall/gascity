@@ -19,6 +19,16 @@
 #      table there and leaves the row uncommitted).
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
+#   1a. Pin the stable pre-flight HEAD to a Dolt branch
+#      (__gc_compact_preflight_<db>) BEFORE the mutating reset. Flatten
+#      orphans that commit (the flatten commit's parent becomes the
+#      gc-compact-base watermark, not the previous HEAD), and managed
+#      auto-GC then collects it. Without the pin, DOLT_DIFF_STAT/DOLT_DIFF
+#      against the recorded preflight hash fail with "target commit not
+#      found" and operators cannot prove row preservation (hq 2026-09-17 /
+#      ga-f5n). The pin is dropped only once post-flatten integrity passes,
+#      just before full GC so GC can reclaim the orphaned graph; quarantine
+#      and writer-race defer keep it.
 #   2. Soft-reset to the history-provenance watermark (the gc-compact-base
 #      tag; see "History protection" below); all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
@@ -670,6 +680,82 @@ valid_branch_name() {
       ;;
     *) return 1 ;;
   esac
+}
+
+# preflight_evidence_ref DB — Dolt branch that keeps the pre-flight HEAD
+# reachable across flatten + auto-GC. Name is ASCII-safe: valid_database_name
+# already rejects anything outside [A-Za-z0-9_-].
+preflight_evidence_ref() {
+  _pe_db="$1"
+  valid_database_name "$_pe_db" || return 1
+  printf '__gc_compact_preflight_%s' "$_pe_db"
+}
+
+# pin_preflight_evidence DB HEAD — force-create the evidence branch at HEAD
+# before flatten. Fail closed: flattening without a pin is how the preflight
+# commit becomes unreviewable.
+pin_preflight_evidence() {
+  _pe_db="$1"
+  _pe_head="$2"
+  case "$_pe_head" in
+    ''|*[!A-Za-z0-9]*)
+      printf 'compact: db=%s preflight HEAD %s is not a pin-able commit id — aborting before flatten\n' \
+        "$_pe_db" "${_pe_head:-<empty>}" >&2
+      return 1
+      ;;
+  esac
+  flatten_preflight_ref=$(preflight_evidence_ref "$_pe_db") || {
+    printf 'compact: db=%s cannot derive preflight evidence branch name — aborting before flatten\n' \
+      "$_pe_db" >&2
+    return 1
+  }
+  valid_branch_name "$flatten_preflight_ref" || {
+    printf 'compact: db=%s preflight evidence branch %s is not a valid branch name — aborting before flatten\n' \
+      "$_pe_db" "$flatten_preflight_ref" >&2
+    flatten_preflight_ref=""
+    return 1
+  }
+  _pe_err=$(mktemp)
+  if ! dolt_query "$_pe_db" \
+    "CALL DOLT_BRANCH('-f', '$flatten_preflight_ref', '$_pe_head')" \
+    >/dev/null 2>"$_pe_err"; then
+    printf 'compact: db=%s failed to pin preflight HEAD=%s at branch %s — aborting before flatten so evidence stays reachable\n' \
+      "$_pe_db" "$_pe_head" "$flatten_preflight_ref" >&2
+    emit_error_file "$_pe_db" "$_pe_err"
+    rm -f "$_pe_err"
+    flatten_preflight_ref=""
+    return 1
+  fi
+  rm -f "$_pe_err"
+  printf 'compact: db=%s pinned preflight HEAD=%s at branch %s so flatten cannot GC the evidence commit\n' \
+    "$_pe_db" "$_pe_head" "$flatten_preflight_ref"
+  return 0
+}
+
+# unpin_preflight_evidence DB — drop the evidence branch once preservation is
+# proven (post-flatten integrity passed, or a quarantine auto-clear proved it),
+# ahead of full GC so GC can reclaim the orphaned graph. Best-effort: a missing
+# branch must not fail the compact run.
+unpin_preflight_evidence() {
+  _ue_db="$1"
+  _ue_ref=$(preflight_evidence_ref "$_ue_db") || return 0
+  valid_branch_name "$_ue_ref" || return 0
+  _ue_err=$(mktemp)
+  dolt_query "$_ue_db" "CALL DOLT_BRANCH('-D', '$_ue_ref')" \
+    >/dev/null 2>"$_ue_err" || true
+  rm -f "$_ue_err"
+  return 0
+}
+
+# preflight_diff_from HEAD — prefer the pinned evidence branch for
+# DOLT_DIFF / DOLT_DIFF_STAT so proofs survive flatten even if the raw
+# commit hash has already dropped out of dolt_log.
+preflight_diff_from() {
+  if [ -n "${flatten_preflight_ref:-}" ]; then
+    printf '%s' "$flatten_preflight_ref"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 refspec_env_value() {
@@ -2331,16 +2417,17 @@ print_existing_quarantine_marker() {
   reason="$3"
   created_at="$4"
 
-  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
+  printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s%s%s%s%s%s%s%s%s — manual intervention required before compaction or GC\n' \
     "$db" "$marker" "${reason:-<unknown>}" "${created_at:-<unknown>}" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" integrity_table_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" database_value_hash_drift)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_head)" \
+    "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_preflight_ref)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_pre_reset_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" flatten_post_verify_head)" \
     "$(compact_marker_summary_value "$quarantine_dir" "$db" decision)" >&2
-  printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss; then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
+  printf 'compact: db=%s quarantine recovery: keep marker unless git status is clean, the Dolt server is reachable, live bead queries are healthy, and marker diff/hash evidence proves no data loss (DOLT_DIFF_STAT the flatten_preflight_ref branch against flatten_head when the raw preflight hash is gone); then remove %s and rerun gc dolt compact --gc-only --only-db %s\n' \
     "$db" "$marker" "$db" >&2
 }
 
@@ -2351,6 +2438,7 @@ write_quarantine_marker() {
 
   write_compact_marker "$quarantine_dir" "$db" "$reason" \
     "flatten_preflight_head=${head:-}" \
+    "flatten_preflight_ref=${flatten_preflight_ref:-}" \
     "flatten_pre_reset_head=${head_before_reset:-}" \
     "flatten_head=${flatten_head:-}" \
     "flatten_post_verify_head=${post_verify_head:-}" \
@@ -3121,10 +3209,12 @@ flatten_database() {
   flatten_head=""
   post_verify_head=""
   final_verify_head=""
+  flatten_preflight_ref=""
   preflight_hash=""
   postflight_hash=""
   writer_race_detected=0
   preflight_excluded_tables=""
+  integrity_defer_blocked_by=""
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -3149,16 +3239,29 @@ flatten_database() {
     case "${quarantine_reason:-}" in
       "post-flatten table value hash changed without row-count increase"|"post-flatten value hash changed without row-count increase"|"post-flatten table value hash changed with row-count increase"|"post-flatten value hash changed with row-count increase")
         autoclear_preflight_head=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_head || true)
+        # Prove preservation from the pinned evidence branch when the marker
+        # names it: flatten orphaned the raw preflight commit, and auto-GC may
+        # already have collected it (ga-f5n). Only the exact branch this
+        # script pins for $db is trusted; anything else falls back to the hash.
+        autoclear_diff_from="$autoclear_preflight_head"
+        autoclear_marker_ref=$(compact_marker_value "$quarantine_dir" "$db" flatten_preflight_ref || true)
+        if [ -n "$autoclear_marker_ref" ] && \
+           [ "$autoclear_marker_ref" = "$(preflight_evidence_ref "$db" || true)" ]; then
+          autoclear_diff_from="$autoclear_marker_ref"
+        fi
         autoclear_preserved_tables_tmp=$(mktemp)
         if autoclear_current_head=$(head_commit "$db") && [ -n "$autoclear_current_head" ] && \
-           diff_stat_preserved_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
-           db_root_drift_within_verified_tables "$db" "$autoclear_preflight_head" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
+           diff_stat_preserved_tables "$db" "$autoclear_diff_from" "$autoclear_current_head" > "$autoclear_preserved_tables_tmp" && \
+           db_root_drift_within_verified_tables "$db" "$autoclear_diff_from" "$autoclear_current_head" "$autoclear_preserved_tables_tmp"; then
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s integrity quarantine marker auto-cleared — drift confined to content-preserved table(s) [%s] via DOLT_DIFF_STAT(%s..%s), reason=%s created_at=%s\n' \
-            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_preflight_head:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+            "$db" "${db_root_drift_proven_tables:-}" "${autoclear_diff_from:-<empty>}" "$autoclear_current_head" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
           emit_compact_quarantine_event "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}"
           mail_compact_quarantine_alert "$db" "compact-quarantine-autoclear" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
           rm -f "$quarantine_marker"
+          # Preservation is proven, so the evidence branch has done its job;
+          # drop it so it stops holding the orphaned pre-flatten graph.
+          unpin_preflight_evidence "$db"
         else
           rm -f "$autoclear_preserved_tables_tmp"
           printf 'compact: db=%s cannot auto-clear integrity quarantine marker — preservation proof did not confirm drift is confined to content-preserved, verified tables (reason=%s)\n' \
@@ -3613,6 +3716,11 @@ flatten_database() {
     return 1
   fi
 
+  if ! pin_preflight_evidence "$db" "$head"; then
+    rm -f "$preflight_tmp"
+    return 1
+  fi
+
   table_count=$(($(wc -l < "$preflight_tmp")))
   printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
     "$db" "$count" "$flatten_target_detail" "$table_count"
@@ -3745,9 +3853,9 @@ flatten_database() {
        [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
+       gain_drift_is_additive_only "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$verify_counts_gain_drift_tables"; then
       printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+        "$db" "$(preflight_diff_from "$head")" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
@@ -3796,9 +3904,9 @@ flatten_database() {
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
+       gain_drift_is_additive_only "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$verify_counts_same_count_drift_tables"; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s) — same-count table value hash drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] is concurrent-writer UPDATE, not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$head" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "$(preflight_diff_from "$head")" "$flatten_head" "${verify_counts_same_count_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3812,14 +3920,26 @@ flatten_database() {
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
          [ "${verify_counts_saw_row_decrease:-0}" = "1" ] || \
          [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; }; then
-      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
-        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
+      integrity_defer_blocked_by=""
+      [ "${verify_counts_saw_table_list_change:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by table_list_change"
+      [ "${verify_counts_saw_probe_failure:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by probe_failure"
+      [ "${verify_counts_saw_row_decrease:-0}" = "1" ] && \
+        [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by row_decrease_with_gain_drift"
+      [ "${verify_counts_saw_gain:-0}" != "1" ] && \
+        integrity_defer_blocked_by="$integrity_defer_blocked_by missing_row_gain"
+      integrity_defer_blocked_by=${integrity_defer_blocked_by# }
+      printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer blocked_by=%s; quarantine unchanged\n' \
+        "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" "${integrity_defer_blocked_by:-unspecified}" >&2
     fi
     printf 'compact: db=%s post-flatten INTEGRITY check failed — escalate (%s)\n' \
       "$db" "$integrity_guidance" >&2
     write_quarantine_marker "$db" "$integrity_reason" \
       "integrity_table_drift=${verify_counts_drift_details#;}" \
-      "integrity_failure_guidance=$integrity_guidance" || {
+      "integrity_failure_guidance=$integrity_guidance" \
+      "integrity_defer_blocked_by=${integrity_defer_blocked_by:-}" || {
       preserve_head_after_integrity_failure "$db" "$flatten_head" || true
       rm -f "$preflight_tmp"
       return 1
@@ -3932,9 +4052,9 @@ flatten_database() {
       # (gc's __gc_read_only_probe; daa 2026-08-04). Prove each drifted table
       # belongs to one of those categories; defer exactly as the proven
       # writer-race paths do. Anything else stays quarantined.
-      if db_root_drift_within_verified_tables "$db" "$head" "$flatten_head" "$preflight_tmp"; then
+      if db_root_drift_within_verified_tables "$db" "$(preflight_diff_from "$head")" "$flatten_head" "$preflight_tmp"; then
         printf 'compact: db=%s committed-root drift confined to verified table(s) [%s], first-committed unversioned table(s) [%s] and dropped dolt_ignore'"'"'d table(s) [%s] via DOLT_DIFF_STAT(%s..%s) with per-table verification passed — absorbed working-set state committed by the flatten, not corruption; deferring, will retry next run\n' \
-          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$head" "$flatten_head" >&2
+          "$db" "${db_root_drift_proven_tables:-}" "${db_root_drift_first_committed_tables:-}" "${db_root_drift_dropped_ignored_tables:-}" "$(preflight_diff_from "$head")" "$flatten_head" >&2
         if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
           "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
           "$compacted_from_head" "$local_branch" "$remote_branch"; then
@@ -3990,6 +4110,11 @@ flatten_database() {
   rm -f "$preflight_tmp"
 
   after_count=$(commit_count "$db" || true)
+
+  # Integrity passed, so the preflight commit is no longer needed as
+  # review evidence. Drop the pin before full GC so the flatten's
+  # orphaned graph (including that commit) can actually be reclaimed.
+  unpin_preflight_evidence "$db"
 
   # A bare CALL DOLT_GC('--archive-level=0') only reclaims working-set chunks —
   # the bulk of the orphaned history lives in noms/oldgen/ archives that

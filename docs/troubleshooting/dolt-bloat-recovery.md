@@ -606,10 +606,23 @@ hash drift on another) during the window. Mixed append-plus-update without a
 proven writer still quarantines.
 
 Quarantine markers also carry structured evidence. New markers include the
-database name, the preflight/flatten/post-verify HEADs, preflight and
-postflight database value hashes when available, `integrity_table_drift` for
-table-level row/hash mismatches, `database_value_hash_drift` for aggregate hash
-drift, and `decision=preserve_marker_manual_review_required`.
+database name, the preflight/flatten/post-verify HEADs, the
+`flatten_preflight_ref` evidence branch (`__gc_compact_preflight_<database>`),
+preflight and postflight database value hashes when available,
+`integrity_table_drift` for table-level row/hash mismatches,
+`database_value_hash_drift` for aggregate hash drift, and
+`decision=preserve_marker_manual_review_required`.
+
+Flatten rewrites history: the preflight commit is no longer on HEAD, and
+managed auto-GC can collect it before anyone reviews the marker. Compact pins
+that commit to `flatten_preflight_ref` **before** the reset and keeps the
+branch if it quarantines. Use the branch, not the raw hash, for
+`DOLT_DIFF_STAT` / `DOLT_DIFF`. If the marker has no `flatten_preflight_ref`
+and the recorded preflight hash is not resolvable (`target commit not found`),
+row preservation cannot be proven — **leave the marker in place**. The
+race-class auto-clear proves preservation from the same branch, and compact
+drops the branch itself once preservation is proven (auto-clear, or the next
+flatten whose integrity check passes), so full GC can reclaim the old history.
 
 Alert-cadence bookkeeping is deliberately separate from that evidence. The
 compactor stores `seen_count`, `notify_count`, and last-notified fields under
@@ -628,8 +641,10 @@ Safe marker-clear procedure:
    `bd list --limit 1` in that rig or `gc bd list --rig <rig> --limit 1`.
 4. Read the marker and retain it if the HEAD/hash/table evidence is incomplete
    or points at row loss. For table drift, compare the recorded HEADs with
-   `DOLT_DIFF` / `DOLT_DIFF_STAT`; only clear when the diff proves preflight
-   rows are still reachable and no unexpected table disappeared.
+   `DOLT_DIFF` / `DOLT_DIFF_STAT` against `flatten_preflight_ref` (fall back
+   to `flatten_preflight_head` only if that commit is still resolvable); only
+   clear when the diff proves preflight rows are still reachable and no
+   unexpected table disappeared.
 5. When the evidence proves no data loss, remove only that database's marker:
    `rm .gc/runtime/packs/dolt/compact-quarantine/<database>`.
 6. Retry reclaim with `gc dolt compact --gc-only --only-db <database>`. If the
