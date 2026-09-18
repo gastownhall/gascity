@@ -47,7 +47,26 @@ var beadCopyExemptFields = map[string]string{
 		"bead_json — so it is structurally absent from the destination and comparing it would refuse EVERY copy of a " +
 		"deferred infra row, identically on each retry. What does not cross is the deferral itself: the binding reads such " +
 		"a row as plainly open.",
+	"CreatedBy": beadPlainColumnExemption,
+	"Owner":     beadPlainColumnExemption,
+	"Notes":     beadPlainColumnExemption,
+	"AwaitType": beadPlainColumnExemption,
+	"AwaitID":   beadPlainColumnExemption,
 }
+
+// beadPlainColumnExemption is the shared reason for bd's five plain columns.
+//
+// Like IndefinitelyDeferred, and unlike the other exemptions, this is not a
+// promise that a copy which changed them is still faithful: the destination
+// cannot hold them at all. They are read-only projections of bd's own columns
+// with no write path — absent from Create's arguments, from UpdateOpts, and
+// from every exec create/update request shape — so the destination's row is a
+// fresh create that cannot receive them. Comparing them would refuse every
+// copy of a source row that carried any one, identically on each retry, while
+// preserving nothing. What does not cross is the projection itself: the
+// destination reads whatever its own backend holds for those columns.
+const beadPlainColumnExemption = "read-only projection of a bd column with no write path (absent from Create, UpdateOpts and every exec request shape), " +
+	"so the destination's fresh create cannot receive it and comparing it would refuse every copy that carried one while preserving nothing."
 
 // infraEqualityFixture is a source row with every durable field populated to a
 // value distinguishable from its zero, so a mutation of any one of them is
@@ -59,15 +78,22 @@ func infraEqualityFixture() beads.Bead {
 	priority := 2
 	blocked := false
 	return beads.Bead{
-		ID:           "gcg-41",
-		Title:        "session lifecycle",
-		Status:       "open",
-		Type:         "session",
-		Priority:     &priority,
-		CreatedAt:    created,
-		UpdatedAt:    created.Add(time.Hour),
-		Assignee:     "worker-1",
-		From:         "dispatcher",
+		ID:        "gcg-41",
+		Title:     "session lifecycle",
+		Status:    "open",
+		Type:      "session",
+		Priority:  &priority,
+		CreatedAt: created,
+		UpdatedAt: created.Add(time.Hour),
+		Assignee:  "worker-1",
+		From:      "dispatcher",
+		// bd's plain columns, populated so the exempt mutations below model a
+		// real loss rather than a no-op on a zero value.
+		CreatedBy:    "seeder",
+		Owner:        "worker-1",
+		Notes:        "migration notes",
+		AwaitType:    "gh:pr",
+		AwaitID:      "gascity#1",
 		ParentID:     "gcg-40",
 		Ref:          "step-3",
 		Needs:        []string{"gcg-39"},
@@ -142,6 +168,14 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 		// a destination that cannot hold what the source read produced. This is
 		// the mutation that must NOT be refused, or the migration wedges.
 		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead { b.IndefinitelyDeferred = false; return b },
+		// The destination's fresh create cannot receive bd's plain columns, so
+		// clearing each one models exactly what a faithful copy looks like from
+		// the destination side. Refusing any of these would wedge the migration.
+		"CreatedBy": func(b beads.Bead) beads.Bead { b.CreatedBy = ""; return b },
+		"Owner":     func(b beads.Bead) beads.Bead { b.Owner = ""; return b },
+		"Notes":     func(b beads.Bead) beads.Bead { b.Notes = ""; return b },
+		"AwaitType": func(b beads.Bead) beads.Bead { b.AwaitType = ""; return b },
+		"AwaitID":   func(b beads.Bead) beads.Bead { b.AwaitID = ""; return b },
 	}
 }
 
