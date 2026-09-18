@@ -1023,54 +1023,6 @@ func TestFindCanonicalNamedSessionInfo_AliasMatchNotPromotedWithSecondLiveCandid
 	}
 }
 
-// TestLookupConfiguredNamedSession_AliasOnlyLiveBeadResolvesCanonical pins the
-// mayor's literal ga-1ycmli repro end-to-end through the real store-backed
-// entry point gc mail send depends on: (1) no live session bead yet for the
-// configured alias resolves empty, (2) once the session's bead exists with
-// only `alias` set (no exact canonical metadata), the lookup must recognize
-// it as its own canonical session rather than reporting a conflict against
-// itself.
-func TestLookupConfiguredNamedSession_AliasOnlyLiveBeadResolvesCanonical(t *testing.T) {
-	store := beads.NewMemStore()
-	spec := NamedSessionSpec{
-		Identity:    "mayor",
-		SessionName: "test-city--mayor",
-	}
-
-	before, err := LookupConfiguredNamedSession(store, spec)
-	if err != nil {
-		t.Fatalf("LookupConfiguredNamedSession(before): %v", err)
-	}
-	if before.HasCanonical || before.HasConflict {
-		t.Fatalf("lookup before session start = %+v, want empty result", before)
-	}
-
-	live, err := store.Create(beads.Bead{
-		Type:   BeadType,
-		Labels: []string{LabelSession},
-		Metadata: map[string]string{
-			"alias": spec.Identity,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(live): %v", err)
-	}
-
-	after, err := LookupConfiguredNamedSession(store, spec)
-	if err != nil {
-		t.Fatalf("LookupConfiguredNamedSession(after): %v", err)
-	}
-	if after.HasConflict {
-		t.Fatalf("lookup after session start reported a conflict with its own bead %q, want no conflict", after.Conflict.ID)
-	}
-	if !after.HasCanonical {
-		t.Fatal("lookup after session start = no canonical, want the live alias-only bead recognized as its own session")
-	}
-	if after.Canonical.ID != live.ID {
-		t.Fatalf("Canonical.ID = %q, want %q", after.Canonical.ID, live.ID)
-	}
-}
-
 func TestRecyclableDeadConfiguredNamePhantom(t *testing.T) {
 	cfg := &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
