@@ -84,9 +84,9 @@ func TestRunSessionLinkForNormalization(t *testing.T) {
 func TestRunSessionLinkForTrustsDurableStampOverRecycledSlotName(t *testing.T) {
 	// Active-only index: S1 (mc-s1) has CLOSED and is absent; a NEW live session S2
 	// (mc-s2) now occupies the SAME recycled pool slot name gc__worker-1.
-	idx := buildRunSessionIndex([]DashboardSession{
+	idx := buildRunSessionIndex(RunSessions{Live: []DashboardSession{
 		{ID: "mc-s2", SessionName: "gc__worker-1", State: "active", Running: true},
-	})
+	}})
 	ctx := runSessionLinkContext{sessionIndex: &idx}
 
 	// Step B ran on S1 and closed; its Assignee is cleared, so only the durable
@@ -105,12 +105,15 @@ func TestRunSessionLinkForTrustsDurableStampOverRecycledSlotName(t *testing.T) {
 }
 
 // TestRunSessionLinkForResolvesActiveDurableStamp: an active step stamped with a
-// live session's durable id resolves to that session (short store prefixes that
-// sessionIDRe rejects are accepted for the provenance-trusted durable id).
+// live session's durable id resolves to that session. The short mc- prefix is no
+// longer what carries this — the unified sessionIDRe accepts it on every path,
+// so the stamp's force is its index-independent PRECEDENCE over the
+// assignee/name fallback (runSessionLinkFor step 1), not a wider stamp-only
+// regex.
 func TestRunSessionLinkForResolvesActiveDurableStamp(t *testing.T) {
-	idx := buildRunSessionIndex([]DashboardSession{
+	idx := buildRunSessionIndex(RunSessions{Live: []DashboardSession{
 		{ID: "mc-s2", SessionName: "gc__worker-1", State: "active", Running: true},
-	})
+	}})
 	ctx := runSessionLinkContext{sessionIndex: &idx}
 
 	bead := runSnapshotBead{
@@ -128,14 +131,14 @@ func TestRunSessionLinkForResolvesActiveDurableStamp(t *testing.T) {
 
 // TestRunSessionLinkForLegacyNameFallbackStaysGated covers the legacy/direct path
 // (no durable stamp): a step carrying only gc.session_name still resolves via the
-// index byName fallback, but ONLY when the resolved id passes the strict
-// sessionIDRe gate — and a byName hit onto a short-prefix (recycled-prone) session
-// is rejected rather than mis-attributed.
+// index byName fallback, but ONLY when the RESOLVED id passes the sessionIDRe
+// gate — a byName hit onto a session whose id the gate rejects yields no link
+// rather than an unroutable one.
 func TestRunSessionLinkForLegacyNameFallbackStaysGated(t *testing.T) {
 	t.Run("gate-passing byName hit resolves", func(t *testing.T) {
-		idx := buildRunSessionIndex([]DashboardSession{
+		idx := buildRunSessionIndex(RunSessions{Live: []DashboardSession{
 			{ID: "gc-legacy", SessionName: "gc__solo", State: "active", Running: true},
-		})
+		}})
 		ctx := runSessionLinkContext{sessionIndex: &idx}
 		bead := runSnapshotBead{metadata: map[string]string{beadmeta.SessionNameMetadataKey: "gc__solo"}}
 		link, ok := runSessionLinkFor(bead, "done", ctx)
@@ -144,14 +147,14 @@ func TestRunSessionLinkForLegacyNameFallbackStaysGated(t *testing.T) {
 		}
 	})
 
-	t.Run("byName hit onto a short-prefix session is gated out (no wrong link)", func(t *testing.T) {
-		idx := buildRunSessionIndex([]DashboardSession{
-			{ID: "mc-live", SessionName: "gc__solo", State: "active", Running: true},
-		})
+	t.Run("byName hit onto a gate-failing id is gated out (no unroutable link)", func(t *testing.T) {
+		idx := buildRunSessionIndex(RunSessions{Live: []DashboardSession{
+			{ID: "worker-live", SessionName: "gc__solo", State: "active", Running: true},
+		}})
 		ctx := runSessionLinkContext{sessionIndex: &idx}
 		bead := runSnapshotBead{metadata: map[string]string{beadmeta.SessionNameMetadataKey: "gc__solo"}}
 		if _, ok := runSessionLinkFor(bead, "done", ctx); ok {
-			t.Fatalf("expected no link: a legacy byName hit onto a short-prefix session must stay gated")
+			t.Fatalf("expected no link: a legacy byName hit must re-apply the id gate to the resolved id")
 		}
 	})
 }

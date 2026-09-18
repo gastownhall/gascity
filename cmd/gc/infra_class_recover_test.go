@@ -435,6 +435,14 @@ type unlistableRelationSource struct {
 
 func (s unlistableRelationSource) DepList(string, string) ([]beads.Dep, error) { return nil, s.err }
 
+// DepMetadata forwards to the leaf. Embedding beads.Store strips the read, and
+// the repair treats a source it cannot ask as one it may not copy from, so
+// without this the double is refused before the topology fallback it exists to
+// exercise is ever reached.
+func (s unlistableRelationSource) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
+	return depMetadataThrough(s.Store, issueID, dependsOnID)
+}
+
 func (s unlistableRelationSource) List(query beads.ListQuery) ([]beads.Bead, error) {
 	rows, err := s.Store.List(query)
 	if err != nil {
@@ -519,6 +527,63 @@ func TestStorageRecoverStrandedReadsEdgesFromTheInlineProjection(t *testing.T) {
 	}
 	if !slices.Contains(carried, tracker.ID) {
 		t.Errorf("the within-infra edge %s -> %s did not cross a source that cannot list relations; the inline projection carried it and the repair ignored it. carried = %v", follow.ID, tracker.ID, carried)
+	}
+}
+
+// TestStorageRecoverStrandedCarriesEdgePayloads pins the repair against the
+// same loss the migration was carrying: an edge restored without its payload.
+//
+// The repair re-adds edges the binding lacks, and on this destination adding an
+// edge does not merely fail to write the payload — setGraphEdgeMetadataTx clears
+// the pair's sidecar first, so a plain DepAdd over an edge that had a gate
+// DELETES it. That makes the failure worse here than in the copy: a repair run
+// to close a gap would report "edges: N restored" while stripping gates off
+// edges that were already fine. Both must hold, which is why the test restores
+// one payload-carrying edge and one payloadless one in the same run.
+//
+// Red-before, if the repair re-added edges with a bare DepAdd:
+//
+//	the repaired edge carries ("", false), want the gate the source holds
+func TestStorageRecoverStrandedCarriesEdgePayloads(t *testing.T) {
+	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	gated := mustCreateInfraBead(t, source, beads.Bead{Title: "order finalize", Type: "task", Labels: []string{"order-tracking"}})
+	gate := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
+	plain := mustCreateInfraBead(t, source, beads.Bead{Title: "an edge with nothing on it", Type: "task"})
+	for _, to := range []string{gate.ID, plain.ID} {
+		if err := source.DepAdd(gated.ID, to, "blocks"); err != nil {
+			t.Fatalf("seeding the stranded edge %s -> %s: %v", gated.ID, to, err)
+		}
+	}
+
+	const payload = `{"gate":"waits_for","threshold":3}`
+	swapRecoverySource(t, &payloadCarryingSource{
+		Store:    source,
+		payloads: map[[2]string]string{{gated.ID, gate.ID}: payload},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := runStrandedRecovery(t, cityPath, cfg, &stdout, &stderr); code != 0 {
+		t.Fatalf("recovery exited %d; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	binding, ok := openMigratedDestination(t, target).(beads.DepMetadataReader)
+	if !ok {
+		t.Fatal("the binding cannot be asked about edge payloads, so this test cannot see what the repair wrote")
+	}
+	got, carried, err := binding.DepMetadata(gated.ID, gate.ID)
+	if err != nil {
+		t.Fatalf("reading the repaired edge's payload: %v", err)
+	}
+	if !carried || got != payload {
+		t.Errorf("the repaired edge %s -> %s carries (%q, %v), want (%q, true): the repair restored the edge and dropped the gate",
+			gated.ID, gate.ID, got, carried, payload)
+	}
+	got, carried, err = binding.DepMetadata(gated.ID, plain.ID)
+	if err != nil {
+		t.Fatalf("reading the payloadless repaired edge: %v", err)
+	}
+	if carried || got != "" {
+		t.Errorf("an edge the source holds nothing for carries (%q, %v) after the repair", got, carried)
 	}
 }
 

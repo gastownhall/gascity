@@ -4144,6 +4144,15 @@ func TestInitBeadsForDirBuildsCanonicalBdInitProviderOp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cityDir := t.TempDir()
+			pinnedBD := filepath.Join(t.TempDir(), "bd")
+			if err := os.WriteFile(pinnedBD, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Fresh gc init reaches this provider operation before it can
+			// persist workspace.env. The process-scoped pin must still reach
+			// the lifecycle script so initialization cannot select an ambient
+			// schema-incompatible bd.
+			t.Setenv("BD_BIN", pinnedBD)
 			cityConfig := fmt.Sprintf(`[workspace]
 name = "demo"
 
@@ -4187,6 +4196,7 @@ provider = %q
 				"GC_PACK_STATE_DIR":   citylayout.PackStateDir(cityDir, "dolt"),
 				"GC_DOLT_DATA_DIR":    filepath.Join(cityDir, ".beads", "dolt"),
 				"BEADS_DIR":           filepath.Join(cityDir, ".beads"),
+				"BD_BIN":              pinnedBD,
 			} {
 				if got := env[key]; got != want {
 					t.Errorf("%s = %q, want %q", key, got, want)
@@ -12266,5 +12276,61 @@ func TestDefaultScopeDoltDatabase(t *testing.T) {
 				t.Errorf("defaultScopeDoltDatabase(%q, %q, %q) = %q starts with a digit; Dolt rejects digit-leading database names", cityPath, tt.dir, tt.prefix, got)
 			}
 		})
+	}
+}
+
+// The first init attempt already treats "already initialized" as success. A
+// post-commit re-init that reports the same thing means the recovery worked, so
+// it must not turn a recovered rig into a hard `gc rig add` failure.
+func TestInitBeadsForDirWithExecutorTreatsAlreadyInitializedRecoveryAsSuccess(t *testing.T) {
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	cityConfig := `[workspace]
+name = "demo"
+
+[beads]
+provider = "bd"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "gascity-packs")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var commits int
+	stubCommitDirtyScopeTables(t, func(string, string) (bool, error) {
+		commits++
+		return true, nil
+	})
+
+	alreadyErr := errors.New("bd init: already initialized")
+	var calls int
+	execute := func(_ string, _ []string, _ ...string) error {
+		calls++
+		if calls == 1 {
+			return errors.New(bdDirtyTablesErrText)
+		}
+		return alreadyErr
+	}
+
+	// doltDatabase is deliberately overridden to a beads_test_-prefixed name
+	// (rather than the "gsp" a real gascity-packs rig would use) because
+	// this test exercises the real finalizeCanonicalBdScopeInit success path
+	// (it opens a real store — see initBeadsForDirWithExecutor's
+	// isBdAlreadyInitializedError branch), which the fake execute above
+	// never touches. The prefix keeps that store identifiable and reapable
+	// by defaultStaleDatabasePrefixes (ga-szv0ge) instead of colliding with
+	// production "gsp" naming.
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "gsp", "beads_test_gsp", execute)
+	if errors.Is(err, alreadyErr) {
+		t.Fatalf("initBeadsForDirWithExecutor error = %v, want the recovery to be treated as success", err)
+	}
+	if calls != 2 {
+		t.Fatalf("bd init attempts = %d, want 2 (initial + post-commit retry)", calls)
+	}
+	if commits != 1 {
+		t.Fatalf("commit rounds = %d, want 1", commits)
 	}
 }

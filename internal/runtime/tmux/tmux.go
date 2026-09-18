@@ -18,9 +18,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -47,7 +49,7 @@ const pollInterval = 100 * time.Millisecond
 // GC_PROVIDER env var; mimocode's binary names differ from its provider
 // name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
 // alongside the family name.
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "cursor", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
 // defaultNudgeSubmitKeySequence is the ordered tmux key names sent, in
 // order, to submit a pasted nudge for a provider family with no explicit
@@ -129,9 +131,16 @@ type Config struct {
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. Empty means use the default tmux server.
 	SocketName string
-	// RuntimeDir is the city runtime root (".gc/runtime") under which a
-	// per-session start-crash diagnostic is persisted. Empty disables the
-	// durable capture (e.g. ad-hoc invocations and tests run unchanged).
+	// RuntimeDir is the city runtime root under which per-session
+	// diagnostics are persisted. Production sets it to
+	// citylayout.RuntimePath(cityPath), which is "<city>/.gc" -- this doc
+	// said ".gc/runtime" and it was wrong, which is the same mistake gc
+	// doctor made when it went looking for these artifacts under
+	// .gc/runtime/sessions and found a permanently empty directory
+	// (dr-6siig HIGH 1). Resolve the subdirectory through
+	// citylayout.SessionDiagnosticsDirForRuntimeDir, never by joining a
+	// literal. Empty disables the durable capture, so ad-hoc invocations
+	// and tests run unchanged.
 	RuntimeDir string
 }
 
@@ -216,6 +225,19 @@ var (
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
 	// exactly what lets a stalled nudge go undetected for many minutes.
 	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// errPartialPasteDelivery means one or more chunks reached the provider
+	// before a later chunk failed. Startup callers must discard that session so
+	// reconciliation cannot accept an agent with a truncated role prompt.
+	errPartialPasteDelivery = errors.New("nudge: partial paste delivery")
+	// ErrNudgeSubmitDeliveredUnobserved indicates the submit Enter reached the
+	// pane AND the composer drained, so delivery is proven -- only the busy
+	// state OBSERVATION failed (the indicator rendered outside the confirm
+	// budget, or never rendered at all). Unlike ErrNudgeSubmitUnconfirmed,
+	// callers must NOT retry this: retrying would re-inject a message the
+	// session already received, which is the ga-civwyz duplicate-reminder
+	// failure mode (up to 5 copies of one reminder, 1201 occurrences in 5
+	// days of production logs).
+	ErrNudgeSubmitDeliveredUnobserved = errors.New("nudge: submit Enter delivered and composer drained but busy state was never observed")
 	// ErrServerDegraded indicates the tmux server bound to SocketName is
 	// reachable on the filesystem but unresponsive. Creating a new session
 	// in this state would let tmux's own (very short) liveness probe time
@@ -237,6 +259,11 @@ const (
 	hiddenAttachMaxLifetime  = 20 * time.Second
 	hiddenAttachPollInterval = 50 * time.Millisecond
 	maxSendKeysLiteralLen    = 4096
+	// Copilot CLI converts any single paste larger than 20 KiB into a
+	// workspace attachment. Keep each paste below that provider boundary and
+	// separate consecutive paste events so its TUI does not coalesce them.
+	copilotMaxPasteBytes   = 16 * 1024
+	copilotPasteChunkDelay = 500 * time.Millisecond
 )
 
 // tmuxSubprocessTimeout caps the wall-clock time any single tmux subprocess
@@ -787,15 +814,74 @@ const processKillGracePeriod = 2 * time.Second
 // processes that remain alive and may still be flushing state.
 const processExitCheckInterval = 25 * time.Millisecond
 
-func terminateProcesses(pids []string) {
-	terminateProcessSet(
-		pids,
+type processTarget struct {
+	PID       int
+	StartTime string
+}
+
+func (t processTarget) String() string {
+	return strconv.Itoa(t.PID)
+}
+
+type processKillPlan struct {
+	Descendants       []processTarget
+	Leader            *processTarget
+	PreserveExclusion bool
+}
+
+func terminateProcesses(targets []processTarget) error {
+	return terminateProcessSet(
+		targets,
 		processKillGracePeriod,
-		func(pid, signal string) { _ = exec.Command("kill", "-"+signal, pid).Run() },
-		processIsAlive,
+		func(target processTarget, signal processSignal) (bool, error) {
+			return signalProcessTargetIfCurrent(target, signal, proctable.ProcessIdentity, signalPID)
+		},
+		func(target processTarget) (bool, error) {
+			return verifyProcessTargetIdentity(target, proctable.ProcessIdentity)
+		},
 		time.Sleep,
 		time.Now,
 	)
+}
+
+func signalProcessTargetIfCurrent(
+	target processTarget,
+	signal processSignal,
+	startTime func(int) (string, error),
+	signalPID func(int, processSignal) error,
+) (bool, error) {
+	if signalPID == nil {
+		return false, fmt.Errorf("process signal collaborator is nil")
+	}
+	matches, err := verifyProcessTargetIdentity(target, startTime)
+	if err != nil || !matches {
+		return false, err
+	}
+	if err := signalPID(target.PID, signal); err != nil {
+		if isProcessSignalGoneError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("signaling PID %d with %s: %w", target.PID, signal, err)
+	}
+	return true, nil
+}
+
+func verifyProcessTargetIdentity(target processTarget, startTime func(int) (string, error)) (bool, error) {
+	if target.PID <= 1 || normalizeProcessStartTime(target.StartTime) == "" || startTime == nil {
+		return false, nil
+	}
+	current, err := startTime(target.PID)
+	if err != nil {
+		if errors.Is(err, proctable.ErrProcessGone) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading current identity for PID %d: %w", target.PID, err)
+	}
+	return normalizeProcessStartTime(current) == normalizeProcessStartTime(target.StartTime), nil
+}
+
+func normalizeProcessStartTime(startTime string) string {
+	return strings.Join(strings.Fields(startTime), " ")
 }
 
 // terminateProcessSet gives each process a graceful TERM window, but returns as
@@ -803,22 +889,33 @@ func terminateProcesses(pids []string) {
 // alive when the grace period expires. Injected side effects keep the timing and
 // escalation policy deterministic in unit tests.
 func terminateProcessSet(
-	pids []string,
+	targets []processTarget,
 	gracePeriod time.Duration,
-	signalProcess func(pid, signal string),
-	isAlive func(pid string) bool,
+	signalProcess func(processTarget, processSignal) (bool, error),
+	isAlive func(processTarget) (bool, error),
 	sleep func(time.Duration),
 	now func() time.Time,
-) {
-	if len(pids) == 0 {
-		return
+) error {
+	if len(targets) == 0 {
+		return nil
 	}
-	for _, pid := range pids {
-		signalProcess(pid, "TERM")
+	var result error
+	remaining := make([]processTarget, 0, len(targets))
+	for _, target := range targets {
+		signaled, err := signalProcess(target, processSignalTerm)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if signaled {
+			remaining = append(remaining, target)
+		}
 	}
 
 	deadline := now().Add(gracePeriod)
-	remaining := liveProcessIDs(pids, isAlive)
+	var probeErr error
+	remaining, probeErr = liveProcessTargets(remaining, isAlive)
+	result = errors.Join(result, probeErr)
 	for len(remaining) > 0 {
 		left := deadline.Sub(now())
 		if left <= 0 {
@@ -829,90 +926,305 @@ func terminateProcessSet(
 			delay = left
 		}
 		sleep(delay)
-		remaining = liveProcessIDs(remaining, isAlive)
+		remaining, probeErr = liveProcessTargets(remaining, isAlive)
+		result = errors.Join(result, probeErr)
 	}
-	for _, pid := range remaining {
-		signalProcess(pid, "KILL")
+	for _, target := range remaining {
+		_, err := signalProcess(target, processSignalKill)
+		result = errors.Join(result, err)
 	}
+	return result
 }
 
-func liveProcessIDs(pids []string, isAlive func(string) bool) []string {
-	live := make([]string, 0, len(pids))
-	for _, pid := range pids {
-		if pid != "" && isAlive(pid) {
-			live = append(live, pid)
+func liveProcessTargets(targets []processTarget, isAlive func(processTarget) (bool, error)) ([]processTarget, error) {
+	live := make([]processTarget, 0, len(targets))
+	var result error
+	for _, target := range targets {
+		alive, err := isAlive(target)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if alive {
+			live = append(live, target)
 		}
 	}
-	return live
+	return live, result
 }
 
-// KillSessionWithProcesses explicitly kills all processes in a session before terminating it.
-// This prevents orphan processes that survive tmux kill-session due to SIGHUP being ignored.
-//
-// Process:
-// 1. Get the pane's main process PID and its process group ID (PGID)
-// 2. Kill the entire process group (catches reparented processes that stayed in the group)
-// 3. Find all descendant processes recursively (catches any stragglers)
-// 4. Send SIGTERM/SIGKILL to descendants
-// 5. Kill the pane process itself
-// 6. Kill the tmux session
-//
-// The process group kill is critical because:
-// - pgrep -P only finds direct children (PPID matching)
-// - Processes that reparent to init (PID 1) are missed by pgrep
-// - But they typically stay in the same process group unless they call setsid()
-//
-// This ensures Claude processes and all their children are properly terminated.
-func (t *Tmux) KillSessionWithProcesses(name string) error {
-	// Get the pane PID
-	pid, err := t.GetPanePID(name)
+type paneProcessState struct {
+	PID  int
+	Dead bool
+}
+
+var errEmptyPaneProcessState = errors.New("empty pane process state")
+
+// capturePaneProcessKillPlan binds a tmux pane to exactly one coherent process
+// snapshot. The live pane PID and its current start identity bracket the
+// snapshot, rejecting remain-on-exit stale-PID reuse and live respawn during
+// discovery. Every uncertainty fails closed with an empty plan; an exclusion
+// request also preserves cleanup-first ordering because the uncertain tree may
+// own it. Signal delivery later rechecks identity but is not atomic with that
+// portable check.
+func capturePaneProcessKillPlan(
+	observe func() (paneProcessState, error),
+	snapshot func() ([]proctable.ProcessRecord, error),
+	currentIdentity func(int) (string, error),
+	exclude map[int]bool,
+) (processKillPlan, error) {
+	empty := processKillPlan{PreserveExclusion: len(exclude) > 0}
+	if observe == nil || snapshot == nil || currentIdentity == nil {
+		return empty, fmt.Errorf("pane process binding collaborator is nil")
+	}
+
+	before, err := observe()
 	if err != nil {
-		// Session might not exist or server may have already gone away.
-		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
-			return nil
+		return empty, fmt.Errorf("observing pane before process snapshot: %w", err)
+	}
+	if before.Dead {
+		return empty, nil
+	}
+	if before.PID <= 1 {
+		return empty, fmt.Errorf("invalid live pane PID %d before process snapshot", before.PID)
+	}
+	beforeIdentity, err := currentIdentity(before.PID)
+	if err != nil {
+		if errors.Is(err, proctable.ErrProcessGone) {
+			return empty, nil
 		}
-		return killErr
+		return empty, fmt.Errorf("reading pane process identity before snapshot: %w", err)
+	}
+	beforeIdentity = normalizeProcessStartTime(beforeIdentity)
+	if beforeIdentity == "" {
+		return empty, fmt.Errorf("empty pane process identity before snapshot")
 	}
 
-	if pid != "" {
-		// Walk the process tree for all descendants (catches processes that
-		// called setsid() and created their own process groups)
-		descendants := getAllDescendants(pid)
-
-		// Build known PID set for group membership verification
-		knownPIDs := make(map[string]bool, len(descendants)+1)
-		knownPIDs[pid] = true
-		for _, d := range descendants {
-			knownPIDs[d] = true
-		}
-
-		// Find reparented processes from our process group. Instead of killing
-		// the entire group blindly with syscall.Kill(-pgid, ...) — which could
-		// hit unrelated processes sharing the same PGID — we enumerate group
-		// members and only include those reparented to init (PPID == 1), which
-		// indicates they were likely children in our tree that outlived their parent.
-		pgid := getProcessGroupID(pid)
-		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented := collectReparentedGroupMembers(pgid, knownPIDs)
-			descendants = append(descendants, reparented...)
-		}
-
-		// Terminate descendants deepest-first, then the pane leader. Each phase
-		// returns as soon as its processes are observed dead while preserving the
-		// full graceful-shutdown window for processes that are still alive.
-		terminateProcesses(descendants)
-		terminateProcesses([]string{pid})
+	records, err := snapshot()
+	if err != nil {
+		return empty, fmt.Errorf("snapshotting pane processes: %w", err)
 	}
 
-	// Kill the tmux session
-	// Ignore missing/dead-server errors - killing the pane process may have
-	// already caused tmux to destroy the session automatically.
-	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-		return nil
+	after, err := observe()
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return empty, nil
+		}
+		return empty, fmt.Errorf("observing pane after process snapshot: %w", err)
+	}
+	if after.Dead {
+		return empty, nil
+	}
+	if after.PID != before.PID {
+		return empty, fmt.Errorf("pane PID changed during process snapshot: %d to %d", before.PID, after.PID)
+	}
+	afterIdentity, err := currentIdentity(after.PID)
+	if err != nil {
+		if errors.Is(err, proctable.ErrProcessGone) {
+			return empty, nil
+		}
+		return empty, fmt.Errorf("reading pane process identity after snapshot: %w", err)
+	}
+	afterIdentity = normalizeProcessStartTime(afterIdentity)
+	if afterIdentity == "" {
+		return empty, fmt.Errorf("empty pane process identity after snapshot")
+	}
+	if afterIdentity != beforeIdentity {
+		return empty, fmt.Errorf("pane process identity changed during snapshot")
+	}
+
+	rootMatches := 0
+	for _, record := range records {
+		if record.PID != before.PID {
+			continue
+		}
+		rootMatches++
+		if normalizeProcessStartTime(record.StartTime) != beforeIdentity {
+			return empty, fmt.Errorf("process snapshot root identity does not match live pane")
+		}
+	}
+	if rootMatches != 1 {
+		return empty, fmt.Errorf("process snapshot contains %d records for live pane PID %d", rootMatches, before.PID)
+	}
+	return buildProcessKillPlan(before.PID, records, exclude), nil
+}
+
+// buildProcessKillPlan is the deterministic, I/O-free teardown selector. It
+// walks one process-table snapshot deepest-first, guards cycles, appends
+// same-group orphan trees in stable order, and carries the captured start-time
+// identity on every target. Missing or ambiguous root identity fails closed.
+func buildProcessKillPlan(rootPID int, records []proctable.ProcessRecord, exclude map[int]bool) processKillPlan {
+	if rootPID <= 1 || len(records) == 0 {
+		return processKillPlan{PreserveExclusion: len(exclude) > 0}
+	}
+
+	byPID := make(map[int]proctable.ProcessRecord, len(records))
+	children := make(map[int][]int, len(records))
+	for _, record := range records {
+		if record.PID <= 1 {
+			continue
+		}
+		if _, duplicate := byPID[record.PID]; duplicate {
+			return processKillPlan{PreserveExclusion: len(exclude) > 0}
+		}
+		record.StartTime = normalizeProcessStartTime(record.StartTime)
+		byPID[record.PID] = record
+		if record.PPID != record.PID {
+			children[record.PPID] = append(children[record.PPID], record.PID)
+		}
+	}
+	root, ok := byPID[rootPID]
+	if !ok || root.StartTime == "" {
+		return processKillPlan{PreserveExclusion: len(exclude) > 0}
+	}
+	for parent := range children {
+		sort.Ints(children[parent])
+	}
+
+	visited := make(map[int]bool, len(byPID))
+	postorder := func(start int, allowed func(int) bool, emit func(int)) {
+		type frame struct {
+			pid      int
+			expanded bool
+		}
+		stack := []frame{{pid: start}}
+		for len(stack) > 0 {
+			current := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if current.expanded {
+				emit(current.pid)
+				continue
+			}
+			if visited[current.pid] || !allowed(current.pid) {
+				continue
+			}
+			visited[current.pid] = true
+			stack = append(stack, frame{pid: current.pid, expanded: true})
+			childPIDs := children[current.pid]
+			for index := len(childPIDs) - 1; index >= 0; index-- {
+				childPID := childPIDs[index]
+				if !visited[childPID] && allowed(childPID) {
+					stack = append(stack, frame{pid: childPID})
+				}
+			}
+		}
+	}
+
+	plan := processKillPlan{}
+	appendTarget := func(pid int) {
+		if exclude[pid] {
+			plan.PreserveExclusion = true
+			return
+		}
+		if pid == rootPID {
+			return
+		}
+		record, exists := byPID[pid]
+		if !exists || record.StartTime == "" {
+			return
+		}
+		plan.Descendants = append(plan.Descendants, processTarget{PID: pid, StartTime: record.StartTime})
+	}
+	postorder(rootPID, func(pid int) bool {
+		_, exists := byPID[pid]
+		return exists
+	}, appendTarget)
+
+	// Only a process-group leader (PGID == PID) proves ownership of the group:
+	// while that leader identity is live the kernel cannot reuse its PID as a
+	// foreign group ID, and processes outside its OS session cannot join it.
+	// When the pane PID merely inherited somebody else's group, group membership
+	// is not ownership and we retain only the captured descendant tree. For an
+	// owned group, members outside that tree are its init/subreaper-adopted tail.
+	// Order each orphan tree deepest-first and resolve disconnected/cyclic
+	// components by PID.
+	if root.PGID == root.PID {
+		extra := make(map[int]bool)
+		for pid, record := range byPID {
+			if !visited[pid] && record.PGID == root.PGID && record.PPID > 0 {
+				extra[pid] = true
+			}
+		}
+		roots := make([]int, 0, len(extra))
+		all := make([]int, 0, len(extra))
+		for pid := range extra {
+			all = append(all, pid)
+			if !extra[byPID[pid].PPID] {
+				roots = append(roots, pid)
+			}
+		}
+		sort.Ints(roots)
+		sort.Ints(all)
+		allowedExtra := func(pid int) bool { return extra[pid] }
+		for _, pid := range roots {
+			postorder(pid, allowedExtra, appendTarget)
+		}
+		for _, pid := range all {
+			postorder(pid, allowedExtra, appendTarget)
+		}
+	}
+
+	if !exclude[rootPID] {
+		leader := processTarget{PID: rootPID, StartTime: root.StartTime}
+		plan.Leader = &leader
+	}
+	return plan
+}
+
+func terminateProcessKillPlan(plan processKillPlan) error {
+	err := terminateProcesses(plan.Descendants)
+	if plan.Leader != nil {
+		err = errors.Join(err, terminateProcesses([]processTarget{*plan.Leader}))
 	}
 	return err
+}
+
+func teardownSessionProcessPlan(
+	plan processKillPlan,
+	discoveryErr error,
+	killSession func() error,
+	terminatePlan func(processKillPlan) error,
+) error {
+	var terminationErr error
+	if plan.PreserveExclusion {
+		terminationErr = terminatePlan(plan)
+	}
+	killErr := killSession()
+	if !plan.PreserveExclusion {
+		terminationErr = terminatePlan(plan)
+	}
+	killConfirmedMissing := errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer)
+	if killConfirmedMissing {
+		killErr = nil
+	}
+	if killConfirmedMissing && (errors.Is(discoveryErr, ErrSessionNotFound) ||
+		errors.Is(discoveryErr, ErrNoServer) || errors.Is(discoveryErr, errEmptyPaneProcessState)) {
+		discoveryErr = nil
+	}
+	return errors.Join(discoveryErr, terminationErr, killErr)
+}
+
+func processExclusionSet(pids []string) map[int]bool {
+	exclude := make(map[int]bool, len(pids))
+	for _, raw := range pids {
+		pid, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err == nil && pid > 1 {
+			exclude[pid] = true
+		}
+	}
+	return exclude
+}
+
+// KillSessionWithProcesses terminates a tmux session and its owned processes.
+// Selection uses one process-table snapshot and every direct signal is fenced
+// by the target's captured start-time identity.
+func (t *Tmux) KillSessionWithProcesses(name string) error {
+	plan, discoveryErr := t.capturePaneProcessKillPlan(name, nil)
+
+	// Let tmux, the pane leader's parent, terminate and reap the live leader
+	// before using direct descendant/leader signals as identity-fenced fallbacks.
+	// Killing a "sleep & wait" child first lets its shell exit before tmux owns
+	// teardown and can leave that shell as an unreaped zombie on Linux.
+	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan)
 }
 
 // KillSessionWithProcessesExcluding is like KillSessionWithProcesses but excludes
@@ -920,215 +1232,25 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 // the calling process (e.g., gt done) is running inside the session it's terminating.
 // Without exclusion, the caller would be killed before completing the cleanup.
 func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []string) error {
-	// Build exclusion set for O(1) lookup
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
-	}
+	exclude := processExclusionSet(excludePIDs)
+	plan, discoveryErr := t.capturePaneProcessKillPlan(name, exclude)
 
-	// Get the pane PID
-	pid, err := t.GetPanePID(name)
-	if err != nil {
-		// Session might not exist or server may have already gone away.
-		killErr := t.KillSession(name)
-		if killErr == nil || errors.Is(killErr, ErrSessionNotFound) || errors.Is(killErr, ErrNoServer) {
-			return nil
-		}
-		return killErr
-	}
-
-	if pid != "" {
-		// Get the process group ID
-		pgid := getProcessGroupID(pid)
-
-		// 1. Get all descendant PIDs recursively (catches processes that called setsid())
-		descendants := getAllDescendants(pid)
-
-		// Build known PID set for group membership verification
-		knownPIDs := make(map[string]bool, len(descendants)+1)
-		knownPIDs[pid] = true
-		for _, dpid := range descendants {
-			knownPIDs[dpid] = true
-		}
-
-		// 2. Get verified process group members (only reparented-to-init processes).
-		// Instead of adding ALL group members — which could include unrelated
-		// processes sharing the same PGID — we only add those that were reparented
-		// to init (PPID == 1), indicating they were likely children in our tree.
-		var reparented []string
-		if pgid != "" && pgid != "0" && pgid != "1" {
-			reparented = collectReparentedGroupMembers(pgid, knownPIDs)
-		}
-
-		// Partition the discovered process set into the descendant/group PIDs to
-		// terminate and whether the pane leader should be killed, honoring the
-		// exclusion set. This decision is pure so it can be unit-tested without
-		// real processes (see computeExcludingKillSet).
-		killList, killPaneLeader := computeExcludingKillSet(pid, descendants, reparented, exclude)
-
-		terminateProcesses(killList)
-
-		// Kill the pane process itself (may have called setsid() and detached),
-		// only if it is not excluded.
-		if killPaneLeader {
-			terminateProcesses([]string{pid})
-		}
-	}
-
-	// Kill the tmux session - this will terminate the excluded process too.
-	// Ignore missing/dead-server errors - if we killed all non-excluded
-	// processes, tmux may have already destroyed the session automatically.
-	err = t.KillSession(name)
-	if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
-		return nil
-	}
-	return err
+	// An exclusion captured inside this pane is the self-close case: finish the
+	// non-excluded cleanup first so the in-pane caller is not torn down early.
+	// A foreign exclusion needs no such delay, so tmux owns and reaps the live
+	// leader first, before identity-fenced direct fallbacks.
+	return teardownSessionProcessPlan(plan, discoveryErr, func() error { return t.KillSession(name) }, terminateProcessKillPlan)
 }
 
-// computeExcludingKillSet partitions a discovered process set into the
-// descendant/group PIDs that should be terminated and whether the pane leader
-// itself should be terminated, honoring an exclusion set. It performs no I/O,
-// so the self-kill exclusion decision can be unit-tested without real
-// processes.
-//
-// exclude protects the calling process from being signaled before it finishes
-// its own cleanup. This is essential for the self-close path where
-// `gc session close` runs inside the very pane it is tearing down: the caller
-// is a descendant of the pane leader and, without exclusion, would receive
-// SIGTERM mid-cleanup — leaving the agent alive and the session bead un-closed.
-// Excluding a caller that lives outside the pane is a harmless no-op because it
-// is not present in the descendant or reparented sets.
-func computeExcludingKillSet(panePID string, descendants, reparented []string, exclude map[string]bool) (killList []string, killPaneLeader bool) {
-	toKill := make(map[string]bool, len(descendants)+len(reparented))
-	for _, dpid := range descendants {
-		if !exclude[dpid] {
-			toKill[dpid] = true
-		}
-	}
-	for _, member := range reparented {
-		if !exclude[member] {
-			toKill[member] = true
-		}
-	}
-	killList = make([]string, 0, len(toKill))
-	for p := range toKill {
-		killList = append(killList, p)
-	}
-	return killList, !exclude[panePID]
-}
-
-// collectReparentedGroupMembers returns process group members that outlived
-// their parent inside our tree and were reparented away, but are not already in
-// the known descendant set. It shares the pane leader's PGID with every member;
-// since the leader is still alive when this runs, the PGID cannot have been
-// reused, so members carrying it descend from our tree rather than an unrelated
-// process. This is safer than killing the entire group blindly with
-// syscall.Kill(-pgid, ...).
-func collectReparentedGroupMembers(pgid string, knownPIDs map[string]bool) []string {
-	return reparentedOrphans(getProcessGroupMembers(pgid), knownPIDs, getParentPID)
-}
-
-// reparentedOrphans selects group members whose parent is outside the known
-// descendant set — the pure, IO-free core of collectReparentedGroupMembers.
-//
-// The prior test was literal PPID == 1, which only holds when init adopts the
-// orphan. Under a `user@.service` subreaper (systemd --user), an orphaned child
-// reparents to the subreaper's pid, not 1, so the PPID == 1 test missed it and
-// the tree kill left it alive next to the replacement. "Parent outside the
-// descendant set" captures both cases: init (pid 1 is never a descendant) and
-// the subreaper (its pid is never a descendant either), while a member whose
-// parent is still a live descendant is left to getAllDescendants. Members whose
-// parent cannot be read are skipped rather than killed.
-func reparentedOrphans(members []string, knownPIDs map[string]bool, parentOf func(string) string) []string {
-	var reparented []string
-	for _, member := range members {
-		if knownPIDs[member] {
-			continue // Already in the descendant list; handled there.
-		}
-		ppid := strings.TrimSpace(parentOf(member))
-		if ppid == "" {
-			continue // Parent unknown (raced exit) — cannot prove it's ours.
-		}
-		if knownPIDs[ppid] {
-			continue // Parent still a live descendant; getAllDescendants owns it.
-		}
-		reparented = append(reparented, member)
-	}
-	return reparented
-}
-
-// getAllDescendants recursively finds all descendant PIDs of a process.
-// Returns PIDs in deepest-first order so killing them doesn't orphan grandchildren.
-func getAllDescendants(pid string) []string {
-	var result []string
-
-	// Get direct children using pgrep
-	out, err := exec.Command("pgrep", "-P", pid).Output()
-	if err != nil {
-		return result
-	}
-
-	children := strings.Fields(strings.TrimSpace(string(out)))
-	for _, child := range children {
-		// First add grandchildren (recursively) - deepest first
-		result = append(result, getAllDescendants(child)...)
-		// Then add this child
-		result = append(result, child)
-	}
-
-	return result
-}
-
-// KillPaneProcesses explicitly kills all processes associated with a tmux pane.
-// This prevents orphan processes that survive pane respawn due to SIGHUP being ignored.
-//
-// Process:
-// 1. Get the pane's main process PID and its process group ID (PGID)
-// 2. Kill the entire process group (catches reparented processes)
-// 3. Find all descendant processes recursively (catches any stragglers)
-// 4. Send SIGTERM/SIGKILL to descendants
-// 5. Kill the pane process itself
-//
-// This ensures Claude processes and all their children are properly terminated
-// before respawning the pane.
+// KillPaneProcesses terminates the processes owned by a tmux pane. Selection
+// uses one process-table snapshot and every direct signal is fenced by the
+// target's captured start-time identity.
 func (t *Tmux) KillPaneProcesses(pane string) error {
-	// Get the pane PID
-	pid, err := t.GetPanePID(pane)
+	plan, err := t.capturePaneProcessKillPlan(pane, nil)
 	if err != nil {
-		return fmt.Errorf("getting pane PID: %w", err)
+		return fmt.Errorf("capturing pane process plan: %w", err)
 	}
-
-	if pid == "" {
-		return fmt.Errorf("pane PID is empty")
-	}
-
-	// Walk the process tree for all descendants (catches processes that
-	// called setsid() and created their own process groups)
-	descendants := getAllDescendants(pid)
-
-	// Build known PID set for group membership verification
-	knownPIDs := make(map[string]bool, len(descendants)+1)
-	knownPIDs[pid] = true
-	for _, d := range descendants {
-		knownPIDs[d] = true
-	}
-
-	// Find reparented processes from our process group. Instead of killing
-	// the entire group blindly with syscall.Kill(-pgid, ...) — which could
-	// hit unrelated processes sharing the same PGID — we enumerate group
-	// members and only include those reparented to init (PPID == 1).
-	pgid := getProcessGroupID(pid)
-	if pgid != "" && pgid != "0" && pgid != "1" {
-		reparented := collectReparentedGroupMembers(pgid, knownPIDs)
-		descendants = append(descendants, reparented...)
-	}
-
-	// Terminate descendants deepest-first, then the pane leader. The grace
-	// period ends early when process exit is observed.
-	terminateProcesses(descendants)
-	terminateProcesses([]string{pid})
-
-	return nil
+	return terminateProcessKillPlan(plan)
 }
 
 // KillPaneProcessesExcluding is like KillPaneProcesses but excludes specified PIDs
@@ -1140,61 +1262,12 @@ func (t *Tmux) KillPaneProcesses(pane string) error {
 // survive. After this function returns, RespawnPane's -k flag will send SIGHUP to
 // clean up the remaining processes.
 func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) error {
-	// Build exclusion set for O(1) lookup
-	exclude := make(map[string]bool)
-	for _, pid := range excludePIDs {
-		exclude[pid] = true
-	}
-
-	// Get the pane PID
-	pid, err := t.GetPanePID(pane)
+	exclude := processExclusionSet(excludePIDs)
+	plan, err := t.capturePaneProcessKillPlan(pane, exclude)
 	if err != nil {
-		return fmt.Errorf("getting pane PID: %w", err)
+		return fmt.Errorf("capturing pane process plan: %w", err)
 	}
-
-	if pid == "" {
-		return fmt.Errorf("pane PID is empty")
-	}
-
-	// Get all descendant PIDs recursively (returns deepest-first order)
-	descendants := getAllDescendants(pid)
-
-	// Filter out excluded PIDs
-	var filtered []string
-	for _, dpid := range descendants {
-		if !exclude[dpid] {
-			filtered = append(filtered, dpid)
-		}
-	}
-
-	// Build known PID set for group membership verification
-	knownPIDs := make(map[string]bool, len(descendants)+1)
-	knownPIDs[pid] = true
-	for _, d := range descendants {
-		knownPIDs[d] = true
-	}
-
-	// Find reparented processes from our process group. Instead of killing
-	// the entire group blindly with syscall.Kill(-pgid, ...) — which could
-	// hit unrelated processes sharing the same PGID — we enumerate group
-	// members and only include those reparented to init (PPID == 1).
-	pgid := getProcessGroupID(pid)
-	if pgid != "" && pgid != "0" && pgid != "1" {
-		for _, member := range collectReparentedGroupMembers(pgid, knownPIDs) {
-			if !exclude[member] {
-				filtered = append(filtered, member)
-			}
-		}
-	}
-
-	terminateProcesses(filtered)
-
-	// Kill the pane process itself only if not excluded
-	if !exclude[pid] {
-		terminateProcesses([]string{pid})
-	}
-
-	return nil
+	return terminateProcessKillPlan(plan)
 }
 
 // KillServer terminates the entire tmux server and all sessions.
@@ -1984,6 +2057,50 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 	return nil
 }
 
+func splitPasteText(text string, maxBytes int) []string {
+	if maxBytes <= 0 || len(text) <= maxBytes {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, (len(text)+maxBytes-1)/maxBytes)
+	for len(text) > maxBytes {
+		cut := maxBytes
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		// Invalid UTF-8 can consist entirely of continuation bytes. Preserve
+		// those bytes exactly and still make progress; valid prompts never use
+		// this fallback.
+		if cut == 0 {
+			cut = maxBytes
+		}
+		if newline := strings.LastIndexByte(text[:cut], '\n'); newline >= 0 {
+			cut = newline + 1
+		}
+		chunks = append(chunks, text[:cut])
+		text = text[cut:]
+	}
+	if text != "" {
+		chunks = append(chunks, text)
+	}
+	return chunks
+}
+
+func sendPasteChunks(chunks []string, send func(string) error, pause func()) error {
+	for i, chunk := range chunks {
+		if err := send(chunk); err != nil {
+			if i > 0 {
+				return fmt.Errorf("%w after %d chunks: %w", errPartialPasteDelivery, i, err)
+			}
+			return err
+		}
+		if i+1 < len(chunks) {
+			pause()
+		}
+	}
+	return nil
+}
+
 // sendKeysLiteralWithRetry sends literal text to a tmux target, retrying on
 // transient errors (e.g., "not in a mode" during agent TUI startup).
 // This is the core retry loop used by both NudgeSession and NudgePane.
@@ -1998,12 +2115,46 @@ func (t *Tmux) pasteLiteralText(target, text string) error {
 // This function ONLY addresses the startup race where the agent TUI hasn't
 // initialized yet, causing tmux send-keys to fail with "not in a mode".
 func (t *Tmux) sendKeysLiteralWithRetry(target, text string, timeout time.Duration) error {
+	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+}
+
+func (t *Tmux) sendStartupKeysLiteralWithRetry(target, text, provider string, timeout time.Duration) error {
+	if len(text) > copilotMaxPasteBytes && sessionlog.ProviderFamily(provider) == "copilot" {
+		chunks := splitPasteText(text, copilotMaxPasteBytes)
+		// Budget the inter-chunk pauses on top of the retry window rather than
+		// out of it. Spending them from `timeout` would shrink each chunk's
+		// share of the configured readiness budget as the prompt grows, making
+		// large prompts more timeout-prone -- the exact case chunking targets.
+		// The deadline is shared across every chunk rather than per-chunk, so a
+		// retry-heavy first chunk can starve the later ones and turn what would
+		// have been a plain timeout into errPartialPasteDelivery.
+		deadline := time.Now().Add(timeout + time.Duration(len(chunks)-1)*copilotPasteChunkDelay)
+		return sendPasteChunks(chunks, func(chunk string) error {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("agent not ready for input after %s", timeout)
+			}
+			return t.sendTextWithRetry(target, chunk, remaining, t.pasteLiteralText)
+		}, func() {
+			remaining := time.Until(deadline)
+			if remaining > copilotPasteChunkDelay {
+				remaining = copilotPasteChunkDelay
+			}
+			if remaining > 0 {
+				time.Sleep(remaining)
+			}
+		})
+	}
+	return t.sendTextWithRetry(target, text, timeout, t.sendLiteralText)
+}
+
+func (t *Tmux) sendTextWithRetry(target, text string, timeout time.Duration, send func(string, string) error) error {
 	deadline := time.Now().Add(timeout)
 	interval := t.cfg.NudgeRetryInterval
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		err := t.sendLiteralText(target, text)
+		err := send(target, text)
 		if err == nil {
 			return nil
 		}
@@ -2194,6 +2345,35 @@ func (t *Tmux) sendNudgeSubmitSequence(target string, keys []string) error {
 // queue up and execute one at a time. This prevents garbled input when
 // SessionStart hooks and nudges arrive simultaneously.
 func (t *Tmux) NudgeSession(session, message string) error {
+	return t.nudgeSession(
+		session,
+		message,
+		t.sendKeysLiteralWithRetry,
+		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
+		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+	)
+}
+
+// nudgeStartupSession sends the initial startup prompt. Copilot startup
+// prompts use provider-safe paste chunks so its TUI keeps the text inline.
+func (t *Tmux) nudgeStartupSession(session, message string) error {
+	return t.nudgeSession(
+		session,
+		message,
+		func(target, text string, timeout time.Duration) error {
+			return t.sendStartupKeysLiteralWithRetry(target, text, t.providerEnv(target), timeout)
+		},
+		func(target string) bool { return t.shouldSendEscapeBeforeEnter(target) },
+		func(target string) []string { return t.nudgeSubmitKeySequence(target) },
+	)
+}
+
+func (t *Tmux) nudgeSession(
+	session, message string,
+	sendText func(string, string, time.Duration) error,
+	shouldSendEscape func(string) bool,
+	submitKeySequence func(string) []string,
+) error {
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
@@ -2239,14 +2419,22 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// the input box, and this paste concatenates on top of it instead of
 	// replacing it: stacked injections merge into one draft that Claude's TUI
 	// does not treat as a clean single-line submit (ra-3x46cy finding 2).
-	if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
-		return err
+	//
+	// Skip the clear when a client is attached: a human may be mid-keystroke,
+	// and silently wiping their in-progress input is worse than the
+	// concatenation this clear otherwise prevents (#5192).
+	if !t.IsSessionAttached(session) {
+		if _, err := t.run("send-keys", "-t", target, "C-u"); err != nil {
+			return err
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	// 1.5. Dismiss Claude Code's post-turn feedback survey if it is parked on
-	// the pane (ga-zg7fjq). The composer is empty at this point -- the C-u
-	// above guarantees that, and it matters: the survey's onDigit handler
+	// the pane (ga-zg7fjq). On the unattached path the C-u above has cleared
+	// the composer; on an attached session it deliberately did not, so a
+	// human draft may still be on the line. That matters: the survey's
+	// onDigit handler
 	// only fires on a single-character input value, so a digit landing on
 	// top of other content silently corrupts the draft instead of
 	// dismissing anything. A parked survey reads idle to WaitForIdle (no
@@ -2256,7 +2444,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	t.DismissFeedbackSurveyModalIfPresent(session)
 
 	// 2. Send text in literal mode with retry on transient errors
-	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
+	if err := sendText(target, message, t.cfg.NudgeReadyTimeout); err != nil {
 		return err
 	}
 
@@ -2268,7 +2456,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// semantic input key. Claude, Codex, Gemini, and OpenCode all treat
 	// Escape as a semantic control key in some busy states, so default submit
 	// must not synthesize it for them.
-	if t.shouldSendEscapeBeforeEnter(target) {
+	if shouldSendEscape(target) {
 		// See: https://github.com/anthropics/gastown/issues/307
 		_, _ = t.run("send-keys", "-t", target, "Escape")
 		time.Sleep(100 * time.Millisecond)
@@ -2286,7 +2474,7 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	// "drafted but not submitted" stall; confirming here removes the town's
 	// dependence on an external observer re-kicking the session. Providers
 	// without a reliable indicator keep best-effort delivery.
-	submitKeys := t.nudgeSubmitKeySequence(target)
+	submitKeys := submitKeySequence(target)
 	// RE-SEND HAZARD (noted, not redesigned): a submit sequence that leads with
 	// Escape is only safe to repeat while the pane is still idle. If the first
 	// attempt actually submitted and the pane went busy, a re-sent Escape is an
@@ -2314,11 +2502,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 			// normal retry delay and spends one of its bounded attempts —
 			// the same handling as any other delivery failure — instead of
 			// silently losing the nudge.
+			//
+			// One extra capture here, on the already-failed path only: check
+			// whether the composer actually drained before concluding the
+			// submit itself is in doubt. A drained composer is positive
+			// evidence the Enter reached the pane and the agent consumed it —
+			// only the busy-state OBSERVATION missed it — so that case must be
+			// reported as proven delivery, not requeued as a failure.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneShowsDrainedComposer(lines, message) {
+				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}
 		return nil
 	}
 	// Fallback: best-effort single delivery (unchanged historical behavior).
+	// This family has no busy-state indicator AT ALL — confirmation is
+	// structurally impossible, not merely unobserved. Reporting every
+	// successful send as ErrNudgeSubmitUnconfirmed (the verified path's
+	// signal for "the submit MAY have failed, please retry") was tried and
+	// reverted here: this branch's callers (the queue drain in
+	// cmd/gc/cmd_nudge.go, mail-notify dedup) treat that error as a genuine
+	// delivery failure and re-enqueue/resend, so a family that can never
+	// confirm would have every successful nudge duplicated and eventually
+	// dead-lettered. Instead, keep reporting success on send and record a
+	// best-effort diagnostic (see recordUnconfirmedSubmit) so the gap is
+	// observable without corrupting the retry contract.
 	var lastErr error
 	for attempt := 0; attempt < submitEnterMaxSends; attempt++ {
 		if attempt > 0 {
@@ -2331,9 +2540,32 @@ func (t *Tmux) NudgeSession(session, message string) error {
 		// 7. Wake again so the submitted turn is processed promptly.
 		wake()
 		delivered = true
+		t.recordUnconfirmedSubmit(session, message)
 		return nil
 	}
 	return fmt.Errorf("failed to send submit sequence after %d attempts: %w", submitEnterMaxSends, lastErr)
+}
+
+// recordUnconfirmedSubmit persists a best-effort diagnostic artifact when a
+// nudge submit was sent on a provider family with no busy-state indicator,
+// so delivery could not be confirmed (see the fallback branch of
+// NudgeSession above). This is deliberately separate from the retry/error
+// contract: the send is still reported as successful to the caller, since
+// treating it as a retryable failure would duplicate every delivery for
+// these provider families (see the comment above the call site). Disabled
+// (no-op) when RuntimeDir is unset. An I/O error is NOT swallowed: it is
+// warned on stderr, because the caller's decision to report success rests
+// entirely on this artifact existing, and a discarded write error leaves the
+// operation returning success with neither confirmation nor evidence.
+func (t *Tmux) recordUnconfirmedSubmit(session, message string) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "session: %s\n", session)
+	b.WriteString("cause: submit delivered but not confirmed (no busy-state indicator for this provider family)\n")
+	writeDiagnosticTextBlock(&b, "--- nudge text ---\n", message)
+
+	if _, err := writeSessionDiagnosticFile(t.cfg.RuntimeDir, session, "nudge-unconfirmed.log", b.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: session %q diagnostic nudge-unconfirmed.log not written: %v\n", session, err)
+	}
 }
 
 // NudgePane sends a message to a specific pane reliably.
@@ -2709,10 +2941,7 @@ func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
 // returning the active pane's PID in multi-pane sessions. When target is
 // a pane ID (e.g., "%5"), uses it directly.
 func (t *Tmux) GetPanePID(target string) (string, error) {
-	tmuxTarget := target
-	if !strings.HasPrefix(target, "%") {
-		tmuxTarget = target + ":^.0"
-	}
+	tmuxTarget := primaryPaneTarget(target)
 	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_pid}")
 	if err != nil {
 		return "", err
@@ -2724,14 +2953,57 @@ func (t *Tmux) GetPanePID(target string) (string, error) {
 	return result, nil
 }
 
+func primaryPaneTarget(target string) string {
+	if strings.HasPrefix(target, "%") {
+		return target
+	}
+	return target + ":^.0"
+}
+
+func (t *Tmux) paneProcessState(target string) (paneProcessState, error) {
+	out, err := t.run("display-message", "-t", primaryPaneTarget(target), "-p", "#{pane_pid}\t#{pane_dead}")
+	if err != nil {
+		return paneProcessState{}, err
+	}
+	return parsePaneProcessState(out, target)
+}
+
+func parsePaneProcessState(output, target string) (paneProcessState, error) {
+	if strings.TrimSpace(output) == "" {
+		return paneProcessState{}, fmt.Errorf("%w for target %s", errEmptyPaneProcessState, target)
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 2 {
+		return paneProcessState{}, fmt.Errorf("unexpected pane process state %q for target %s", output, target)
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 1 {
+		return paneProcessState{}, fmt.Errorf("invalid pane PID %q for target %s", fields[0], target)
+	}
+	switch fields[1] {
+	case "0":
+		return paneProcessState{PID: pid}, nil
+	case "1":
+		return paneProcessState{PID: pid, Dead: true}, nil
+	default:
+		return paneProcessState{}, fmt.Errorf("unexpected pane_dead value %q for target %s", fields[1], target)
+	}
+}
+
+func (t *Tmux) capturePaneProcessKillPlan(target string, exclude map[int]bool) (processKillPlan, error) {
+	return capturePaneProcessKillPlan(
+		func() (paneProcessState, error) { return t.paneProcessState(target) },
+		proctable.SnapshotProcesses,
+		proctable.ProcessIdentity,
+		exclude,
+	)
+}
+
 // IsPaneDead reports whether the target pane's process has exited while the
 // pane remains visible (for example because remain-on-exit is enabled).
 // When target is a session name, pane 0 is queried explicitly.
 func (t *Tmux) IsPaneDead(target string) (bool, error) {
-	tmuxTarget := target
-	if !strings.HasPrefix(target, "%") {
-		tmuxTarget = target + ":^.0"
-	}
+	tmuxTarget := primaryPaneTarget(target)
 	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_dead}")
 	if err != nil {
 		return false, err
@@ -3598,6 +3870,69 @@ func idlePromptPrefix(configured string) string {
 	return DefaultReadyPromptPrefix
 }
 
+// snapshotPaneIdle takes one observation of the session's pane and reports
+// whether it currently shows a ready prompt with no active-processing
+// indicator, resolving the session's configured ready-prompt prefix first. It
+// is the entry point for single-observation callers (SnapshotIdle); WaitForIdle
+// resolves the prefix once and polls snapshotPaneIdleWithPrefix directly so its
+// loop does not re-exec tmux show-environment on every 200ms tick.
+func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
+	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session))
+}
+
+// resolveIdlePromptPrefix reads the session's configured ready-prompt prefix,
+// falling back to DefaultReadyPromptPrefix when it is unset or unreadable.
+func (t *Tmux) resolveIdlePromptPrefix(session string) string {
+	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
+		return idlePromptPrefix(configured)
+	}
+	return DefaultReadyPromptPrefix
+}
+
+// snapshotPaneIdleWithPrefix is the pure pane scan behind idle detection: it
+// captures the pane once and reports whether it shows promptPrefix with no
+// active-processing indicator. A capture error is returned verbatim so callers
+// can distinguish a session that has gone away (ErrSessionNotFound /
+// ErrNoServer) from a transient read failure.
+func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
+	prefix := strings.TrimSpace(promptPrefix)
+
+	lines, err := t.CapturePaneLines(session, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+
+	// Check for active processing indicator in the status bar.
+	// Claude Code shows "esc to interrupt" while processing — if present,
+	// the agent is busy regardless of whether the prompt is visible.
+	if paneContainsBusyIndicator(lines) {
+		return false, nil
+	}
+
+	// Scan captured lines for the prompt prefix.
+	// Claude Code renders a status bar below the prompt line,
+	// so the prompt may not be the last non-empty line.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SnapshotIdle reports whether the named session is at an idle interactive
+// boundary right now — a ready prompt with no active-processing indicator — in
+// a single non-blocking observation. It implements
+// [runtime.IdleSnapshotProvider]. A session that has gone away is reported as
+// an error, not as idle.
+func (t *Tmux) SnapshotIdle(session string) (bool, error) {
+	return t.snapshotPaneIdle(session)
+}
+
 // WaitForIdle polls until the agent appears to be at an idle prompt.
 // Unlike WaitForRuntimeReady (which is for bootstrap), this is for steady-state
 // idle detection — used to avoid interrupting agents mid-work.
@@ -3610,11 +3945,10 @@ func idlePromptPrefix(configured string) string {
 // Returns nil if the agent becomes idle within the timeout.
 // Returns an error if the timeout expires while the agent is still busy.
 func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Duration) error {
-	promptPrefix := DefaultReadyPromptPrefix
-	if configured, err := t.GetEnvironment(session, sessionReadyPromptEnvKey); err == nil {
-		promptPrefix = idlePromptPrefix(configured)
-	}
-	prefix := strings.TrimSpace(promptPrefix)
+	// Resolved once, outside the poll loop: the prefix cannot change mid-wait,
+	// and re-reading it per tick would add a tmux show-environment exec to
+	// every 200ms poll.
+	promptPrefix := t.resolveIdlePromptPrefix(session)
 
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
@@ -3624,7 +3958,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
+		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
@@ -3638,34 +3972,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 			}
 			continue
 		}
-
-		// Check for active processing indicator in the status bar.
-		// Claude Code shows "esc to interrupt" while processing — if present,
-		// the agent is busy regardless of whether the prompt is visible.
-		if paneContainsBusyIndicator(lines) {
-			consecutiveIdle = 0
-			if err := waitForIdlePoll(ctx); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// Scan captured lines for the prompt prefix.
-		// Claude Code renders a status bar below the prompt line,
-		// so the prompt may not be the last non-empty line.
-		foundPrompt := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				continue
-			}
-			if matchesPromptPrefix(trimmed, promptPrefix) || (prefix != "" && trimmed == prefix) {
-				foundPrompt = true
-				break
-			}
-		}
-
-		if foundPrompt {
+		if idle {
 			consecutiveIdle++
 			if consecutiveIdle >= requiredConsecutive {
 				return nil
@@ -3839,6 +4146,82 @@ func paneContainsBusyIndicator(lines []string) bool {
 		}
 	}
 	return false
+}
+
+// paneShowsDrainedComposer reports whether the pane's live composer -- the
+// LAST captured line matching the ready prompt prefix (DefaultReadyPromptPrefix)
+// -- has drained, meaning the submit Enter actually reached the pane and the
+// agent consumed it. Earlier lines that also start with the prompt prefix are
+// scrollback transcript entries, not the live composer, and are ignored.
+//
+// It returns false when the composer still holds sent: the first non-empty
+// line of sent (compared on its first 40 runes, trimmed) is still present in
+// what remains after stripping the prompt prefix. That is the ga-bwm case --
+// the message is sitting drafted-but-unsubmitted -- and callers must keep
+// treating it as unconfirmed and retry. It returns true otherwise: the
+// composer is bare (or holds different, newer text), so the prior submit
+// drained it and only the busy-state OBSERVATION failed. When no line
+// matches the prompt prefix at all, the composer cannot be observed, so this
+// conservatively returns false rather than claiming delivery is proven.
+func paneShowsDrainedComposer(lines []string, sent string) bool {
+	remainder, observed := lastComposerRemainder(lines, DefaultReadyPromptPrefix)
+	if !observed {
+		return false
+	}
+	draft := firstNRunes(strings.TrimSpace(firstNonEmptyLine(sent)), 40)
+	if draft != "" && strings.Contains(remainder, draft) {
+		return false
+	}
+	return true
+}
+
+// lastComposerRemainder returns the text after the ready-prompt prefix on the
+// LAST captured line that matches it -- the live composer, since any earlier
+// match is a scrollback transcript entry -- and whether any line matched at
+// all. Mirrors matchesPromptPrefix's normalization (NBSP folding, box-border
+// stripping) so a line it would call a match also yields a remainder here.
+func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bool) {
+	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
+	prefixTrimmed := strings.TrimSpace(normalizedPrefix)
+
+	var remainder string
+	var observed bool
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
+		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+			switch {
+			case strings.HasPrefix(cand, normalizedPrefix):
+				remainder, observed = cand[len(normalizedPrefix):], true
+			case prefixTrimmed != "" && cand == prefixTrimmed:
+				remainder, observed = "", true
+			default:
+				continue
+			}
+			break
+		}
+	}
+	return remainder, observed
+}
+
+// firstNonEmptyLine returns the first line of s (split on "\n") that is not
+// blank after trimming, or "" if every line is blank.
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// firstNRunes returns the first n runes of s, or all of s when it has n
+// runes or fewer.
+func firstNRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // GetSessionInfo returns detailed information about a session.

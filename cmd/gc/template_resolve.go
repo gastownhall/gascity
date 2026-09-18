@@ -59,6 +59,13 @@ type TemplateParams struct {
 	Prompt string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
+	// OperatorEnv carries only the operator-authored environment layers —
+	// workspace.Env, the resolved provider's Env, and agent.Env — a subset
+	// of Env that excludes passthrough and generated agentEnv plumbing.
+	// Carried to runtime.Config.OperatorEnv (launch-tier fingerprint) so a
+	// resolved config env change drives a warm-box relaunch instead of a
+	// no-op.
+	OperatorEnv map[string]string
 	// Upstream is the selected model-serving endpoint name (a key in [upstreams],
 	// Phase C). Carried to runtime.Config.Upstream (launch-half fingerprint) so a
 	// switch relaunches the warm box; the resolved serving env is already merged
@@ -211,6 +218,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 		command = command + " " + shellquote.Join(defaultArgs)
 	}
+	if p.stderr != nil {
+		for _, pin := range resolved.UnhonoredOptionPins() {
+			fmt.Fprintln(p.stderr, config.FormatUnhonoredOptionPin(qualifiedName, resolved.Name, pin)) //nolint:errcheck
+		}
+	}
 	sa, err := ensureClaudeSettingsArgs(p.fs, p.cityPath, providerFamily, p.stderr)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
@@ -342,6 +354,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
+	// configDir is the directory agent config-relative paths (pre-start
+	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
+	// resolve against. Computed once, ahead of Step 9's prompt render, so
+	// the PromptContext and Step 11's SessionSetupContext agree (#5315).
+	configDir := resolveConfigDir(p.cityPath, cfgAgent.SourceDir)
+
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
@@ -391,11 +409,18 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
 		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
-	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
+	// The prime instruction tells a non-hook agent to go fetch its context.
+	// That is only meaningful when the beacon ships alone (the default branch
+	// below): when the rendered prompt is inlined under the beacon, the agent
+	// already holds the exact bytes `gc prime` would hand back, so the
+	// instruction costs a turn and duplicates the context it just received.
+	includePrimeInstruction := !hasHooks && prompt == ""
+	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, includePrimeInstruction, p.beaconTime)
 	switch {
 	case suppressStartupPrompt:
 		prompt = ""
@@ -463,6 +488,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
+
+	// OperatorEnv carries only the operator-authored layers (workspace,
+	// resolved provider, agent) — excluding passthrough and the generated
+	// agentEnv plumbing — so a resolved config env change fingerprints as
+	// Launch-tier identity instead of a no-op.
+	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
+	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
 
 	// Step 10b: Upstream axis (Phase C). Inject the selected upstream's serving
 	// env LAST so it is authoritative for the model-serving keys, and after
@@ -535,21 +567,20 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		env[key] = val
 	}
 
-	// Step 11: Expand session setup templates.
-	configDir := p.cityPath
-	if cfgAgent.SourceDir != "" {
-		configDir = cfgAgent.SourceDir
-	}
+	// Step 11: Expand session setup templates. configDir was resolved ahead
+	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
+	// agree (#5315).
 	setupCtx := SessionSetupContext{
-		Session:   sessName,
-		Agent:     qualifiedName,
-		AgentBase: agentBase,
-		Rig:       rigName,
-		RigRoot:   rigRoot,
-		CityRoot:  p.cityPath,
-		CityName:  p.cityName,
-		WorkDir:   workDir,
-		ConfigDir: configDir,
+		Session:       sessName,
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
+		CityRoot:      p.cityPath,
+		CityName:      p.cityName,
+		WorkDir:       workDir,
+		ConfigDir:     configDir,
+		DefaultBranch: dirCtx.DefaultBranch,
 	}
 	if strings.Contains(command, "{{") {
 		expanded := expandSessionSetup([]string{command}, setupCtx)
@@ -708,6 +739,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		Command:          command,
 		Prompt:           prompt,
 		Env:              env,
+		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
 		Hints:            hints,
 		WorkDir:          workDir,
@@ -915,6 +947,7 @@ func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, prom
 	cfg.PromptSuffix = promptSuffix
 	cfg.PromptFlag = promptFlag
 	cfg.Env = env
+	cfg.OperatorEnv = maps.Clone(tp.OperatorEnv)
 	if tp.IsACP {
 		cfg.MCPServers = tp.MCPServers
 	}

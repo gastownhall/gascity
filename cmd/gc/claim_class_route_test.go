@@ -520,3 +520,109 @@ func newClaimRouteFor(t *testing.T, class beads.Store) *hookClaimClassRoute {
 	}
 	return route
 }
+
+// claimCapableCountedStore is a counted binding that forwards the CAS.
+//
+// countingClassStore embeds the beads.Store INTERFACE, so it advertises no
+// two-argument Claim and newHookClaimClassRoute refuses it outright. That
+// refusal is correct and must stay — a route that cannot perform the one write
+// it exists for is worse than no route — so the capability is restored here, by
+// the fixture that wants it, rather than by widening the counter for every
+// caller.
+//
+// Get is NOT overridden: it promotes off the embedded counter, which is what
+// keeps the read count the only observable these rows assert on.
+type claimCapableCountedStore struct {
+	*countingClassStore
+	claims beads.Store
+}
+
+func (s claimCapableCountedStore) Claim(id, assignee string) (beads.Bead, bool, error) {
+	claimer, ok := s.claims.(interface {
+		Claim(id, assignee string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		return beads.Bead{}, false, fmt.Errorf("the counted binding's leaf %T has no compare-and-swap claim", s.claims)
+	}
+	return claimer.Claim(id, assignee)
+}
+
+// installClaimCapableCountedBinding is installCountedClassBinding for the claim
+// route: the same counter and the same restated census verdict, wrapped so the
+// route's construction gate admits it.
+func installClaimCapableCountedBinding(t *testing.T, cityPath string, relicFree bool) *countingClassStore {
+	t.Helper()
+	return installCountedClassBindingWrapped(t, cityPath, relicFree, func(c *countingClassStore) beads.Store {
+		return claimCapableCountedStore{countingClassStore: c, claims: c.Store}
+	})
+}
+
+// claimRouteForCountedCity resolves the route the two retirement rows below
+// assert on, and fails the row rather than returning a nil one.
+func claimRouteForCountedCity(t *testing.T, cityPath string) *hookClaimClassRoute {
+	t.Helper()
+	route, err := hookClaimClassRouteForCity(cityPath)
+	if err != nil {
+		t.Fatalf("resolving the claim-time class route: %v", err)
+	}
+	if route == nil {
+		t.Fatal("a city serving its classes from a relocated binding resolved no claim route")
+	}
+	return route
+}
+
+// TestClaimRouteHoldsSkipsTheProbeOnACensusCleanBinding is the claim path's half
+// of the retirement the boot census is taken for.
+//
+// holds() is the residence probe, reached on every work-scope claim that comes
+// back not-found, and it read the binding unconditionally. The by-id door stopped
+// doing that when it moved onto storeref (ga-qdt5y.18) and this seam kept its own
+// hand-rolled version of the same judgement, so a converged relic-free city still
+// paid a binding read per escalated bead here while
+// TestBdByIDDoorSkipsTheProbeOnACensusCleanBinding reported the saving taken.
+//
+// Asserted on the read COUNT for the same reason as that row: the answer is
+// false either way, and the work that does not happen is the whole point.
+func TestClaimRouteHoldsSkipsTheProbeOnACensusCleanBinding(t *testing.T) {
+	cityPath, _ := foreignProviderCity(t)
+	counter := installClaimCapableCountedBinding(t, cityPath, true)
+	route := claimRouteForCountedCity(t, cityPath)
+
+	held, err := route.holds("gc-abc123")
+	if err != nil {
+		t.Fatalf("holds on a work-shaped id: %v", err)
+	}
+	if held {
+		t.Error("the binding claims to hold a work-shaped id it never minted; the escalation would claim through the wrong ledger")
+	}
+	if counter.gets != 0 {
+		t.Errorf("the claim route read the class binding %d time(s) for a work-shaped id on a census-clean binding; the retirement the census was taken for is not being taken", counter.gets)
+	}
+}
+
+// TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding is the
+// must-be-silent counterpart, and it is what stops the row above from being
+// satisfied by a holds() that stopped reading altogether.
+//
+// A clean census retires the RESIDENCE probe — the leg that exists only because
+// a migration preserved work-shaped ids. It never retires the authority leg: the
+// binding is the sole minter of its namespaces, so for an id inside one it is the
+// only store that can answer, and "no relics" says nothing about whether it holds
+// this particular bead.
+func TestClaimRouteHoldsKeepsTheAuthorityLegOnACensusCleanBinding(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	minted := mustCreateClassBead(t, classStore, beads.Bead{Title: "a step the clean binding holds"})
+	counter := installClaimCapableCountedBinding(t, cityPath, true)
+	route := claimRouteForCountedCity(t, cityPath)
+
+	resident, err := route.holds(minted.ID)
+	if err != nil {
+		t.Fatalf("holds on an id only the binding can mint: %v", err)
+	}
+	if !resident {
+		t.Fatal("the binding was reported not to hold a bead it minted; the claim would escalate past the only store that can answer")
+	}
+	if counter.gets != 1 {
+		t.Errorf("the claim route read the class binding %d time(s) for an id only that binding can mint, want exactly 1: zero means a clean census retired the authority leg, which nothing may do, and more than one means the probe is being repeated", counter.gets)
+	}
+}

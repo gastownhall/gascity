@@ -57,6 +57,7 @@ func (s *NativeDoltStore) Count(ctx context.Context, query ListQuery, excludeTyp
 			return err
 		}
 		n = int(total)
+		s.noteRows(n)
 		return nil
 	})
 	if err != nil {

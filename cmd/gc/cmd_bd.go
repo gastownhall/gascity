@@ -100,7 +100,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
@@ -221,6 +226,17 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 // preflight cannot interpret exactly are refused before bd can mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
+	// create, new"), so the alias has to reach the same admission check AND the
+	// same flag manifest. Normalizing here covers both, because those are the
+	// only two things verb is read for. The gate alone would not: bdflags keys
+	// its manifests under the canonical verb only and performs no alias
+	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
+	// over no value — the failure mode globalValueFlags' doc comment calls
+	// load-bearing.
+	if verb == "new" {
+		verb = "create"
+	}
 	if verb != "create" && verb != "update" {
 		return "", false
 	}
@@ -312,6 +328,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// A `list` that filters on the wisps tier reaches that tier only with
+	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
+	// molecules. See bd_wisp_tier.go.
+	bdArgs = rewriteBdWispTierArgs(bdArgs)
+
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
 	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
@@ -364,6 +385,28 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// ledger cannot answer by class, so the reason it would have been
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// The same split, on the write side. `gc bd create` is a passthrough too, and
+	// bd writes the work ledger only, so a create whose SHAPE belongs to a
+	// relocated class strands the bead in a ledger that class is never read from
+	// — silently, because bd did what it was asked and exited 0. Placement is
+	// impossible here (only argv crosses to the subprocess), so the create is
+	// refused before anything is written and the refusal names the gc-native
+	// command that mints it correctly.
+	//
+	// The read override above deliberately does not reach this arm: it exists
+	// because the read scan classifies ambiguous TEXT and a refused read can be
+	// re-run, while a stranded mint leaves a row under the wrong prefix that no
+	// later read finds and no migration moves.
+	//
+	// It runs before the by-id door rather than after because the two answer
+	// different questions and cannot shadow each other: this arm reads the
+	// prospective bead's CLASS and never an addressed id, so a create that names
+	// a relocated bead in --parent still reaches the ownership refusal, which
+	// names that bead. When both are true the mint is what has to be stopped.
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, target.ScopeRoot, bdArgs); stranded {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// A by-ID operation whose subject a relocated class owns is answered in
 	// process, from the binding that class is served from, and never handed to
@@ -488,12 +531,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
-	// this scope: a scope bound to a complete storage binding pins the bd
-	// build that speaks that backend, and the passthrough must honor the pin
-	// or it hands the command to an ambient bd that rejects the bound
-	// backend. Keying on the target scope rather than the city keeps a rig
-	// that owns its binding on its pin, and keeps a rig that overrides the
-	// city backend on the ambient bd its runtime env already implies.
+	// this scope: the city scope, any rig that inherits the city backend, and
+	// any scope bound to a complete storage binding all pin the bd build that
+	// speaks that backend, and the passthrough must honor the pin or it hands
+	// the command to an ambient bd that rejects the bound backend. Keying on
+	// the target scope rather than the city keeps a rig that overrides the
+	// city backend, and owns no binding of its own, on the ambient bd its
+	// runtime env already implies.
 	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -613,7 +657,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (2026-06-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags

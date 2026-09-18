@@ -257,6 +257,13 @@ type SessionSetupContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // source directory where agent config was defined
+	// DefaultBranch mirrors workdir.PathContext.DefaultBranch: the rig's
+	// configured mainline branch, empty for city-scoped agents and for rigs
+	// with no default_branch. Configured value only — prompts'
+	// {{.DefaultBranch}} additionally falls back to a live origin/HEAD probe,
+	// but setup-command expansion runs on reconciler hot paths and must not
+	// spawn git. Setup scripts should keep their own probe fallback.
+	DefaultBranch string
 }
 
 // expandSessionSetup expands Go text/template strings in session_setup commands.
@@ -295,6 +302,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,
+		ContextAdvisory:   config.CloneContextAdvisory(src.ContextAdvisory),
 		Upstream:          src.Upstream,
 		InheritedProvider: src.InheritedProvider,
 		PromptTemplate:    src.PromptTemplate,
@@ -311,20 +319,21 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		OverlayDir:         src.OverlayDir,
 		SourceDir:          src.SourceDir,
 		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
-		IdleTimeout:          src.IdleTimeout,
-		MaxSessionAge:        src.MaxSessionAge,
-		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,
-		SleepAfterIdle:       src.SleepAfterIdle,
-		SleepAfterIdleSource: src.SleepAfterIdleSource,
-		Suspended:            src.Suspended,
-		ResumeCommand:        src.ResumeCommand,
-		WakeMode:             src.WakeMode,
-		MouseMode:            src.MouseMode,
-		PoolName:             src.QualifiedName(),
-		Implicit:             src.Implicit,
-		ScaleCheck:           src.ScaleCheck,
-		BindingName:          src.BindingName,
-		PackName:             src.PackName,
+		IdleTimeout:            src.IdleTimeout,
+		MaxSessionAge:          src.MaxSessionAge,
+		MaxSessionAgeJitter:    src.MaxSessionAgeJitter,
+		SleepAfterIdle:         src.SleepAfterIdle,
+		SleepAfterIdleSource:   src.SleepAfterIdleSource,
+		AutoReclaimStaleClaims: src.AutoReclaimStaleClaims,
+		Suspended:              src.Suspended,
+		ResumeCommand:          src.ResumeCommand,
+		WakeMode:               src.WakeMode,
+		MouseMode:              src.MouseMode,
+		PoolName:               src.QualifiedName(),
+		Implicit:               src.Implicit,
+		ScaleCheck:             src.ScaleCheck,
+		BindingName:            src.BindingName,
+		PackName:               src.PackName,
 	}
 	if len(src.DependsOn) > 0 {
 		dst.DependsOn = make([]string, len(src.DependsOn))

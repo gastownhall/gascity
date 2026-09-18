@@ -887,3 +887,109 @@ func TestLookupConfiguredNamedSession_AliasOnlyLiveBeadResolvesCanonical(t *test
 		t.Fatalf("Canonical.ID = %q, want %q", after.Canonical.ID, live.ID)
 	}
 }
+
+func TestRecyclableDeadConfiguredNamePhantom(t *testing.T) {
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "keeper"}},
+		NamedSessions: []config.NamedSession{{Template: "keeper", Mode: "on_demand"}},
+	}
+	cityName := "test-city"
+	identity := cfg.NamedSessions[0].QualifiedName()
+	runtimeName := config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)
+	if runtimeName == "" {
+		t.Fatal("precondition: runtime name must be non-empty")
+	}
+
+	bead := func(meta map[string]string) beads.Bead { return beads.Bead{Metadata: meta} }
+
+	tests := []struct {
+		name         string
+		bead         beads.Bead
+		wantIdentity string
+		wantOK       bool
+	}{
+		{
+			name: "empty-identity phantom with flag and matching runtime name",
+			bead: bead(map[string]string{
+				"session_name":          runtimeName,
+				NamedSessionMetadataKey: "true",
+			}),
+			wantIdentity: identity,
+			wantOK:       true,
+		},
+		{
+			name: "pre-flag legacy phantom recognized via alias signal",
+			bead: bead(map[string]string{
+				"session_name": runtimeName,
+				"alias":        identity,
+			}),
+			wantIdentity: identity,
+			wantOK:       true,
+		},
+		{
+			name: "pre-flag legacy phantom recognized via template signal",
+			bead: bead(map[string]string{
+				"session_name": runtimeName,
+				"template":     identity,
+			}),
+			wantIdentity: identity,
+			wantOK:       true,
+		},
+		{
+			name: "recognized canonical owner is not recyclable",
+			bead: bead(map[string]string{
+				"session_name":               runtimeName,
+				NamedSessionMetadataKey:      "true",
+				NamedSessionIdentityMetadata: identity,
+			}),
+			wantOK: false,
+		},
+		{
+			name: "bead tagged for a different identity is out of scope",
+			bead: bead(map[string]string{
+				"session_name":               runtimeName,
+				NamedSessionMetadataKey:      "true",
+				NamedSessionIdentityMetadata: "other",
+			}),
+			wantOK: false,
+		},
+		{
+			name: "session_name is not a configured runtime name",
+			bead: bead(map[string]string{
+				"session_name":          "claude-pool-abc",
+				NamedSessionMetadataKey: "true",
+			}),
+			wantOK: false,
+		},
+		{
+			name: "unrecognized squatter holds the name but nothing ties it to the identity",
+			bead: bead(map[string]string{
+				"session_name": runtimeName,
+			}),
+			wantOK: false,
+		},
+		{
+			name:   "empty session_name",
+			bead:   bead(map[string]string{"alias": identity}),
+			wantOK: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIdentity, gotOK := RecyclableDeadConfiguredNamePhantom(tt.bead, cfg, cityName)
+			if gotOK != tt.wantOK {
+				t.Fatalf("ok = %v, want %v (identity=%q)", gotOK, tt.wantOK, gotIdentity)
+			}
+			if gotOK && gotIdentity != tt.wantIdentity {
+				t.Fatalf("identity = %q, want %q", gotIdentity, tt.wantIdentity)
+			}
+		})
+	}
+}
+
+func TestRecyclableDeadConfiguredNamePhantom_NilConfigNeverRecyclable(t *testing.T) {
+	if _, ok := RecyclableDeadConfiguredNamePhantom(beads.Bead{Metadata: map[string]string{"session_name": "x"}}, nil, ""); ok {
+		t.Fatal("nil cfg should never be recyclable")
+	}
+}

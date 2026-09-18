@@ -1,88 +1,24 @@
 package config
 
-// The reserved id namespaces, and the auxiliary one the registry did not know
-// about.
+// The reserved-prefix table itself is tested in internal/beadmeta, where it
+// lives. What is left to test here is the join: config's BeadClass* names are
+// what every caller passes INTO that table, and they are declared in a different
+// file from the table's keys.
 //
-// A class mints under one prefix, but a class STORE can hold beads under more
-// than one: the nudge queue mints its own records as "gcnq-…" inside the nudges
-// binding (internal/storebinding/beads_nudge_queue.go's nudgeQueueIDPrefix).
-// That prefix was never registered, so every consumer that asks "is this id
-// class-reserved" — the rig/HQ prefix validator, the `gc bd` by-id front door,
-// the residency topology's binding namespaces — answered no for a queue id.
-//
-// The consequences are asymmetric and both bad. A rig could be configured with
-// prefix "gcnq" and collide with the queue's own ids, and a by-id read of a
-// queue bead falls through to the work ledger, which answers it emptily and
-// confidently. Registration is what makes the union match the reality.
+// A drift there answers "no reserved prefix" for a class that has one, and that
+// answer is silent in the worst direction — the id falls through to the work
+// ledger, which answers it emptily and confidently rather than erroring.
 
-import (
-	"testing"
-)
+import "testing"
 
-func TestNudgeQueuePrefixIsReserved(t *testing.T) {
-	if !IsReservedClassPrefix("gcnq") {
-		t.Error("gcnq is not reserved; a rig could be configured with that prefix and collide with the nudge queue's own bead ids")
-	}
-	// Case-insensitive, matching ValidateRigs' prefix handling.
-	if !IsReservedClassPrefix("  GCNQ ") {
-		t.Error("gcnq is not reserved case-insensitively; the rig validator lowercases before comparing")
-	}
-}
-
-// The auxiliary prefix must not displace the one the class MINTS under. A
-// binding's store is opened with ReservedClassPrefix as its IDPrefix, so a
-// change there is a change to every id the class creates from then on.
-func TestReservedClassPrefixStillNamesTheMintPrefix(t *testing.T) {
-	got, ok := ReservedClassPrefix(BeadClassNudges)
-	if !ok {
-		t.Fatal("nudges has no reserved mint prefix")
-	}
-	if got != "gcn" {
-		t.Fatalf("nudges mints under %q, want gcn — this is the store's IDPrefix, not the namespace union", got)
-	}
-}
-
-func TestReservedClassPrefixesForCoversAuxiliaryNamespaces(t *testing.T) {
-	tests := []struct {
-		class string
-		want  []string
-	}{
-		{BeadClassNudges, []string{"gcn", "gcnq"}},
-		{BeadClassGraph, []string{"gcg"}},
-		{BeadClassWork, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.class, func(t *testing.T) {
-			got := ReservedClassPrefixesFor(tt.class)
-			if len(got) != len(tt.want) {
-				t.Fatalf("ReservedClassPrefixesFor(%q) = %v, want %v", tt.class, got, tt.want)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Fatalf("ReservedClassPrefixesFor(%q) = %v, want %v (mint prefix first)", tt.class, got, tt.want)
-				}
-			}
-		})
-	}
-}
-
-// Every prefix the registry knows must be reserved, and the union must be the
-// concatenation of the per-class unions. Stated as a property rather than a
-// literal list so registering a sixth class cannot leave one accessor behind.
-func TestReservedPrefixUnionAgreesWithPerClassUnions(t *testing.T) {
-	union := map[string]bool{}
-	for _, p := range AllReservedClassPrefixes() {
-		if !IsReservedClassPrefix(p) {
-			t.Errorf("AllReservedClassPrefixes returned %q, which IsReservedClassPrefix denies", p)
+func TestEveryRelocatedBeadClassNameKeysTheReservedTable(t *testing.T) {
+	for _, class := range []string{BeadClassGraph, BeadClassMessaging, BeadClassSessions, BeadClassOrders, BeadClassNudges} {
+		if _, ok := ReservedClassPrefix(class); !ok {
+			t.Errorf("config names the relocated class %q, but the reserved-prefix table has no key for it — ids it mints would fall through to the work ledger", class)
 		}
-		union[p] = true
 	}
-	for class := range reservedClassPrefixes {
-		for _, p := range ReservedClassPrefixesFor(class) {
-			if !union[p] {
-				t.Errorf("class %q reserves %q, which is missing from AllReservedClassPrefixes", class, p)
-			}
-		}
+	if _, ok := ReservedClassPrefix(BeadClassWork); ok {
+		t.Errorf("work has a reserved class prefix; work beads stay on bd under the rig/HQ EffectivePrefix")
 	}
 }
 
