@@ -1383,31 +1383,23 @@ func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.
 }
 
 // mailSenderAuthorizedCached reports whether the calling session may claim
-// resolvedSender as its --from identity (#4070). The reserved "controller"
-// bucket is exempt: "--from controller" is the documented pattern for
-// scripted automation (e.g. examples/bd/dolt/commands/compact/run.sh's
-// quarantine alert). The reserved "human" bucket is NOT exempt: it is the
-// operator's identity, so a live agent claiming it forges operator
+// resolvedSender as its --from identity (#4070). Neither reserved bucket is
+// exempt: "human" is the operator's identity and "controller" is a
+// structured sender identity, so a live agent claiming either forges
 // authority exactly as claiming a coordinator's mailbox would. A caller
 // with no live-session env vars set at all (own identity resolves to
-// "human", an interactive terminal user) is exempt too -- shell access to
-// the city is already a stronger trust boundary than mail-sender identity,
-// and this is the documented default sender for a plain human operator. A
-// caller whose own env vars are set but don't resolve to any live session
-// fails closed rather than let an unresolvable identity dodge the check.
-// Everything else -- a live agent session claiming a DIFFERENT live
-// agent's mailbox, e.g. a compromised worker forging mail as a fleet's
-// coordinator role -- is the actual gap this closes: without this check,
-// resolveMailIdentityWithConfigCached resolves any live, named session's
-// identity for any caller with zero authentication.
+// "human": an interactive terminal user, or an exec order, which runs with
+// the supervisor's environment) may claim any sender -- this keeps
+// scripted "--from controller" automation such as
+// examples/bd/dolt/commands/compact/run.sh working. A caller whose own env
+// vars are set but don't resolve to any live session fails closed rather
+// than let an unresolvable identity dodge the check.
 //
-// This is a spoofing guard, NOT authentication: the caller's own identity
-// comes from GC_SESSION_ID/GC_ALIAS/GC_AGENT, which the caller controls, and
-// a caller that clears all three resolves as "human" and is exempt by design.
+// This is a guard against a session accidentally or naively claiming
+// another identity, not authentication: the caller's own identity comes
+// from its GC_SESSION_ID/GC_ALIAS/GC_AGENT environment, which the caller
+// controls, and mail is a plain bead any store writer can create.
 func mailSenderAuthorizedCached(cityPath string, cfg *config.City, store beads.Store, resolvedSender string, cache *mailIdentitySessionCache) bool {
-	if resolvedSender == controllerMailIdentity {
-		return true
-	}
 	own, ok := callerOwnMailIdentityCached(cityPath, cfg, store, cache)
 	if !ok {
 		return false
