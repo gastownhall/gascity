@@ -1123,7 +1123,7 @@ mode = "always"
 	if target.display != "gcw/gas-city-architect" {
 		t.Fatalf("display = %q, want gcw/gas-city-architect", target.display)
 	}
-	want := []string{"gcw/gas-city-architect", "gc-1", "gas-city-architect"}
+	want := []string{"gcw/gas-city-architect", "gcw-1", "gas-city-architect"}
 	if strings.Join(target.recipients, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %#v, want %#v", target.recipients, want)
 	}
@@ -2009,11 +2009,11 @@ func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
 	t.Setenv("GC_AGENT", "codeprobe-worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-2", "reply body"}, "", "", false, &stdout, &stderr)
+	code := cmdMailReply([]string{"tc-2", "reply body"}, "", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Replied to gc-2") {
+	if !strings.Contains(stdout.String(), "Replied to tc-2") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "to alice") {

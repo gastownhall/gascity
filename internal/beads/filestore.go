@@ -196,7 +196,7 @@ type FileStoreOption func(*FileStore)
 func WithFileStoreIDPrefix(prefix string) FileStoreOption {
 	return func(s *FileStore) {
 		if strings.TrimSpace(prefix) != "" {
-			s.MemStore.IDPrefix = normalizeIDPrefix(prefix)
+			s.IDPrefix = normalizeIDPrefix(prefix)
 		}
 	}
 }
