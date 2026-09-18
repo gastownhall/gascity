@@ -444,7 +444,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	})
 
 	targetInit := mustRunBD(targetDir, nil,
-		"init", "--server", "--server-port", "0", "--non-interactive",
+		"init", "--server", "--non-interactive",
 		"-p", "target", "--skip-hooks", "--skip-agents")
 	targetPort = customTypesTestServerPort(t, targetInit)
 	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(targetDir, ".beads", "config.yaml"), contract.ConfigState{
@@ -460,7 +460,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	mustRunBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
 
 	decoyInit := mustRunBD(decoyDir, nil,
-		"init", "--server", "--server-port", "0", "--non-interactive",
+		"init", "--server", "--non-interactive",
 		"-p", "decoy", "--skip-hooks", "--skip-agents")
 	decoyPort = customTypesTestServerPort(t, decoyInit)
 	decoyEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", decoyPort)
