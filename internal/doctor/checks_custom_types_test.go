@@ -119,6 +119,30 @@ func customTypesTestServerPort(t testing.TB, initOutput string) string {
 	return ""
 }
 
+// unsetEnvForTest removes key from the process environment for the duration of
+// the test, restoring whatever was there on cleanup. t.Setenv cannot express
+// this: setting a selector to the empty string still hands the child an
+// explicitly-empty value, which bd reads as a deliberate choice rather than as
+// an absent one.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			if err := os.Setenv(key, prev); err != nil {
+				t.Errorf("restore %s: %v", key, err)
+			}
+			return
+		}
+		if err := os.Unsetenv(key); err != nil {
+			t.Errorf("unset %s: %v", key, err)
+		}
+	})
+}
+
 func setCustomTypesTestEndpoint(t *testing.T, host, port string) {
 	t.Helper()
 	t.Setenv("GC_DOLT_HOST", host)
@@ -192,6 +216,61 @@ func TestCustomTypesStoreEnvClearsAmbientAuthorityAndPreservesCredentials(t *tes
 	for key, want := range credentials {
 		if got[key] != want {
 			t.Errorf("%s was not preserved", key)
+		}
+	}
+}
+
+// TestCustomTypesStoreEnvProjectsDoltliteBackend pins the doltlite arm of the
+// store-environment projection. A doltlite scope records no dolt_mode — the
+// metadata contract scrubs it as a cross-backend key — so the server arm never
+// fires there. Without its own arm the projection would clear both backend
+// hints and supply no replacement, leaving bd to guess the backend from the
+// ambient environment this projection exists to ignore.
+func TestCustomTypesStoreEnvProjectsDoltliteBackend(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"doltlite","database":"doltlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for key, value := range map[string]string{
+		"BEADS_BACKEND":          "sqlite",
+		"GC_BEADS_BACKEND":       "sqlite",
+		"BEADS_DOLT_SERVER_HOST": "poison.example",
+		"BEADS_DOLT_SERVER_PORT": "9999",
+		"BEADS_DOLT_SERVER_USER": "poison",
+		"GC_DOLT_HOST":           "poison.example",
+		"GC_DOLT_PORT":           "9999",
+		"GC_DOLT_USER":           "poison",
+	} {
+		t.Setenv(key, value)
+	}
+
+	environ, err := customTypesStoreEnv(&CheckContext{CityPath: dir}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		key, value, _ := strings.Cut(entry, "=")
+		got[key] = value
+	}
+
+	for _, key := range []string{"BEADS_BACKEND", "GC_BEADS_BACKEND"} {
+		if got[key] != "doltlite" {
+			t.Errorf("%s = %q, want %q", key, got[key], "doltlite")
+		}
+	}
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_USER",
+		"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+	} {
+		if got[key] != "" {
+			t.Errorf("%s = %q, want cleared for a doltlite scope", key, got[key])
 		}
 	}
 }
@@ -391,6 +470,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 
 	for _, key := range []string{
 		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT", "GC_BEADS",
+		"BEADS_DOLT_AUTO_START",
 		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
 		"BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_TLS",
 		"BEADS_DOLT_PASSWORD", "BEADS_DOLT_CREDENTIAL_COMMAND",
@@ -398,7 +478,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		"BEADS_SHARED_SERVER_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
 		"GC_DOLT_USER", "GC_DOLT_PASSWORD",
 	} {
-		t.Setenv(key, "")
+		unsetEnvForTest(t, key)
 	}
 	testOwnedHome(t)
 	t.Setenv("BD_BACKUP_ENABLED", "false")

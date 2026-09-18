@@ -222,7 +222,15 @@ func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving bd store metadata: %w", err)
 	}
-	if ok && strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server") {
+	switch {
+	case ok && strings.EqualFold(strings.TrimSpace(meta.Backend), "doltlite"):
+		// A doltlite scope has no server to target, so the endpoint selectors
+		// stay cleared. The backend hint is re-projected from the recorded
+		// metadata rather than inherited, which is what keeps the ambient
+		// environment from choosing the backend.
+		overrides["GC_BEADS_BACKEND"] = "doltlite"
+		overrides["BEADS_BACKEND"] = "doltlite"
+	case ok && strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server"):
 		// Managed-city GC_DOLT_HOST remains part of the resolver contract: it is
 		// the supported container-to-host override, not a bd-side store selector.
 		// All ambient bd selectors are replaced below with this resolved target.
