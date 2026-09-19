@@ -119,22 +119,31 @@ func TestCascadeNudgeRoutesCrossRig(t *testing.T) {
 	}
 }
 
-// TestNudgeOnRouteResolvesPoolMembers guards the pool-base fan-out: a
-// multi-session pool routes to the pool BASE (sling's NormalizePoolRouteTarget
-// collapses slot -> base), which is the members' template, not a session name
-// `gc session nudge` can resolve. The script must therefore enumerate pool
-// members by template before nudging — a naive `gc session nudge "$routed_to"`
-// silently no-ops for exactly the warm-idle pool workers this order targets.
-func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
+// TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop guards against waking
+// every member of a routed pool. The controller binds pool demand to one
+// eligible slot and its bounded idle-claim backstop wakes that slot if the
+// normal claim does not land; the event order must not nudge busy siblings.
+// Direct named-session and explicit-slot routes still need the order's nudge.
+func TestNudgeOnRouteDefersPoolMembersToIdleClaimBackstop(t *testing.T) {
 	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
 	if err != nil {
 		t.Fatalf("reading nudge-on-route.sh: %v", err)
 	}
 	body := string(data)
-	for _, want := range []string{"gc session list", "--template"} {
+	for _, want := range []string{
+		"gc session list",
+		"--template",
+		"native idle-claim backstop",
+		`if [ "$_member_count" -gt 1 ]`,
+		`gc session nudge "$_members"`,
+		`gc session nudge "$_target"`,
+	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("nudge-on-route.sh must resolve pool members; missing %q", want)
+			t.Errorf("nudge-on-route.sh must defer pool routes and preserve direct nudges; missing %q", want)
 		}
+	}
+	if strings.Contains(body, `gc session nudge "$_m"`) {
+		t.Error("nudge-on-route.sh must not nudge every active pool member")
 	}
 }
 
