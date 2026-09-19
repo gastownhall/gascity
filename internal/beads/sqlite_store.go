@@ -1633,6 +1633,8 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // Tx executes fn in one SQLite transaction. Every write is rolled back when
 // the callback returns an error, so callers can safely compose Create, Update,
 // metadata updates, and Close as one all-or-nothing operation.
+// A transient busy result retries the complete callback in a fresh transaction;
+// callers must keep side effects inside tx because fn may run more than once.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1640,19 +1642,21 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
-	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite tx: begin: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlite tx: commit: %w", err)
-	}
-	return nil
+	return retryOnBusy(func() error {
+		ctx := context.Background()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite tx: begin: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("sqlite tx: commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // AtomicTx reports that Tx uses a real SQLite transaction and rolls all
