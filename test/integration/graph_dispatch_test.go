@@ -72,6 +72,8 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("body outcome = %q, want pass", got)
 	}
 
+	waitForWorkflowTeardown(t, cityDir, workflowID)
+
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
 		t.Fatalf("convoy work_dir = %q, want unset after cleanup", got)
@@ -116,6 +118,8 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 	if got := metaValue(body, "gc.outcome"); got != "fail" {
 		t.Fatalf("body outcome = %q, want fail", got)
 	}
+
+	waitForWorkflowTeardown(t, cityDir, workflowID)
 
 	convoy := showBead(t, cityDir, convoyID)
 	if got := metaValue(convoy, "work_dir"); got != "" {
@@ -175,6 +179,37 @@ func assertControlDispatcherLane(t *testing.T, cityDir string) {
 	if strings.Contains(workerTrace, "unexpected-control") {
 		t.Fatalf("worker should not receive control beads:\n%s", workerTrace)
 	}
+}
+
+// waitForWorkflowTeardown blocks until the workflow's teardown tail has
+// converged, and is the barrier every assertion about cleanup's effects must
+// sit behind.
+//
+// A closed workflow root does NOT imply the teardown ran. Teardown-scoped work
+// is post-settlement by contract (gastownhall/gascity#5271, bead ga-99u0u):
+// graphSinkStepIDs omits gc.scope_role=teardown steps from
+// workflow-finalize's sinks -- sinking them deadlocks settlement, because a
+// teardown's own pass condition can wait on the root outcome only finalize
+// produces -- and processWorkflowFinalize's terminal subtree sweep exempts the
+// teardown tail so it stays executable after the root closes.
+//
+// cleanup-worktree and workflow-finalize are therefore concurrent successors of
+// the body scope, with no edge between them: the compiled graph blocks each of
+// them on body alone. Whichever the controller reaches first wins, so waiting
+// on the root is not a barrier for cleanup. Under full-suite load the root won
+// twice (ga-lwnqu9 2026-09-04 on the report assertion, ga-qhr85l 2026-09-15 on
+// work_dir), which is what ga-pva49c tracked.
+//
+// The barrier is the cleanup step's retry control rather than its attempt: the
+// control closes only once the teardown has converged, so it stays correct when
+// attempt.1 fails transiently and attempt.2 does the real work. The ".cleanup-worktree"
+// ref suffix matches only that control -- ".cleanup-worktree.attempt.1" and
+// ".cleanup-worktree.spec" do not end in it.
+func waitForWorkflowTeardown(t *testing.T, cityDir, workflowID string) {
+	t.Helper()
+
+	cleanup := mustFindWorkflowBeadByRefSuffix(t, cityDir, workflowID, ".cleanup-worktree")
+	waitForBeadClosed(t, cityDir, cleanup.ID, graphWorkflowCloseTimeout())
 }
 
 func graphWorkflowCloseTimeout() time.Duration {
