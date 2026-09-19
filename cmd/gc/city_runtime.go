@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1635,13 +1636,20 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
+	// The staleAfter cutoff alone does not protect in-flight dispatches: an exec
+	// order may run until its own timeout (300s by default), and closing a live
+	// run's marker lets the next tick launch a second copy (#5481). So the sweep
+	// skips every tracking bead whose dispatch is still running on this
+	// runtime's order dispatchers, active or retired. It still closes every
+	// other stale marker: one a dead controller left, one its dispatch failed to
+	// close, and one held by a run these dispatchers did not launch (gc order
+	// run, a webhook delivery). With that skip, a direct all-orders sweep is
+	// safe, and it recovers the jam without depending on any single order being
+	// scheduled.
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, cr.inFlightOrderTrackingIDs())
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1651,6 +1659,20 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	if n > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// inFlightOrderTrackingIDs returns the tracking-bead IDs of every dispatch
+// still running on this runtime's order dispatchers: the active one and the
+// retired ones. A dispatcher whose reload drain timed out keeps its runs
+// going, and their markers with them.
+func (cr *CityRuntime) inFlightOrderTrackingIDs() map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, od := range append([]orderDispatcher{cr.od}, cr.retiredOrderDispatchers...) {
+		if od != nil {
+			maps.Copy(ids, od.inFlightTrackingIDs())
+		}
+	}
+	return ids
 }
 
 // bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
