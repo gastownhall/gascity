@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/spf13/cobra"
 )
 
@@ -164,7 +165,12 @@ Use --long to include git commit and build date metadata.`,
 				fmt.Fprintf(stdout, "%s (commit: %s, built: %s)\n", version, commit, date) //nolint:errcheck // best-effort stdout
 				return nil
 			}
-			fmt.Fprintf(stdout, "%s\n", version) //nolint:errcheck // best-effort stdout
+			beadsVersion := contract.LinkedBeadsLibraryVersion()
+			if beadsVersion != "" {
+				fmt.Fprintf(stdout, "%s (beads: %s)\n", version, beadsVersion) //nolint:errcheck // best-effort stdout
+			} else {
+				fmt.Fprintf(stdout, "%s\n", version) //nolint:errcheck // best-effort stdout
+			}
 			return nil
 		},
 	}

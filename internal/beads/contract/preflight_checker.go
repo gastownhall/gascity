@@ -442,6 +442,16 @@ func linkedBeadsLibraryFrom(info *debug.BuildInfo) beadsLibrary {
 	return beadsLibrary{}
 }
 
+// LinkedBeadsLibraryVersion returns the version of the linked beads library.
+// It returns an empty string when the version cannot be determined.
+func LinkedBeadsLibraryVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	return linkedBeadsLibraryFrom(info).Version
+}
+
 type preflightMetadata struct {
 	Backend      string `json:"backend"`
 	DoltMode     string `json:"dolt_mode"`
