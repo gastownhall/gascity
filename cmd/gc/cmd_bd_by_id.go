@@ -1306,6 +1306,29 @@ func bdArgsFlagAddressedIDs(args []string, i int, undecidable bool, valueFlags, 
 	return ids, i, undecidable
 }
 
+// bdSubcommandAliases maps a bd subcommand alias to its canonical verb.
+// bdflags keys every manifest under the canonical verb only and performs no
+// alias normalization itself (see its globalValueFlags doc comment), so any
+// reader that resolves a verb via bdflags.Known must normalize first or the
+// alias silently fails to resolve — bdflags.Known("new") is false even though
+// `bd create --help` prints "Aliases: create, new". Kept here, not in
+// bdflags, so this is the ONE place both bdByIDSubcommand callers (the by-ID
+// door and the assignee gate) and bdRigQualifiedMetadataRefusal normalize
+// from; do not add a second copy of this map.
+var bdSubcommandAliases = map[string]string{
+	"new":           "create",
+	"done":          "close",
+	"view":          "show",
+	"protomolecule": "mol",
+}
+
+func bdNormalizeSubcommandAlias(verb string) string {
+	if canonical, ok := bdSubcommandAliases[verb]; ok {
+		return canonical
+	}
+	return verb
+}
+
 // bdByIDSubcommand locates the bd subcommand in an argv and returns the
 // arguments that follow it.
 //
@@ -1319,13 +1342,14 @@ func bdByIDSubcommand(bdArgs []string) (sub string, args []string, resolved bool
 	for i := 0; i < len(bdArgs); i++ {
 		arg := bdArgs[i]
 		if !strings.HasPrefix(arg, "-") {
+			norm := bdNormalizeSubcommandAlias(arg)
 			if i+1 < len(bdArgs) {
-				if two := arg + " " + bdArgs[i+1]; bdflags.Known(two) {
+				if two := norm + " " + bdArgs[i+1]; bdflags.Known(two) {
 					return two, bdArgs[i+2:], true
 				}
 			}
-			if bdflags.Known(arg) {
-				return arg, bdArgs[i+1:], true
+			if bdflags.Known(norm) {
+				return norm, bdArgs[i+1:], true
 			}
 			// A subcommand this build's manifest does not carry. Everything
 			// after it is judged rather than skipped.

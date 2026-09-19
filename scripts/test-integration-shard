@@ -116,6 +116,7 @@ rest_smoke_tests=(
 # integration tag. Keep this manifest exact; scripts tests compare it with the
 # canonical linux/amd64 shard's tagged source declarations.
 cmd_gc_integration_tests=(
+  TestBdSubcommandAliasesCurrent
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind

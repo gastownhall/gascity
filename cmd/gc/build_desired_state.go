@@ -1159,6 +1159,11 @@ func buildDesiredStateWithSessionBeadsAt(
 			namedRoutedDemand[identity] = true
 		}
 	}
+	// The loop above is driven by namedSpecs, so a bead whose assignee matches
+	// no spec is never visited and produces no demand and no error. That is how
+	// work stays "owned" by a target that does not exist. Ask the question in
+	// the other direction so the unmatched case is at least representable.
+	reportUnroutableAssignees(stderr, cfg, assignedWorkBeads)
 	for identity, spec := range namedSpecs {
 		canonicalInfo, hasCanonical := findCanonicalNamedSessionInfo(bp.sessionBeads, spec)
 		if !hasCanonical {
@@ -6605,4 +6610,36 @@ func formatMaxSessions(a *config.Agent) string {
 		return "unlimited"
 	}
 	return strconv.Itoa(*m)
+}
+
+// reportUnroutableAssignees names every unfinished assigned bead whose assignee
+// resolves to no configured agent or named session. It only reports: choosing a
+// replacement owner is a resourcing decision, and clearing the field would
+// substitute one misleading label for another.
+func reportUnroutableAssignees(stderr io.Writer, cfg *config.City, assignedWorkBeads []beads.Bead) {
+	roster := newAssigneeRoster(cfg)
+	if roster.Empty() {
+		return
+	}
+	var unroutable []string
+	seen := make(map[string]struct{})
+	for _, wb := range assignedWorkBeads {
+		if !isOpenWorkStatus(wb.Status) {
+			continue
+		}
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || roster.Resolves(assignee) {
+			continue
+		}
+		if _, ok := seen[wb.ID]; ok {
+			continue
+		}
+		seen[wb.ID] = struct{}{}
+		unroutable = append(unroutable, fmt.Sprintf("%s(assignee=%s)", wb.ID, assignee))
+	}
+	if len(unroutable) == 0 {
+		return
+	}
+	sort.Strings(unroutable)
+	fmt.Fprintf(stderr, "unroutableAssignee: %d unfinished bead(s) assigned to a target that does not resolve: %s\n", len(unroutable), strings.Join(unroutable, " ")) //nolint:errcheck
 }

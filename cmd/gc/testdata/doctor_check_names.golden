@@ -16,6 +16,7 @@ expanded-config-load
 implicit-import-cache
 deprecated-attachment-fields
 nudge-unconfirmed
+config-load
 dolt-topology
 dolt-drift
 config-valid
@@ -62,6 +63,7 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+assignee-resolves
 executor-identity-residue
 census-owner-liveness
 run-target-routed-to-backfill
