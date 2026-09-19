@@ -154,6 +154,41 @@ func TestConformance_QuarantineState(t *testing.T) {
 	}
 }
 
+// TestQuarantineClearsLocalLastWokeAtNotJustDurable pins that Manager.Quarantine
+// clears last_woke_at through the session front door (Store.ApplyPatch), not a
+// raw store.SetMetadataBatch call, so a stale non-empty local sidecar value
+// left by the migrated wake path cannot survive Quarantine and mask the clear
+// from Store.Get's local-overlay projection (ga-igcny0.1.2.1 Phase B finding
+// 1; see info_store.go's projectWithLocalOverlay). A raw-store clear only
+// writes durable metadata; the local overlay would still prefer the stale
+// non-empty local value and hide the clear from crash/churn trackers.
+func TestQuarantineClearsLocalLastWokeAtNotJustDurable(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManagerWithOptions(store, sp)
+
+	id := createTestSession(t, m, "worker")
+	if err := store.SetMetadata(id, "last_woke_at", "2026-08-12T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetLocalString(id, "last_woke_at", "2026-08-12T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	until := time.Now().Add(5 * time.Minute)
+	if err := m.Quarantine(id, until, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := m.PersistedStore().Get(id)
+	if err != nil {
+		t.Fatalf("PersistedStore().Get: %v", err)
+	}
+	if info.LastWokeAt != "" {
+		t.Errorf("LastWokeAt = %q, want cleared (local sidecar must not mask the durable clear)", info.LastWokeAt)
+	}
+}
+
 func TestConformance_ArchivedReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

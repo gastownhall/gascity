@@ -147,13 +147,20 @@ func RunSessionsStoreTests(r Runner, suite SessionsSuite) {
 	if suite.Capability.Transactions {
 		r.Run("TransactionRollsBackEntirely", func(r Runner) {
 			store := suite.NewStore(r)
+			// sleep_reason (not last_woke_at) is the representative durable
+			// field here deliberately: last_woke_at is clone-local-routed by
+			// Store.ApplyPatch (see session/store.go's localOnlyMetadataKeys),
+			// and no production Tx caller ever patches it (ClosePatch and the
+			// reconciler's Tx call sites both leave it alone), so it is not a
+			// safe stand-in for "an arbitrary durable field" in a generic
+			// Tx-atomicity proof. sleep_reason carries no such special routing.
 			survivor := mustCreateSession(r, store, "survivor", map[string]string{
 				"state":        string(session.StateAwake),
-				"last_woke_at": "before",
+				"sleep_reason": "before",
 			})
 			boom := errors.New("conformance rollback")
 			err := store.Tx("rollback", func(tx session.Tx) error {
-				if err := tx.ApplyPatch(survivor.ID, session.MetadataPatch{"last_woke_at": ""}); err != nil {
+				if err := tx.ApplyPatch(survivor.ID, session.MetadataPatch{"sleep_reason": ""}); err != nil {
 					return err
 				}
 				if err := tx.CloseWithoutReason(survivor.ID); err != nil {
@@ -175,8 +182,8 @@ func RunSessionsStoreTests(r Runner, suite SessionsSuite) {
 			if got.Closed {
 				r.Errorf("the session is closed after a failed transaction; the close was not rolled back")
 			}
-			if got.LastWokeAt != "before" {
-				r.Errorf("last_woke_at = %q after a failed transaction, want the rolled-back %q", got.LastWokeAt, "before")
+			if got.SleepReason != "before" {
+				r.Errorf("sleep_reason = %q after a failed transaction, want the rolled-back %q", got.SleepReason, "before")
 			}
 		})
 
@@ -184,10 +191,10 @@ func RunSessionsStoreTests(r Runner, suite SessionsSuite) {
 			store := suite.NewStore(r)
 			created := mustCreateSession(r, store, "committed", map[string]string{
 				"state":        string(session.StateAwake),
-				"last_woke_at": "before",
+				"sleep_reason": "before",
 			})
 			if err := store.Tx("commit", func(tx session.Tx) error {
-				if err := tx.ApplyPatch(created.ID, session.MetadataPatch{"last_woke_at": ""}); err != nil {
+				if err := tx.ApplyPatch(created.ID, session.MetadataPatch{"sleep_reason": ""}); err != nil {
 					return err
 				}
 				return tx.CloseWithoutReason(created.ID)
@@ -201,8 +208,8 @@ func RunSessionsStoreTests(r Runner, suite SessionsSuite) {
 			if !got.Closed {
 				r.Errorf("the session is open after a committed transaction closed it")
 			}
-			if got.LastWokeAt != "" {
-				r.Errorf("last_woke_at = %q after a committed transaction cleared it, want it cleared", got.LastWokeAt)
+			if got.SleepReason != "" {
+				r.Errorf("sleep_reason = %q after a committed transaction cleared it, want it cleared", got.SleepReason)
 			}
 		})
 	}

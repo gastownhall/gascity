@@ -66,12 +66,13 @@ func TestResolveSessionTargetID_PoolPathAliasAwakeStateMatches(t *testing.T) {
 	}
 }
 
-// pathAliasFakeStore is a minimal beads.Store implementing only List —
-// the single method resolveLiveSessionByPathAlias touches. Lets the
-// tiebreaker test inject beads with explicit CreatedAt values without
-// going through MemStore's time.Now() stamping (which has limited
-// resolution on coarse-clock hosts and would couple the test to wall-
-// clock timing).
+// pathAliasFakeStore is a minimal beads.Store implementing only List and
+// GetLocalString — the methods resolveLiveSessionByPathAlias's ListAll call
+// touches (List for the rows, GetLocalString via the clone-local last_woke_at
+// overlay each row is projected through). Lets the tiebreaker test inject
+// beads with explicit CreatedAt values without going through MemStore's
+// time.Now() stamping (which has limited resolution on coarse-clock hosts and
+// would couple the test to wall-clock timing).
 type pathAliasFakeStore struct {
 	beads.Store
 	items []beads.Bead
@@ -79,6 +80,14 @@ type pathAliasFakeStore struct {
 
 func (p *pathAliasFakeStore) List(_ beads.ListQuery) ([]beads.Bead, error) {
 	return p.items, nil
+}
+
+// GetLocalString reports every key as never-set: this fixture carries no
+// clone-local data, so the overlay projection is a no-op and each row's
+// LastWokeAt falls back to the durable-Metadata value, same as before the
+// overlay existed.
+func (p *pathAliasFakeStore) GetLocalString(_, _ string) (string, error) {
+	return "", nil
 }
 
 // TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent verifies
