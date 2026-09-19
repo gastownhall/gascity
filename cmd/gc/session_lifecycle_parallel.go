@@ -21,10 +21,12 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -164,6 +166,17 @@ type startCandidate struct {
 	info  sessionpkg.Info
 	tp    TemplateParams
 	order int
+
+	// configured mirrors configuredNames[name()] at the pipeline's true
+	// construction site (reconcileSessionBeadsTracedWithNamedDemand). It
+	// propagates by value through preparedStart.candidate to
+	// startResult.prepared.candidate, letting commitStartFailure tell a
+	// controller-owned named session apart from an orphaned one without
+	// threading configuredNames through the intervening call chain. Left
+	// at its zero value (false) on the two non-pipeline construction sites
+	// (relaunchAgentForLaunchDrift, recoverRunningPendingCreate), which
+	// never produce a startResult and so never read it.
+	configured bool
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -175,15 +188,20 @@ func (c startCandidate) name() string {
 }
 
 // wakeFairnessTime is the ordering key for the per-tick wake budget: the time the
-// session was last woken (last_woke_at), falling back to its creation time so a
-// brand-new session does not jump ahead of one that has been waiting for a slot.
-// Oldest sorts first so the longest-waiting candidates spend the budget first.
-// It reads the typed twin (Info.LastWokeAt / Info.CreatedAt); the #2574-class
-// same-tick sleep->re-wake fairness (a SleepPatch clears last_woke_at before the
-// append, so the fallback to CreatedAt kicks in) is pinned by
-// TestWakeFairnessInfoTwinCharacterization.
+// session was last woken (last_woke_at), falling back to when it last slept
+// (slept_at), and finally to its creation time so a brand-new session does not
+// jump ahead of one that has been waiting for a slot. Oldest sorts first so the
+// longest-waiting candidates spend the budget first. It reads the typed twin
+// (Info.LastWokeAt / Info.SleptAt / Info.CreatedAt); the #2574-class same-tick
+// sleep->re-wake fairness (a SleepPatch clears last_woke_at before the append,
+// so the fallback kicks in) is pinned by TestWakeFairnessInfoTwinCharacterization
+// — the slept_at middle tier keeps a session that slept recently from jumping
+// the queue ahead of one that has been waiting since creation.
 func wakeFairnessTime(c startCandidate) time.Time {
 	if t, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
 		return t
 	}
 	if !c.info.CreatedAt.IsZero() {
@@ -241,6 +259,25 @@ type startResult struct {
 	finished        time.Time
 	rollbackPending bool
 	rateLimitScreen bool
+	// diedDuringStartup is true when the session started and then died
+	// before it was confirmed alive, detected either of two ways: (1) the
+	// provider/resume layer returns runtime.ErrSessionDiedDuringStartup
+	// directly from Start() — the only path reachable when the session has
+	// no session_key to recover through (e.g. a plain bash-script agent
+	// with no SessionIDFlag configured; see retryFreshStartAfterStaleKey's
+	// decline branch in internal/session/chat.go), or (2) Start() itself
+	// succeeded (startedFresh) and the *post-start* stability/liveness check
+	// below then found the session not running/alive (the "session %q died
+	// during startup" synthetic error; requires a non-empty SessionKey to
+	// run at all). Either way this is distinct from Start() returning some
+	// other, generic error (e.g. a transient provider error mid a gc
+	// suspend/resume cycle), which leaves diedDuringStartup false.
+	// commitStartFailure uses this to distinguish "this session actually came
+	// up and immediately exited, so its pending-create should roll back and
+	// retry fresh" from "Start() never got the process up at all, so a
+	// configured named session's pending-create should be preserved for a
+	// retry instead of destructively closed" (ga-pmafyc rounds 4 and 5).
+	diedDuringStartup bool
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
 	// where a slow start spent its time. See gc-67o for context.
 	phases startPhaseTimings
@@ -1028,10 +1065,16 @@ func buildPreparedStartWithWorkDirResolver(
 	}
 
 	preOverrideWorkDir := agentCfg.WorkDir
+	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
+		return nil, candidate.info, err
+	}
 	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
-	} else if wd := candidate.info.WorkDir; wd != "" {
+	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+	}
+	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
+		return nil, candidate.info, err
 	}
 	// The task work_dir override above can replace agentCfg.WorkDir after
 	// template resolution already rendered PreStart commands (materialize-
@@ -1223,6 +1266,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if triggerEnv := sessionTriggerBeadEnv(candidate.info); len(triggerEnv) > 0 {
 		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
 	}
+	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate:       candidate,
@@ -1235,6 +1279,123 @@ func buildPreparedStartWithWorkDirResolver(
 		promptDelivered: promptDelivered,
 		promptHash:      promptHash,
 	}, candidate.info, nil
+}
+
+func preparedStartSessionWorkDir(info sessionpkg.Info) string {
+	if wd := strings.TrimSpace(info.WorkDirCanonical); wd != "" {
+		return wd
+	}
+	return strings.TrimSpace(info.WorkDir)
+}
+
+func repairConcretePoolTemplateWorkDirOverride(candidate *startCandidate, cityPath string, cfg *config.City, store beads.Store) (bool, error) {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(*candidate, cityPath, cfg)
+	if !ok {
+		return false, nil
+	}
+	patch := sessionpkg.MetadataPatch{}
+	canonical := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDirCanonical)
+	legacy := resolveWorkDirAgainstCity(cityPath, candidate.info.WorkDir)
+	if samePreparedWorkDirPath(canonical, templateDir) || (strings.TrimSpace(canonical) == "" && samePreparedWorkDirPath(legacy, templateDir)) {
+		patch[beadmeta.WorkDirMetadataKey] = concreteDir
+	}
+	if samePreparedWorkDirPath(legacy, templateDir) {
+		patch[beadmeta.LegacyWorkDirMetadataKey] = concreteDir
+	}
+	if len(patch) == 0 {
+		return false, nil
+	}
+	if store == nil || strings.TrimSpace(candidate.info.ID) == "" {
+		candidate.info = candidate.info.ApplyPatch(patch)
+		return true, nil
+	}
+	info, err := sessionFrontDoor(store).UpdateMetadataInfo(candidate.info, patch)
+	if err != nil {
+		return false, fmt.Errorf("repairing concrete pool work_dir for %s: %w", candidate.name(), err)
+	}
+	candidate.info = info
+	return true, nil
+}
+
+func validateConcretePoolPreparedWorkDir(candidate startCandidate, cityPath string, cfg *config.City, workDir string) error {
+	templateDir, concreteDir, ok := concretePoolTemplateWorkDirs(candidate, cityPath, cfg)
+	if !ok || strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	resolved := resolveWorkDirAgainstCity(cityPath, workDir)
+	if !samePreparedWorkDirPath(resolved, templateDir) {
+		return nil
+	}
+	return fmt.Errorf("pool session %s for concrete alias %s resolved template work_dir %q; want concrete work_dir %q",
+		candidate.name(), concretePoolPreparedIdentity(candidate, cfg), templateDir, concreteDir)
+}
+
+func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg *config.City) (templateDir, concreteDir string, ok bool) {
+	if cfg == nil || candidate.info.ManualSession || candidate.tp.ManualSession || !isPoolManagedSessionInfo(candidate.info) {
+		return "", "", false
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	if template == "" {
+		return "", "", false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return "", "", false
+	}
+	concreteIdentity := concretePoolPreparedIdentity(candidate, cfg)
+	if concreteIdentity == "" || concreteIdentity == template {
+		return "", "", false
+	}
+	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
+	if concreteDir == "" {
+		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *cfgAgent, cfg.Rigs); err == nil {
+			concreteDir = resolved
+		}
+	}
+	if concreteDir == "" {
+		return "", "", false
+	}
+	templateDir, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), template, *cfgAgent, cfg.Rigs)
+	if err != nil || templateDir == "" || samePreparedWorkDirPath(templateDir, concreteDir) {
+		return "", "", false
+	}
+	return templateDir, concreteDir, true
+}
+
+func concretePoolPreparedIdentity(candidate startCandidate, cfg *config.City) string {
+	if identity := strings.TrimSpace(candidate.tp.InstanceName); identity != "" {
+		return identity
+	}
+	if identity := strings.TrimSpace(candidate.info.CanonicalInstanceNameMetadata); identity != "" {
+		return identity
+	}
+	template := strings.TrimSpace(candidate.logicalTemplate(cfg))
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if cfgAgent == nil {
+		return ""
+	}
+	_, identity := canonicalSessionIdentityWithConfigInfo(cfg, cfgAgent, candidate.info)
+	if identity != "" && identity != template {
+		return identity
+	}
+	return normalizeSessionBeadQualifiedName(cfgAgent, sessionBeadAgentNameInfo(candidate.info))
+}
+
+func preparedStartCityName(cityPath string, cfg *config.City) string {
+	fallback := ""
+	if strings.TrimSpace(cityPath) != "" {
+		fallback = filepath.Base(filepath.Clean(cityPath))
+	}
+	return config.EffectiveCityName(cfg, fallback)
+}
+
+func samePreparedWorkDirPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return samePath(a, b)
 }
 
 // sessionTriggerBeadEnv reads the trigger-bead identity off the typed twin
@@ -1293,7 +1454,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
 	if resolveErr != nil {
-		log.Printf("session %s: template option resolution error: %v", sessionID, resolveErr)
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, resolveErr)
 		return
 	}
 	if len(args) > 0 {
@@ -1494,6 +1655,15 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// diedDuringStartup starts true when the provider/resume layer already
+	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
+	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
+	// decline in internal/session/chat.go when there is no session_key to
+	// recover through) — see the startResult.diedDuringStartup doc comment.
+	// The local post-start liveness check below can still independently set
+	// it true for the other detection path; neither path ever resets it back
+	// to false.
+	diedDuringStartup := errors.Is(err, runtime.ErrSessionDiedDuringStartup)
 	// Split start_call into provider.Start and the ErrStateSync recovery
 	// branch (gc-9ha). The recovery branch hits the worker observation
 	// API which can dominate start_call when the runtime is wedged.
@@ -1503,11 +1673,22 @@ func runPreparedStartCandidate(
 		recoveryBegin := time.Now()
 		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		phases.StateSyncRecovery = time.Since(recoveryBegin)
-		if runningErr == nil && runtimeObservationLive(obs) {
+		switch {
+		case errors.Is(runningErr, runtime.ErrRuntimeUnavailable):
+			err = fmt.Errorf("observing session %q after state-sync failure: %w", item.candidate.name(), runningErr)
+		case runningErr == nil && runtimeObservationLive(obs):
 			err = nil
 		}
 	}
 	phases.StartCall = time.Since(startCallBegin)
+	var sessionExistsObservation worker.LiveObservation
+	var sessionExistsObservationErr error
+	if err != nil && errors.Is(err, runtime.ErrSessionExists) && startCtxErr == nil && !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		sessionExistsObservation, sessionExistsObservationErr = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
+		if errors.Is(sessionExistsObservationErr, runtime.ErrRuntimeUnavailable) {
+			err = fmt.Errorf("observing session %q after start collision: %w", item.candidate.name(), sessionExistsObservationErr)
+		}
+	}
 	// Stale session key detection: if the session was started
 	// with a resume flag but dies immediately, the session key
 	// likely references a conversation that no longer exists
@@ -1519,37 +1700,45 @@ func runPreparedStartCandidate(
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
-				running, alive = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
+				running, alive, err = observeRuntimeProviderLiveness(sp, item.candidate.name(), item.cfg.ProcessNames)
 			} else {
 				var obs worker.LiveObservation
 				obs, err = workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 				running = obs.Running
 				alive = obs.Alive
 			}
-			if err != nil || !running || !alive {
+			if err != nil {
+				err = fmt.Errorf("observing session %q after startup: %w", item.candidate.name(), err)
+			} else if !running || !alive {
 				err = fmt.Errorf("session %q died during startup", item.candidate.name())
+				diedDuringStartup = true
 			}
 		}
 		phases.PostStartObserve = time.Since(postStartBegin)
 	}
 	finished := time.Now()
-	rollbackPending := err != nil && shouldRollbackPendingCreateInfo(item.candidate.info)
-	rateLimitScreen := err != nil && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
+	livenessUnavailable := errors.Is(err, runtime.ErrRuntimeUnavailable)
+	rollbackPending := err != nil && !livenessUnavailable && shouldRollbackPendingCreateInfo(item.candidate.info)
+	rateLimitScreen := err != nil && !livenessUnavailable && startupRateLimitScreenDetected(item, cityPath, sp, store, cfg)
 	if err != nil && rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp) {
 		return startResult{
-			prepared:        item,
-			err:             nil,
-			outcome:         TraceOutcomeStartErrorConverged,
-			started:         started,
-			finished:        finished,
-			rollbackPending: false,
-			phases:          phases,
+			prepared:          item,
+			err:               nil,
+			outcome:           TraceOutcomeStartErrorConverged,
+			started:           started,
+			finished:          finished,
+			rollbackPending:   false,
+			diedDuringStartup: diedDuringStartup,
+			phases:            phases,
 		}
 	}
 	var outcome TraceOutcomeCode
 	switch {
 	case errors.Is(err, runtime.ErrSessionInitializing):
 		outcome = TraceOutcomeSessionInitializing
+		err = nil
+	case livenessUnavailable:
+		outcome = TraceOutcomeDeferred
 		err = nil
 	case startCtxErr == context.DeadlineExceeded:
 		outcome = TraceOutcomeDeadlineExceeded
@@ -1564,9 +1753,8 @@ func runPreparedStartCandidate(
 	case err == nil:
 		outcome = TraceOutcomeSuccess
 	case errors.Is(err, runtime.ErrSessionExists):
-		obs, runningErr := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, item.candidate.name(), item.cfg.ProcessNames)
 		switch {
-		case runningErr != nil || !runtimeObservationLive(obs):
+		case sessionExistsObservationErr != nil || !runtimeObservationLive(sessionExistsObservation):
 			outcome = TraceOutcomeProviderError
 		case rollbackPending && !rateLimitScreen && runningSessionMatchesPendingCreateInfo(item.candidate.info, item.candidate.name(), sp):
 			outcome = TraceOutcomeSessionExistsConverged
@@ -1585,15 +1773,20 @@ func runPreparedStartCandidate(
 		rateLimitScreen = false
 	}
 	return startResult{
-		prepared:        item,
-		err:             err,
-		outcome:         outcome,
-		started:         started,
-		finished:        finished,
-		rollbackPending: rollbackPending,
-		rateLimitScreen: rateLimitScreen,
-		phases:          phases,
+		prepared:          item,
+		err:               err,
+		outcome:           outcome,
+		started:           started,
+		finished:          finished,
+		rollbackPending:   rollbackPending,
+		rateLimitScreen:   rateLimitScreen,
+		diedDuringStartup: diedDuringStartup,
+		phases:            phases,
 	}
+}
+
+func startOutcomeDefersCommit(outcome TraceOutcomeCode) bool {
+	return outcome == TraceOutcomeSessionInitializing || outcome == TraceOutcomeDeferred
 }
 
 func appendInitialMessageToStartupNudge(nudge, msg string) string {
@@ -1748,7 +1941,7 @@ func commitAsyncStartResultWithContext(
 		// session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime {
+		if cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
 		outcome := "stale_async_start"
@@ -1765,6 +1958,9 @@ func commitAsyncStartResultWithContext(
 		refreshed.rollbackPending = false
 	}
 	if ctx != nil && ctx.Err() != nil {
+		if startOutcomeDefersCommit(refreshed.outcome) {
+			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
+		}
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
 		}
@@ -1775,7 +1971,7 @@ func commitAsyncStartResultWithContext(
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
 	}
-	if sp != nil && refreshed.err == nil && refreshed.outcome != TraceOutcomeSessionInitializing {
+	if sp != nil && refreshed.err == nil && !startOutcomeDefersCommit(refreshed.outcome) {
 		_ = clearReconcilerDrainAckMetadata(sp, refreshed.prepared.candidate.name())
 	}
 	return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace)
@@ -1910,7 +2106,10 @@ func startPreparedStartCandidate(
 ) (bool, error) {
 	name := item.candidate.name()
 	if sp != nil {
-		running, alive := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		running, alive, err := observeRuntimeProviderLiveness(sp, name, item.cfg.ProcessNames)
+		if err != nil {
+			return false, err
+		}
 		if running {
 			if alive {
 				if shouldRollbackPendingCreateInfo(item.candidate.info) && !runningSessionMatchesPendingCreateInfo(item.candidate.info, name, sp) {
@@ -1976,12 +2175,12 @@ func runtimeObservationLive(obs worker.LiveObservation) bool {
 	return obs.Running && obs.Alive
 }
 
-func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool) {
+func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNames []string) (running bool, alive bool, err error) {
 	if sp == nil || strings.TrimSpace(name) == "" {
-		return false, false
+		return false, false, nil
 	}
-	obs := runtime.ObserveLiveness(sp, name, processNames)
-	return obs.Running, obs.Alive
+	obs, err := runtime.ObserveLivenessWithError(sp, name, processNames)
+	return obs.Running, obs.Alive, err
 }
 
 // staleResumeKeyProbe reports whether the keyed transcript a resume would
@@ -2155,9 +2354,9 @@ func commitStartResultTraced(
 	info := result.prepared.candidate.info
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
-	// Session still starting up — back off silently without recording failure.
-	// The reconciler will retry on the next patrol tick.
-	if result.outcome == TraceOutcomeSessionInitializing {
+	// Session startup is not yet safe to decide — back off silently without
+	// recording failure. The reconciler will retry on the next patrol tick.
+	if startOutcomeDefersCommit(result.outcome) {
 		clearPendingStartInFlightLease(info.ID, sessFront, stderr)
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, nil, result.phases)
 		return false
@@ -2383,7 +2582,21 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 			}
 		}
-		rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		if !result.prepared.candidate.configured || result.diedDuringStartup {
+			// A configured named session (declared via [[named_session]]) must
+			// survive a single transient start failure mid pending-create (e.g.
+			// a gc suspend/resume cycle) so the reconciler can retry it, instead
+			// of being destructively closed with its session_name cleared — see
+			// TestReconcileSessionBeads_RollsBackPendingCreatePreservesConfiguredNamedSession.
+			// An orphaned (unconfigured) pending-create still rolls back here,
+			// per TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError.
+			// A configured session that DID start but then died during its
+			// post-start liveness check (diedDuringStartup) still rolls back
+			// here: it actually launched and exited, so the stale pending-create
+			// must clear for a fresh attempt next tick, matching base's fast
+			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
+			rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
 	}

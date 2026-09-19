@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,6 +102,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop <unit>' instead of the control-socket stop.
@@ -246,9 +256,19 @@ func guardSupervisorSocketDir(dir string) {
 	}
 }
 
+// supervisorSocketPathLimit caps the canonical socket path length below the
+// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches the
+// controllerSocketPathLimit pattern in controller.go.
+const supervisorSocketPathLimit = 100
+
 func supervisorSocketPathForDir(dir string) string {
 	guardSupervisorSocketDir(dir)
-	return filepath.Join(dir, "supervisor.sock")
+	canonical := filepath.Join(dir, "supervisor.sock")
+	if len(canonical) <= supervisorSocketPathLimit {
+		return canonical
+	}
+	sum := sha256.Sum256([]byte(dir))
+	return filepath.Join("/tmp", "gascity-supervisor", fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 func supervisorSocketPathCandidates() []string {
@@ -842,8 +862,12 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if !jsonOut {
 		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
 	}
-	unloadSupervisorService()
+	serviceErr := unloadSupervisorServiceHook()
 	if !wait {
+		if serviceErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+			return 1
+		}
 		if jsonOut {
 			return writeSupervisorStopSuccess(stdout, stderr, wait)
 		}
@@ -868,6 +892,14 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 			// budget — the server already told us shutdown finished.
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if serviceErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+				return 1
+			}
+			if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 				return 1
 			}
 			if jsonOut {
@@ -898,6 +930,14 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if serviceErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+		return 1
+	}
+	if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
@@ -971,6 +1011,13 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			running, pidSource = true, "api"
 		}
 	}
+	// Unit ownership only makes sense when we have a real live PID to compare
+	// against the unit's MainPID (ga-9pjtoy) -- the service_manager/api
+	// fallback paths above confirm liveness without ever learning a PID.
+	var ownership supervisorUnitOwnershipStatus
+	if pid > 0 {
+		ownership = supervisorDetermineUnitOwnership(pid)
+	}
 	if asJSON {
 		payload := map[string]any{
 			"schema_version": "1",
@@ -990,6 +1037,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		if delegationErr != nil {
 			payload["config_error"] = delegationErr.Error()
 		}
+		if pid > 0 {
+			payload["supervisor_unit_owned"] = ownership.Status == "owned"
+			if ownership.Unit != "" {
+				payload["supervisor_unit"] = ownership.Unit
+			}
+		}
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
 		}
@@ -998,6 +1051,16 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 	switch {
 	case pid > 0:
 		fmt.Fprintf(stdout, "Supervisor is running (PID %d)\n", pid) //nolint:errcheck
+		switch ownership.Status {
+		case "owned":
+			fmt.Fprintf(stdout, "Owned by systemd unit %s\n", ownership.Unit) //nolint:errcheck
+		case "outside_unit":
+			if ownership.UnitActive {
+				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is active but tracking a different process)\n", ownership.Unit) //nolint:errcheck
+			} else {
+				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is installed but inactive)\n", ownership.Unit) //nolint:errcheck
+			}
+		}
 		return 0
 	case running:
 		fmt.Fprintf(stdout, "Supervisor is running (pid unavailable: control socket unreachable; liveness confirmed via %s)\n", pidSource) //nolint:errcheck
@@ -1114,6 +1177,31 @@ func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 	return timeout * 5
 }
 
+// runCityShutdownBounded runs mc.cr.shutdown() in its own goroutine and waits
+// for it to finish, bounded by the forced-stop timeout (or mc.done closing
+// first). shutdown() is idempotent (guarded by sync.Once), so if it is
+// genuinely hung — e.g. on a beads/session call with no context of its own —
+// abandoning the goroutine past the bound is safe: it either completes later
+// on its own or blocks harmlessly forever without doing further work. This
+// keeps a hung shutdown() from blocking the caller's own bounded wait for
+// mc.done (#5256).
+func runCityShutdownBounded(mc *managedCity) {
+	if mc == nil || mc.cr == nil {
+		return
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer func() { recover() }() //nolint:errcheck
+		defer close(shutdownDone)
+		mc.cr.shutdown()
+	}()
+	select {
+	case <-shutdownDone:
+	case <-mc.done:
+	case <-time.After(managedCityForcedStopTimeout(mc)):
+	}
+}
+
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
 // closes the bead provider and file recorder. It returns a non-nil error
@@ -1142,21 +1230,34 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
+	forceTimeout := managedCityForcedStopTimeout(mc)
 	if mc.cr != nil {
 		if mc.cr.forceStopShutdown != nil {
 			mc.cr.forceStopShutdown.Store(true)
 		}
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-	}
-	forceTimeout := managedCityForcedStopTimeout(mc)
-	if forceTimeout > 0 {
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each: runCityShutdownBounded can return early (its
+		// shutdownDone fires as soon as mc.cr.shutdown() itself returns,
+		// which says nothing about whether mc.done has closed yet), so the
+		// remaining wait for mc.done must shrink by however long that
+		// already took rather than restart a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
+			select {
+			case <-mc.done:
+				// Forced shutdown completed within its budget — the city
+				// is out. Clear the pending error so we report success.
+				stopErr = nil
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+			}
+		}
+	} else if forceTimeout > 0 {
 		select {
 		case <-mc.done:
-			// Forced shutdown completed before the second timeout — the
-			// city is out. Clear the pending error so we report success.
 			stopErr = nil
 		case <-time.After(forceTimeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
@@ -1193,17 +1294,24 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 		}
 	}
 	if waitForRuntimeShutdown && mc.cr != nil {
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-		if timeout > 0 {
+		forceTimeout := managedCityForcedStopTimeout(mc)
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each — see stopManagedCity for the full rationale:
+		// runCityShutdownBounded can return early (its shutdownDone fires as
+		// soon as mc.cr.shutdown() itself returns, which says nothing about
+		// whether mc.done has closed yet), so the remaining wait for mc.done
+		// must shrink by however long that already took rather than restart
+		// a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
 			select {
 			case <-mc.done:
 				stopErr = nil
-			case <-time.After(timeout):
-				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
-				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, forceTimeout)
 			}
 		}
 	}

@@ -531,13 +531,13 @@ The v2 compiler must emit a flat, topologically ordered graph:
   terminal. Steps carrying `gc.scope_role = "teardown"` are excluded from
   the sink set: teardown runs after the workflow settles (section 3.5), so
   gating settlement on it would deadlock the run.
-- **The root blocks on the finalize step.** The workflow root bead is made
-  to depend on `workflow-finalize` (or, when a recipe has no finalize step,
-  on every step whose `gc.kind` is not one of the generated `run`, `check`,
-  `retry-run`, `retry-eval`, or `spec` kinds).
-  Consequence: the root is never Ready-visible while the workflow runs and
-  only surfaces when the workflow completes. Step beads — not the root —
-  are the Ready-visible work that wakes agents and pools.
+- **The root tracks the finalize step.** The workflow root reaches
+  `workflow-finalize` through an informational `tracks` edge. A blocking edge
+  would prevent the finalizer from closing the root while it is still open.
+  When a recipe has no finalize step, the root instead depends on every step
+  whose `gc.kind` is not one of the generated `run`, `check`, `retry-run`,
+  `retry-eval`, or `spec` kinds. The root is controller-owned; step beads are
+  the work that wakes agents and pools.
 - **Non-blocking `tracks` edges to the root.** Batch instantiation connects
   every non-root node to the root with a `tracks` edge so cascade deletion
   from the root discovers all workflow beads without making the root a
@@ -584,6 +584,13 @@ default for that step. Per-dispatch provider options ride `opt_*` step
 metadata (for example `opt_model`), validated against the provider's
 options schema at spawn; `gc.model` is a deprecated spelling that the
 `gc doctor` check `work-option-metadata-migration` migrates to `opt_model`.
+
+**Role target aliases.** In the *value* of `gc.run_target`, `gc.<role>` is a
+semantic role alias used by imported role packs. The resolver first treats the
+complete value as an exact configured agent identity; this preserves an agent
+actually named or bound as `gc.<role>`. Only when that exact identity is absent
+does it retry the bare `<role>` within the workflow's rig context. This value
+alias does not change the separate reservation of `gc.*` *metadata keys*.
 
 **Gates and waits_for.** A `[steps.gate]` table synthesizes a sibling gate
 bead (type `gate`, title `Gate: <type> <id>`) and a `blocks` edge from the

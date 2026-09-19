@@ -64,8 +64,9 @@
 # resolver-bypassing helper takes.
 #
 # WHAT THIS HALF CANNOT SEE AT ALL: four rules live only in the Go half
-# (scripts/residency_boundary_test.go), because each needs a parse tree to
-# separate a reference from a declaration or from prose —
+# (scripts/residency_signature_rule_test.go and
+# scripts/residency_expression_rules_test.go), because each needs a parse tree
+# to separate a reference from a declaration or from prose —
 #   ast:returns-store-list        a new store-list signature, including one
 #                                 spelled as a local type name or hung off a
 #                                 package var as a func value
@@ -143,7 +144,7 @@ scan_dirs=(cmd/gc internal/api internal/sling internal/dispatch)
 # The alias evasion this leaves — taking the accessor as a VALUE rather than
 # calling it, which no value-position grep row can catch without also firing on
 # every mention in a comment — is closed on the AST side, by the
-# ast:vocabulary-alias rule in scripts/residency_boundary_test.go.
+# ast:vocabulary-alias rule in scripts/residency_expression_rules_test.go.
 #
 #   cmd_bd_topology.go — fork-only work-axis workspace routing, orthogonal to
 #                        class residency. It stays here because it does not
@@ -441,9 +442,10 @@ fi
 declare -A baseline_count=()
 declare -A current_count=()
 
-# `ast:` rows belong to the OTHER half of the guard (TestResidencyResolverBoundary,
-# scripts/residency_boundary_test.go), which shares this baseline file so there is
-# one ratchet rather than two that can disagree. This half ignores them.
+# `ast:` rows belong to the AST half of the guard
+# (scripts/residency_signature_rule_test.go and
+# scripts/residency_expression_rules_test.go), which shares this baseline file so
+# there is one ratchet rather than two that can disagree. This half ignores them.
 while IFS=$'\t' read -r path fn pattern count; do
 	[[ -z "${path:-}" || "${path:0:1}" == "#" ]] && continue
 	[[ "$pattern" == ast:* ]] && continue

@@ -46,6 +46,21 @@ func (f *Fake) Record(e Event) {
 	f.notify = make(chan struct{})
 }
 
+// RecordAck records like Record and reports the append outcome, so a Fake
+// satisfies [AckRecorder]. A healthy Fake acknowledges every append with a nil
+// error; a broken Fake ([NewFailFake]) reports a drop without recording, so a
+// test can exercise the confirm-before-durable-action path both ways.
+func (f *Fake) RecordAck(e Event) error {
+	f.mu.Lock()
+	broken := f.broken
+	f.mu.Unlock()
+	if broken {
+		return fmt.Errorf("events provider unavailable")
+	}
+	f.Record(e)
+	return nil
+}
+
 // List returns events matching the filter from the in-memory store.
 func (f *Fake) List(filter Filter) ([]Event, error) {
 	f.mu.Lock()

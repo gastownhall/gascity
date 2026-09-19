@@ -522,6 +522,15 @@ var openInfraMigrationSource = func(cityPath string) (beads.Store, error) {
 // somewhere no runtime binding reads, which is the exact defect this opener
 // exists to prevent, so tests exercise the production opener at a temporary
 // binding root.
+//
+// The handle is deliberately unfenced — it is the pinned-id fence's own escape
+// hatch, and the migration copies ids in verbatim. Every id-pinning create
+// through it must go through CreateWithForeignID: importInfraSnapshot here and
+// the stranded-row recovery (infra_class_recover.go) are the two sanctioned
+// callers, and a plain Create here would pin an out-of-namespace id with
+// nothing left to refuse it. The handle's other writes pin no ids and stay
+// outside the exemption — prepareInfraDestination's clearing deletes and
+// infraCopyDepEdge's edge rows.
 func openInfraDestination(target infraBindingTarget) (beads.Store, error) {
 	prefix, err := infraBindingIDPrefix()
 	if err != nil {

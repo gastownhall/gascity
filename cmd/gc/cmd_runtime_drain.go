@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -505,23 +503,23 @@ func cmdRuntimeDrainAck(args []string, jsonOutput bool, stdout, stderr io.Writer
 func newRuntimeRequestRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "request-restart",
-		Short: "Request controller restart this session (waits to be killed)",
+		Short: "Request controller restart this session (returns immediately)",
 		Long: `Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
-controller stops the session on its next reconcile tick and restarts it
-fresh. The wait keeps the agent idle so it does not consume more context
-in the interim.
+Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
+an immediate reconcile tick, and returns without waiting. Control-plane
+authority over the actual stop/start stays with the controller's reconcile
+loop; this command only signals it so the request need not wait for the next
+periodic patrol tick.
 
-Under normal operation the controller SIGKILLs the process tree before
-this command returns. If the controller accepts the stop handoff, the
-runtime is already gone, or a SIGINT/SIGTERM is received, the command
-exits 0 cleanly. If the controller has not acted within a bounded
-timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
-1 with a diagnostic pointing at controller health.
+The command exits 0 once the restart request is durably persisted and the
+controller has been signaled, even if the controller has not yet acted. If
+the controller cannot be signaled, the command exits 1 with a diagnostic —
+the restart request itself remains durably set, so the controller still
+picks it up on its next periodic reconcile tick regardless.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before waiting.`,
+It emits a session.draining event before signaling the controller.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdRuntimeRequestRestart(stdout, stderr) != 0 {
@@ -576,13 +574,9 @@ func cmdRuntimeRequestRestart(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc runtime request-restart: checking session type: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	return doRuntimeRequestRestart(sigCtx, dops, sp, persistRestart, pinned, rec, current.display, current.sessionName,
-		controllerRestartPollInterval, controllerRestartTimeout(cfg), stdout, stderr)
+	return doRuntimeRequestRestart(dops, persistRestart, pinned, rec, current.display, current.sessionName,
+		current.cityPath, stdout, stderr)
 }
-
-const controllerRestartPollInterval = 1 * time.Second
 
 // controllerRestartTimeout computes the bounded timeout for waiting on the
 // controller to act on a restart request: max(5*PatrolInterval, 5min), capped at 30min.
@@ -603,17 +597,19 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 	return d
 }
 
-// doRuntimeRequestRestart sets the restart-requested flag then polls until the
-// controller accepts the stop handoff (exit 0), the context is canceled by a
-// signal (exit 0), or the bounded timeout expires (exit 1 with diagnostic).
+// doRuntimeRequestRestart sets the restart-requested flag, pokes the
+// controller for an immediate reconcile tick, and returns without waiting for
+// the controller to act. Control-plane authority over the actual stop/start
+// stays with the controller's reconcile loop; this call only signals it so
+// the request need not wait for the next periodic tick.
 //
 // pinned marks a kill-protected named session (pin_awake == "true"): the
 // reconciler refuses to collaterally kill such a session on a bare runtime
 // restart-requested flag, so for pinned sessions persistRestart (which lands
 // continuation_reset_pending, the explicit-reset escape hatch) is mandatory
 // rather than best-effort. See sessionRestartableByController.
-func doRuntimeRequestRestart(ctx context.Context, dops drainOps, sp runtime.Provider, persistRestart func() error, pinned bool, rec events.Recorder,
-	targetName, sn string, pollInterval, timeout time.Duration, stdout, stderr io.Writer,
+func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned bool, rec events.Recorder,
+	targetName, sn, cityPath string, stdout, stderr io.Writer,
 ) int {
 	if err := dops.setRestartRequested(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -641,9 +637,13 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, sp runtime.Prov
 		Subject: targetName,
 		Message: "restart requested by session",
 	})
-	fmt.Fprintf(stdout, "Restart requested. Waiting up to %s for controller to stop this session...\n", timeout) //nolint:errcheck // best-effort stdout
 
-	return waitForControllerRestart(ctx, dops, sp, sn, "gc runtime request-restart", pollInterval, timeout, stderr)
+	if err := pokeControllerForRestart(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // waitForControllerRestart polls until the controller accepts the stop
@@ -656,9 +656,9 @@ func doRuntimeRequestRestart(ctx context.Context, dops drainOps, sp runtime.Prov
 // in session_reconciler.go). sp confirms the session actually stopped before
 // this reports success; while the flag is clear but the session is still
 // running, polling continues until the deadline instead of returning early.
-func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Provider, sn, command string, pollInterval, timeout time.Duration, stderr io.Writer) int {
+func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Provider, sn string, timeout time.Duration, stderr io.Writer) int {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(pollInterval)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	var lastPollErr error
 
@@ -666,7 +666,7 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 		select {
 		case <-ctx.Done():
 			// Signal received; leave the flag set so the controller still acts on its next tick.
-			fmt.Fprintf(stderr, "%s: signal received; restart request remains set; controller will stop this session on its next reconcile tick\n", command) //nolint:errcheck // best-effort stderr
+			fmt.Fprint(stderr, "gc handoff: signal received; restart request remains set; controller will stop this session on its next reconcile tick\n") //nolint:errcheck // best-effort stderr
 			return 0
 		case <-ticker.C:
 			requested, err := dops.isRestartRequested(sn)
@@ -681,14 +681,32 @@ func waitForControllerRestart(ctx context.Context, dops drainOps, sp runtime.Pro
 			}
 			if time.Now().After(deadline) {
 				if lastPollErr != nil {
-					fmt.Fprintf(stderr, "%s: controller did not act within %s; last poll error: %v; check `gc dashboard` or `gc trace`\n", command, timeout, lastPollErr) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "gc handoff: controller did not act within %s; last poll error: %v; check `gc dashboard` or `gc trace`\n", timeout, lastPollErr) //nolint:errcheck // best-effort stderr
 				} else {
-					fmt.Fprintf(stderr, "%s: controller did not act within %s; check `gc dashboard` or `gc trace`\n", command, timeout) //nolint:errcheck // best-effort stderr
+					fmt.Fprintf(stderr, "gc handoff: controller did not act within %s; check `gc dashboard` or `gc trace`\n", timeout) //nolint:errcheck // best-effort stderr
 				}
 				return 1
 			}
 		}
 	}
+}
+
+// pokeControllerForRestart signals the controller to run an immediate
+// reconcile tick instead of waiting for the next periodic patrol. It does not
+// wait for the controller to act: the restart-requested flag is durable, so a
+// signal failure just means the next periodic tick picks up the request
+// instead of an immediate one.
+//
+// This calls sendControllerCommandWithTimeouts directly rather than going
+// through pokeController: pokeController silently falls back to the
+// city-agnostic global supervisor socket on any send failure, which would
+// make an explicit-restart request for one city spuriously report success
+// via an unrelated supervisor.
+func pokeControllerForRestart(cityPath string) error {
+	if _, err := sendControllerCommandWithTimeouts(cityPath, "poke", 2*time.Second, 2*time.Second, 5*time.Second); err != nil {
+		return fmt.Errorf("signaling controller: %w (restart request remains durably set for the next reconcile tick)", err)
+	}
+	return nil
 }
 
 // drainAckPokeController is a mutable global test seam over pokeController.
@@ -739,21 +757,53 @@ func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.W
 		return
 	}
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
-	sessionBead, err := cliSessionStore(store, cfg, cityPath).Get(sessionName)
+	rigStores := func() map[string]beads.Store {
+		if cfg == nil {
+			return nil
+		}
+		return buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	}
+	releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, drainAckReleaseBudget, stderr)
+}
+
+// releaseUnexecutedClaimsForSessionStore resolves a runtime session name to the
+// durable session bead behind it and releases the claims that bead's identities
+// still hold. Resolution is the reason this step exists separately: a pool
+// worker's runtime name lives in `session_name` metadata on a bead whose ID is
+// something else entirely, so a direct Get on the runtime name would miss it.
+//
+// rigStores is a thunk, not a map, because opening the rig stores is real store
+// I/O on the pre-ack path. It is called only once resolution and the session
+// Get have both succeeded — a drain-ack that cannot find its session pays
+// nothing for stores it would immediately discard.
+func releaseUnexecutedClaimsForSessionStore(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores func() map[string]beads.Store,
+	sessionName string,
+	budget time.Duration,
+	stderr io.Writer,
+) {
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	sessionID, err := resolveSessionID(sessStore, sessionName)
 	if err != nil {
 		// A session that cannot be resolved holds nothing this pass can find, so
-		// there is nothing to report. Both arms above are deliberately silent for
-		// the same reason: the ack is the signal the controller is waiting on, and
-		// a release that could not even begin must not decorate a successful ack
-		// with a warning an operator can do nothing about. A claim genuinely left
-		// behind here is still caught by the dead-assignee release lane.
+		// there is nothing to report. The ack is the signal the controller is
+		// waiting on, and a release that could not begin must not decorate a
+		// successful ack with a warning an operator can do nothing about. A claim
+		// genuinely left behind here is still caught by the dead-assignee lane.
 		return
 	}
-	var rigStores map[string]beads.Store
-	if cfg != nil {
-		rigStores = buildStandaloneRigStores(cfg, cityPath, io.Discard)
+	sessionBead, err := sessStore.Get(sessionID)
+	if err != nil {
+		return
 	}
-	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigStores, sessionBead, drainAckReleaseBudget, stderr)
+	var rigs map[string]beads.Store
+	if rigStores != nil {
+		rigs = rigStores()
+	}
+	releaseUnexecutedClaimsOnDrainAck(cityPath, cfg, store, rigs, sessionBead, budget, stderr)
 }
 
 // drainAckReleaseBudget bounds the whole held-claim release pass.

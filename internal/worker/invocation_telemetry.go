@@ -231,7 +231,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
 // had no entry for the (family, model) pair; cost is then left zero and must be
-// read as "not measured", never as a free invocation.
+// read as "not measured", never as a free invocation. At prefers the
+// transcript entry's own Timestamp when the extractor populated one, falling
+// back to now for providers whose tail extraction leaves it zero.
 func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
 	// beadID and sessionID are the session bead id and the run-id fallback — the
 	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
@@ -248,6 +250,10 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	if !priced {
 		cost = 0
 	}
+	at := now
+	if !u.Timestamp.IsZero() {
+		at = u.Timestamp
+	}
 	return usage.Fact{
 		RunID:     runID,
 		SessionID: strings.TrimSpace(sessionID),
@@ -263,7 +269,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		CostUSDEstimate:     cost,
 		Unpriced:            !priced,
 		UpstreamReqID:       reqID,
-		At:                  now.UnixMilli(),
+		At:                  at.UnixMilli(),
 		IdempotencyKey:      usage.ModelIdempotencyKey(runID, reqID),
 	}
 }
@@ -820,12 +826,15 @@ func sweepAgentName(meta map[string]string) string {
 }
 
 // sweepIntervalWindow derives the codex discovery date window from a terminal
-// session's awake interval: [awake_started_at, slept_at]. When slept_at is
-// missing or not after the start (stale for non-sleep terminal states), it falls
-// back to now as the interval end, so notAfter is always set and never reversed —
-// FindCodexSessionFileByID requires a non-zero notAfter and refuses a reversed
-// range. The finder pads both ends by a local day, so an off-by-seconds bound
-// cannot drop the rollout's day directory.
+// session's awake interval: [awake_started_at, slept_at]. slept_at is refreshed
+// by both SleepPatch and AcknowledgeDrainPatch, so a drained session tightens
+// notAfter from now to its drain-ack time. When slept_at is missing or not after
+// the start (a terminal exit that does not refresh it, or a value carried over
+// from a prior awake interval), it falls back to now as the interval end, so
+// notAfter is always set and never reversed — FindCodexSessionFileByID requires
+// a non-zero notAfter and refuses a reversed range. The finder pads both ends by
+// a local day, so an off-by-seconds bound — including the tighter drain-ack
+// bound — cannot drop the rollout's day directory.
 func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notAfter time.Time) {
 	notAfter = now
 	if started, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["awake_started_at"])); err == nil {

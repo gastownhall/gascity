@@ -3,7 +3,9 @@
 #
 # Scans recent bead.updated events for the "reset to pool" signature
 # (status=open, assignee cleared). Counts resets per bead. When any
-# bead exceeds the threshold, escalates to mayor via mail.
+# bead exceeds the threshold, escalates via mail to the configured
+# escalation target ($GC_ESCALATION_TARGET, default: the reserved "human"
+# alias, which every city resolves).
 #
 # State file tracks cumulative reset counts across runs. Closed beads
 # are pruned from the ledger automatically.
@@ -20,6 +22,12 @@ CITY="${GC_CITY:-.}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/packs/core}"
 LEDGER="$PACK_STATE_DIR/spawn-storm-counts.json"
 THRESHOLD="${SPAWN_STORM_THRESHOLD:-2}"
+# Where storm alerts go. Cities that staff a coordinator role (e.g. the gastown
+# pack's mayor) can point this at it; "human" is the reserved recipient alias
+# that resolves in every city, including core-only ones.
+ESCALATION_TARGET="${GC_ESCALATION_TARGET:-human}"
+# Count of undeliverable alerts. Load-bearing for the exit code below.
+FAILED=0
 
 if [ ! -e "$LEDGER" ] && [ -e "$CITY/.gc/spawn-storm-counts.json" ]; then
     LEDGER="$CITY/.gc/spawn-storm-counts.json"
@@ -42,7 +50,7 @@ fi
 COUNTS=$(cat "$LEDGER")
 
 # Step 3: For each open unassigned bead, check if it has rejection metadata
-# (indicates it was returned from refinery or recovered by witness).
+# (indicates it was returned for rework or recovered by a work-health patrol).
 STORMS=0
 RESET_IDS=$(echo "$OPEN_BEADS" | jq -r '.[] | select(.metadata.rejection_reason != null or .metadata.recovered != null) | .id' 2>/dev/null)
 while IFS= read -r bead_id; do
@@ -56,7 +64,7 @@ while IFS= read -r bead_id; do
     if [ "$NEW" -ge "$THRESHOLD" ]; then
         TITLE_JSON=$(gc bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
-        gc mail send mayor/ \
+        if ! gc mail send "$ESCALATION_TARGET" \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
             -m "Bead $bead_id ($TITLE) has been reset to pool $NEW times (threshold: $THRESHOLD).
 This likely indicates a polecat crash loop on this specific work.
@@ -65,7 +73,13 @@ Recommended actions:
 - Inspect the bead: gc bd show $bead_id --json
 - Check rejection history: metadata.rejection_reason
 - Consider quarantining the bead or investigating the root cause." \
-            2>/dev/null || true
+            2>/dev/null; then
+            # Do not swallow an undeliverable alert — a vanished storm alert
+            # is invisible. Surfacing it requires a non-zero exit (see below),
+            # so record the failure and keep sweeping the remaining beads.
+            echo "spawn-storm-detect: could not mail escalation target '$ESCALATION_TARGET' about $bead_id" >&2
+            FAILED=$((FAILED + 1))
+        fi
         STORMS=$((STORMS + 1))
     fi
 done <<< "$RESET_IDS"
@@ -97,4 +111,14 @@ echo "$COUNTS" > "$LEDGER"
 
 if [ "$STORMS" -gt 0 ]; then
     echo "spawn-storm-detect: found $STORMS beads exceeding reset threshold"
+fi
+
+# Loud-fail: the ledger has been written above, so a non-zero exit now surfaces
+# the per-bead failure lines to the controller log without losing the recorded
+# counts. The controller captures an exec order's combined output but logs it
+# only on a non-zero exit (order_dispatch.go), so exit 0 would swallow them
+# (gastownhall/gascity#4543).
+if [ "$FAILED" -gt 0 ]; then
+    echo "spawn-storm-detect: $FAILED storm alert(s) could not be delivered to '$ESCALATION_TARGET' (see above)" >&2
+    exit 1
 fi

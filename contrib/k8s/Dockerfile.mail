@@ -14,14 +14,26 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     TMPDIR=/tmp
 
+# The util-linux set carries CVE-2026-53615, fixed in 2.41.5-0+deb13u1. All nine
+# names are binary packages of one source, and Trivy reports each separately, so
+# they are upgraded together rather than through util-linux alone.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
+    bsdutils \
+    libblkid1 \
     libcap2 \
+    liblastlog2-2 \
+    libmount1 \
+    libsmartcols1 \
     libssl3t64 \
     libsystemd0 \
     libudev1 \
+    libuuid1 \
+    login \
+    mount \
     openssl \
     openssl-provider-legacy \
+    util-linux \
     && apt-get install -y --no-install-recommends \
     git \
     libnghttp2-14 \

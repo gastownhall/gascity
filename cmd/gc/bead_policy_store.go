@@ -158,6 +158,27 @@ func (s *beadPolicyStore) DeleteBatch(ids []string) error {
 	return deleter.DeleteBatch(ids)
 }
 
+var (
+	_ beads.RowWitness = (*beadPolicyStore)(nil)
+	_ beads.RowWitness = (*beadPolicyGraphStore)(nil)
+)
+
+// SawRows implements beads.RowWitness by forwarding to the wrapped store. Like
+// Count and DeleteBatch, the delegation must be explicit, and here the cost of
+// omitting it is silent rather than loud: an absent optional capability reads
+// to a caller as "this store cannot witness itself", which is a supported
+// state. The store-health row count would keep certifying a zero it has the
+// evidence to refuse, on every controller-opened city, because both the store
+// opener and wrapWithCachingStore hand the API server its city store through
+// this wrapper. Inner stores that cannot witness themselves report no
+// evidence, which leaves the caller on its prior behavior rather than
+// refusing a count. beadPolicyGraphStore embeds *beadPolicyStore, so it
+// forwards through this too.
+func (s *beadPolicyStore) SawRows() bool {
+	witness, ok := s.Store.(beads.RowWitness)
+	return ok && witness.SawRows()
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

@@ -202,6 +202,53 @@ func TestExtractTailMetaUnknownModel(t *testing.T) {
 	}
 }
 
+// TestExtractTailMetaToleratesOffFormatTimestamp guards the shared tailEntry
+// decoder: model, context and activity must survive a top-level timestamp
+// that is not an RFC3339 string, and the entry must not be counted as a
+// malformed tail. A strict time.Time field would reject the whole line, and
+// this path backs every non-codex provider — the loss would be invisible.
+func TestExtractTailMetaToleratesOffFormatTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	writeTailJSONL(t, path, []map[string]any{
+		{
+			"type":      "assistant",
+			"timestamp": 1770000000, // numeric epoch, not an RFC3339 string
+			"message": map[string]any{
+				"role":        "assistant",
+				"model":       "claude-opus-4-5-20251101",
+				"stop_reason": "end_turn",
+				"content":     "done",
+				"usage":       map[string]any{"input_tokens": 10000},
+			},
+		},
+	})
+
+	meta, err := ExtractTailMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("expected non-nil TailMeta")
+	}
+	if meta.Model != "claude-opus-4-5-20251101" {
+		t.Errorf("Model = %q, want %q", meta.Model, "claude-opus-4-5-20251101")
+	}
+	if meta.ContextUsage == nil {
+		t.Fatal("expected non-nil ContextUsage")
+	}
+	if meta.ContextUsage.InputTokens != 10000 {
+		t.Errorf("InputTokens = %d, want 10000", meta.ContextUsage.InputTokens)
+	}
+	if meta.Activity != "idle" {
+		t.Errorf("Activity = %q, want %q", meta.Activity, "idle")
+	}
+	if meta.MalformedTail {
+		t.Error("MalformedTail = true, want false (an off-format timestamp is not a malformed line)")
+	}
+}
+
 func TestExtractTailMetaValidUnterminatedTail(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
