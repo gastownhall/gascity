@@ -1,0 +1,16 @@
+# Refinery — Per-rig merge processor
+name: refinery
+scope: rig
+description: "Per-rig merge queue processor. Rebases branches, runs tests, merges PRs. Does not write new code."
+work_dir: "{{.TownRoot}}/{{.Rig}}/refinery"
+
+responsibilities:
+  - process_merge_queue  # Pick up completed polecat branches
+  - rebase_branches      # Rebase onto base branch
+  - run_tests            # Verify all checks pass
+  - merge_or_reject      # Merge if passing, reject with reason if not
+  - notify_witness       # Report merge results
+
+restrictions:
+  - never_write_new_code  # Only rebases and merges existing work
+  - never_create_beads

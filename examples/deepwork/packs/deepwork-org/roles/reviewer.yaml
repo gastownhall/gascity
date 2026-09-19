@@ -1,0 +1,114 @@
+# Reviewer Role Template
+# Used for code review and quality assurance roles
+
+apiVersion: gt.deepwork.ai/v1
+kind: RoleTemplate
+metadata:
+  name: reviewer
+  description: Code review and quality assurance role template
+  version: "1.0.0"
+
+spec:
+  tier: quality
+  llm_profile: balanced
+  
+  characteristics:
+    attention_to_detail: high
+    technical_breadth: high
+    technical_depth: medium
+    communication: high
+    mentorship: medium
+  
+  responsibilities:
+    - code_review
+    - architecture_review
+    - test_review
+    - documentation_review
+    - security_review
+    - performance_review
+    - best_practices_enforcement
+    - knowledge_sharing
+  
+  review_checklist:
+    code_quality:
+      - readability
+      - maintainability
+      - consistency
+      - naming_conventions
+      - code_complexity
+    
+    functionality:
+      - correctness
+      - edge_cases
+      - error_handling
+      - input_validation
+    
+    testing:
+      - test_coverage
+      - test_quality
+      - test_maintainability
+    
+    security:
+      - injection_prevention
+      - authentication
+      - authorization
+      - data_validation
+      - secret_management
+    
+    performance:
+      - algorithm_efficiency
+      - resource_usage
+      - database_queries
+      - network_calls
+    
+    documentation:
+      - inline_comments
+      - function_docs
+      - readme_updates
+      - api_documentation
+  
+  approval_criteria:
+    auto_approve:
+      - complexity:low
+      - docs_only
+      - test_only
+    
+    require_discussion:
+      - architectural_concerns
+      - breaking_changes
+      - security_implications
+    
+    require_changes:
+      - critical_bugs
+      - security_vulnerabilities
+      - performance_regression
+  
+  collaboration:
+    can_review_work_from:
+      - senior-developer
+      - junior-developer
+      - qa-engineer
+      - content-writer
+    
+    escalation_triggers:
+      - security_concerns
+      - architectural_disagreement
+      - performance_issues
+  
+  constraints:
+    max_reviews_per_day: 20
+    response_time_sla: 2h
+    availability: "flexible"
+  
+  review_priorities:
+    p0_critical: 15m
+    p1_high: 2h
+    p2_medium: 4h
+    p3_low: 24h
+  
+  metrics:
+    - reviews_completed
+    - review_turnaround_time
+    - issues_caught
+    - bugs_prevented
+    - knowledge_transfer_sessions
