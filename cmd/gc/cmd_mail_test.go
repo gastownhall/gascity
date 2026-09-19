@@ -844,6 +844,42 @@ func TestCmdMailSendFromRejectsUnresolvableCallerIdentity(t *testing.T) {
 	}
 }
 
+// TestCmdMailSendFromEnvEmptyCallerIsExempt pins the documented
+// interactive-human exemption: a caller with GC_ALIAS/GC_SESSION_ID/GC_AGENT
+// all empty resolves its own identity as the reserved "human" bucket, so it
+// may claim any --from identity -- including a live session's (mayor). This
+// is by design, not an oversight: shell access to the city is already a
+// stronger trust boundary than mail-sender identity, and this is the plain
+// human operator's documented default sender. It is also the residual hole
+// in the #4070 guard (--from is a spoofing guard, not authentication, since
+// the caller controls those env vars), pinned here so the exemption cannot
+// be narrowed or widened by accident.
+func TestCmdMailSendFromEnvEmptyCallerIsExempt(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	createMailIdentitySession(t, store, "test-city/mayor", "mayor", "mayor-session")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"human/"}, false, false, "mayor", "", "operator advisory", "sent by a human operator", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from mayor, caller=env-empty human) = %d, want 0 (interactive-human exemption); stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_MAIL", "")

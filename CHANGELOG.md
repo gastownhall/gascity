@@ -482,6 +482,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the reserved `human`/`controller` buckets (the documented pattern for
   scripted automation), or as an interactive human with no live-session
   identity of its own still works unchanged.
+
 - **ACP activity is now available across process boundaries.** ACP
   `session/update` timestamps are published through an atomic, coalesced
   sidecar, allowing a process other than the session owner to report

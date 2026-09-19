@@ -1399,6 +1399,10 @@ func callerOwnMailIdentityCached(cityPath string, cfg *config.City, store beads.
 // coordinator role -- is the actual gap this closes: without this check,
 // resolveMailIdentityWithConfigCached resolves any live, named session's
 // identity for any caller with zero authentication.
+//
+// This is a spoofing guard, NOT authentication: the caller's own identity
+// comes from GC_SESSION_ID/GC_ALIAS/GC_AGENT, which the caller controls, and
+// a caller that clears all three resolves as "human" and is exempt by design.
 func mailSenderAuthorizedCached(cityPath string, cfg *config.City, store beads.Store, resolvedSender string, cache *mailIdentitySessionCache) bool {
 	if _, reserved := reservedMailSenderIdentity(resolvedSender); reserved {
 		return true
