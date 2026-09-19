@@ -660,9 +660,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
+	// This pass runs before readiness, so it leaves the order-tracking retention
+	// watchdog to the first steady-state tick (#6429).
 	startupOrdersStart := time.Now()
 	cr.safeTick(func() {
-		cr.dispatchOrders(ctx, cityRoot)
+		cr.dispatchOrders(ctx, cityRoot, true)
 	}, "startup-orders")
 	logPhaseElapsed("startup-orders", startupOrdersStart)
 	if ctx.Err() != nil {
@@ -1241,7 +1243,7 @@ func (cr *CityRuntime) tick(
 	// but after the pressure gate and managed-Dolt preflight so skipped or
 	// endpoint-repair ticks do not add tracking writes first.
 	phaseStart = time.Now()
-	cr.dispatchOrders(ctx, cityRoot)
+	cr.dispatchOrders(ctx, cityRoot, false)
 	recordPhase(TraceSiteOrderDispatch, "dispatch_orders", phaseStart, nil)
 	if ctx.Err() != nil {
 		return
@@ -1495,7 +1497,18 @@ func (cr *CityRuntime) tick(
 	tickCompleted = true
 }
 
-func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
+// dispatchOrders runs the dispatch-time watchdogs, then dispatches due orders.
+// bootDispatch is true only for the synchronous pass on the startup path: that
+// pass runs before the city reports ready, so it skips the order-tracking
+// retention watchdog, which is always due at boot and lists every closed
+// order-tracking bead before pruning — on a slow store with a large closed
+// backlog that would hold readiness for the whole pass
+// (gastownhall/gascity#6429). The first steady-state dispatch runs the
+// watchdog; the other watchdogs still run on the boot pass. This moves the
+// pass, it does not shorten it: steady-state dispatch still runs the watchdog
+// inline on the tick, so the same list delays that tick's order dispatch
+// (gastownhall/gascity#2604).
+func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string, bootDispatch bool) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -1506,7 +1519,15 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	}
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
-	cr.runOrderTrackingRetentionWatchdog(now)
+	if bootDispatch {
+		// #6429: skip without stamping orderTrackingRetentionWatchdogLast, so the
+		// first steady-state dispatch still finds the watchdog due.
+		if cr.stderr != nil {
+			fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: deferred on boot; it runs inline on the first steady-state tick\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		}
+	} else {
+		cr.runOrderTrackingRetentionWatchdog(now)
+	}
 	cr.runNudgeMailSweepWatchdog(now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)

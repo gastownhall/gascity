@@ -7397,7 +7397,7 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 // scratch city carrying one legacy backup_state.json stamped at backupAge, plus
 // a store holding minClosedOrderTrackingRetained+2 prunable beads. Every other
 // TestOrderTrackingRetentionWatchdog_* case leaves cityPath empty, which skips
-// the doctor.BulkDeleteSafe guard entirely; these two exercise it.
+// the doctor.BulkDeleteSafe guard entirely; the cases built on it exercise it.
 func seedRetentionWatchdogCity(t *testing.T, now time.Time, backupAge time.Duration) (*CityRuntime, beads.Store, *bytes.Buffer) {
 	t.Helper()
 	cityDir := t.TempDir()
@@ -7481,6 +7481,46 @@ func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
 		if _, err := store.Get(id); err != nil {
 			t.Fatalf("%s should be preserved at the retain floor: %v", id, err)
 		}
+	}
+}
+
+// TestOrderTrackingRetentionWatchdog_DeferredOnBootDispatch verifies the
+// gastownhall/gascity#6429 fix: the boot dispatch, which runs before the city
+// reports ready, skips the retention watchdog without stamping its interval,
+// so the first steady-state dispatch still prunes. The other watchdogs keep
+// running on the boot dispatch.
+func TestOrderTrackingRetentionWatchdog_DeferredOnBootDispatch(t *testing.T) {
+	// dispatchOrders reads the wall clock, so the fixture is dated from it.
+	cr, store, stderrBuf := seedRetentionWatchdogCity(t, time.Now(), time.Hour)
+
+	cr.dispatchOrders(context.Background(), cr.cityPath, true)
+
+	for i := range minClosedOrderTrackingRetained + 2 {
+		id := fmt.Sprintf("guard-%02d", i)
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("%s should be preserved by the boot dispatch: %v\nstderr:\n%s", id, err, stderrBuf.String())
+		}
+	}
+	if !cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatalf("orderTrackingRetentionWatchdogLast = %v after the boot dispatch, want zero so the first steady-state dispatch runs the watchdog", cr.orderTrackingRetentionWatchdogLast)
+	}
+	if got := stderrBuf.String(); !strings.Contains(got, "deferred on boot") {
+		t.Fatalf("stderr = %q, want 'deferred on boot' in output", got)
+	}
+	if cr.orderSweepWatchdogLast.IsZero() || cr.nudgeMailSweepWatchdogLast.IsZero() {
+		t.Fatalf("boot dispatch skipped a sibling watchdog (orderSweepWatchdogLast = %v, nudgeMailSweepWatchdogLast = %v); only retention is deferred",
+			cr.orderSweepWatchdogLast, cr.nudgeMailSweepWatchdogLast)
+	}
+
+	cr.dispatchOrders(context.Background(), cr.cityPath, false)
+
+	for _, id := range []string{"guard-00", "guard-01"} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (the first steady-state dispatch should prune)\nstderr:\n%s", id, err, stderrBuf.String())
+		}
+	}
+	if cr.orderTrackingRetentionWatchdogLast.IsZero() {
+		t.Fatal("orderTrackingRetentionWatchdogLast is still zero after the steady-state dispatch; the watchdog did not run")
 	}
 }
 
