@@ -1,0 +1,24 @@
+
+
+● Creating approval-proof.txt with exclusive open
+  ⎿  $ python3 -c 'from pathlib import Path; Path('"'"'/tmp/bb-menu-check-jlsjif
+     jp/approval-proof.txt'"'"').open("x").write("approved once\n")'
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode"
+ below
+
+   │ python3 -c 'from pathlib import Path; Path('"'"'/tmp/bb-menu-check-jlsji
+   │ fjp/approval-proof.txt'"'"').open("x").write("approved once\n")'
+   Create approval-proof.txt with exclusive open
+
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: python3 *
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

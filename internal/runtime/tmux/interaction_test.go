@@ -264,10 +264,7 @@ func TestPhase2ProviderRespondApprovesAndClearsPrompt(t *testing.T) {
 		},
 	}
 
-	requestID := "tmux-" + approvalHash(&parsedApproval{
-		ToolName: "Read",
-		Input:    "file_path: /tmp/test.txt",
-	})
+	requestID := "tmux-" + approvalHash(parseApprovalPrompt(approvalPromptPane()))
 	err := provider.Respond(session, runtime.InteractionResponse{
 		RequestID: requestID,
 		Action:    "approve",
