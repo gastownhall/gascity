@@ -477,6 +477,14 @@ func TestStaleDBFormulaCloseIsIndependentOfIdentityEnv(t *testing.T) {
 			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_NAME=dog-session-7"},
 			want: staleDBCloseWrite("bead-1"),
 		},
+		{
+			// The live pool-session shape (ga-n13msy, gm-5001gi): an unaliased
+			// pool slot has BOTH GC_SESSION_ID and a stable GC_SESSION_NAME, and
+			// the claim is stamped with the session ID. The close must still land.
+			name: "pool session with distinct session id and name",
+			env:  []string{"GC_ALIAS=", "BEADS_ACTOR=", "GC_SESSION_ID=dog-wisp-99", "GC_SESSION_NAME=dog-session-7"},
+			want: staleDBCloseWrite("bead-1"),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runStaleDBFormulaCloseActorCase(t, tc.env, tc.want)
