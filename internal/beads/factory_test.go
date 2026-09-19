@@ -605,8 +605,9 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 // plane routing contract: a caller that supplies no PreflightChecker can
 // never be given the native store — the factory treats the missing checker
 // as preflight-unavailable and takes the bd fallback, stamping it like every
-// other path. (The control dispatcher routes its raw bd store through the
-// factory this way; native selection there would be a behavior change.)
+// other path. (The control dispatcher used to route its raw bd store
+// through the factory this way; it now supplies the checker like every
+// other store open, so this pins the no-checker caller contract only.)
 func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	bd := NewMemStore()
