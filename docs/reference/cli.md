@@ -2763,6 +2763,9 @@ Each dropped nudge is terminalized through the same dead-letter path a
 failed delivery attempt uses, so it lands in "gc nudge status" as dead
 rather than disappearing silently. Find IDs with "gc nudge status".
 
+Dropping an in-flight nudge dead-letters it even if it was already
+injected into the session but not yet acked.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.
 

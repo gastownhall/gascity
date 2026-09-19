@@ -362,6 +362,9 @@ Each dropped nudge is terminalized through the same dead-letter path a
 failed delivery attempt uses, so it lands in "gc nudge status" as dead
 rather than disappearing silently. Find IDs with "gc nudge status".
 
+Dropping an in-flight nudge dead-letters it even if it was already
+injected into the session but not yet acked.
+
 This only accepts explicit nudge IDs; it does not do bulk or age-based
 selection.`,
 		Args: cobra.MinimumNArgs(1),
@@ -551,6 +554,12 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 			droppable = append(droppable, id)
 		}
 	}
+	// Classification and the write pass take the queue lock separately -- the
+	// flock is per-process and non-reentrant -- so an ID can be delivered and
+	// acked in between. Report from the write pass's own dead-lettered slice
+	// rather than the classification, or a nudge nobody dropped is still
+	// reported as dropped.
+	dropped := make(map[string]bool, len(droppable))
 	if len(droppable) > 0 {
 		store, err := openNudgeBeadStoreErr(cityPath)
 		if err != nil {
@@ -558,9 +567,13 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 			return 1
 		}
 		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
-		if err := recordQueuedNudgeFailureWithStore(cityPath, store, droppable, errNudgeManualDrop, now); err != nil {
+		deadLettered, err := recordQueuedNudgeFailureDetailed(cityPath, store, droppable, errNudgeManualDrop, now)
+		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 			return 1
+		}
+		for _, item := range deadLettered {
+			dropped[item.ID] = true
 		}
 	}
 
@@ -569,6 +582,12 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	for _, id := range ids {
 		switch statuses[id] {
 		case nudgeDropStatusDroppable:
+			if !dropped[id] {
+				exit = 1
+				results = append(results, nudgeDropResult{ID: id, OK: false, Error: "no longer queued (delivered or acked concurrently)"})
+				fmt.Fprintf(stderr, "gc nudge drop %s: no longer queued (delivered or acked concurrently)\n", id) //nolint:errcheck
+				continue
+			}
 			results = append(results, nudgeDropResult{ID: id, OK: true, Outcome: "dropped"})
 			if !jsonOutput {
 				fmt.Fprintf(stdout, "Dropped nudge %s\n", id) //nolint:errcheck
@@ -2896,11 +2915,12 @@ func recordQueuedNudgeFailureWithStore(cityPath string, store beads.NudgesStore,
 	return err
 }
 
-// The dead-lettered slice is part of the helper's API (tests assert on it and
-// the *Detailed name promises it), even though the only production caller today
-// is recordQueuedNudgeFailureWithStore, which discards it.
-//
-//nolint:unparam // first result is an intentional diagnostic API
+// The dead-lettered slice reports which of the given IDs actually reached the
+// dead letter queue in this pass, which is not the same set the caller asked
+// for: an item delivered and acked since the caller last read the queue is
+// simply gone by the time the write pass takes the lock. doNudgeDrop reports
+// per-ID outcomes from this slice for exactly that reason;
+// recordQueuedNudgeFailureWithStore discards it.
 func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, ids []string, cause error, now time.Time) ([]queuedNudge, error) {
 	if len(ids) == 0 {
 		return nil, nil

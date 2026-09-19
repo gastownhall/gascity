@@ -5241,6 +5241,62 @@ func TestCmdNudgeDropDeadLettersPendingNudge(t *testing.T) {
 	}
 }
 
+func TestCmdNudgeDropDeadLettersInFlightNudge(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	t.Setenv("GC_CITY", dir)
+	now := time.Now()
+
+	item := newQueuedNudgeWithOptions("worker", "in-flight reminder", "session", now, queuedNudgeOptions{ID: "n-drop-inflight"})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	// Claim it so it sits in state.InFlight with a lease -- the case where a
+	// nudge was already handed to a session but never acked, which is the one
+	// an operator most wants to drop.
+	claimed, err := claimDueQueuedNudgesMatching(dir, now.Add(time.Millisecond), func(q queuedNudge) bool {
+		return q.ID == "n-drop-inflight"
+	})
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed = %d, want 1", len(claimed))
+	}
+	if claimed[0].ClaimedAt.IsZero() || claimed[0].LeaseUntil.IsZero() {
+		t.Fatalf("claimed item = %+v, want ClaimedAt and LeaseUntil set", claimed[0])
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdNudgeDrop([]string{"n-drop-inflight"}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdNudgeDrop = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Dropped nudge n-drop-inflight") {
+		t.Fatalf("stdout = %q, want a drop confirmation line", stdout.String())
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 {
+		t.Fatalf("pending=%d inFlight=%d, want both 0", len(pending), len(inFlight))
+	}
+	if len(dead) != 1 || dead[0].ID != "n-drop-inflight" {
+		t.Fatalf("dead = %v, want exactly [n-drop-inflight]", dead)
+	}
+	got := dead[0]
+	if got.DeadAt.IsZero() {
+		t.Fatal("DeadAt is zero, want a terminal timestamp")
+	}
+	// The claim must not survive the transition: a dead item still carrying a
+	// lease looks recoverable to recoverExpiredInFlightNudges.
+	if !got.ClaimedAt.IsZero() || !got.LeaseUntil.IsZero() {
+		t.Fatalf("dropped item ClaimedAt=%s LeaseUntil=%s, want both cleared", got.ClaimedAt, got.LeaseUntil)
+	}
+}
+
 func TestCmdNudgeDropNonexistentIDReportsError(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
