@@ -273,7 +273,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0-rc.2"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -302,7 +302,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0-rc.2"
+      BD_VERSION: "v1.3.0"
     strategy:
       fail-fast: false
       matrix:
@@ -417,7 +417,7 @@ jobs:
       # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
       # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
       # and BD_VERSION — every other job's bd — carries those flags as of
-      # v1.3.0-rc.2, so the row would run there too. It stays here as the single
+      # v1.3.0, so the row would run there too. It stays here as the single
       # home for the one contract that needs a real CAS-capable bd, and
       # BD_PREV_VERSION (v1.0.4) still cannot run it. The target refuses to skip.
       - name: bd conditional-release CAS contract (current)
@@ -571,7 +571,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0-rc.2"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -725,7 +725,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0-rc.2"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -752,7 +752,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.3.0-rc.2"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

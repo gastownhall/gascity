@@ -232,7 +232,9 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
 // everywhere else. Callers must pass its output through
 // poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
-// visible once a root carries gc.routed_to. This retirement-window fallback
+// visible once a root carries gc.routed_to, nor resurrect a root already
+// expanded into real child steps (gc.workflow_expanded, #5900). This
+// retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
@@ -240,7 +242,7 @@ func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) strin
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")]`
+	filter := `[.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.WorkflowExpandedMetadataKey) + ` != "true"))]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -337,7 +339,7 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 	}
 	filter := legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
-			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
+			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`,
 		limit,
 		true,
 	)

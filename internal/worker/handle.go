@@ -60,6 +60,7 @@ type TranscriptHandle interface {
 	HistoryHandle
 	Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error)
 	TranscriptPath(context.Context) (string, error)
+	TranscriptRecords(context.Context) ([]json.RawMessage, error)
 	AgentMappings(context.Context) ([]AgentMapping, error)
 	AgentTranscript(context.Context, string) (*AgentTranscriptResult, error)
 }

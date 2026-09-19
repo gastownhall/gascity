@@ -14,10 +14,16 @@ func setProcessGroup(_ *exec.Cmd) {}
 
 // interruptProcessGroup signals the command's process directly on Windows.
 // os.Interrupt is unsupported there, so this returns an error and the caller
-// falls back to Kill, matching the pre-existing Windows behavior.
-func interruptProcessGroup(cmd *exec.Cmd) error {
+// falls back to Kill, matching the pre-existing Windows behavior. The
+// returned CancelOutcome is only meaningful when the error is nil; there is
+// no process-group concept on Windows, so a successful direct signal reports
+// CancelLeaderSignaledOnly.
+func interruptProcessGroup(cmd *exec.Cmd) (CancelOutcome, error) {
 	if cmd.Process == nil {
-		return os.ErrProcessDone
+		return CancelNotDelivered, os.ErrProcessDone
 	}
-	return cmd.Process.Signal(os.Interrupt)
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		return CancelNotDelivered, err
+	}
+	return CancelLeaderSignaledOnly, nil
 }
