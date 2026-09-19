@@ -81,6 +81,13 @@ func PromptHash(prompt string) string {
 // cycle under wake_mode=fresh.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
+// CurrentWorkflowRootKey records the workflow root (gc.root_bead_id, or the
+// bead itself when it carries gc.input_convoy_id) of the bead named by
+// CurrentBeadIDKey. The reconciler compares roots, not bead ids, before
+// cycling a wake_mode=fresh session: advancing from one step of a molecule to
+// the next changes the anchor bead but not the work item.
+const CurrentWorkflowRootKey = "currently_processing_workflow_root"
+
 var freshWakeConversationResetKeys = []string{
 	"session_key",
 	"started_config_hash",

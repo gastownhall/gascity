@@ -2482,3 +2482,82 @@ func TestAssignedWork_NoRecordedCurrent_FirstMatchAnchors(t *testing.T) {
 		t.Fatal("RequiresFreshCycle = true, want false — no recorded current means no divergence")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fresh-cycle divergence compares workflow roots, not anchor bead ids
+// (sys-by2243.118): advancing to the next step of the same molecule is not a
+// reassignment; being pointed at another workflow or a standalone bead is.
+// ---------------------------------------------------------------------------
+
+func freshCycleInput(recordedBead, recordedRoot string, work []AwakeWorkBead) AwakeInput {
+	return AwakeInput{
+		Agents: []AwakeAgent{{QualifiedName: "rig/hudson"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "gc-1", SessionName: "hudson-gc-1", Template: "rig/hudson",
+			State:                           "active",
+			CurrentlyProcessingBeadID:       recordedBead,
+			CurrentlyProcessingWorkflowRoot: recordedRoot,
+		}},
+		WorkBeads:       work,
+		RunningSessions: map[string]bool{"hudson-gc-1": true},
+		Now:             now,
+	}
+}
+
+func TestAssignedWork_NextStepOfSameWorkflow_NoFreshCycle(t *testing.T) {
+	// Step 1 (recorded) was closed, so it is no longer among the assigned work;
+	// steps 2 and 3 of the same molecule remain assigned to the session.
+	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
+		{ID: "step-3", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
+	}))["hudson-gc-1"]
+	if d.AssignedWorkBeadID != "step-2" || d.AssignedWorkflowRoot != "root-A" {
+		t.Fatalf("anchor = %q root %q, want step-2 / root-A", d.AssignedWorkBeadID, d.AssignedWorkflowRoot)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false — next step of the same workflow is not a reassignment")
+	}
+}
+
+func TestAssignedWork_PrefersSiblingStepOverUnrelatedCandidate(t *testing.T) {
+	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+		{ID: "other", Assignee: "hudson-gc-1", Status: "in_progress", WorkflowRoot: "root-B"},
+		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
+	}))["hudson-gc-1"]
+	if d.AssignedWorkBeadID != "step-2" {
+		t.Fatalf("anchor = %q, want the sibling step-2 over the first candidate", d.AssignedWorkBeadID)
+	}
+	if d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = true, want false")
+	}
+}
+
+func TestAssignedWork_DifferentWorkflow_EmitsFreshCycle(t *testing.T) {
+	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+		{ID: "step-9", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-B"},
+	}))["hudson-gc-1"]
+	if !d.RequiresFreshCycle || d.AssignedWorkBeadID != "step-9" {
+		t.Fatalf("decision = %+v, want fresh cycle onto step-9 (different workflow)", d)
+	}
+}
+
+func TestAssignedWork_StandaloneReassign_EmitsFreshCycle(t *testing.T) {
+	// The #1893 case: an operator points the alive session at a standalone bead.
+	d := ComputeAwakeSet(freshCycleInput("step-1", "root-A", []AwakeWorkBead{
+		{ID: "wb-solo", Assignee: "hudson-gc-1", Status: "in_progress"},
+	}))["hudson-gc-1"]
+	if !d.RequiresFreshCycle || d.AssignedWorkBeadID != "wb-solo" || d.AssignedWorkflowRoot != "" {
+		t.Fatalf("decision = %+v, want fresh cycle onto standalone wb-solo", d)
+	}
+}
+
+func TestAssignedWork_LegacySessionWithoutRecordedRoot_KeepsIDRule(t *testing.T) {
+	// A session that recorded an anchor before roots existed keeps the id-only
+	// divergence until its next wake stamps a root.
+	d := ComputeAwakeSet(freshCycleInput("step-1", "", []AwakeWorkBead{
+		{ID: "step-2", Assignee: "hudson-gc-1", Status: "open", Ready: true, WorkflowRoot: "root-A"},
+	}))["hudson-gc-1"]
+	if !d.RequiresFreshCycle {
+		t.Fatal("RequiresFreshCycle = false, want true — no recorded root to compare")
+	}
+}

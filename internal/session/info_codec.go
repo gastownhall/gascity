@@ -172,6 +172,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"instance_token", func(i *Info, v string) { i.InstanceToken = v }},
 	{"detached_at", func(i *Info, v string) { i.DetachedAt = v }},
 	{CurrentBeadIDKey, func(i *Info, v string) { i.CurrentlyProcessingBeadID = v }},
+	{CurrentWorkflowRootKey, func(i *Info, v string) { i.CurrentlyProcessingWorkflowRoot = v }},
 	{"core_hash_breakdown", func(i *Info, v string) { i.CoreHashBreakdown = v }},
 	{"started_provision_hash", func(i *Info, v string) { i.StartedProvisionHash = v }},
 	{"started_launch_hash", func(i *Info, v string) { i.StartedLaunchHash = v }},
