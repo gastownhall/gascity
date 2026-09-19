@@ -497,6 +497,18 @@ func buildDesiredStateWithSessionBeadsAt(
 	// below so the probe wakes a cold pool from zero without overriding the
 	// pool's custom scale_check count.
 	coldWakeTemplates := map[string]bool{}
+	// coldWakeDisabledTemplates marks templates whose agent set
+	// cold_wake=false: the wake probe must defer to a successful custom
+	// scale_check's count, including an authoritative 0, rather than merge
+	// by maximum (#6351). Unset (the default) keeps today's behavior, where
+	// the wake probe may override a 0 it cannot tell apart from a check that
+	// is simply blind to demand from another store.
+	coldWakeDisabledTemplates := map[string]bool{}
+	for i := range cfg.Agents {
+		if !cfg.Agents[i].EffectiveColdWake() {
+			coldWakeDisabledTemplates[cfg.Agents[i].QualifiedName()] = true
+		}
+	}
 	// namedOnDemandTemplates marks templates where namedSessionMode != "always"
 	// and a defaultScaleTargets entry was appended (on_demand named-backing).
 	// Their pool demand is clamped to 1 at the merge so one pool slot wakes the
@@ -871,6 +883,18 @@ func buildDesiredStateWithSessionBeadsAt(
 		})
 		subPhaseStart = time.Now()
 		scaleCheckCounts, poolScaleCheckPartialTemplates = evaluatePendingPoolsMap(cfg, pendingPools, stderr, trace)
+		// customScaleCheckSucceeded snapshots which templates a custom
+		// scale_check just answered for successfully, before
+		// poolScaleCheckPartialTemplates is merged below with the separate
+		// default/cold-wake probe's own partial set -- the cold-wake clamp
+		// further down needs to know whether THIS custom check succeeded,
+		// not whether the cold-wake probe itself did.
+		customScaleCheckSucceeded := make(map[string]bool, len(scaleCheckCounts))
+		for template := range scaleCheckCounts {
+			if !poolScaleCheckPartialTemplates[template] {
+				customScaleCheckSucceeded[template] = true
+			}
+		}
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(pendingPools),
 		})
@@ -906,6 +930,22 @@ func buildDesiredStateWithSessionBeadsAt(
 				// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
 				if namedOnDemandTemplates[template] && count > 1 {
 					count = 1
+				}
+				// A successful custom scale_check's count is authoritative on
+				// a cold_wake=false template, including an explicit 0 -- the
+				// one value that means "no session right now" and the one
+				// value merge-by-maximum could not otherwise preserve, since
+				// 1 > 0. Gated on the opt-out (not the default): the wake
+				// probe otherwise exists precisely because a check can be
+				// blind to demand from a store it never queries (see the
+				// CrossRig test), and treating every successful 0 as
+				// authoritative would silently stop those pools from ever
+				// waking. A check that errored is never authoritative here
+				// either way -- it goes PARTIAL rather than reading as zero
+				// demand, which other logic relies on.
+				if coldWakeTemplates[template] && customScaleCheckSucceeded[template] && coldWakeDisabledTemplates[template] {
+					scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], defaultDemand[template], count)
+					continue
 				}
 				if count > scaleCheckCounts[template] {
 					scaleCheckCounts[template] = count
