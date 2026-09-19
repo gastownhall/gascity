@@ -15,7 +15,7 @@
 //     suites, and a coverage map fails CI if a contract behavior gains a
 //     RunProviderTests case without a catalog entry.
 //
-// Two exceptions to the RunProviderTests mirror are wire-only groups — there
+// Exceptions to the RunProviderTests mirror are wire-only groups — there
 // is no runtime.Provider method to contract-test yet, so they are validated by
 // the runtimecontract probe (and the runtimecapability env runner) rather than
 // by RunProviderTests, and are exempt from the catalog↔RunProviderTests backing
@@ -28,6 +28,9 @@
 //     agent, so the controller can relaunch the agent in a warm box over exec
 //     instead of re-provisioning. In-repo Provision is still the welded Start,
 //     so there is no distinct RunProviderTests case to mirror yet.
+//   - remote (provider-native SaaS sessions) — an optional interface extension
+//     and RPP capability family whose transport guarantees are independently
+//     gated without expanding runtime.Provider.
 //
 // Unlike rppcheck (the lighter `gc runtime check` smoke test), this suite
 // also proves each requirement is *gated*: a reference script that violates
@@ -54,6 +57,7 @@ const (
 	GroupLifecycle  Group = "lifecycle"
 	GroupConnection Group = "connection"
 	GroupProvision  Group = "provision"
+	GroupRemote     Group = "remote"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -105,6 +109,14 @@ const (
 	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
 	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
 	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
+
+	ReqRemoteCreateIdempotent Code = "RPP-REMOTE-001"
+	ReqRemoteAdoptIdentity    Code = "RPP-REMOTE-002"
+	ReqRemoteStatusErrors     Code = "RPP-REMOTE-003"
+	ReqRemoteFollowUpFenced   Code = "RPP-REMOTE-004"
+	ReqRemoteTranscriptBound  Code = "RPP-REMOTE-005"
+	ReqRemoteCancelFenced     Code = "RPP-REMOTE-006"
+	ReqRemoteCloseFenced      Code = "RPP-REMOTE-007"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -122,6 +134,14 @@ var catalog = []Requirement{
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (absent = SKIP; becomes required when gc drives its own input/observation over exec)", true},
 
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
+
+	{ReqRemoteCreateIdempotent, GroupRemote, "remote-create returns a valid opaque identity and replays the same request id without creating a second identity (capability absent = SKIP)", true},
+	{ReqRemoteAdoptIdentity, GroupRemote, "remote-adopt rebinds and returns the exact persisted opaque session identity (capability absent = SKIP)", true},
+	{ReqRemoteStatusErrors, GroupRemote, "remote-status returns normalized snapshots and stable provider-neutral error classifications (capability absent = SKIP)", true},
+	{ReqRemoteFollowUpFenced, GroupRemote, "remote-follow-up is idempotent and rejects a stale ownership fence with a structured ownership error (capability absent = SKIP)", true},
+	{ReqRemoteTranscriptBound, GroupRemote, "remote-transcript honors the requested event bound and advances an opaque cursor (capability absent = SKIP)", true},
+	{ReqRemoteCancelFenced, GroupRemote, "remote-cancel returns a terminal snapshot and rejects a stale ownership fence (capability absent = SKIP)", true},
+	{ReqRemoteCloseFenced, GroupRemote, "remote-close returns a terminal snapshot and rejects a stale ownership fence (capability absent = SKIP)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

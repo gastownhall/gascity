@@ -27,6 +27,222 @@ var probes = map[Code]probe{
 	ReqLifecycleUnknownNotRunning: probeUnknownNotRunning,
 	ReqConnectionExec:             probeExec,
 	ReqProvisionBoxWithoutAgent:   probeProvision,
+	ReqRemoteCreateIdempotent:     probeRemoteCreateIdempotent,
+	ReqRemoteAdoptIdentity:        probeRemoteAdoptIdentity,
+	ReqRemoteStatusErrors:         probeRemoteStatusErrors,
+	ReqRemoteFollowUpFenced:       probeRemoteFollowUpFenced,
+	ReqRemoteTranscriptBound:      probeRemoteTranscriptBound,
+	ReqRemoteCancelFenced:         probeRemoteCancelFenced,
+	ReqRemoteCloseFenced:          probeRemoteCloseFenced,
+}
+
+type remoteEnvelope[T any] struct {
+	OK     bool                        `json:"ok"`
+	Result *T                          `json:"result,omitempty"`
+	Error  *runtime.RemoteSessionError `json:"error,omitempty"`
+}
+
+func decodeRemoteEnvelope[T any](out outcome) (*T, *runtime.RemoteSessionError, error) {
+	if out.unsupported {
+		return nil, nil, fmt.Errorf("declared operation returned exit 2")
+	}
+	if out.err != nil {
+		return nil, nil, out.err
+	}
+	var envelope remoteEnvelope[T]
+	if err := json.Unmarshal([]byte(out.stdout), &envelope); err != nil {
+		return nil, nil, fmt.Errorf("invalid JSON envelope: %w", err)
+	}
+	if envelope.OK {
+		if envelope.Result == nil || envelope.Error != nil {
+			return nil, nil, fmt.Errorf("successful envelope must contain result only")
+		}
+		return envelope.Result, nil, nil
+	}
+	if envelope.Error == nil || envelope.Result != nil {
+		return nil, nil, fmt.Errorf("failed envelope must contain error only")
+	}
+	if err := envelope.Error.Validate(); err != nil {
+		return nil, nil, err
+	}
+	return nil, envelope.Error, nil
+}
+
+func remoteSkip(hs runtime.ProtocolInfo, operation runtime.RemoteSessionOperation) (Status, string, bool) {
+	if hs.Has(string(operation)) {
+		return "", "", false
+	}
+	return StatusSkip, fmt.Sprintf("%s capability not declared", operation), true
+}
+
+func remoteSnapshot(out outcome) (runtime.RemoteSessionSnapshot, *runtime.RemoteSessionError, error) {
+	result, remoteErr, err := decodeRemoteEnvelope[runtime.RemoteSessionSnapshot](out)
+	if err != nil || remoteErr != nil {
+		return runtime.RemoteSessionSnapshot{}, remoteErr, err
+	}
+	if err := result.Validate(); err != nil {
+		return runtime.RemoteSessionSnapshot{}, nil, err
+	}
+	return *result, nil, nil
+}
+
+func probeRemoteCreateIdempotent(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, runtime.RemoteSessionCreate); skip {
+		return status, detail
+	}
+	request := runtime.RemoteCreateRequest{
+		RequestID: "conformance-create-request",
+		Fence:     runtime.RemoteOwnershipFence{Token: "owner-generation"},
+		Prompt:    runtime.TextContent("conformance prompt"),
+		Source:    runtime.RemoteSource{Repository: "https://example.invalid/org/repo", Ref: "main"},
+	}
+	name := r.nextName()
+	first, remoteErr, err := remoteSnapshot(r.remoteOp(ctx, name, "remote-create", request))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("first remote-create failed: result error=%v provider error=%v", err, remoteErr)
+	}
+	second, remoteErr, err := remoteSnapshot(r.remoteOp(ctx, name, "remote-create", request))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("replayed remote-create failed: result error=%v provider error=%v", err, remoteErr)
+	}
+	if first.Ref != second.Ref {
+		return StatusFail, fmt.Sprintf("same request_id returned different identities: first=%+v second=%+v", first.Ref, second.Ref)
+	}
+	return StatusPass, "remote-create preserves one opaque identity for a replayed request_id"
+}
+
+func probeRemoteAdoptIdentity(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, runtime.RemoteSessionAdopt); skip {
+		return status, detail
+	}
+	ref := runtime.RemoteSessionRef{SessionID: "opaque-session", RunID: "opaque-run"}
+	request := runtime.RemoteAdoptRequest{Ref: ref, Fence: runtime.RemoteOwnershipFence{Token: "owner-generation"}}
+	snapshot, remoteErr, err := remoteSnapshot(r.remoteOp(ctx, r.nextName(), "remote-adopt", request))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("remote-adopt failed: result error=%v provider error=%v", err, remoteErr)
+	}
+	if snapshot.Ref.SessionID != ref.SessionID {
+		return StatusFail, fmt.Sprintf("remote-adopt changed persisted session identity: got=%+v want=%+v", snapshot.Ref, ref)
+	}
+	return StatusPass, "remote-adopt returns the exact persisted opaque identity"
+}
+
+func probeRemoteStatusErrors(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, runtime.RemoteSessionStatus); skip {
+		return status, detail
+	}
+	ref := runtime.RemoteSessionRef{SessionID: "opaque-session", RunID: "opaque-run"}
+	snapshot, remoteErr, err := remoteSnapshot(r.remoteOp(ctx, r.nextName(), "remote-status", struct {
+		Ref runtime.RemoteSessionRef `json:"ref"`
+	}{Ref: ref}))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("remote-status failed: result error=%v provider error=%v", err, remoteErr)
+	}
+	if snapshot.Ref != ref {
+		return StatusFail, fmt.Sprintf("remote-status changed identity: got=%+v want=%+v", snapshot.Ref, ref)
+	}
+	for _, kind := range []runtime.RemoteFailureKind{runtime.RemoteFailureAuth, runtime.RemoteFailureQuota, runtime.RemoteFailureNetwork} {
+		failureRef := runtime.RemoteSessionRef{SessionID: "simulate-" + string(kind)}
+		_, gotRemoteErr, gotErr := remoteSnapshot(r.remoteOp(ctx, r.nextName(), "remote-status", struct {
+			Ref runtime.RemoteSessionRef `json:"ref"`
+		}{Ref: failureRef}))
+		if gotErr != nil || gotRemoteErr == nil || gotRemoteErr.Kind != kind {
+			return StatusFail, fmt.Sprintf("remote-status %s classification: result error=%v provider error=%v", kind, gotErr, gotRemoteErr)
+		}
+	}
+	return StatusPass, "remote-status returns normalized identity and stable auth/quota/network classifications"
+}
+
+func probeRemoteFollowUpFenced(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, runtime.RemoteSessionFollowUp); skip {
+		return status, detail
+	}
+	request := runtime.RemoteFollowUpRequest{
+		RequestID: "conformance-follow-up",
+		Ref:       runtime.RemoteSessionRef{SessionID: "opaque-session"},
+		Fence:     runtime.RemoteOwnershipFence{Token: "owner-generation"},
+		Content:   runtime.TextContent("continue"),
+	}
+	name := r.nextName()
+	var first runtime.RemoteReceipt
+	for i := 0; i < 2; i++ {
+		result, remoteErr, err := decodeRemoteEnvelope[runtime.RemoteReceipt](r.remoteOp(ctx, name, "remote-follow-up", request))
+		if err != nil || remoteErr != nil {
+			return StatusFail, fmt.Sprintf("remote-follow-up attempt %d failed: result error=%v provider error=%v", i+1, err, remoteErr)
+		}
+		if err := result.Validate(); err != nil {
+			return StatusFail, err.Error()
+		}
+		if result.RequestID != request.RequestID {
+			return StatusFail, fmt.Sprintf("receipt request_id = %q, want %q", result.RequestID, request.RequestID)
+		}
+		if i == 0 {
+			first = *result
+		} else if result.ReceiptID != first.ReceiptID || result.RunID != first.RunID {
+			return StatusFail, fmt.Sprintf("replayed request returned a different receipt/run: first=%+v second=%+v", first, *result)
+		}
+	}
+	request.Fence.Token = "stale-owner"
+	_, remoteErr, err := decodeRemoteEnvelope[runtime.RemoteReceipt](r.remoteOp(ctx, name, "remote-follow-up", request))
+	if err != nil || remoteErr == nil || remoteErr.Kind != runtime.RemoteFailureOwnership {
+		return StatusFail, fmt.Sprintf("stale fence was not rejected as ownership: result error=%v provider error=%v", err, remoteErr)
+	}
+	return StatusPass, "remote-follow-up is idempotent and ownership-fenced"
+}
+
+func probeRemoteTranscriptBound(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, runtime.RemoteSessionTranscript); skip {
+		return status, detail
+	}
+	query := runtime.RemoteTranscriptQuery{
+		Ref:         runtime.RemoteSessionRef{SessionID: "opaque-session"},
+		AfterCursor: "opaque-cursor-0",
+		Limit:       1,
+	}
+	result, remoteErr, err := decodeRemoteEnvelope[runtime.RemoteTranscriptPage](r.remoteOp(ctx, r.nextName(), "remote-transcript", query))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("remote-transcript failed: result error=%v provider error=%v", err, remoteErr)
+	}
+	if len(result.Events) != 1 || result.Events[0].ID == "" {
+		return StatusFail, fmt.Sprintf("remote-transcript events = %+v, want one identified event", result.Events)
+	}
+	if result.NextCursor == "" || result.NextCursor == query.AfterCursor {
+		return StatusFail, fmt.Sprintf("remote-transcript next_cursor = %q, want an advanced opaque cursor", result.NextCursor)
+	}
+	return StatusPass, "remote-transcript honors the event bound and advances an opaque cursor"
+}
+
+func probeRemoteCancelFenced(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	return probeRemoteTerminalMutation(ctx, r, hs, runtime.RemoteSessionCancel, "remote-cancel")
+}
+
+func probeRemoteCloseFenced(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	return probeRemoteTerminalMutation(ctx, r, hs, runtime.RemoteSessionClose, "remote-close")
+}
+
+func probeRemoteTerminalMutation(ctx context.Context, r *runner, hs runtime.ProtocolInfo, capability runtime.RemoteSessionOperation, wireOperation string) (Status, string) {
+	if status, detail, skip := remoteSkip(hs, capability); skip {
+		return status, detail
+	}
+	request := runtime.RemoteMutationRequest{
+		RequestID: "conformance-" + wireOperation,
+		Ref:       runtime.RemoteSessionRef{SessionID: "opaque-session"},
+		Fence:     runtime.RemoteOwnershipFence{Token: "owner-generation"},
+	}
+	name := r.nextName()
+	snapshot, remoteErr, err := remoteSnapshot(r.remoteOp(ctx, name, wireOperation, request))
+	if err != nil || remoteErr != nil {
+		return StatusFail, fmt.Sprintf("%s failed: result error=%v provider error=%v", wireOperation, err, remoteErr)
+	}
+	if snapshot.Ref.SessionID != request.Ref.SessionID || !snapshot.Phase.Terminal() {
+		return StatusFail, fmt.Sprintf("%s result is not the requested terminal session: %+v", wireOperation, snapshot)
+	}
+	request.Fence.Token = "stale-owner"
+	_, remoteErr, err = remoteSnapshot(r.remoteOp(ctx, name, wireOperation, request))
+	if err != nil || remoteErr == nil || remoteErr.Kind != runtime.RemoteFailureOwnership {
+		return StatusFail, fmt.Sprintf("%s stale fence was not rejected as ownership: result error=%v provider error=%v", wireOperation, err, remoteErr)
+	}
+	return StatusPass, wireOperation + " returns a terminal snapshot and rejects a stale fence"
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
