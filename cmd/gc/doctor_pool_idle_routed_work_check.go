@@ -154,7 +154,7 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		}
 
 		// Live so bd's raw --status=open filter drops blocked/deferred rows
-		// before mapBdStatus collapses them into "open" and the check reports
+		// before they reach this check, which would otherwise report
 		// work the instance is correct to leave alone (same tradeoff as
 		// listOpenForControllerDemandLive). FederatedReadTier because a
 		// relocated class leg answers at exactly the tier asked.
@@ -168,7 +168,7 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 		}
 		var beadIDs []string
 		for _, b := range items {
-			if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
+			if strings.TrimSpace(b.Assignee) != "" || !beads.IsOpenStatus(b.Status) {
 				continue
 			}
 			beadIDs = append(beadIDs, b.ID)
