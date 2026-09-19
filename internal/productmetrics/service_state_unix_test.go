@@ -17,8 +17,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/gchome"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 const testNotice = "TEST-ONLY product metrics notice\n"
@@ -1087,6 +1089,12 @@ func defaultTestServiceDependencies(home gchome.ProductUsageHome, epoch uint64) 
 			return randomUUIDv4(rand.Reader)
 		},
 		verifyTTY: func(io.Writer) bool { return true },
+		// Tests move the injected clock, not the wall clock, so a real
+		// deadline derived from it would only measure host load. Keep a real
+		// bound so a genuinely stuck lock still fails the test (ga-653hfj).
+		recordLockContext: func(time.Duration) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), testutil.GoroutineRaceTimeout)
+		},
 	}
 }
 

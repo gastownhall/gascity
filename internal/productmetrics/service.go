@@ -198,6 +198,12 @@ type serviceDependencies struct {
 	spawn                       spawnDependencies
 	privateUploaderStart        uploadStartFunc
 	privateUploaderStartFactory func() (uploadStartFunc, error)
+	// recordLockContext bounds RecordOnce's state-lock wait. Nil means
+	// production: a real deadline of whatever the decision window has left.
+	// Tests that freeze now must not inherit a real 50ms deadline from a
+	// clock that never moves, or a slow fsync on a loaded host drops the
+	// record before the step under test (ga-653hfj).
+	recordLockContext func(remaining time.Duration) (context.Context, context.CancelFunc)
 }
 
 // Service owns the lazy consent and identity state machine.

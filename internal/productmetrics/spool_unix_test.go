@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/gchome"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"golang.org/x/sys/unix"
 )
 
@@ -582,6 +583,61 @@ func TestRecordOnceDoesNotWriteAfterQuotaDirectorySyncIsUncertain(t *testing.T) 
 		t.Fatalf("RecordOnce = %v", got)
 	}
 	assertNoQueuedEvents(t, home)
+}
+
+// The state-lock wait takes its deadline from the decision window. Tests freeze
+// the injected clock, so a REAL deadline taken from it measured only host load:
+// on a busy CI runner a slow fsync of the new lock file spent the 50ms and
+// dropped the record before the step under test (ga-653hfj). Both cases below
+// avoid fixed sleeps: one inspects the deadline the test dependency hands the
+// lock, the other waits for the real deadline itself to fire.
+func TestRecordOnceStateLockWaitFollowsTheInjectedClock(t *testing.T) {
+	t.Run("test dependency gives the lock a real bound far beyond the decision budget", func(t *testing.T) {
+		_, service, permit := newRecordServiceFixture(t, testEventIDOne)
+		base := service.deps.recordLockContext
+		if base == nil {
+			t.Fatal("test fixture has no recordLockContext; the lock would inherit a real 50ms deadline")
+		}
+		var deadline time.Time
+		var hasDeadline bool
+		service.deps.recordLockContext = func(remaining time.Duration) (context.Context, context.CancelFunc) {
+			ctx, cancel := base(remaining)
+			deadline, hasDeadline = ctx.Deadline()
+			return ctx, cancel
+		}
+		if got := service.RecordOnce(permit, CommandHelp); got != RecordStored {
+			t.Fatalf("RecordOnce = %v, want %v", got, RecordStored)
+		}
+		if !hasDeadline {
+			t.Fatal("test lock context has no deadline, so a stuck lock would hang the test")
+		}
+		if left := time.Until(deadline); left < time.Second {
+			t.Fatalf("test lock deadline is %s away, derived from the frozen clock's %s budget", left, defaultRecordDecisionBudget)
+		}
+	})
+	t.Run("a real deadline of the remaining budget drops a record whose lock sync outlasts it", func(t *testing.T) {
+		_, service, permit := newRecordServiceFixture(t, testEventIDOne)
+		var lockContext context.Context
+		// The production default, captured so the sync below can outlast it.
+		service.deps.recordLockContext = func(remaining time.Duration) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithTimeout(context.Background(), remaining)
+			lockContext = ctx
+			return ctx, cancel
+		}
+		service.deps.storageHooks.beforeStep = func(step storageStep) error {
+			if lockContext != nil && (step == storageStepFileSync || step == storageStepDirectorySync) {
+				select {
+				case <-lockContext.Done():
+				case <-time.After(testutil.GoroutineRaceTimeout):
+					t.Error("the real lock deadline never fired")
+				}
+			}
+			return nil
+		}
+		if got := service.RecordOnce(permit, CommandHelp); got != RecordDropped {
+			t.Fatalf("RecordOnce = %v, want %v", got, RecordDropped)
+		}
+	})
 }
 
 func TestRecordOnceDecisionWindowGatesEveryForegroundQuotaBoundary(t *testing.T) {
