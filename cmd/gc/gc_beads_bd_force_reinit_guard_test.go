@@ -844,6 +844,171 @@ esac
 	}
 }
 
+// TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce
+// pins the actual TOCTOU gap the deployer's integration gate caught after
+// TestGcBeadsBdInitRefusesForcedReinitWhenMigrationCursorIsAdvancing shipped:
+// that sibling test's fake dolt answers "schema_migrations exists with a
+// stalled cursor" from op_init's very first classification read onward, so
+// it never exercises the case where the store is genuinely empty AT
+// classification time and only stops being empty afterward. Real wall-clock
+// work happens between bd_runtime_store_holds_bd_tables's classification
+// call and the destructive run_bd_init_pinned call that actually executes
+// the force -- a second ensure_database_registered call and, when the
+// database was freshly created, seed_fresh_managed_bd_version_witness both
+// run in that gap -- during which a concurrent initializer can create
+// schema_migrations and start advancing its cursor. This fake dolt counts
+// calls to the schema_migrations existence probe and answers "does not
+// exist" (genuinely fresh) on the first call but "exists, cursor stalled at
+// 6" on every call after, simulating exactly that concurrent write landing
+// inside the gap. op_init must revalidate immediately before forcing, not
+// rely solely on the one classification read from earlier in the function.
+func TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// bd init exits 0 rather than failing, so a regression surfaces as this
+	// test's own assertion rather than as an unrelated downstream error.
+	initMarker := filepath.Join(t.TempDir(), "bd-init-ran")
+	fakeBd := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "init" ]; then
+  printf '%%s\n' "$@" > %q
+fi
+exit 0
+`, initMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The schema_migrations existence probe answers "does not exist" (the
+	// store reads as genuinely empty) on its first call -- the
+	// classification read at op_init's original call site -- and "exists,
+	// with a stalled non-zero cursor" on every call after, simulating a
+	// concurrent initializer that created and started advancing
+	// schema_migrations during the gap between classification and the force
+	// decision. Table count stays zero throughout: this models a migration
+	// in progress that has not yet reached bd's own four tables, matching
+	// the sibling advancing-cursor scenario. The config-table probe (which
+	// backs bd_runtime_schema_ready) fails until bd init actually runs, then
+	// succeeds -- so an unguarded op_init that forces the reinit anyway sees
+	// its own force "work" (schema now reads ready) and exits 0 instead of
+	// dying on an unrelated post-init verification failure. That keeps the
+	// regression's signal on the one thing this test exists to catch: did
+	// op_init revalidate immediately before forcing, or did it act on a
+	// stale classification. A fix that revalidates before run_bd_init_pinned
+	// never reaches bd init at all, so init_marker never exists and this
+	// probe's gate never matters on the fixed path.
+	existsCounterFile := filepath.Join(binDir, "schema-migrations-exists-calls")
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+counter_file=%q
+init_marker=%q
+case "$query" in
+  *"'issues'"*)
+    printf 'cnt\n0\n'
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$counter_file"
+    if [ "$n" -le 1 ]; then
+      printf 'cnt\n0\n'
+    else
+      printf 'cnt\n1\n'
+    fi
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    if [ -f "$init_marker" ]; then
+      printf 'cnt\n1\n'
+      exit 0
+    fi
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, existsCounterFile, initMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// sleep_ms shells out to sleep, so stubbing it spends any retry budget
+	// at no wall-clock cost.
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runGCBeadsBdCommand(t, sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...), script, "init", cityPath, "gc", "hq")
+	out := stdout + stderr
+	if err == nil {
+		t.Fatalf("init should refuse to force-reinitialize once revalidation finds the store no longer empty, but it succeeded:\n%s", out)
+	}
+
+	calls := 0
+	if raw, readErr := os.ReadFile(existsCounterFile); readErr == nil {
+		calls, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+	if calls < 2 {
+		t.Fatalf("schema_migrations existence probe was called only %d time(s); op_init classified the store as empty and forced reinit without ever revalidating immediately before the force decision, so this test did not exercise the classification-to-force race window:\n%s", calls, out)
+	}
+
+	for _, want := range []string{
+		"refusing to force-reinitialize",
+		"'hq'",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("refusal is not self-describing, missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "concurrent") && !strings.Contains(out, "migration") {
+		t.Fatalf("refusal does not name a concurrent/in-progress migration, so it is indistinguishable from the unrelated count>0 refusal while triaging:\n%s", out)
+	}
+	if strings.Contains(out, "holds bd tables but its bd schema stayed unreadable across retries") {
+		t.Fatalf("refusal reused the count>0 message for a store with zero bd tables, which misdescribes what is actually there:\n%s", out)
+	}
+	if _, statErr := os.Stat(initMarker); statErr == nil {
+		argv, _ := os.ReadFile(initMarker)
+		t.Fatalf("bd init ran despite the store no longer being empty by the time of the force decision, so a classification-time-only freshness check did not close the race:\nargv:\n%s\noutput:\n%s", argv, out)
+	}
+}
+
 // TestGcBeadsBdScriptDocumentsSchemaSettleTimeoutOverride pins the exit
 // contract's requirement that wait_for_bd_runtime_schema's wall-clock hard
 // cap has an env override, and that the override is documented in the
