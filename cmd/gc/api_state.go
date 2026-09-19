@@ -329,25 +329,21 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 	return cs
 }
 
-// primeThenStartReconciler runs the async full prime and then arms the
-// watchdog reconciler. The reconciler starts even when the prime fails:
-// its periodic full scan loads the same snapshot a successful prime
-// would and promotes the cache to live, so a transient prime failure at
-// startup heals on the next reconcile cycle. Without this, one failed
-// prime left the store serving its PrimeActive-era snapshot for the
-// life of the controller — kept fresh only by event-bus writes — so
-// storage-level state created before a restart (e.g. routed pool work
-// feeding scale-check demand) stayed invisible until something else
-// touched the bead. Only shutdown (ctx canceled) skips the reconciler.
+// primeThenStartReconciler arms the watchdog before running the async full
+// prime. A full bd scan can block or retry under startup load; delaying the
+// watchdog until it returns leaves a rig cache with no recovery path during
+// that whole interval. Starting first bounds external native mutations by the
+// watchdog cadence even while the initial full prime is slow or failing.
+// Only shutdown (ctx canceled) skips the reconciler.
 func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agentID string) {
-	log.Printf("caching-store: priming ...")
-	if err := cs.Prime(ctx); err != nil {
-		log.Printf("caching-store: prime FAILED: %v (reads use bd subprocess until the reconciler converges)", err)
-	}
 	if ctx.Err() != nil {
 		return
 	}
 	cs.StartReconciler(ctx, beads.WithStaggerAuto(), agentID)
+	log.Printf("caching-store: priming ...")
+	if err := cs.Prime(ctx); err != nil {
+		log.Printf("caching-store: prime FAILED: %v (reads use bd subprocess until the reconciler converges)", err)
+	}
 }
 
 // buildStores creates bead stores for each rig in cfg.
