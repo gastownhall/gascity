@@ -21,7 +21,7 @@ const (
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
 	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "e7974b4a687ac82b37e4cc9745abbb4acf6c3e9fc7a965d55bcfc622757bc876" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
+	expectedCIExecutionHash      = "2f4e798a69527b9d39f0d7981b165a1689515d35505c6e8f873a93ac5bc86a81" // reviewed delta: productmetrics testhook timeout 5m -> 12m (#6396)
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
