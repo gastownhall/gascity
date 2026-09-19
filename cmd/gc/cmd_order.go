@@ -508,6 +508,7 @@ type orderJSON struct {
 	Timeout      string            `json:"timeout,omitempty"`
 	CheckTimeout string            `json:"check_timeout,omitempty"`
 	Enabled      bool              `json:"enabled"`
+	Idempotent   bool              `json:"idempotent"`
 	Source       string            `json:"source,omitempty"`
 	FormulaLayer string            `json:"formula_layer,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
@@ -578,6 +579,7 @@ func orderToJSON(a orders.Order) orderJSON {
 		Timeout:      a.Timeout,
 		CheckTimeout: a.CheckTimeout,
 		Enabled:      a.IsEnabled(),
+		Idempotent:   a.Idempotent,
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
 		Env:          a.Env,
@@ -663,6 +665,10 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 			w(fmt.Sprintf("  %s=%s", key, a.Env[key]))
 		}
 	}
+	// Idempotent decides whether the order fails OPEN when its open-work gate
+	// times out under store contention (see order_dispatch gateFailClosed). It is
+	// load-bearing for diagnosing starved single-flight orders, so surface it.
+	w(fmt.Sprintf("Idempotent:  %t", a.Idempotent))
 	w(fmt.Sprintf("Source:      %s", a.Source))
 	return 0
 }
@@ -798,10 +804,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 
 	// Compile wisp from formula so graph workflows can be decorated with
 	// routing metadata before instantiation.
-	var searchPaths []string
-	if a.FormulaLayer != "" {
-		searchPaths = []string{a.FormulaLayer}
-	}
+	searchPaths := orderFormulaSearchPaths(cfg, a)
 	// Pass the unwrapped store to the generic molecule/graph-routing boundaries:
 	// the beads.OrdersStore wrapper does not promote optional capabilities, so
 	// handing it to molecule.Instantiate would hide the underlying
@@ -2089,27 +2092,40 @@ per invocation prevents runaway sweeps under load.
 Use --dry-run to log what would be closed without making any changes.
 The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, dryRun, quiet, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			mailTTLExplicit := cmd.Flags().Changed("mail-ttl")
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, mailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
-	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd")
+	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
 
-func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool, stdout, stderr io.Writer) int {
+// validateNudgeMailSweepFlags checks the sweep-nudge-mail flags before any
+// city is resolved. --nudge-ttl must stay positive (there is no "disabled"
+// meaning for it). --mail-ttl may be an explicit 0 -- that is the CLI's way
+// to disable the mail-close phase (see nudgeMailSweepMailTTLForConfig /
+// sweepStaleNudgeMail) -- but a negative value is rejected either way, and an
+// unset flag is left for config resolution rather than validated here.
+func validateNudgeMailSweepFlags(nudgeTTL, mailTTL time.Duration, mailTTLExplicit bool) error {
 	if nudgeTTL <= 0 {
-		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --nudge-ttl must be positive") //nolint:errcheck // best-effort stderr
-		return 1
+		return fmt.Errorf("--nudge-ttl must be positive")
 	}
-	if mailTTL <= 0 {
-		fmt.Fprintln(stderr, "gc order sweep-nudge-mail: --mail-ttl must be positive") //nolint:errcheck // best-effort stderr
+	if mailTTLExplicit && mailTTL < 0 {
+		return fmt.Errorf("--mail-ttl must not be negative")
+	}
+	return nil
+}
+
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, mailTTLExplicit); err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
@@ -2135,6 +2151,13 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, dryRun, quiet bool,
 		return 1
 	}
 	statePtr := &nudgeState
+
+	if !mailTTLExplicit {
+		// Read the TTL default straight from city.toml. openStoreAtForCity above
+		// already loaded the city config through loadCityConfig, but it does not
+		// hand that config back to this caller, so the value is read again here.
+		mailTTL = nudgeMailSweepMailTTLForCity(cityPath, mailTTL, stderr)
+	}
 
 	now := time.Now()
 	// Route each phase to its coordination class, the way the controller's

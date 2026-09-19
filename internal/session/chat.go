@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -571,6 +572,7 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 	if gcProvider := providerKind(b); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	// Refuse to resume if a prior escaped process for this session could not be
@@ -698,6 +700,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	// Refuse to respawn if a prior escaped process for this session could not
@@ -1233,12 +1236,14 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	// zcode carries no session_key — no session-id flag, no hook plugin — so
 	// the keyed lookup above can never hit for it and the ambiguity guard below
 	// would leave every pooled worker transcript-dark. Its mirror is keyed by
-	// the identity the bead does hold.
+	// the identity the bead does hold: its name, its own id (the seat — two
+	// seats can share a name and epoch), and its continuation epoch.
 	if path := workertranscript.DiscoverScopedPath(
 		searchPaths,
 		provider,
 		workDir,
 		b.Metadata["session_name"],
+		b.ID,
 		b.Metadata["continuation_epoch"],
 	); path != "" {
 		return path, TranscriptFound, nil

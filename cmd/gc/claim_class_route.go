@@ -130,6 +130,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // errClaimRouteBindingCannotClaim reports that the relocated coordination-class
@@ -161,6 +162,13 @@ type hookClaimClassRoute struct {
 	// takes a beads.Store rather than the closed contract.
 	class beads.Store
 	graph storebinding.GraphStore
+
+	// topology is the residency frame holds() plans over, captured once at
+	// construction. Data, not a path and not a func: a route that re-entered the
+	// funnel per bead could resolve a DIFFERENT handle from the one class and
+	// graph were opened over, and would then prove a bead absent in one engine
+	// while the claim wrote through another.
+	topology storeref.Topology
 
 	resident map[string]bool
 
@@ -199,13 +207,48 @@ func newHookClaimClassRoute(class beads.Store) (*hookClaimClassRoute, error) {
 // newClaimClassRouteOver builds the route value over an already-projected front
 // door, with both per-invocation memos live. It is the one place they are
 // created, so a route can never reach the escalation with a nil map.
+//
+// The topology it derives is PESSIMISTIC: one binding over the given store,
+// serving every infrastructure class, censused by a nil relics func — which
+// storeref.BuildBindings reads as HasLegacyResidents=true for every store,
+// because a caller holding no censused routes is entitled to claim nothing more.
+// That makes probeRetired() false, so a route built here probes on exactly the
+// ids it probed on before this frame existed. Callers that DO hold a census —
+// hookClaimClassRouteForCity, the only production one — overwrite it with the
+// real thing.
+//
+// Deriving it through soleBindingResidency rather than assembling a ClassBinding
+// literal is the point of doing it at all: Prefixes, Classes, Ref and both
+// retirement bits then come from the one production derivation, so a route built
+// from a bare store cannot disagree with a route built from a city about what
+// the binding's namespaces are.
+//
+// class is what the topology's binding leg is, and graph must be the projection
+// OF that same store — newHookClaimClassRoute is what guarantees it. A caller
+// pairing a graph over one store with a topology over another would prove a bead
+// absent in one engine and write through the other, which is the split this
+// route exists to close, one level up.
 func newClaimClassRouteOver(class beads.Store, graph storebinding.GraphStore) *hookClaimClassRoute {
+	bindings, refused := soleBindingResidency(class)
 	return &hookClaimClassRoute{
 		class:    class,
 		graph:    graph,
+		topology: claimRouteTopology(bindings, refused),
 		resident: map[string]bool{},
 		workHeld: map[string]bool{},
 	}
+}
+
+// claimRouteTopology frames the bindings for holds().
+//
+// The work leg is the unprobed residual, which is what makes the plan's answer
+// readable as a yes/no about the BINDING alone: this route's work axis is the
+// federated bd fan-out the caller already ran and found not-found, not a store,
+// and a real work leg here would report those same beads owned by work again.
+// No rig legs, for the reason cliByIDOwner passes none — a claim escalation has
+// never read them, and starting to would change which beads it claims.
+func claimRouteTopology(bindings []storeref.ClassBinding, refused error) storeref.Topology {
+	return assembleResidencyTopology(nil, newUnprobedWorkResidual(), nil, bindings, refused)
 }
 
 // hookClaimRouteVerdict turns one class-route resolution into the claim ops the
@@ -270,7 +313,18 @@ func hookClaimClassRouteForCity(cityPath string) (*hookClaimClassRoute, error) {
 	if !relocated {
 		return nil, nil
 	}
-	return newHookClaimClassRoute(binding.Store)
+	route, err := newHookClaimClassRoute(binding.Store)
+	if err != nil {
+		return nil, err
+	}
+	// The census-bearing frame, read from the SAME memo cliSoleClassBinding just
+	// took the store out of. That is what makes the probe handle and the write
+	// handle one store by construction rather than by coincidence, and it is why
+	// the topology is not resolved from cityPath later: a second derivation could
+	// open a second engine on the same root.
+	bindings, refused := cliResidencyBindings(cityPath)
+	route.topology = claimRouteTopology(bindings, refused)
+	return route, nil
 }
 
 // knownResident reports whether an earlier probe in THIS invocation already
@@ -285,13 +339,23 @@ func (r *hookClaimClassRoute) knownResident(id string) bool {
 
 // holds probes the binding for id and memoizes the answer.
 //
-// An error is a read that FAILED, never absence. The single exception is the
-// one-shot funnel's standing refusal on a WORK-shaped id: it says this city's
-// storage configuration cannot be served, which is a fact about the city and
-// none about a particular bead, and a refused city still serves work from its
-// work ledger — so the caller's own work-store answer stands. An id only the
-// binding could own (a reserved class prefix) has nowhere else to live, so for
-// that one the refusal is the answer and surfaces.
+// The judgement is the residency resolver's, over the frame captured at
+// construction. It used to be spelled here — an unconditional Get, a not-found
+// arm, a hand-rolled standing-refusal arm — and every clause of it was a
+// restatement of one the by-id door already had. Two consequences follow from
+// the collapse, and both are the point:
+//
+// An error is a read that FAILED, never absence, and the one non-fault is the
+// one-shot funnel's standing refusal on a WORK-shaped id. That is now the
+// resolver's per-leg policy rather than a predicate here: a residence probe for
+// an id no relocated class could own tolerates the refusal, because a refused
+// city still serves work from its work ledger, while the authority leg for an id
+// inside a reserved namespace surfaces it, because there the refusal IS the
+// answer.
+//
+// And a binding the boot census certified relic-free is not probed at all for a
+// work-shaped id. The census is taken to retire exactly this read, and this seam
+// was paying it once per escalated bead while the by-id door had already stopped.
 func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 	id = strings.TrimSpace(id)
 	if r == nil || id == "" {
@@ -300,19 +364,12 @@ func (r *hookClaimClassRoute) holds(id string) (bool, error) {
 	if known, ok := r.resident[id]; ok {
 		return known, nil
 	}
-	_, err := r.graph.Get(id)
-	switch {
-	case err == nil:
-		r.resident[id] = true
-		return true, nil
-	case errors.Is(err, beads.ErrNotFound):
-		r.resident[id] = false
-		return false, nil
-	case isStandingStorageRefusal(err) && !bdIDIsClassReserved(id):
-		return false, nil
-	default:
+	_, resident, err := byIDBindingOwnerForTopology(r.topology, id)
+	if err != nil {
 		return false, fmt.Errorf("reading %q from the relocated class binding: %w", id, err)
 	}
+	r.resident[id] = resident
+	return resident, nil
 }
 
 // routes reports whether a claim-time write for id must run against the binding

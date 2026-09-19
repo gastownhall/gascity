@@ -42,10 +42,12 @@ type storeScopedBeadKey struct {
 // ContinuationClaimCandidate is a ready graph-v2 successor that may need a
 // bounded claim nudge after its current pool session completed the preceding
 // step but did not start another turn. All fields are exact provenance:
-// StoreRef is canonical (city:<name> or rig:<name>), RootBeadID was verified
-// through Store, and Assignee is the bead's persisted preassignment. Store is
-// retained for immediate pre-delivery revalidation; session identity
-// resolution happens later against the post-reconcile session snapshot.
+// StoreRef is the canonical ref of the scope that OWNS the row (city:<name> or
+// rig:<name>), which for a class binding is not the leg the row was read from;
+// RootBeadID was verified through Store, and Assignee is the bead's persisted
+// preassignment. Store is retained for immediate pre-delivery revalidation;
+// session identity resolution happens later against the post-reconcile session
+// snapshot.
 type ContinuationClaimCandidate struct {
 	WorkBeadID string
 	RootBeadID string
@@ -92,6 +94,21 @@ type DesiredStateResult struct {
 	// ReadyUnassignedRoutedWorkStoreRefs is index-aligned with
 	// ReadyUnassignedRoutedWorkBeads and uses canonical city:/rig: refs.
 	ReadyUnassignedRoutedWorkStoreRefs []string
+	// OpenRoutedWorkBeads is the BROAD open/unassigned/routed snapshot, before
+	// ReadyUnassignedRoutedWorkBeads narrows it to the rows the default pool
+	// demand probes selected. The seat-claim backstop reads this one because it
+	// settles readiness itself, from each row's own dependency edges rather than
+	// from pool-demand selection: a named seat's routed work is not pool demand,
+	// so the narrowed view can be silent on exactly the rows that lane exists
+	// for. OpenRoutedWorkStores and OpenRoutedWorkStoreRefs are index-aligned
+	// with it, the same contract AssignedWorkStores/StoreRefs carry.
+	OpenRoutedWorkBeads     []beads.Bead
+	OpenRoutedWorkStores    []beads.Store
+	OpenRoutedWorkStoreRefs []string
+	// OpenRoutedWorkQueryPartial is true when the open-routed read above was
+	// incomplete. A missing row makes a seat's own work look absent, so
+	// consumers that act on ABSENCE must disable themselves for that tick.
+	OpenRoutedWorkQueryPartial bool
 	// NamedSessionDemand records which named-session identities have active
 	// direct assignee demand (Assignee == identity). The reconciler merges this
 	// into poolDesired so that on-demand named sessions remain config-eligible.
@@ -753,6 +770,7 @@ func buildDesiredStateWithSessionBeadsAt(
 	var unassignedRoutedBeads []beads.Bead
 	var unassignedRoutedStores []beads.Store
 	var unassignedRoutedStoreRefs []string
+	var unassignedRoutedPartial bool
 	var readyUnassignedRoutedWorkBeads []beads.Bead
 	var readyUnassignedRoutedWorkStoreRefs []string
 	var readyAssigned map[storeScopedBeadKey]bool
@@ -790,6 +808,17 @@ func buildDesiredStateWithSessionBeadsAt(
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
 		}
+		// One-shot repair for beads a prior reconciler tick already clobbered
+		// (ga-3c5isi / #5193): restores gc.work_dir from the still-intact
+		// legacy work_dir when the canonical value was overwritten with a
+		// pool-slot label before workDirStampWouldClobberEvidence existed to
+		// prevent it. Idempotent — see repairPoolSlotWorkDirClobber. Runs
+		// BEFORE the stamp below: stampRunSessionIdentity writes through the
+		// store without refreshing assignedWorkBeads, so a sweep placed after
+		// it would read pre-stamp metadata and could undo a legitimate fresh
+		// stamp. Repair reads the snapshot it was collected with; the live
+		// stamp gets the last word.
+		repairPoolSlotWorkDirClobber(cfg, assignedWorkBeads, assignedWorkStores, stderr)
 		// Durably record which session is executing each in-progress work
 		// bead. The Assignee link is transient (cleared on close), so without
 		// this a completed run carries no session/worktree reference. See
@@ -797,7 +826,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		// storePartial: stamping the beads that WERE collected is always
 		// correct, and any bead missed by a partial query simply gets stamped
 		// on a later tick.
-		stampRunSessionIdentity(assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
+		stampRunSessionIdentity(cfg, assignedWorkBeads, assignedWorkStores, sessionBeads, stderr)
 		// Re-home work pre-assigned to a legacy template identity onto the
 		// configured canonical identity, so the canonical session the awake/scale
 		// accounting wakes for it can actually surface and claim it (the
@@ -811,8 +840,14 @@ func buildDesiredStateWithSessionBeadsAt(
 		// the route must be canonicalized before demand is counted or the cold
 		// pool never wakes for it.
 		subPhaseStart = time.Now()
-		var unassignedRoutedPartial bool
 		unassignedRoutedBeads, unassignedRoutedStores, unassignedRoutedStoreRefs, unassignedRoutedPartial = collectOpenUnassignedRoutedWork(cityPath, cfg, store, rigStores, suspendedRigPaths, stderr)
+		// Same repair as above, over the open/unassigned collection: a bead
+		// released back to open by a drain is clobbered the same way an
+		// in_progress one is, and never appears in assignedWorkBeads once
+		// reopened. Ordered first here for the same reason as the assigned
+		// site: the sweep reads the snapshot it was collected with, before any
+		// later pass writes through the store behind it.
+		repairPoolSlotWorkDirClobber(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		canonicalizeLegacyBoundUnassignedRoutedWork(cfg, unassignedRoutedBeads, unassignedRoutedStores, stderr)
 		// Same pass, same reason, different legacy form: a route stamped at a
 		// live slot ("<base>-N") is a load-balancing HINT that every raw reader
@@ -1167,6 +1202,10 @@ func buildDesiredStateWithSessionBeadsAt(
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
 		ReadyUnassignedRoutedWorkBeads:     readyUnassignedRoutedWorkBeads,
 		ReadyUnassignedRoutedWorkStoreRefs: readyUnassignedRoutedWorkStoreRefs,
+		OpenRoutedWorkBeads:                unassignedRoutedBeads,
+		OpenRoutedWorkStores:               unassignedRoutedStores,
+		OpenRoutedWorkStoreRefs:            unassignedRoutedStoreRefs,
+		OpenRoutedWorkQueryPartial:         unassignedRoutedPartial,
 		ReadyAssigned:                      readyAssigned,
 		ContinuationClaimCandidates:        continuationClaimCandidates,
 		ContinuationClaimQueryPartial:      continuationClaimQueryPartial,
@@ -1591,7 +1630,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1708,7 +1747,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -1736,12 +1775,21 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 		}
 	}
 	if cfg != nil {
+		cityName := config.EffectiveCityName(cfg, "")
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
 			identity := cfg.NamedSessions[i].QualifiedName()
 			add(identity)
+			// A closed phantom session bead for this identity means the
+			// on-demand session's own ready-assigned work is now filed under
+			// its runtime session name (#5231's assignee form), not the
+			// qualified identity above — enumerate that form too, or it is
+			// never queried and the work never re-materializes a session.
+			if _, ok := findClosedNamedSessionBead(cityStore, identity); ok {
+				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
+			}
 		}
 	}
 	return result
@@ -2132,8 +2180,29 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // with pre-ga-eld2x workflow roots. It matches the shell claim/count shape:
 // canonical gc.routed_to first, then gc.run_target only for workflow roots
 // stamped before root routing switched to gc.routed_to.
+//
+// The gc.run_target half applies workflowRunTargetFallbackEligible, so the
+// demand side counts exactly the roots hookClaimMatchesRoute will accept
+// (#5900). Without it a fully-expanded root whose real children have all
+// closed stays permanent capacity demand for a template whose own workers
+// refuse the claim: the seat spawns, its hook reads empty, it drains, and the
+// row is counted again next tick. The gate lives here rather than in
+// legacyWorkflowRunTarget because route recovery and pool session naming read
+// that helper for identity, not claimability, and must keep resolving an
+// expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
-	return routedToAndLegacyWorkflowCandidates(b)
+	candidates := routedToAndLegacyWorkflowCandidates(b)
+	if len(candidates) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+		return candidates
+	}
+	// The lone remaining candidate is the legacy gc.run_target fallback.
+	if !workflowRunTargetFallbackEligible(b) {
+		return nil
+	}
+	return candidates
 }
 
 func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {
@@ -2384,7 +2453,7 @@ func liveReadyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery
 // unfiltered set is exactly the assignee-filtered set, and taking the first
 // Limit of it matches a per-assignee fetch. NativeDoltStore.Ready filters the
 // assignee server-side, and its wisp sub-query is assignee-aware too: the
-// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// pinned beads@v1.3.0-rc.2 readyWorkWispIssueFilter carries filter.Assignee into the
 // wisp filter (internal/storage/issueops/ready_work.go), which emits
 // `assignee = ?` for the wisp table (internal/storage/sqlbuild/filter.go),
 // exactly as the issues leg does. Both legs order by a total order independent
@@ -2942,6 +3011,22 @@ func discoverSessionBeadsWithRoots(
 			} else {
 				tp.InstanceName = sn
 			}
+		}
+		if isNamedSessionInfo(info) {
+			// Rediscovery runs whenever the primary cfg-driven namedSpecs loop
+			// (build_desired_state.go ~1130-1139) did not populate this bead into
+			// desired this tick — e.g. during city suspend, which gates only that
+			// primary build and not this backfill. resolveTemplateForSessionBeadInfo
+			// above recovers identity/work-dir via canonicalSessionIdentityWithConfigInfo,
+			// but never sets these three fields, so without this the named-session
+			// markers session_beads.go and templateParamsSessionOrigin key off go
+			// missing and the bead is wrongly treated as non-named.
+			tp.ConfiguredNamedIdentity = info.ConfiguredNamedIdentity
+			tp.ConfiguredNamedMode = info.ConfiguredNamedMode
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["GC_SESSION_ORIGIN"] = "named"
 		}
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
@@ -4361,9 +4446,12 @@ func selectOrPlanPoolSessionBead(
 		info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 		return info, slot, nil, err
 	}
-	// Reuse an existing active/creating session bead. Skip drained, closed,
-	// and asleep — asleep ephemerals are not restarted; a fresh session is
-	// created instead. The reconciler closes orphaned asleep beads.
+	// Reuse an existing active/creating session bead. Skip drained and
+	// closed. Asleep is skipped too, with one carve-out: a
+	// lifecycle=one_shot session whose sleep reason is freeable and which
+	// holds no assigned work is reused through the wake path — see
+	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
+	// asleep beads; an earlier version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
@@ -4890,6 +4978,41 @@ func sessionBeadHasAssignedWorkInfo(workBeads []beads.Bead, info session.Info) b
 	return false
 }
 
+// sessionBeadHasAssignedWorkByAnyIdentityInfo is the broader sibling of
+// sessionBeadHasAssignedWorkInfo: it matches an open/in-progress work bead's
+// Assignee against every current identity of the session (ID,
+// SessionNameMetadata, ConfiguredNamedIdentity, Alias, AliasHistory — see
+// session.AssigneeIdentities), not just the narrower ID/SessionNameMetadata/
+// ConfiguredNamedIdentity trio sessionBeadHasAssignedWorkInfo pins. Work
+// claimed by an agent is commonly assigned under its actor alias (GC_ALIAS /
+// BEADS_ACTOR, see session.AssigneeIdentifier), which the narrower check
+// does not consider, so it can miss live assigned work entirely.
+//
+// It exists as a separate function (not a change to the pinned
+// sessionBeadHasAssignedWorkInfo) so its wider match is opt-in for callers
+// that need it — currently only the one_shot asleep-freeable wake-reuse
+// guard in reusablePoolSessionInfo, where under-detecting assigned work lets
+// the ordinary wake path "reuse" an identity that still holds an unfinished
+// step, orphaning it a tick later with the step pinned in_progress forever.
+func sessionBeadHasAssignedWorkByAnyIdentityInfo(workBeads []beads.Bead, info session.Info) bool {
+	identities := make(map[string]bool, 5)
+	for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+		if id = strings.TrimSpace(id); id != "" {
+			identities[id] = true
+		}
+	}
+	for _, wb := range workBeads {
+		assignee := strings.TrimSpace(wb.Assignee)
+		if assignee == "" || (wb.Status != "open" && wb.Status != "in_progress") {
+			continue
+		}
+		if identities[assignee] {
+			return true
+		}
+	}
+	return false
+}
+
 // poolRequestResumesAssignedWorkInfo proves that a concrete resume request is
 // still backed by its exact actionable work bead and that the bead is assigned
 // through any current or historical identity of the preferred session.
@@ -4998,7 +5121,7 @@ func sessionBeadIdentifierInfo(info session.Info) string {
 // only a newly claimed (or reassigned) bead triggers a single write. A write
 // failure is logged and skipped — stamping is best-effort observability and
 // must never block reconciliation.
-func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
+func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, sessionBeads *sessionBeadSnapshot, stderr io.Writer) {
 	if sessionBeads == nil || len(workBeads) != len(workStores) {
 		return
 	}
@@ -5033,7 +5156,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
 		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) {
+			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) &&
+			!workDirStampWouldClobberEvidence(cfg, wb.Metadata, workDir) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -5046,7 +5170,7 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
 	}
 }
 
@@ -5068,7 +5192,7 @@ func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
+func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
@@ -5088,7 +5212,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
 	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
-		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) {
+		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) &&
+		!workDirStampWouldClobberEvidence(cfg, root.Metadata, workDir) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {
@@ -5559,28 +5684,14 @@ func selectReadyContinuationClaimCandidates(
 
 	result := make([]ContinuationClaimCandidate, 0, len(order))
 	for _, key := range order {
-		var (
-			valid  []ContinuationClaimCandidate
-			absent bool
-			hold   bool
+		valid, absent, hold := foldReadyContinuationClaimGroup(
+			groups[key],
+			work,
+			workStores,
+			workStoreRefs,
+			key.StoreRef,
+			readyAssigned,
 		)
-		for _, i := range groups[key] {
-			candidate, resolution := evaluateReadyContinuationClaimCandidate(
-				work[i],
-				workStores[i],
-				workStoreRefs[i],
-				key.StoreRef,
-				readyAssigned,
-			)
-			switch resolution {
-			case continuationCandidateAbsent:
-				absent = true
-			case continuationCandidateHold:
-				hold = true
-			case continuationCandidateValid:
-				valid = append(valid, candidate)
-			}
-		}
 		if hold {
 			partial = true
 			continue
@@ -5609,12 +5720,60 @@ func selectReadyContinuationClaimCandidates(
 	return result, partial
 }
 
+// foldReadyContinuationClaimGroup evaluates every leg-local copy of one grouped
+// (StoreRef, ID) pair and reduces the per-row resolutions to the three signals
+// the caller's agreement guard acts on: the candidates whose own owner ref this
+// fold resolved — inside a class binding that owner can be a rig scope rather
+// than the city ref the group is keyed on — whether a same-scope copy disagreed
+// (absent), and whether a copy could not be read at all (hold). A copy another
+// scope owns contributes no signal at all. rows holds that group's indexes into
+// the aligned work/workStores/workStoreRefs slices, and canonicalStoreRef is the
+// group key, not necessarily the owner.
+func foldReadyContinuationClaimGroup(
+	rows []int,
+	work []beads.Bead,
+	workStores []beads.Store,
+	workStoreRefs []string,
+	canonicalStoreRef string,
+	readyAssigned map[storeScopedBeadKey]bool,
+) (valid []ContinuationClaimCandidate, absent bool, hold bool) {
+	for _, i := range rows {
+		candidate, resolution := evaluateReadyContinuationClaimCandidate(
+			work[i],
+			workStores[i],
+			workStoreRefs[i],
+			canonicalStoreRef,
+			readyAssigned,
+		)
+		switch resolution {
+		case continuationCandidateAbsent:
+			absent = true
+		case continuationCandidateHold:
+			hold = true
+		case continuationCandidateValid:
+			valid = append(valid, candidate)
+		case continuationCandidateForeign:
+			// Deliberately no signal. A group keyed on the city ref holds
+			// every leg that serves the city, and on a migrated city that
+			// includes the class bindings, which carry rows other scopes
+			// own. Such a copy says nothing about this group's scope, so
+			// counting it absent would drop the owning leg's candidate and
+			// — partial being snapshot-wide — turn every unrelated
+			// continuation backstop in the city dark.
+		}
+	}
+	return valid, absent, hold
+}
+
 type continuationCandidateResolution int
 
 const (
 	continuationCandidateAbsent continuationCandidateResolution = iota
 	continuationCandidateHold
 	continuationCandidateValid
+	// A row this leg can read but another scope owns. Kept distinct from
+	// "absent" because the fold reads absent as a same-scope disagreement.
+	continuationCandidateForeign
 )
 
 func continuationRowCouldBeCandidate(
@@ -5640,13 +5799,25 @@ func evaluateReadyContinuationClaimCandidate(
 	canonicalStoreRef string,
 	readyAssigned map[storeScopedBeadKey]bool,
 ) (ContinuationClaimCandidate, continuationCandidateResolution) {
+	// Scope is answered before eligibility: a row another scope owns is foreign
+	// to this leg whatever its own state, and a co-resident copy that is merely
+	// stale or not ready would otherwise be reported as an absent row of THIS
+	// scope. Both questions still answer "absent" for a row this leg owns, so
+	// the order is otherwise immaterial.
+	rootStoreRef := bead.Metadata[beadmeta.RootStoreRefMetadataKey]
+	ownerStoreRef, owned := continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef)
+	if !owned {
+		if continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef) {
+			return ContinuationClaimCandidate{}, continuationCandidateForeign
+		}
+		return ContinuationClaimCandidate{}, continuationCandidateAbsent
+	}
 	if !continuationRowCouldBeCandidate(bead, rawStoreRef, readyAssigned) {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
-	rootStoreRef := strings.TrimSpace(bead.Metadata[beadmeta.RootStoreRefMetadataKey])
-	if rootID == "" || rootStoreRef == "" || rootStoreRef != canonicalStoreRef {
+	if rootID == "" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
 	}
 	if store == nil {
@@ -5669,7 +5840,7 @@ func evaluateReadyContinuationClaimCandidate(
 	if root.ID != rootID ||
 		!strings.EqualFold(strings.TrimSpace(root.Status), "in_progress") ||
 		!strings.EqualFold(strings.TrimSpace(root.Type), "task") ||
-		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != canonicalStoreRef ||
+		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != ownerStoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
 		return ContinuationClaimCandidate{}, continuationCandidateAbsent
@@ -5677,10 +5848,68 @@ func evaluateReadyContinuationClaimCandidate(
 	return ContinuationClaimCandidate{
 		WorkBeadID: strings.TrimSpace(bead.ID),
 		RootBeadID: rootID,
-		StoreRef:   canonicalStoreRef,
+		StoreRef:   ownerStoreRef,
 		Assignee:   strings.TrimSpace(bead.Assignee),
 		Store:      store,
 	}, continuationCandidateValid
+}
+
+// continuationClaimOwnerStoreRef answers which canonical store ref OWNS one
+// candidate row, which is not always the scope its leg serves. A class binding
+// is a city-scope store but a many-scope container — the same distinction PR
+// #5918 (ga-oytw9) drew for control-route repair. A rig-scoped workflow's steps
+// are minted into the binding carrying gc.root_store_ref=rig:<name>, so on a
+// split city the row's own root ref is the owner and the leg-derived city ref
+// is only the grouping key. It is accepted only when canonical: exactly the
+// city ref, or a well-formed rig ref. A blank, class, or legacy value fails
+// closed. The rig name is not checked against the configured rigs — the binding
+// that authorizes delivery is the step's assignee resolving to exactly one live
+// session (newPoolContinuationCandidateSnapshot). Every other leg is
+// single-scope, so there the leg-derived canonical ref stays the comparator.
+func continuationClaimOwnerStoreRef(rawStoreRef, rootStoreRef, canonicalStoreRef string) (string, bool) {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" {
+		return "", false
+	}
+	if !storeref.IsClassRef(rawStoreRef) {
+		if rootStoreRef != canonicalStoreRef {
+			return "", false
+		}
+		return canonicalStoreRef, true
+	}
+	if rootStoreRef == canonicalStoreRef {
+		return canonicalStoreRef, true
+	}
+	rigName, scoped := storeref.ScopeRigContext(rootStoreRef)
+	if !scoped || rigName == "" || rootStoreRef != "rig:"+rigName {
+		return "", false
+	}
+	return rootStoreRef, true
+}
+
+// continuationClaimRowIsForeign answers, for a row continuationClaimOwnerStoreRef
+// admitted no owner for, whether it names a DIFFERENT scope rather than merely
+// carrying provenance this leg cannot read. Only an exactly-canonical
+// "city:<name>" or "rig:<name>" naming another scope qualifies. Blank,
+// class-valued, non-canonical and malformed refs stay unreadable, so they keep
+// resolving absent and the owner helper's fail-closed posture is unchanged:
+// this widens no admission, it only separates "someone else's row" from
+// "a broken row of ours".
+func continuationClaimRowIsForeign(rootStoreRef, canonicalStoreRef string) bool {
+	rootStoreRef = strings.TrimSpace(rootStoreRef)
+	if rootStoreRef == "" || rootStoreRef == canonicalStoreRef {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(rootStoreRef, "city:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "city:"))
+		return name != "" && rootStoreRef == "city:"+name
+	case strings.HasPrefix(rootStoreRef, "rig:"):
+		name := strings.TrimSpace(strings.TrimPrefix(rootStoreRef, "rig:"))
+		return name != "" && rootStoreRef == "rig:"+name
+	default:
+		return false
+	}
 }
 
 func sameContinuationClaimCandidate(a, b ContinuationClaimCandidate) bool {
@@ -5707,7 +5936,9 @@ func canonicalContinuationClaimStoreRef(cityName, storeRef string) (string, bool
 	// census named it separately, a binding-resident continuation row arrived
 	// under the city ref and was a candidate; answering "not canonical" here
 	// would silently retire the continuation backstop for every graph-class step
-	// on a split city.
+	// on a split city. This is the GROUPING key and the city-rooted comparator
+	// only: the binding holds rows from many scopes, and each row's own owner is
+	// taken from its gc.root_store_ref by continuationClaimOwnerStoreRef.
 	case storeref.IsClassRef(storeRef):
 		if cityName == "" {
 			return "", false
@@ -6140,13 +6371,23 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// reappear at session start; the next tick converges it. That turns the
 	// permanent drift this fix targets into a transient one, which is the
 	// actual invariant — not that nothing else ever writes these paths.
+	//
+	// Versioned hook files are also excluded, via hooks.PreserveManagedFile.
+	// Staging has no version check and writes no backup, so without this it
+	// reverted a hook file that internal/hooks considers current — or newer,
+	// or user-authored — on every tick (#5554).
+	//
+	// One option value is created here and reused across every staging call
+	// below: it carries the per-pass write-tracking that keeps a path this pass
+	// itself wrote overridable by a later overlay layer (last-writer-wins).
+	preserveManaged := runtime.WithPreserve(hooks.PreserveManagedFile)
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr, preserveManaged); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

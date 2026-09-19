@@ -701,10 +701,28 @@ func doImportRemove(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	return 0
 }
 
+// intoRepoCacheRoot is the success-line suffix naming the repo cache root a
+// `gc import install` or `gc import upgrade` wrote into. Both commands clone
+// through packman.EnsureRepoInCache into the root this process resolves from
+// GC_HOME, and the read side already names the directory it searched
+// ("locked but not cached at <dir>"), so the two lines together turn a
+// GC_HOME that differs between the shell that ran the write and the process
+// that resolves the config into a one-line diagnosis instead of a mystery.
+func intoRepoCacheRoot(root string) string {
+	return " into " + root
+}
+
 func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 	allImports, err := collectAllImportsFS(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import install: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import install: resolving repo cache root: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	lock, err := syncImports(cityPath, allImports, packman.InstallResolveIfNeeded)
@@ -744,7 +762,7 @@ func doImportInstall(cityPath string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Installed %d remote import(s)\n", len(lock.Packs)) //nolint:errcheck
+	fmt.Fprintf(stdout, "Installed %d remote import(s)%s\n", len(lock.Packs), intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 	return 0
 }
 
@@ -817,6 +835,14 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Resolve the repo cache root the clones below land in, so the success
+	// line can name it (see intoRepoCacheRoot).
+	cacheRoot, err := packman.RepoCacheRoot()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import upgrade: resolving repo cache root: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
 	var lock *packman.Lockfile
 	var targetSource string
 	if target == "" {
@@ -866,16 +892,16 @@ func doImportUpgrade(cityPath, target string, stdout, stderr io.Writer) int {
 		if moved == 0 {
 			fmt.Fprintf(stdout, "No import moved; %d already up to date\n", total) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s); %d already up to date\n", moved, total, total-moved) //nolint:errcheck
+			fmt.Fprintf(stdout, "Upgraded %d of %d remote import(s)%s; %d already up to date\n", moved, total, intoRepoCacheRoot(cacheRoot), total-moved) //nolint:errcheck
 		}
 	} else {
 		pack, ok := lock.Packs[targetSource]
 		if !ok {
-			fmt.Fprintf(stdout, "Upgraded import %q\n", target) //nolint:errcheck
+			fmt.Fprintf(stdout, "Upgraded import %q%s\n", target, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 		} else if prev, hadPrev := prevLock.Packs[targetSource]; hadPrev && prev.Commit == pack.Commit {
 			fmt.Fprintf(stdout, "Import %q already at %s\n", target, pack.Commit) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "Upgraded import %q (%s)\n", target, pack.Commit) //nolint:errcheck
+			fmt.Fprintf(stdout, "Upgraded import %q (%s)%s\n", target, pack.Commit, intoRepoCacheRoot(cacheRoot)) //nolint:errcheck
 		}
 	}
 	return 0

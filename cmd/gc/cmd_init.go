@@ -31,6 +31,9 @@ const initMailRetentionExample = `# [mail]
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 
@@ -1633,7 +1636,11 @@ func writeInitAgentPrompts(fs fsys.FS, cityPath string, cfg *config.City, stderr
 // when copying a city template directory via --from. Skips .gc/ runtime state.
 func initFromSkip(relPath string, isDir bool) bool {
 	top, _, _ := strings.Cut(relPath, string(filepath.Separator))
-	if top == ".gc" {
+	// Provider-owned beads state is initialized by the selected provider in
+	// the destination. Copying it from a template can carry stale process,
+	// endpoint, and database identity across cities, so the complete .beads
+	// tree is always excluded from --from copies.
+	if top == ".gc" || top == ".beads" {
 		return true
 	}
 	if !isDir && strings.HasSuffix(filepath.Base(relPath), "_test.go") {
