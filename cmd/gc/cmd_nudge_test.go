@@ -2527,6 +2527,84 @@ dir = "myrig"
 	}
 }
 
+// TestCliNudgeSessionStoreIgnoresTheStoreItWasHanded pins #6348's actual
+// invariant: the nudge CLI's session-class store must be derived from the
+// city path, never from whatever store handle a caller happens to already
+// hold open for something else. Before the fix, every session-bead access
+// point in cmd_nudge.go derived its session store from the store it had
+// already opened for nudges (cliSessionStore(store, ...) with store ==
+// nudges), so a session read or write silently followed wherever that
+// caller's store pointed rather than where sessions actually live.
+//
+// A city that relocates [beads.classes.nudges] without also relocating
+// [beads.classes.sessions] would make that difference directly observable,
+// but this build's storage-composition gate currently refuses any [storage]
+// arrangement short of "every class stays on work" or "every class (graph,
+// sessions, messaging, orders, nudges) moves to one shared binding together"
+// -- confirmed by hand: writing that exact city.toml and calling
+// resolveNudgeTarget against it fails config load with "this build cannot
+// serve" before ever reaching the bug. So this pins the invariant the only
+// way currently reachable: on an ordinary single-store city, the session
+// store cliNudgeSessionStore returns must be the city's own work store
+// regardless of which unrelated store handle is passed in as the base --
+// proving the result no longer depends on (or leaks from) the caller's
+// store, which is exactly what stops the caller's store from being read as
+// authoritative should a future build ever allow the split #6348 describes.
+func TestCliNudgeSessionStoreIgnoresTheStoreItWasHanded(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "test-city"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	target := nudgeTarget{cityPath: cityDir, cfg: cfg}
+
+	// An unrelated, empty store, not connected to the city at all -- the
+	// shape a caller's already-open nudges store took pre-fix, and the shape
+	// any wrong base would take once the split becomes reachable. Left
+	// empty so its own auto-assigned bead IDs (MemStore ignores the ID a
+	// caller supplies and assigns its own, sequentially, independently of
+	// any other store instance) cannot coincidentally collide with the
+	// marker's ID and produce a false pass or fail below.
+	decoy := beads.NewMemStore()
+
+	sessStore, err := cliNudgeSessionStore(decoy, target)
+	if err != nil {
+		t.Fatalf("cliNudgeSessionStore: %v", err)
+	}
+	if sessStore == nil {
+		t.Fatal("cliNudgeSessionStore returned a nil store for a non-nil input store")
+	}
+
+	// Write a marker bead through the returned store and confirm it is
+	// visible from the city's own work store -- proving sessStore really is
+	// the work store, not the decoy handed in as the base.
+	created, err := sessStore.Create(beads.Bead{ID: "session-marker-1", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create via cliNudgeSessionStore's result: %v", err)
+	}
+	work, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := work.Get(created.ID); err != nil {
+		t.Fatalf("Get(%q) on the city's work store: %v -- cliNudgeSessionStore did not resolve to the work store", created.ID, err)
+	}
+	decoyBeads, err := decoy.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List on the decoy store: %v", err)
+	}
+	if len(decoyBeads) != 0 {
+		t.Fatalf("decoy store holds %d bead(s), want 0 -- the marker landed in the store handed in as the base, not the work store", len(decoyBeads))
+	}
+}
+
 func TestCmdNudgeStatusJSON(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	// resolveNudgeTarget MATERIALIZES the named session ("mayor"), which under
