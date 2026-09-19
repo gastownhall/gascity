@@ -30,6 +30,7 @@ var controllerTestExcludedHangDeadlineLines = map[int]string{
 	877:  "negative-assertion window (asserts no watcher poke arrives)",
 	927:  "negative-assertion window (asserts no watcher poke arrives, loop body)",
 	1456: "bounded best-effort probe with no assertion on either branch",
+	2245: "negative-assertion window (asserts no watcher poke arrives for a .git write)",
 }
 
 func controllerTestPath(t *testing.T) string {
