@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -117,11 +118,102 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
+//
+// (Event-capable providers never reach this: nudgeDispatchTick routes their
+// passes through the nudge event dispatcher's worker instead.)
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
-	if cfg == nil || sessionBeads == nil || cityPath == "" {
+	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+// duePendingNudgeAgents returns the agent keys with queue work a pass could act
+// on now: pending items past their DeliverAfter, plus in-flight items whose
+// lease has expired, which are recoverable on the next claim attempt and so
+// should not wait for a patrol tick to be rediscovered.
+func duePendingNudgeAgents(state nudgequeue.State, now time.Time) map[string]bool {
+	agents := make(map[string]bool, len(state.Pending))
+	for _, item := range state.Pending {
+		if item.Agent == "" {
+			continue
+		}
+		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
+			continue
+		}
+		agents[item.Agent] = true
+	}
+	for _, item := range state.InFlight {
+		if item.Agent == "" {
+			continue
+		}
+		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
+			continue
+		}
+		agents[item.Agent] = true
+	}
+	return agents
+}
+
+// pendingNudgeSessionNames names the sessions a sweep should hand off to, and
+// it makes NO provider call on the way.
+//
+// That is the entire point of it existing beside deliverPendingQueuedNudges,
+// which observes each matched session inline. Observation is a server call on
+// an uncancellable context, so an enumeration that observes is an enumeration
+// that a single hung session can stop: the sessions after it in the walk never
+// get reached, and a session that was already idle when its nudge was queued
+// has no other path, because it emits no idle transition. Everything here is a
+// queue read and a bead read.
+//
+// It runs the queue's TTL/max-attempts maintenance for the same reason
+// deliverPendingQueuedNudges does: a structurally orphaned item never reaches a
+// successful claim, so nothing else would ever prune it.
+func pendingNudgeSessionNames(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) ([]string, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
+		return nil, nil
+	}
+	now := time.Now()
+	if err := runNudgeQueueMaintenanceSweep(cityPath, now); err != nil {
+		return nil, fmt.Errorf("nudge queue maintenance sweep: %w", err)
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading nudge queue: %w", err)
+	}
+	pendingAgents := duePendingNudgeAgents(state, now)
+	if len(pendingAgents) == 0 {
+		return nil, nil
+	}
+	var names []string
+	seen := make(map[string]bool, len(pendingAgents))
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		if target.sessionName == "" || seen[target.sessionName] {
+			continue
+		}
+		for _, key := range target.queueKeys() {
+			if pendingAgents[key] {
+				seen[target.sessionName] = true
+				names = append(names, target.sessionName)
+				break
+			}
+		}
+	}
+	return names, nil
+}
+
+// deliverPendingQueuedNudges is one dispatcher pass over the queue: collect
+// the agents with due pending (or lease-expired in-flight) items, resolve
+// each matching open session bead to a nudgeTarget — restricted to
+// sessionFilter when set — observe it, and hand running matches to deliver.
+// Returns how many targets delivered at least one item. debugOut is threaded
+// through to logNudgeDispatchSkip; nil suppresses the debug lines (skip
+// counts still accumulate regardless).
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	now := time.Now()
@@ -142,28 +234,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if len(state.Pending) == 0 && len(state.InFlight) == 0 {
 		return 0, nil
 	}
-	pendingAgents := make(map[string]bool, len(state.Pending))
-	for _, item := range state.Pending {
-		if item.Agent == "" {
-			continue
-		}
-		if !item.DeliverAfter.IsZero() && item.DeliverAfter.After(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
-	// In-flight items with expired leases are recoverable on the next
-	// claim attempt. Including their agents lets us retry without waiting
-	// for the patrol tick to discover them.
-	for _, item := range state.InFlight {
-		if item.Agent == "" {
-			continue
-		}
-		if item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
-			continue
-		}
-		pendingAgents[item.Agent] = true
-	}
+	pendingAgents := duePendingNudgeAgents(state, now)
 	if len(pendingAgents) == 0 {
 		return 0, nil
 	}
@@ -190,6 +261,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
+			continue
+		}
+		if sessionFilter != "" && target.sessionName != sessionFilter {
 			continue
 		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
@@ -228,7 +302,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := deliver(target, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
