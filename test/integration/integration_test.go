@@ -449,14 +449,27 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	return version, nil
 }
 
+// declaredBeadsModuleVersion returns the version go.mod's own require
+// directive declares for github.com/steveyegge/beads, independent of
+// pinnedIntegrationBeadsModuleVersion's `go list -m` resolution. Comparing
+// the two catches drift a hardcoded literal would silently miss (e.g. a
+// stray replace directive), while a reviewed go.mod pin bump stays in sync
+// automatically instead of leaving this test stale.
+func declaredBeadsModuleVersion() (string, error) {
+	return "", errors.New("declaredBeadsModuleVersion: not yet implemented")
+}
+
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.3.0-rc.2"
+	want, err := declaredBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("declaredBeadsModuleVersion() error = %v", err)
+	}
 	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q (declared in go.mod)", version, want)
 	}
 }
 
