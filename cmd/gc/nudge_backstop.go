@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -258,6 +259,13 @@ func runNudgeBackstop(
 				pred.exhausted(store, s, stdout)
 				continue
 			}
+			// A seat sitting at an approval or selection prompt is waiting on
+			// a human, not stalled. Nudging it types into that prompt and
+			// answers on the operator's behalf. Checked before the reserve so
+			// a refusal does not consume an attempt for a nudge never sent.
+			if backstopSeatAwaitsHumanInput(sp, sessName, label, stdout) {
+				continue
+			}
 			// Write ahead of the external delivery. If the process crashes
 			// after this point, an attempt may be consumed without delivery,
 			// but a crash or store failure can never replay an unbounded nudge.
@@ -271,4 +279,30 @@ func runNudgeBackstop(
 			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
 		}
 	}
+}
+
+// backstopSeatAwaitsHumanInput reports whether the seat is sitting at a
+// blocking interaction, which every backstop lane must refuse to nudge.
+//
+// Refuses on probe error as well as on a confirmed prompt. The two failure
+// directions are not symmetric: skipping a nudge costs one tick, because the
+// backstop re-evaluates the same seat on the next pass, while delivering into
+// an open prompt answers on the operator's behalf and cannot be taken back.
+func backstopSeatAwaitsHumanInput(sp runtime.Provider, sessName, label string, stdout io.Writer) bool {
+	ip, ok := sp.(runtime.InteractionProvider)
+	if !ok {
+		return false
+	}
+	pending, err := ip.Pending(sessName)
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		return false
+	case err != nil:
+		fmt.Fprintf(stdout, "%s: %s skipped: probing pending interaction: %v\n", label, sessName, err) //nolint:errcheck // best-effort
+		return true
+	case pending != nil:
+		fmt.Fprintf(stdout, "%s: %s skipped: awaiting human input\n", label, sessName) //nolint:errcheck // best-effort
+		return true
+	}
+	return false
 }

@@ -856,12 +856,21 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 			return false, err
 		}
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return false, err
+		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return false, err
+	}
+	// Checked after ensureRunning, as sendLocked does: a dormant session has
+	// no pane to probe, and refusing before the start would turn a managed
+	// wake into an error.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return false, err
 	}
 	if providerKind(b) != "claude" {
@@ -883,6 +892,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
 	if !m.sp.IsRunning(sessName) {
 		return false, nil
+	}
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
