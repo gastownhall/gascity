@@ -128,18 +128,31 @@ close_with_result() {
     return 0
 }
 
+transient_once_marker() {
+    printf '%s/transient-once.%s' "$HARNESS_STATE_DIR" "$(sanitize_key "$1")"
+}
+
+# Decides whether this ref still owes a one-shot transient failure. It must NOT
+# consume the budget: the marker is committed by commit_transient_once only
+# after the failing close is observed to have landed.
+#
+# Consuming it here instead loses the injected failure whenever the close that
+# follows does not land — close_with_result swallows every bd error, and a pool
+# worker can be SIGKILLed mid-close (the marker dir is shared by the always-on
+# worker and every polecat slot). The next pass over the same bead then saw the
+# marker, skipped the injection, and closed the attempt gc.outcome=pass, so
+# classifyRetryAttempt scheduled no retry and the workflow finalized pass with
+# no .attempt.2 at all -- the ga-j88sfp gate flake, four sightings in eight days.
 should_fail_transient_once() {
     local ref="$1"
-    local marker=""
     if ! ref_matches_suffix_list "$ref" "${GC_GRAPH_TRANSIENT_ONCE_SUFFIXES:-}"; then
         return 1
     fi
-    marker="$HARNESS_STATE_DIR/transient-once.$(sanitize_key "$ref")"
-    if [ -f "$marker" ]; then
-        return 1
-    fi
-    : > "$marker"
-    return 0
+    [ ! -f "$(transient_once_marker "$ref")" ]
+}
+
+commit_transient_once() {
+    : > "$(transient_once_marker "$1")"
 }
 
 should_fail_transient_always() {
@@ -629,6 +642,14 @@ while true; do
         status_after=$(show_status "$bead_id" 2>/dev/null || true)
         outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
+        # Commit the one-shot budget only against a landed failure. If the close
+        # was dropped the bead is still open, so leaving the marker unwritten
+        # lets the next pass re-inject rather than silently closing it pass.
+        if [ "$status_after" = "closed" ] && [ "$outcome_after" = "fail" ]; then
+            commit_transient_once "$ref"
+        else
+            trace "transient-once-uncommitted bead=$bead_id ref=$ref status=$status_after outcome=$outcome_after"
+        fi
         continue
     fi
     if should_fail_transient_always "$ref"; then
