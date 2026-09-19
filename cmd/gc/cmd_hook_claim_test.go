@@ -179,6 +179,66 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 	}
 }
 
+// TestDoHookClaimSurvivesPreassignError pins sys-pxryan.20: a failed
+// continuation pre-assignment must NOT veto an otherwise-successful claim.
+// preassignHookContinuationGroup is optimization-only (retry next tick, NDI),
+// the same class as stampHookClaimIdentity / publishHookClaimRunMap. Before the
+// fix, an AssignContinuation error (store hiccup / Dolt latency past the
+// mutation budget / a sibling refusing assignment) turned a won claim into a
+// non-zero exit with no JSON on stdout, stranding graph.v2 recon workflows.
+func TestDoHookClaimSurvivesPreassignError(t *testing.T) {
+	candidates := []beads.Bead{{
+		ID:       "bead-1",
+		Status:   "open",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.run_target": "route-1", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a"},
+	}}
+	output, err := json.Marshal(candidates)
+	if err != nil {
+		t.Fatalf("marshal candidates: %v", err)
+	}
+
+	ops := hookClaimOps{
+		Runner: func(string, string) (string, error) { return string(output), nil },
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Assignee: assignee, Status: "in_progress", Metadata: candidates[0].Metadata}, true, nil
+		},
+		ListContinuation: func(_ context.Context, _ string, _ []string, rootID, group string) ([]beads.Bead, error) {
+			if rootID != "root-1" || group != "group-a" {
+				t.Fatalf("continuation lookup = (%q, %q), want (root-1, group-a)", rootID, group)
+			}
+			return []beads.Bead{{ID: "sib-1", Status: "open", Metadata: candidates[0].Metadata}}, nil
+		},
+		AssignContinuation: func(_ context.Context, _ string, _ []string, _, _ string) error {
+			return errors.New("dolt: context deadline exceeded (forwarder timeout)")
+		},
+		DrainAck: func(io.Writer) error { return nil },
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"route-1"},
+		JSON:               true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0 (a preassign error must not veto the claim); stderr=%s", code, stderr.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout = %q, want valid JSON; err=%v", stdout.String(), err)
+	}
+	if result["bead_id"] != "bead-1" {
+		t.Fatalf("bead_id = %v, want bead-1; stdout=%s", result["bead_id"], stdout.String())
+	}
+	if _, present := result["continuation_assigned"]; present {
+		t.Fatalf("continuation_assigned present = %#v, want absent (assignment failed)", result["continuation_assigned"])
+	}
+	if !strings.Contains(stderr.String(), "non-fatal") {
+		t.Fatalf("stderr = %q, want non-fatal preassign diagnostic", stderr.String())
+	}
+}
+
 func TestHookClaimEnvMapUsesOnlyTheQueryEnvironment(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient-dolt.example.com")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "ambient_database")
