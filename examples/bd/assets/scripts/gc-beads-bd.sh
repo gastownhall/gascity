@@ -1138,6 +1138,29 @@ bd_runtime_store_holds_bd_tables() {
     [ "$cursor" -gt 0 ]
 }
 
+# bd_runtime_reinit_refusal_subject disambiguates the two live states that
+# bd_runtime_store_holds_bd_tables collapses into its single "not empty"
+# return code (0): bd's own tables are present, or the table count is still
+# zero but schema_migrations shows a cursor in flight (a concurrent
+# initializer that hasn't reached bd's tables yet). Echoes "tables" or
+# "migration" so a caller can choose the refusal message that actually
+# matches what is there. Re-queries the table count at the moment of the
+# call -- whatever produced the caller's classification is stale by however
+# long has passed since.
+bd_runtime_reinit_refusal_subject() {
+    local db="$1"
+    local table_count=""
+    table_count=$(bd_runtime_bd_table_count "$db" 2>/dev/null) || table_count=""
+    case "$table_count" in
+        ''|*[!0-9]*) table_count="" ;;
+    esac
+    if [ -n "$table_count" ] && [ "$table_count" -gt 0 ]; then
+        echo "tables"
+    else
+        echo "migration"
+    fi
+}
+
 # --- Robustness Helpers ---
 
 # save_state writes the private provider runtime state atomically (no jq dependency).
@@ -3346,15 +3369,10 @@ op_init() {
                         # share one code: bd's own tables are present, or the table
                         # count is still zero but schema_migrations shows a cursor in
                         # flight (a concurrent initializer that hasn't reached bd's
-                        # tables yet). Re-query the table count now, at give-up time,
-                        # to tell them apart -- the earlier read that produced
-                        # holds_bd_tables is stale by however long the wait just ran.
-                        local give_up_table_count=""
-                        give_up_table_count=$(bd_runtime_bd_table_count "$dolt_database" 2>/dev/null) || give_up_table_count=""
-                        case "$give_up_table_count" in
-                            ''|*[!0-9]*) give_up_table_count="" ;;
-                        esac
-                        if [ -n "$give_up_table_count" ] && [ "$give_up_table_count" -gt 0 ]; then
+                        # tables yet). Ask which one now, at give-up time -- the
+                        # earlier read that produced holds_bd_tables is stale by
+                        # however long the wait just ran.
+                        if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
                             die "database '$dolt_database' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
                         else
                             die "database '$dolt_database' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety). this means a concurrent initializer is still migrating '$dolt_database', or a previous migration crashed mid-way. a forced reinit cannot succeed here -- beads refuses to auto-apply pending migrations to a database with existing history -- and would only corrupt the store further. wait for the concurrent init to finish, or inspect the stalled migration with 'bd dolt status' before retrying."
@@ -3414,6 +3432,28 @@ op_init() {
     # Pre-existing databases deliberately receive no marker here.
     if [ "$database_created_by_gc" = true ]; then
         seed_fresh_managed_bd_version_witness "$dir"
+    fi
+
+    # The classification above (whichever branch set bd_init_force) can go
+    # stale before the force actually runs: ensure_database_registered and
+    # seed_fresh_managed_bd_version_witness both do real work in the gap
+    # between that decision and here, during which a concurrent initializer
+    # can create schema_migrations and start advancing its cursor. Revalidate
+    # immediately before forcing rather than acting on a read that is now
+    # however-old -- this is the same probe the classification above used,
+    # just re-run at the moment it actually matters.
+    if [ -n "$bd_init_force" ]; then
+        local reinit_still_empty=0
+        bd_runtime_store_holds_bd_tables "$dolt_database" || reinit_still_empty=$?
+        if [ "$reinit_still_empty" -eq 0 ]; then
+            if [ "$(bd_runtime_reinit_refusal_subject "$dolt_database")" = "tables" ]; then
+                die "database '$dolt_database' now holds bd tables that were not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer completed between the freshness check and this forced reinit; forcing now would re-run migrations over its working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+            else
+                die "database '$dolt_database' now has a schema_migrations cursor in progress that was not there moments ago; refusing to force-reinitialize (data-safety). a concurrent initializer started migrating '$dolt_database' between the freshness check and this forced reinit, and beads refuses to auto-apply pending migrations to a database with existing history. wait for the concurrent init to finish, or inspect the migration with 'bd dolt status' before retrying."
+            fi
+        elif [ "$reinit_still_empty" -eq 2 ]; then
+            echo "warning: could not confirm '$dolt_database' is still empty immediately before forcing; proceeding on the earlier classification" >&2
+        fi
     fi
 
     # Run bd init in server mode through the pinned wrapper so the fallback
