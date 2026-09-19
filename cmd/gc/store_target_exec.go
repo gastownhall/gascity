@@ -68,7 +68,7 @@ func copyExecProjectedBackendEnv(dst, src map[string]string) {
 	}
 }
 
-func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) map[string]string {
+func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["GC_PROVIDER"] = provider
 	env["GC_STORE_ROOT"] = target.ScopeRoot
@@ -81,7 +81,11 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) ma
 	env["BEADS_DOLT_AUTO_START"] = ""
 	env["GC_BIN"] = ""
 	if execProviderUsesCanonicalBdScopeFiles(provider) {
-		if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
+		gcBin, err := resolveProviderLifecycleGCBinary()
+		if err != nil {
+			return nil, err
+		}
+		if gcBin != "" {
 			env["GC_BIN"] = gcBin
 		}
 	}
@@ -89,11 +93,14 @@ func gcExecStoreEnv(cityPath string, target execStoreTarget, provider string) ma
 		env["GC_RIG"] = target.RigName
 		env["GC_RIG_ROOT"] = target.ScopeRoot
 	}
-	return env
+	return env, nil
 }
 
 func gcExecLifecycleInitProcessEnv(cityPath string, target execStoreTarget, provider string) ([]string, error) {
-	env := gcExecStoreEnv(cityPath, target, provider)
+	env, err := gcExecStoreEnv(cityPath, target, provider)
+	if err != nil {
+		return nil, err
+	}
 	if !execProviderNeedsScopedDoltInit(provider) {
 		return mergeRuntimeEnv(os.Environ(), env), nil
 	}

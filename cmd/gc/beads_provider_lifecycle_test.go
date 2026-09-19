@@ -402,7 +402,7 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	cityPath := t.TempDir()
 	t.Setenv("GC_BIN", "/tmp/wrong-gc")
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return "/opt/gc/bin/gc" }
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "/opt/gc/bin/gc", nil }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	envEntries := mustProviderLifecycleProcessEnv(t, cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
@@ -415,6 +415,28 @@ func TestProviderLifecycleProcessEnvProjectsResolvedGCBin(t *testing.T) {
 	}
 	if got := env["GC_BIN"]; got != "/opt/gc/bin/gc" {
 		t.Fatalf("providerLifecycleProcessEnv()[GC_BIN] = %q, want %q", got, "/opt/gc/bin/gc")
+	}
+}
+
+func TestProviderLifecycleProcessEnvRejectsGCBinaryResolutionFailure(t *testing.T) {
+	cityPath := t.TempDir()
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	_, err := providerLifecycleProcessEnvWithError(cityPath, "exec:"+gcBeadsBdScriptPath(cityPath))
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("providerLifecycleProcessEnvWithError() error = %v, want resolver failure", err)
+	}
+}
+
+func TestProviderLifecycleProcessEnvPreservesInjectedTestGCBinary(t *testing.T) {
+	env, err := providerLifecycleProcessEnvFromBase(t.TempDir(), "exec:/tmp/gc-beads-bd", []string{"GC_BIN=/tmp/test-wrapper"})
+	if err != nil {
+		t.Fatalf("providerLifecycleProcessEnvFromBase: %v", err)
+	}
+	if got := envSliceValue(env, "GC_BIN"); got != "/tmp/test-wrapper" {
+		t.Fatalf("GC_BIN = %q, want injected test wrapper", got)
 	}
 }
 
@@ -521,11 +543,14 @@ func TestProviderLifecycleProcessEnvPreservesAmbientWaitTimeout(t *testing.T) {
 	// No cityDoltConfigs entry: this is the silent-city.toml case.
 	cityDoltConfigs.Delete(cityPath)
 
-	envEntries := providerLifecycleProcessEnvFromBase(
+	envEntries, err := providerLifecycleProcessEnvFromBase(
 		cityPath,
 		"exec:"+gcBeadsBdScriptPath(cityPath),
 		[]string{"GC_DOLT_WAIT_TIMEOUT=45"},
 	)
+	if err != nil {
+		t.Fatalf("providerLifecycleProcessEnvFromBase: %v", err)
+	}
 
 	count := 0
 	for _, entry := range envEntries {
@@ -5762,7 +5787,7 @@ exit 99
 	}
 }
 
-func TestInitAndHookDirAdoptsAlreadyInitializedDefaultRigBdStore(t *testing.T) {
+func TestInitAndHookDirAdoptsAlreadyInitializedDefaultRigBdStorePinsCanonicalGCBinary(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "tincan")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -5786,12 +5811,14 @@ func TestInitAndHookDirAdoptsAlreadyInitializedDefaultRigBdStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
+	gcBinFile := filepath.Join(t.TempDir(), "bd-init-gc-bin")
 	fakeBd := filepath.Join(binDir, "bd")
 	fakeBdScript := fmt.Sprintf(`#!/bin/sh
 set -eu
 case "${1:-}" in
   init)
     printf '%%s\n' "$@" > %q
+    printf '%%s\n' "${GC_BIN-}" > %q
     echo "Found existing Dolt database 'tincan' for this workspace. This workspace is already initialized; just run bd commands normally. Aborting." >&2
     exit 1
     ;;
@@ -5803,10 +5830,18 @@ case "${1:-}" in
     exit 0
     ;;
 esac
-`, initArgsFile)
+`, initArgsFile, gcBinFile)
 	if err := os.WriteFile(fakeBd, []byte(fakeBdScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
 
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
@@ -5815,6 +5850,17 @@ esac
 	}
 	if _, err := os.Stat(initArgsFile); err != nil {
 		t.Fatalf("expected bd init attempt, stat err = %v", err)
+	}
+	data, err := os.ReadFile(gcBinFile)
+	if err != nil {
+		t.Fatalf("read GC_BIN capture: %v", err)
+	}
+	wantGCBin, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatalf("canonicalize expected gc binary: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != wantGCBin {
+		t.Fatalf("bd init GC_BIN = %q, want canonical %q", got, wantGCBin)
 	}
 	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "hooks", "on_create")); !os.IsNotExist(err) {
 		t.Fatalf("gc must not install bd event hooks for adopted rig (stat err=%v)", err)

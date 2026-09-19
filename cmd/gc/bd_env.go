@@ -48,6 +48,9 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env := cityRuntimeEnvMapForCity(cityPath)
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		bdBin, err := workspacePinnedBdBinary(cityPath)
 		if err != nil {
 			return nil, err
@@ -1020,6 +1023,13 @@ var (
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
+	gcBin, err := resolveProviderLifecycleGCBinary()
+	if err != nil {
+		return err
+	}
+	if gcBin != "" {
+		overrides["GC_BIN"] = gcBin
+	}
 	if err := applyWorkspacePinnedBdBinary(overrides, cityPath); err != nil {
 		return err
 	}
@@ -1029,10 +1039,6 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	applyBdContributorRoutingOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
-	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
-		environ = removeEnvKey(environ, "GC_BIN")
-		environ = append(environ, "GC_BIN="+gcBin)
-	}
 	return runProviderOpWithEnv(script, environ, "recover")
 }
 
@@ -1402,6 +1408,9 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if env == nil {
 			env = map[string]string{}
 		}
+		if err := pinBdGCEnvironment(env); err != nil {
+			return nil, err
+		}
 		ensureProjectedDoltEnvExplicit(env)
 		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
 		if runnerErr != nil {
@@ -1423,6 +1432,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
+		}
+		if retryEnv == nil {
+			retryEnv = map[string]string{}
+		}
+		if err := pinBdGCEnvironment(retryEnv); err != nil {
+			return nil, err
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
