@@ -41,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"golang.org/x/mod/modfile"
 )
 
 // gcBinary is the path to the built gc binary, set by TestMain.
@@ -456,7 +457,21 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 // stray replace directive), while a reviewed go.mod pin bump stays in sync
 // automatically instead of leaving this test stale.
 func declaredBeadsModuleVersion() (string, error) {
-	return "", errors.New("declaredBeadsModuleVersion: not yet implemented")
+	path := filepath.Join(findModuleRoot(), "go.mod")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	modFile, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	for _, req := range modFile.Require {
+		if req.Mod.Path == "github.com/steveyegge/beads" {
+			return req.Mod.Version, nil
+		}
+	}
+	return "", fmt.Errorf("github.com/steveyegge/beads not found in %s require directives", path)
 }
 
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
