@@ -101,6 +101,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A condition-triggered order whose check passes now dispatches on the tick
+  that observes it, instead of queueing behind the per-tick dispatch budget.**
+  `orders.max_dispatches_per_tick` (default 4) capped every trigger type and
+  advanced a rotation cursor only when it spent a slot, so on a city with ~40
+  orders and a tick period longer than every sweep's interval the cooldown
+  sweeps were due at every tick and spent the whole budget before the rotation
+  reached anything else — each order got a turn roughly every ten ticks. A
+  condition order is a wake demand rather than a request for a turn: its check
+  reports that work is pending right now, and it is true only for as long as
+  that work waits. On maintainer-city the merge-queue order went 11 h without a
+  dispatch while merge beads sat ready, with no gate error, no suppression
+  event and nothing in the journal to show for it. Due condition orders now
+  fire outside the budget (still single-flighted by the open-tracking and
+  open-work gates, and still bounded by their own check), the budget and its
+  rotation are unchanged for cooldown, cron and event orders, and a tick that
+  spends its budget logs one line naming the orders it did not reach.
+
+
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
   sling whose only live root is gone.** A storage migration copies rows into the
