@@ -728,6 +728,8 @@ func TestReconcileSessionBeads_DrainingSeatsBelongToTheStopPendingHandler(t *tes
 				return
 			}
 			env.reconcileAsyncSafe([]beads.Bead{cur}, logs)
+			// The stop runs asynchronously; the next tick must observe its result.
+			waitForProviderStopped(t, env.sp, poolSeatName)
 			env.clk.Time = env.clk.Time.Add(time.Minute)
 		}
 		t.Fatal("a killable stop-pending seat never converged; its own machinery is supposed to retire it")
