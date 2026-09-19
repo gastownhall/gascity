@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -274,9 +275,28 @@ func (p *Provider) Stop(name string) error {
 	return err
 }
 
-// Interrupt sends Ctrl-C to the named tmux session.
+// Interrupt sends Ctrl-C, or cancels a recognized Claude approval with Escape.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Interrupt(name string) error {
+	if sessionlog.ProviderFamily(p.tm.providerEnv(name)) == "claude" {
+		pane, err := p.tm.CapturePane(name, 0)
+		if err != nil {
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+				return nil
+			}
+			return fmt.Errorf("observing Claude before interrupt: %w", err)
+		}
+		if parseApprovalPrompt(pane) != nil {
+			// The approval dialog advertises Escape to cancel; Ctrl-C can leave
+			// it open. Never select a numbered permission option to interrupt.
+			p.tm.cancelCopyModeIfParked(name)
+			err := p.tm.SendKeysRaw(name, "Escape")
+			if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+				return nil
+			}
+			return err
+		}
+	}
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {
 		if err := p.tm.ensureHiddenAttachedClient(name); err != nil {
 			return fmt.Errorf("preparing detached interrupt: %w", err)

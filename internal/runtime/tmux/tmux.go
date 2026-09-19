@@ -3887,8 +3887,12 @@ func idlePromptPrefix(configured string) string {
 // resolves the prefix once and polls snapshotPaneIdleWithPrefix directly so its
 // loop does not re-exec tmux show-environment on every 200ms tick.
 func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
-	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session))
+	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session), sessionlog.ProviderFamily(t.providerEnv(session)))
 }
+
+// Claude uses its composer glyph for selected menu rows too. Such a row is
+// never evidence that an interrupted turn has returned to the composer.
+var claudeMenuSelectionRe = regexp.MustCompile(`(?m)^\s*(?:[│┃]\s*)?❯\s*\d+[.)](?:\s|$)`)
 
 // resolveIdlePromptPrefix reads the session's configured ready-prompt prefix,
 // falling back to DefaultReadyPromptPrefix when it is unset or unreadable.
@@ -3904,10 +3908,18 @@ func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 // active-processing indicator. A capture error is returned verbatim so callers
 // can distinguish a session that has gone away (ErrSessionNotFound /
 // ErrNoServer) from a transient read failure.
-func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
+//
+// family is the session's provider family. For Claude, only the visible pane
+// counts (historical input prompts cannot establish a current stop boundary),
+// and a selected menu row or an approval prompt is a modal, never idle.
+func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix, family string) (bool, error) {
 	prefix := strings.TrimSpace(promptPrefix)
 
-	lines, err := t.CapturePaneLines(session, promptObservationLines)
+	observationLines := promptObservationLines
+	if family == "claude" {
+		observationLines = 0
+	}
+	lines, err := t.CapturePaneLines(session, observationLines)
 	if err != nil {
 		return false, err
 	}
@@ -3915,7 +3927,9 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 	// Check for active processing indicator in the status bar.
 	// Claude Code shows "esc to interrupt" while processing — if present,
 	// the agent is busy regardless of whether the prompt is visible.
-	if paneContainsBusyIndicator(lines) {
+	pane := strings.Join(lines, "\n")
+	modal := family == "claude" && (claudeMenuSelectionRe.MatchString(pane) || parseApprovalPrompt(pane) != nil)
+	if modal || paneContainsBusyIndicator(lines) {
 		return false, nil
 	}
 
@@ -3959,6 +3973,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 	// and re-reading it per tick would add a tmux show-environment exec to
 	// every 200ms poll.
 	promptPrefix := t.resolveIdlePromptPrefix(session)
+	family := sessionlog.ProviderFamily(t.providerEnv(session))
 
 	consecutiveIdle := 0
 	const requiredConsecutive = 2
@@ -3968,7 +3983,7 @@ func (t *Tmux) WaitForIdle(ctx context.Context, session string, timeout time.Dur
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix)
+		idle, err := t.snapshotPaneIdleWithPrefix(session, promptPrefix, family)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —
