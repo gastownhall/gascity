@@ -2337,6 +2337,7 @@ func TestBuildDesiredState_BlockedFreshSessionMaterializesRunnableReplacement(t 
 				openInfos,
 				result.AssignedWorkBeads,
 				result.AssignedWorkStoreRefs,
+				result.PoolWakeReadiness,
 			)
 			poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesAt(
 				cfg,

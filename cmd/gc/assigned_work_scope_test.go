@@ -230,7 +230,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFal
 		Metadata: map[string]string{},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, sessionInfosFromBeads(sessions), work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, sessionInfosFromBeads(sessions), work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "direct-assigned" {
 		t.Fatalf("filtered work = %#v, want direct-assigned work preserved through template fallback", got)
@@ -253,7 +253,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *tes
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "legacy-workflow-root" {
 		t.Fatalf("filtered work = %#v, want legacy workflow root preserved through run_target fallback", got)
@@ -289,7 +289,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"gascity-packs"})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"gascity-packs"}, nil)
 
 	if len(got) != 1 || got[0].ID != "gp-qx0o" {
 		t.Fatalf("filtered work = %#v, want persisted bound route preserved", got)
@@ -313,7 +313,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandNormalizesInstanceSuffixedRouteTarg
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "instance-routed" {
 		t.Fatalf("filtered work = %#v, want instance-suffixed route target normalized to the base template and kept", got)
@@ -337,7 +337,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandLeavesUnmatchedInstanceSuffixAlone(
 		},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""}, nil)
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want out-of-range instance suffix left unmatched and dropped", got)
@@ -375,7 +375,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDeferredRoutedBead(t *testing.
 		},
 	}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", ""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", ""}, nil)
 
 	if len(got) != 1 || got[0].ID != "live-routed-work" {
 		t.Fatalf("filtered work = %#v, want only live-routed-work (deferred anchor dropped)", got)
@@ -401,7 +401,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsElapsedDeferRoutedBead(t *test
 		DeferUntil: &past,
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{""}, nil)
 
 	if len(got) != 1 || got[0].ID != "elapsed-defer-work" {
 		t.Fatalf("filtered work = %#v, want elapsed-defer bead preserved as demand", got)
@@ -433,7 +433,7 @@ func TestFilterAssignedWorkBeadsForPoolDemandDropsDirectAssigneeFromUnreachableS
 		Metadata: map[string]string{},
 	}}
 
-	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"riga"})
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, nil, sessionInfosFromBeads(sessions), work, []string{"riga"}, nil)
 
 	if len(got) != 0 {
 		t.Fatalf("filtered work = %#v, want unreachable rig-store direct assignment dropped", got)
