@@ -52,16 +52,16 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // documented atomic close uses to stamp the record and close in one call:
 // beads.UpdateOpts.Metadata is an additive merge, so validating only the stored
 // row would refuse a request that supplies a perfectly good record. Coverage is
-// decided on the stored row — both Type and gc.kind, read before any submitted
-// field is applied — so a request cannot escape the gate by stamping gc.kind on
-// its way out, nor by retyping a gated task away from task. The same choice
-// means the reverse direction is NOT covered: a closing update that converts a
-// non-gated bead into a task closes ungated, because the type it would be gated
-// on is the one the request is about to write. That is the boundary the CLI door
-// has at isWorkRecordGatedBead in cmd/gc/work_record_gate.go, which decides
-// coverage on the stored row and then projects metadata only; moving it belongs
-// in internal/workrecord so both doors move together rather than asking
-// different questions of different populations.
+// decided on the stored row — Type, gc.kind, and workflow-step metadata, read
+// before any submitted field is applied — so a request cannot escape the gate
+// by stamping gc.kind on its way out, nor by retyping a gated task away from
+// task. The same choice means the reverse direction is NOT covered: a closing
+// update that converts a non-gated bead into a task closes ungated, because the
+// type it would be gated on is the one the request is about to write. That is
+// the boundary the CLI door has at isWorkRecordGatedBead in cmd/gc/work_record_gate.go,
+// which decides coverage on the stored row and then projects metadata only;
+// moving it belongs in internal/workrecord so both doors move together rather
+// than asking different questions of different populations.
 //
 // ctx is the request's, and it reaches the reachability clause because that
 // clause shells out to git: a client that hangs up has to be able to stop the
