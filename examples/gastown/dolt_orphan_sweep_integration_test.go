@@ -80,11 +80,14 @@ func TestSweep_ReapsRealDoltDataDirAfterSIGKILL(t *testing.T) {
 	if len(after.Errors) != 0 {
 		t.Fatalf("sweep errored after the dolt sql-server was SIGKILLed: %v", after.Errors)
 	}
-	if len(after.Removed) != 1 || after.Removed[0] != dataDir {
-		t.Fatalf("sweep.Removed = %v, want [%s] after the dolt sql-server was SIGKILLed", after.Removed, dataDir)
+	if len(after.Removed) != 1 || after.Removed[0] != dbDir {
+		t.Fatalf("sweep.Removed = %v, want [%s] after the dolt sql-server was SIGKILLed", after.Removed, dbDir)
 	}
-	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("data dir %s still exists after sweep reported removing it (stat err = %v)", dataDir, err)
+	if _, err := os.Stat(dbDir); !os.IsNotExist(err) {
+		t.Fatalf("dolt store dir %s still exists after sweep reported removing it (stat err = %v)", dbDir, err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("top-level data dir %s should survive; only its nested dolt store dir is removed: %v", dataDir, err)
 	}
 }
 
