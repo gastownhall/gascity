@@ -459,6 +459,8 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 		freshIDs[item.ID] = struct{}{}
 	}
 
+	now := time.Now()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.state != cacheLive && c.state != cachePartial {
@@ -471,6 +473,23 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 			continue
 		}
 		if !query.Matches(bead) {
+			continue
+		}
+		if query.Status != "" && IsDeferred(bead, now) {
+			// A deferred row is absent from a status-filtered backing list by
+			// construction, not by staleness: bd filters on its own richer
+			// status vocabulary, where the row is "deferred", while
+			// normalizedBdReadState collapses that to Status "open" for us
+			// (bdstore.go) and records the deferral out-of-band. So the cached
+			// row keeps matching a Status "open" query that the backing list
+			// can never answer with it.
+			//
+			// Getting it changes neither fact — the fresh copy normalizes to
+			// the same Status — so it would be re-Got on every live list
+			// forever, one bd show per deferred bead per list. The cached
+			// deferral already explains the absence. A deferral that later
+			// closes is still reconciled by recoverMissingFromList, which
+			// verifies missing rows on the reconciliation cadence.
 			continue
 		}
 		stale = append(stale, id)
