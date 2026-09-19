@@ -22,7 +22,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_MIMOCODE_HOOK_VERSION = 2;
+const GC_MIMOCODE_HOOK_VERSION = 3;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -158,6 +158,13 @@ async function mirrorTranscript(directory, client, sessionID) {
 
 export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
+  // The system-transform hook fires once per model generation and chat.message
+  // once more, so the consumptive `gc nudge drain --inject` ran on every tool
+  // call. Track the turn a user message opened and drain once per turn; with no
+  // known turn, fall back to draining every time so nudges are never withheld
+  // (#5552, same shape as the OpenCode plugin).
+  let currentTurnID = "";
+  let drainedTurnID = null;
 
   async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
@@ -172,6 +179,12 @@ export default async function gascityPlugin({ directory, client }) {
 
   async function buildPrefix() {
     const prime = await readPrime();
+    if (currentTurnID && drainedTurnID === currentTurnID) {
+      return prime;
+    }
+    // Claim the turn before awaiting so concurrent generations cannot both
+    // reach the drain.
+    drainedTurnID = currentTurnID;
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
     return [prime, nudges, mail].filter(Boolean).join("\n\n");
@@ -188,8 +201,17 @@ export default async function gascityPlugin({ directory, client }) {
             await mirrorTranscript(directory, client, sessionID);
           }
           return;
-        case "session.idle":
         case "message.updated":
+          {
+            // A new user message opens a turn.
+            const info = event?.properties?.info;
+            if (info && info.role === "user" && info.id) {
+              currentTurnID = String(info.id);
+            }
+          }
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
+          return;
+        case "session.idle":
           await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
         default:

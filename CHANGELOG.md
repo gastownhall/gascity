@@ -101,6 +101,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The OpenCode plugin drains queued nudges once per turn.** `experimental.chat.system.transform`
+  fires once per model generation and `chat.message` once more, so every tool call in a turn ran
+  `gc nudge drain --inject` and `gc mail check --inject` again. The drain is consumptive, so the
+  queue was emptied several times per turn and the items landed in whichever generation won the
+  race, and each run opened hundreds of store connections — a seven-lane city measured ~18 new
+  Dolt connections/s with the server at ~270% CPU. The plugin now tracks the turn a user message
+  opens, runs the two consumptive commands once per turn, and repeats only the prime for later
+  generations. The MiMo Code plugin had the same shape and gets the same fix. OpenCode hook
+  version 7, MiMo Code hook version 3; `gc` upgrades installed plugins below those. (#5552)
+
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
   sling whose only live root is gone.** A storage migration copies rows into the
