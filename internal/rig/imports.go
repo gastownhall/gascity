@@ -317,6 +317,33 @@ func sortedBoundImports(imports []config.BoundImport) []config.BoundImport {
 	return sorted
 }
 
+// boundImportsEqual compares the effective import declarations rather than
+// relying on Go's comparable constraint. Import contains slices and pointers,
+// so generic slices.Equal cannot compare BoundImport values. In particular,
+// AgentsExclude is part of an import edge's semantics and must participate in
+// equality checks used when deciding whether an existing rig matches a new
+// declaration.
+func boundImportsEqual(a, b []config.BoundImport) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Binding != b[i].Binding || !importsEqual(a[i].Import, b[i].Import) {
+			return false
+		}
+	}
+	return true
+}
+
+func importsEqual(a, b config.Import) bool {
+	return a.Source == b.Source &&
+		a.Version == b.Version &&
+		a.Export == b.Export &&
+		a.Shadow == b.Shadow &&
+		a.ImportIsTransitive() == b.ImportIsTransitive() &&
+		slices.Equal(a.AgentsExclude, b.AgentsExclude)
+}
+
 // MergeBoundImports is for already-bound import sets. Legacy default-rig
 // includes use composeDefaultRigImports so binding collisions can be
 // uniquified with the migration policy.
@@ -328,7 +355,7 @@ func MergeBoundImports(primary, secondary []config.BoundImport) ([]config.BoundI
 	seenByBinding := make(map[string]config.Import, len(primary)+len(secondary))
 	appendImport := func(bound config.BoundImport) error {
 		if prior, exists := seenByBinding[bound.Binding]; exists {
-			if prior.Source == bound.Import.Source {
+			if importsEqual(prior, bound.Import) || prior.Source == bound.Import.Source {
 				return nil
 			}
 			return fmt.Errorf("binding %q maps to both %q and %q", bound.Binding, prior.Source, bound.Import.Source)

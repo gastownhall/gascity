@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -537,7 +536,7 @@ func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationP
 			existingRigImports, err := effectiveRigBoundImports(plan.existingRig, deps.Cfg.Packs)
 			if err != nil {
 				emit(ProvisionStep{Name: "include-ignored", Warn: true, Detail: fmt.Sprintf("warning: --include flags %v ignored; existing rig imports could not be normalized (%v). Edit city.toml to change", includes, err)})
-			} else if !slices.Equal(existingRigImports, plan.explicitRigImports) {
+			} else if !boundImportsEqual(existingRigImports, plan.explicitRigImports) {
 				emit(ProvisionStep{Name: "include-ignored", Warn: true, Detail: fmt.Sprintf("warning: --include flags %v ignored (existing imports: %s); edit city.toml to change", includes, formatBoundImports(existingRigImports))})
 			}
 		}
