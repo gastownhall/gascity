@@ -490,6 +490,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or prove that a session is dead. `progress_stall_timeout` remains disabled by
   default.
 
+## [1.4.2] - 2026-09-18
+
+### Fixed
+
+- Restore the 1.4 release line's compatibility with Beads 1.3.0: initialize
+  fresh managed workspace version witnesses, align native library and CLI
+  pins, and decode decimal-string revision tokens without losing precision.
+- Allow graph containers to close without depending on their own finalizer,
+  and explicitly close skipped scope members while preserving cleanup.
+
+### Upgrading Notes
+
+- Coordinate clients sharing a Beads 1.2.2 database before running
+  `bd migrate schema`. The verified migration moves schema 53 to 66;
+  older clients cannot read the migrated schema.
+- Workflow dependency fixes apply to newly instantiated graphs and do not
+  rewrite already-persisted workflow dependencies.
+
+## [1.4.1] - 2026-08-15
+
+### Changed
+
+- **beads pinned to v1.2.2 everywhere** (go.mod library, `deps.env`
+  `BD_VERSION`, CI matrix, SHA-verified archive installer). beads v1.2.2 is
+  the recovery re-release of the tested 1.1 line that superseded the
+  accidental, untested v1.2.0/v1.2.1. With the library and the Homebrew
+  `beads` formula both at 1.2.2, the native store preflight's version-match
+  check passes again for `brew install gascity` users, re-activating the
+  in-process NativeDoltStore (it had silently fallen back to the per-call
+  `bd` CLI store since bd 1.1.2 replaced 1.1.0 as the released version).
+  The module bump is code-identical to the previously pinned 1.1 line
+  (v1.2.2 is the v1.1.2 tree; no transitive dependency changes).
+
 ## [1.4.0] - 2026-07-24
 
 ### Upgrading Notes

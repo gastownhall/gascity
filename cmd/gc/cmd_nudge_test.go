@@ -3087,12 +3087,20 @@ func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenDeliveryDeclined(t *tes
 	}
 }
 
-func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(t *testing.T) {
+// TestTryDeliverQueuedNudgesByPollerCoalescesStaleFenceOntoLiveIncarnation
+// pins the ga-bow contract: a nudge queued for a prior ContinuationEpoch (or a
+// prior SessionID on the same seat) is coalesced onto the live incarnation
+// rather than dead-lettered when the seat's next incarnation drains. Before
+// this change, a fresh wake bumped the epoch and every queued reminder from
+// the previous conversation was dead-lettered as `queued nudge session fence
+// mismatch` — a whole-queue data loss on every failed-spawn respawn
+// (thunderfartcity:gp-u63s).
+func TestTryDeliverQueuedNudgesByPollerCoalescesStaleFenceOntoLiveIncarnation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	now := time.Now().Add(-1 * time.Minute)
 
-	store := &failingTerminalNudgeStore{MemStore: beads.NewMemStore()}
+	store := beads.NewMemStore()
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
@@ -3105,7 +3113,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
-	stale := newQueuedNudgeWithOptions("worker", "stale fenced reminder", "session", now, queuedNudgeOptions{
+	stale := newQueuedNudgeWithOptions("worker", "stale-epoch reminder", "session", now, queuedNudgeOptions{
 		SessionID:         info.ID,
 		ContinuationEpoch: "1",
 	})
@@ -3119,19 +3127,6 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	if err := enqueueQueuedNudgeWithStore(dir, beads.NudgesStore{Store: store}, fresh); err != nil {
 		t.Fatalf("enqueueQueuedNudgeWithStore(fresh): %v", err)
 	}
-	staleBead, ok, err := nudgeFrontDoor(beads.NudgesStore{Store: store}).Find(stale.ID)
-	if err != nil || !ok {
-		t.Fatalf("nudgeFrontDoor.Find(stale) = %v, ok=%v", err, ok)
-	}
-	// Terminal-marking the stale item's backing bead fails (store flake).
-	// Dead-lettering bookkeeping for stale items must not block delivery
-	// of the fence-matching item.
-	store.failID = staleBead.BeadID
-
-	var warnings bytes.Buffer
-	origWarn := nudgeWarningWriter
-	nudgeWarningWriter = &warnings
-	defer func() { nudgeWarningWriter = origWarn }()
 
 	target := nudgeTarget{
 		cityPath:          dir,
@@ -3148,7 +3143,7 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
 	if !delivered {
-		t.Fatal("delivered = false, want the fence-matching nudge delivered despite stale-item bead-mark failure")
+		t.Fatal("delivered = false, want both nudges coalesced and delivered to the live incarnation")
 	}
 
 	var nudgeCalls []runtime.Call
@@ -3158,27 +3153,22 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 		}
 	}
 	if len(nudgeCalls) != 1 {
-		t.Fatalf("nudge calls = %d, want 1", len(nudgeCalls))
+		t.Fatalf("nudge calls = %d, want 1 (both items coalesced into one delivery)", len(nudgeCalls))
 	}
 	if !strings.Contains(nudgeCalls[0].Message, "wake up and resume your wisp") {
-		t.Fatalf("nudge message = %q, want fence-matching reminder", nudgeCalls[0].Message)
+		t.Fatalf("nudge message = %q, want the fresh reminder included", nudgeCalls[0].Message)
 	}
-	if strings.Contains(nudgeCalls[0].Message, "stale fenced reminder") {
-		t.Fatalf("nudge message = %q, must not deliver the fence-mismatched reminder", nudgeCalls[0].Message)
+	if !strings.Contains(nudgeCalls[0].Message, "stale-epoch reminder") {
+		t.Fatalf("nudge message = %q, want the stale-epoch reminder coalesced (not dead-lettered)", nudgeCalls[0].Message)
 	}
 
 	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
 	if err != nil {
 		t.Fatalf("listQueuedNudges: %v", err)
 	}
-	if len(pending) != 0 || len(inFlight) != 0 {
-		t.Fatalf("pending/inFlight = %d/%d, want 0/0", len(pending), len(inFlight))
-	}
-	if len(dead) != 1 || dead[0].ID != stale.ID {
-		t.Fatalf("dead = %+v, want exactly the stale fence-mismatched item", dead)
-	}
-	if !strings.Contains(warnings.String(), stale.ID) {
-		t.Fatalf("warnings = %q, want bead-mark failure surfaced for %s", warnings.String(), stale.ID)
+	if len(pending) != 0 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 0/0/0 (both delivered and acked; no fence-mismatch dead-letter)",
+			len(pending), len(inFlight), len(dead))
 	}
 }
 
@@ -3906,11 +3896,202 @@ func TestClaimDueQueuedNudgesForTargetClaimsSameSessionStaleEpoch(t *testing.T) 
 	}
 
 	deliverable, rejected := splitQueuedNudgesForTarget(target, claimed)
-	if len(deliverable) != 0 {
-		t.Fatalf("deliverable = %#v, want none", deliverable)
+	if len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want stale-epoch nudge re-fenced (not dead-lettered)", rejected)
 	}
-	if len(rejected) != 1 || rejected[0].ID != item.ID {
-		t.Fatalf("rejected = %#v, want stale same-session nudge rejected", rejected)
+	if len(deliverable) != 1 || deliverable[0].ID != item.ID {
+		t.Fatalf("deliverable = %#v, want stale-epoch nudge re-fenced to the live incarnation", deliverable)
+	}
+	if got := deliverable[0].ContinuationEpoch; got != "2" {
+		t.Fatalf("re-fenced ContinuationEpoch = %q, want %q (target's live epoch)", got, "2")
+	}
+	if got := deliverable[0].SessionID; got != "gc-1" {
+		t.Fatalf("re-fenced SessionID = %q, want %q (target's live sessionID)", got, "gc-1")
+	}
+}
+
+func TestQueuedNudgeClaimableForTarget_SessionReplacementTable(t *testing.T) {
+	worker := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-new",
+		continuationEpoch: "2",
+	}
+	matching := queuedNudge{Agent: "worker", SessionID: "gc-new", ContinuationEpoch: "2"}
+	legA := queuedNudge{Agent: "worker", SessionID: "gc-new", ContinuationEpoch: "1"}
+	legB := queuedNudge{Agent: "worker", SessionID: "gc-old", ContinuationEpoch: "1"}
+	otherAgent := queuedNudge{Agent: "mayor", SessionID: "gc-old", ContinuationEpoch: "1"}
+	unresolved := nudgeTarget{agent: config.Agent{Name: "worker"}}
+
+	liveSuccessorOnly := func() map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}}
+	}
+	liveSibling := func() map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}, "gc-old": {}}
+	}
+
+	tests := []struct {
+		name string
+		item queuedNudge
+		tgt  nudgeTarget
+		live func() map[string]struct{}
+		want bool
+	}{
+		{name: "matching fence delivers", item: matching, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "Leg A same session stale epoch is claimable", item: legA, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "Leg B superseded session is claimable", item: legB, tgt: worker, live: liveSuccessorOnly, want: true},
+		{name: "live sibling keeps its own fence", item: legB, tgt: worker, live: liveSibling, want: false},
+		{name: "no census fails closed on session replacement", item: legB, tgt: worker, live: nil, want: false},
+		{name: "empty census fails closed on session replacement", item: legB, tgt: worker, live: func() map[string]struct{} { return map[string]struct{}{} }, want: false},
+		{name: "unresolved target cannot claim a fenced item", item: legB, tgt: unresolved, live: liveSuccessorOnly, want: false},
+		{name: "other agent is never claimable", item: otherAgent, tgt: worker, live: liveSuccessorOnly, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queuedNudgeClaimableForTarget(tt.tgt, tt.item, tt.live); got != tt.want {
+				t.Fatalf("claimable = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaimDueQueuedNudgesForTargetClaimsReplacedSession(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-time.Minute)
+	item := newQueuedNudgeWithOptions("worker", "predecessor session", "mail", now, queuedNudgeOptions{
+		ID:                "n-replaced",
+		SessionID:         "gc-old",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-new": {}}
+	}
+
+	target := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-new",
+		continuationEpoch: "2",
+	}
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].ID != item.ID {
+		t.Fatalf("claimed = %#v, want replaced-session nudge", claimed)
+	}
+
+	deliverable, rejected := splitQueuedNudgesForTarget(target, claimed)
+	if len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want replaced-session nudge re-fenced (not dead-lettered)", rejected)
+	}
+	if len(deliverable) != 1 || deliverable[0].ID != item.ID {
+		t.Fatalf("deliverable = %#v, want replaced-session nudge re-fenced to the live incarnation", deliverable)
+	}
+	if got := deliverable[0].SessionID; got != "gc-new" {
+		t.Fatalf("re-fenced SessionID = %q, want %q", got, "gc-new")
+	}
+	if got := deliverable[0].ContinuationEpoch; got != "2" {
+		t.Fatalf("re-fenced ContinuationEpoch = %q, want %q", got, "2")
+	}
+}
+
+func TestClaimDueQueuedNudgesForTargetLeavesLiveSiblingFencePending(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-time.Minute)
+	item := newQueuedNudgeWithOptions("worker", "for sibling session", "session", now, queuedNudgeOptions{
+		ID:                "n-sibling",
+		SessionID:         "gc-2",
+		ContinuationEpoch: "1",
+	})
+	if err := enqueueQueuedNudge(dir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	prev := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prev })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{"gc-1": {}, "gc-2": {}}
+	}
+
+	target := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-1",
+		continuationEpoch: "1",
+	}
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("claimed = %#v, want live sibling fence left pending", claimed)
+	}
+
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != "n-sibling" {
+		t.Fatalf("pending = %#v, want n-sibling", pending)
+	}
+}
+
+func TestSessionHoldsNudgeFence(t *testing.T) {
+	tests := []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{name: "active holds fence", info: session.Info{ID: "gc-1", State: session.StateActive}, want: true},
+		{name: "asleep holds fence", info: session.Info{ID: "gc-1", State: session.StateAsleep}, want: true},
+		{name: "draining holds fence", info: session.Info{ID: "gc-1", State: session.StateDraining}, want: true},
+		{name: "drained is superseded", info: session.Info{ID: "gc-1", State: session.StateDrained}, want: false},
+		{name: "archived is superseded", info: session.Info{ID: "gc-1", State: session.StateArchived}, want: false},
+		{name: "failed-create is superseded", info: session.Info{ID: "gc-1", State: session.StateFailedCreate}, want: false},
+		{name: "closed is superseded", info: session.Info{ID: "gc-1", State: session.StateActive, Closed: true}, want: false},
+		{name: "empty id does not hold fence", info: session.Info{State: session.StateActive}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionHoldsNudgeFence(tt.info); got != tt.want {
+				t.Fatalf("sessionHoldsNudgeFence(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSplitQueuedNudgesForTarget_ReFencesStaleSessionIDToLiveTarget pins the
+// same-seat-new-incarnation re-fence: an item pinned to the seat's prior
+// session bead (e.g. after a failed-spawn respawn re-materialized the named
+// session under a new ID) is not dead-lettered; the current target IS the
+// live incarnation for that seat (matchesQueueAgent proved it), so the item
+// is delivered there with its fence coalesced onto the live one. Regression
+// guard for ga-bow (thunderfartcity:gp-u63s).
+func TestSplitQueuedNudgesForTarget_ReFencesStaleSessionIDToLiveTarget(t *testing.T) {
+	items := []queuedNudge{
+		{ID: "n-stale-session", Agent: "worker", SessionID: "gc-old", ContinuationEpoch: "1"},
+	}
+	target := nudgeTarget{
+		agent:             config.Agent{Name: "worker"},
+		sessionID:         "gc-new",
+		continuationEpoch: "1",
+	}
+
+	deliverable, rejected := splitQueuedNudgesForTarget(target, items)
+	if len(rejected) != 0 {
+		t.Fatalf("rejected = %#v, want stale-sessionID nudge re-fenced (not dead-lettered)", rejected)
+	}
+	if len(deliverable) != 1 || deliverable[0].ID != "n-stale-session" {
+		t.Fatalf("deliverable = %#v, want the stale-sessionID nudge re-fenced onto the live target", deliverable)
+	}
+	if got := deliverable[0].SessionID; got != "gc-new" {
+		t.Fatalf("re-fenced SessionID = %q, want %q", got, "gc-new")
 	}
 }
 
