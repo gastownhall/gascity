@@ -223,7 +223,39 @@ gc analyze
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc analyze beads](#gc-analyze-beads) | Bead open/close counts by store, type, and label |
 | [gc analyze reliability](#gc-analyze-reliability) | Correlate session-lifecycle events with model/version/rig |
+
+## gc analyze beads
+
+Beads reports bead.created/bead.closed counts over a time window,
+grouped by store, type, and label — the routine "how much did we ship in
+this window" stats query.
+
+Store is derived from the bead id's mint-prefix namespace (the segment
+before the first "-"; ids with no hyphen group under "default"), the
+same prefix convention the relocated coordination classes (graph,
+messaging, sessions, orders, nudges) mint under. Type is the bead's
+issue_type. A bead carrying multiple labels contributes to each label's
+bucket; the TOTAL row counts distinct bead ids instead of summing
+groups, so it is not inflated by multi-label fan-out.
+
+Read-only: this command never writes events or beads.
+
+```
+gc analyze beads [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--city` | string |  | city directory (default: discover from cwd) |
+| `--events` | string |  | explicit events.jsonl path (overrides city discovery) |
+| `--json` | bool |  | emit JSON instead of a table |
+| `--label` | string |  | filter to beads carrying a specific label |
+| `--since` | string | `24h` | start of the analysis window — duration (1h, 7d) or RFC3339 timestamp |
+| `--store` | string |  | filter to a specific store (bead-id mint-prefix namespace) |
+| `--type` | string |  | filter to a specific bead type (issue_type) |
+| `--until` | string |  | end of the analysis window — duration (0s = now, 30m = 30 minutes ago) or RFC3339 timestamp |
 
 ## gc analyze reliability
 
