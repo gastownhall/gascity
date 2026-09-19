@@ -1469,6 +1469,28 @@ type multiRecipientMailCounter interface {
 	CountRecipients([]string) (int, int, error)
 }
 
+// mailSendAnnotations carries the optional provenance a sender attaches to one
+// message: the recurring order a digest belongs to, and the bead a BLOCKED
+// report waits on. Both are empty for ordinary mail.
+type mailSendAnnotations struct {
+	supersede string
+	blockedOn string
+}
+
+func (a mailSendAnnotations) metadata() map[string]string {
+	md := map[string]string{}
+	if a.supersede != "" {
+		md[mail.SupersedeKeyMetadataKey] = a.supersede
+	}
+	if a.blockedOn != "" {
+		md[mail.BlockedOnMetadataKey] = a.blockedOn
+	}
+	if len(md) == 0 {
+		return nil
+	}
+	return md
+}
+
 func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var notify bool
 	var all bool
@@ -1477,6 +1499,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
 	var jsonOut bool
+	var ann mailSendAnnotations
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
 		Short: "Send a message to a session alias or human",
@@ -1489,22 +1512,29 @@ a non-running recipient. Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
-Use --all to broadcast to all live sessions (excluding sender and "human").`,
+Use --all to broadcast to all live sessions (excluding sender and "human").
+
+Use --supersede <order> for a recurring digest that reports full current
+state. The new message archives your earlier unread messages carrying the
+same order name to the same recipient, so the inbox holds one copy: the
+newest. It never touches a message sent without the flag, sent by another
+sender, or carrying a different order name.
+
+Use --blocked-on <bead> when you escalate a blocker. Once that bead closes,
+the reader's next inbox listing archives the message. A message whose bead is
+still open stays unread.`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
   gc mail send polecat "Priority task" --notify
-  gc mail send --all "Status update: tests passing"`,
+  gc mail send --all "Status update: tests passing"
+  gc mail send mayor -s "Slack alert review: 3 actionable" --supersede slack-alert-review
+  gc mail send human -s "BLOCKED: needs PR 25 merged" --blocked-on sc-8fk2p`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			code := 0
-			if jsonOut {
-				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
-			} else {
-				code = cmdMailSend(args, notify, all, from, to, subject, message, stdout, stderr)
-			}
+			code := cmdMailSendJSON(args, notify, all, from, to, subject, message, ann, jsonOut, stdout, stderr)
 			if code != 0 {
 				return errExit
 			}
@@ -1520,7 +1550,11 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().StringVar(&ann.supersede, "supersede", "", "recurring order name; archives your earlier unread messages with the same name to this recipient")
+	cmd.Flags().StringVar(&ann.blockedOn, "blocked-on", "", "bead id this message waits on; the message is archived once that bead closes")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("all", "supersede")
+	cmd.MarkFlagsMutuallyExclusive("all", "blocked-on")
 	return cmd
 }
 
@@ -1736,14 +1770,10 @@ The recipient defaults to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human".`,
 	return cmd
 }
 
-// cmdMailSend is the CLI entry point for sending mail. It opens the provider,
-// resolves session mailbox identities, and delegates to doMailSend.
-// The to parameter is the --to flag value (empty if not set).
-func cmdMailSend(args []string, notify bool, all bool, from string, to string, subject string, message string, stdout, stderr io.Writer) int {
-	return cmdMailSendJSON(args, notify, all, from, to, subject, message, false, stdout, stderr)
-}
-
-func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, jsonOut bool, stdout, stderr io.Writer) int {
+// cmdMailSendJSON is the CLI entry point for sending mail. It opens the
+// provider, resolves session mailbox identities, and delegates to
+// doMailSendJSON. The to parameter is the --to flag value (empty if not set).
+func cmdMailSendJSON(args []string, notify bool, all bool, from string, to string, subject string, message string, ann mailSendAnnotations, jsonOut bool, stdout, stderr io.Writer) int {
 	mp, code := openCityMailProvider(stderr, "gc mail send")
 	if mp == nil {
 		return code
@@ -1852,17 +1882,40 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	rec := openCityRecorder(stderr)
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, jsonOut, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nf, ann, jsonOut, stdout, stderr)
+}
+
+// sendAnnotatedMail sends one message, attaching the sender's annotations when
+// there are any. A backend that cannot carry metadata rejects the flags rather
+// than dropping them: a digest whose supersede key vanished would pile up
+// silently, which is the bug the flag exists to fix.
+//
+// A supersede failure comes back with the created message, because the digest
+// did go out; the caller reports the leftover and still succeeds.
+func sendAnnotatedMail(mp mail.Provider, sender, to, subject, body string, ann mailSendAnnotations, stderr io.Writer) (mail.Message, error) {
+	md := ann.metadata()
+	if md == nil {
+		return mp.Send(sender, to, subject, body)
+	}
+	ms, ok := mp.(mail.MetadataSender)
+	if !ok {
+		return mail.Message{}, fmt.Errorf("mail provider %q does not support --supersede or --blocked-on", mailProviderName())
+	}
+	m, err := ms.SendWithMetadata(sender, to, subject, body, md)
+	if err != nil && m.ID != "" {
+		fmt.Fprintf(stderr, "gc mail send: sent %s but could not retire the previous digest: %v\n", m.ID, err) //nolint:errcheck // best-effort stderr
+	}
+	return m, err
 }
 
 // doMailSend creates a message addressed to a recipient. args is [to, subject, body]
 // or [to, body] (subject="" if no -s flag). When nudgeFn is non-nil, the
 // recipient is nudged after message creation (skipped for "human").
 func doMailSend(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, stdout, stderr io.Writer) int {
-	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, false, stdout, stderr)
+	return doMailSendJSON(mp, rec, validRecipients, sender, args, nudgeFn, mailSendAnnotations{}, false, stdout, stderr)
 }
 
-func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, jsonOut bool, stdout, stderr io.Writer) int {
+func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[string]bool, sender string, args []string, nudgeFn nudgeFunc, ann mailSendAnnotations, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "gc mail send: usage: gc mail send <to> <body>  OR  gc mail send <to> -s <subject> [-m <body>]") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1884,9 +1937,9 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		return 1
 	}
 
-	m, err := mp.Send(sender, to, subject, body)
+	m, err := sendAnnotatedMail(mp, sender, to, subject, body, ann, stderr)
 	telemetry.RecordMailOp(context.Background(), "send", err)
-	if err != nil {
+	if err != nil && m.ID == "" {
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2002,7 +2055,24 @@ func cmdMailInboxWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer)
 		return 1
 	}
 
+	sweepResolvedBlockers(mp, target, stderr)
+
 	return doMailInboxTargetWithJSON(mp, target, jsonOut, stdout, stderr)
+}
+
+// sweepResolvedBlockers retires the BLOCKED reports in this mailbox whose named
+// bead has closed, so the reader sees only blockers that still block. It is
+// best-effort and advisory: a sweep failure must never stop the listing, since
+// showing a stale report is strictly better than showing nothing. Backends that
+// cannot resolve a bead id skip it entirely.
+func sweepResolvedBlockers(mp mail.Provider, target resolvedMailTarget, stderr io.Writer) {
+	sweeper, ok := mp.(mail.BlockerSweeper)
+	if !ok {
+		return
+	}
+	if _, err := sweeper.ArchiveResolvedBlockers(target.recipients); err != nil {
+		fmt.Fprintf(stderr, "gc mail inbox: retiring resolved blockers: %v\n", err) //nolint:errcheck // best-effort stderr
+	}
 }
 
 type mailInboxReader interface {

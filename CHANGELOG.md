@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc mail send --supersede <order>` keeps one copy of a recurring digest.**
+  An order that reports full current state every hour used to leave one unread
+  message per hour: the mayor's inbox grew to 32 unread on 2026-09-15, six of
+  them copies of the same Slack alert review. With the flag, a new message
+  archives the sender's earlier unread messages that carry the same order name
+  to the same recipient, so the inbox holds the newest state and nothing else.
+  Archiving closes the message bead and keeps its body, so a superseded digest
+  stays readable through `gc mail peek` and `bd show`. The match is scoped by
+  key, sender, and recipient together: a worker's one-off report, which carries
+  no key, is never retired by a later digest.
+
+- **`gc mail send --blocked-on <bead>` retires an escalation once its blocker
+  closes.** A BLOCKED report whose request has already been granted used to sit
+  unread forever, which teaches a reader to distrust the whole mailbox. A
+  message that names the bead it waits on is archived by the reader's next
+  `gc mail inbox`, and only on positive evidence: a bead still open or in
+  progress, a bead this store cannot read, and a named session or message bead
+  all keep the report visible. There is no timer, because an unanswered request
+  from a blocked worker is the one signal this mailbox exists to deliver.
+
 - **`gc storage preflight` reports everything the infra-class cutover would
   refuse, from outside the window.** `gc storage migrate --from-work` runs its
   refusals with the fleet stopped, so an operator learned that a rig scope
