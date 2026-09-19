@@ -1337,7 +1337,22 @@ func (m *Manager) suspend(id string, intent suspendIntent) error {
 			return err
 		}
 
+		// Invalidate exit tracking before the provider can report death. An
+		// explicit suspend is neither a rapid crash nor unproductive churn;
+		// either classification would discard the conversation resume key.
+		// Restore the wake stamp if stopping a live runtime fails.
+		lastWokeAt := b.Metadata["last_woke_at"]
+		if lastWokeAt != "" {
+			if err := m.store.SetMetadata(id, "last_woke_at", ""); err != nil {
+				return fmt.Errorf("preparing suspension exit tracking: %w", err)
+			}
+		}
 		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+			if lastWokeAt != "" {
+				if restoreErr := m.store.SetMetadata(id, "last_woke_at", lastWokeAt); restoreErr != nil {
+					return errors.Join(err, fmt.Errorf("restoring suspension exit tracking: %w", restoreErr))
+				}
+			}
 			return err
 		}
 
