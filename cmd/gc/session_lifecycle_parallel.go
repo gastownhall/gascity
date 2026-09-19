@@ -1103,10 +1103,17 @@ func buildPreparedStartWithWorkDirResolver(
 	// the probe reports !probeable and we leave their metadata untouched.
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
+	// Caller-allocated keys have no transcript until the first launch. Rebuilding
+	// a pending launch must retain the same key, even before its first JSONL write,
+	// so a missing transcript only clears the key once the session has started.
+	searchPaths := worker.DefaultSearchPaths()
+	if cfg != nil {
+		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
+	}
 	transcriptState := sessTranscriptUnknown
 	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, sk)
 		if probeable {
 			if present {
 				transcriptState = sessTranscriptPresent
@@ -1114,7 +1121,7 @@ func buildPreparedStartWithWorkDirResolver(
 				transcriptState = sessTranscriptAbsent
 			}
 		}
-		if probeable && !present {
+		if probeable && !present && candidate.info.StartedConfigHash != "" {
 			var sessFront *sessionpkg.Store
 			if store != nil {
 				sessFront = sessionFrontDoor(store)
@@ -1174,7 +1181,7 @@ func buildPreparedStartWithWorkDirResolver(
 		parentStale := false
 		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
 			provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+			if present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, parentSID); probeable && !present {
 				parentStale = true
 			}
 		}
@@ -2216,11 +2223,8 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 // so tests can model a present or absent transcript without materializing
 // provider-specific transcript trees. Production delegates to the transcript
 // discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of the supplied claude default, so
-// claude/kimi/pi each probe their real location.
-var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
-	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
-}
+// provider's own default roots with the configured worker search paths.
+var staleResumeKeyProbe = workertranscript.HasKeyedTranscript
 
 // validateForkLaunch enforces fork-launch invariants before command resolution.
 // It fails loud rather than ever silently degrading a brain-forked (warm) arm to

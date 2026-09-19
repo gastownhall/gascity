@@ -1455,7 +1455,7 @@ func TestCheckStability_SubprocessProviderSkipsCrashCounting(t *testing.T) {
 // conversation is actually unresumable. Attempt accrual is unaffected.
 func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return true, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return true, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1486,7 +1486,7 @@ func TestRecordWakeFailure_KeepsResumableConversation(t *testing.T) {
 // absent transcript keeps the existing unconditional reset.
 func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
@@ -1515,7 +1515,7 @@ func TestRecordWakeFailure_ClearsUnresumableConversation(t *testing.T) {
 // gaining the new keep-the-conversation behavior.
 func TestRecordWakeFailure_ClearsWhenProviderUnprobeable(t *testing.T) {
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, false }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, false }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}

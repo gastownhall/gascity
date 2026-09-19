@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type wakeEvaluation struct {
@@ -672,7 +673,7 @@ func wakeFailureKeepsConversation(info sessionpkg.Info) bool {
 	if sessionKey == "" || workDir == "" {
 		return false
 	}
-	present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(nil, info), workDir, sessionKey)
+	present, probeable := staleResumeKeyProbe(worker.DefaultSearchPaths(), sessionTranscriptProvider(nil, info), workDir, sessionKey)
 	return probeable && present
 }
 
