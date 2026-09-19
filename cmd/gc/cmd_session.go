@@ -1682,6 +1682,10 @@ func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Suspend an active session by stopping its runtime process.
 The session bead persists and can be resumed later.
 
+The hold is durable: a suspended session that still owns assigned work stays
+asleep rather than being restarted to serve it, and its pool slot and claim are
+left alone. It comes back on ` + "`gc session wake`" + `, or when the hold expires.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -1733,7 +1737,7 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 			heldUntil := time.Now().Add(indefiniteHoldDuration).UTC().Format(time.RFC3339)
 			if err := sessionFrontDoor(sessStore).ApplyPatch(sessionID, map[string]string{
 				"held_until":   heldUntil,
-				"sleep_intent": "user-hold",
+				"sleep_intent": string(session.SleepReasonUserHold),
 				"state":        "suspended",
 			}); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr

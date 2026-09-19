@@ -60,3 +60,28 @@ func IsDeliberateSleepReason(reason string) bool {
 		return false
 	}
 }
+
+// StandingSleepIntent returns the canonical standing-hold intent carried by a
+// raw sleep_intent marker, or "" when the marker is not a standing hold.
+//
+// A STANDING hold outlives the drain it provokes, because a later explicit act
+// releases it: an operator suspend (`gc session suspend`, which pairs the
+// intent with held_until) or a wait gate (`gc session wait --sleep`, which
+// pairs it with wait_hold). Both are cleared by ClearWakeBlockersPatch on
+// `gc session wake`, and wait-hold additionally by the wait's own resolution.
+// Every other intent — idle-stop-pending, the ordinary idle-drain handshake —
+// is bookkeeping for the drain itself and ends with it.
+//
+// The distinction is load-bearing on the wake side: sleep_intent is the only
+// marker separating an operator's suspend hold from an agent's
+// `gc runtime heartbeat` keep-alive hold, since both set held_until. The
+// heartbeat crash-recovery override respawns the latter and must not touch the
+// former (gastownhall/gascity#3994).
+func StandingSleepIntent(intent string) SleepReason {
+	switch reason := SleepReason(strings.TrimSpace(intent)); reason {
+	case SleepReasonUserHold, SleepReasonWaitHold:
+		return reason
+	default:
+		return ""
+	}
+}

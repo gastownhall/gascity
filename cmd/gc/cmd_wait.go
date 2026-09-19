@@ -177,7 +177,13 @@ func newSessionWaitCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wait [session-id-or-alias]",
 		Short: "Register a dependency wait for a session",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Register a durable wait so a session is woken when the beads it depends on close.
+
+With --sleep the session takes a wait hold and drains to sleep. The hold is
+durable: a wait-held session that still owns assigned work stays asleep rather
+than being restarted to serve it, and its pool slot and claim are left alone. It
+comes back when the wait resolves, or on ` + "`gc session wake`" + `.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionWait(args, depIDs, matchAny, note, sleep, stdout, stderr) != 0 {
 				return errExit
@@ -404,7 +410,7 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 	if sleep {
 		if err := deps.sessions.ApplyPatch(sessionID, map[string]string{
 			"wait_hold":    "true",
-			"sleep_intent": "wait-hold",
+			"sleep_intent": string(sessionpkg.SleepReasonWaitHold),
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
