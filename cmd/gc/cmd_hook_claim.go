@@ -1764,20 +1764,57 @@ func (s hookClaimStoreHead) Admit(candidate string) (hookClaimWorkTree, bool) {
 // the store holds no repository, there is no branch to leak and the path comparison
 // is the whole question.
 //
-// A worktree carries .git as a directory or as a file; a bare repository carries HEAD
-// beside objects/.
+// This has to read the same repository git's own discovery would, or it clears cases
+// the declining git call would not have: a worktree carries .git as a directory or as
+// a file at its own root, but git also finds a repository a directory inherits from
+// an ancestor, and a linked worktree's administrative directory carries HEAD beside
+// commondir rather than beside objects/. And a marker this cannot stat for permission
+// reasons is not evidence of absence -- an unreadable entry is exactly the shape a
+// repository refused for dubious ownership would present, so it has to read the same
+// as a marker found, not the same as a marker missing.
 func hookClaimDirLooksLikeRepo(dir string) bool {
-	if strings.TrimSpace(dir) == "" {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
 		return false
 	}
-	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+	for {
+		if hookClaimDirCarriesRepoMarkers(dir) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
+
+// hookClaimDirCarriesRepoMarkers reports whether dir itself, without climbing to any
+// ancestor, carries a repository's own markers: a worktree's .git, a bare
+// repository's HEAD beside objects/, or a linked worktree's administrative directory,
+// which carries HEAD beside commondir but no objects/ of its own.
+func hookClaimDirCarriesRepoMarkers(dir string) bool {
+	if hookClaimMarkerPresent(filepath.Join(dir, ".git")) {
 		return true
 	}
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+	if !hookClaimMarkerPresent(filepath.Join(dir, "HEAD")) {
 		return false
 	}
-	info, err := os.Stat(filepath.Join(dir, "objects"))
-	return err == nil && info.IsDir()
+	return hookClaimMarkerPresent(filepath.Join(dir, "objects")) ||
+		hookClaimMarkerPresent(filepath.Join(dir, "commondir"))
+}
+
+// hookClaimMarkerPresent reports whether path can be shown to exist. A stat error
+// other than "not found" -- permission denied, chiefly -- is inconclusive rather than
+// absent, so it reads as present: the caller only ever treats presence as a reason to
+// refuse, and refusing on an entry this could not rule out matches the ordering the
+// rest of this exclusion already uses.
+func hookClaimMarkerPresent(path string) bool {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true
+	}
+	return !os.IsNotExist(err)
 }
 
 // hookClaimPathOutside reports whether child can be SHOWN to name a directory that

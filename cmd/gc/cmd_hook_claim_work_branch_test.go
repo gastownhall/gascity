@@ -1160,6 +1160,92 @@ func TestHookClaimRefusesTheCandidatesItCannotCompare(t *testing.T) {
 	}
 }
 
+// TestHookClaimDirLooksLikeRepoTreatsPermissionDeniedAsPresent pins the first of the
+// three measured misses in the on-disk repository check: a marker this cannot stat
+// for permission reasons has to read the same as a marker found, not the same as one
+// missing. An unreadable store directory is exactly the shape a repository refused
+// for dubious ownership would present -- the one case this check exists to catch --
+// so reading the stat error as "no repository here" would clear the store it is
+// asked about specifically because git declined to answer for it.
+func TestHookClaimDirLooksLikeRepoTreatsPermissionDeniedAsPresent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores permission bits")
+	}
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked-store")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", locked, err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("locking %s: %v", locked, err)
+	}
+	// Restore permissions before t.TempDir's own cleanup tries to remove root, and
+	// before this test's own os.Lstat calls below need to reach the directory again.
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o755); err != nil {
+			t.Errorf("restoring permissions on %s: %v", locked, err)
+		}
+	})
+
+	if _, err := os.Lstat(filepath.Join(locked, ".git")); err == nil || !os.IsPermission(err) {
+		t.Skipf("this environment does not deny access to a mode-000 directory: %v", err)
+	}
+
+	if !hookClaimDirLooksLikeRepo(locked) {
+		t.Errorf("%s read as no repository; a permission-denied marker is indistinguishable from one git declined to identify", locked)
+	}
+}
+
+// TestHookClaimDirLooksLikeRepoDiscoversRepositoryAboveDir pins the second measured
+// miss: the check only ever looked at dir itself, while the git query it stands in
+// for climbs from dir to whatever repository an ancestor carries. A store directory
+// nested inside a repository it does not itself carry markers for read as "no
+// repository" under the old check and "a repository" under a real git query -- the
+// exact gap that lets the refusal miss what git would have refused.
+func TestHookClaimDirLooksLikeRepoDiscoversRepositoryAboveDir(t *testing.T) {
+	root := t.TempDir()
+	hookClaimInitRepo(t, root, "main")
+
+	nested := filepath.Join(root, "workdir", "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+
+	if !hookClaimDirLooksLikeRepo(nested) {
+		t.Errorf("%s read as no repository; its ancestor %s carries one", nested, root)
+	}
+}
+
+// TestHookClaimDirLooksLikeRepoRecognizesLinkedWorktreeAdminDir pins the third
+// measured miss: a linked worktree's administrative directory (under the main
+// repository's .git/worktrees/) carries HEAD beside a commondir file that points back
+// at the shared object store, not beside an objects/ directory of its own. The old
+// check required HEAD and objects/ together, so this administrative directory --
+// which does answer branch queries -- read as no repository.
+func TestHookClaimDirLooksLikeRepoRecognizesLinkedWorktreeAdminDir(t *testing.T) {
+	admin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(admin, "HEAD"), []byte("ref: refs/heads/worktree-branch\n"), 0o644); err != nil {
+		t.Fatalf("writing HEAD: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(admin, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatalf("writing commondir: %v", err)
+	}
+
+	if !hookClaimDirLooksLikeRepo(admin) {
+		t.Errorf("%s read as no repository; HEAD beside commondir is a linked worktree's administrative directory", admin)
+	}
+
+	t.Run("a bare HEAD file with neither objects nor commondir is not a repository", func(t *testing.T) {
+		bare := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+			t.Fatalf("writing HEAD: %v", err)
+		}
+		if hookClaimDirLooksLikeRepo(bare) {
+			t.Errorf("%s read as a repository from a lone HEAD file", bare)
+		}
+	})
+}
+
 // TestHookClaimPinnedBranchReadKeepsRelativeConfigSemantics pins that naming the
 // repository did not move where git resolves relative paths from.
 //
