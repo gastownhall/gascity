@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 type primeHookFailWriter struct {
@@ -175,8 +176,9 @@ schema = 2
 	if code != 0 {
 		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if got := stdout.String(); got != "Agent: ada\n" {
-		t.Fatalf("stdout = %q, want %q", got, "Agent: ada\n")
+	want := appendFilesystemSearchGuidance("Agent: ada\n")
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
 
@@ -285,7 +287,7 @@ path = "./rigs/bravo"
 	if code != 0 {
 		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	if got := stdout.String(); got != "alpha-work-query" {
+	if got := stdout.String(); got != appendFilesystemSearchGuidance("alpha-work-query") {
 		t.Fatalf("stdout = %q, want alpha rig fragment; stderr=%q", got, stderr.String())
 	}
 	if strings.Contains(stdout.String(), "bravo-work-query") {
@@ -1385,5 +1387,49 @@ func TestBuildPrimeContextConfigDir(t *testing.T) {
 	}, nil, config.QueryTopology{}, nil)
 	if ctx.ConfigDir != packDir {
 		t.Fatalf("ConfigDir = %q, want SourceDir override %q", ctx.ConfigDir, packDir)
+	}
+}
+
+// TestPrimeStrictJSONBudgetMatchesDeliveredPrompt pins the invariant stated in
+// reportPromptDeliveryBudget's doc comment: the strict diagnostic "can never
+// disagree with what a real launch does". The filesystem-search guidance is
+// appended to the prompt before it reaches stdout, so the budget must be
+// computed on the post-append text — otherwise --strict under-reports
+// raw_bytes/argv_bytes by the guidance length and can miss an oversized-prompt
+// hard fail.
+//
+// Non-hook only: in hook mode Content also carries the beacon and the hook
+// context suffix, both of which are outside the delivery budget by design.
+func TestPrimeStrictJSONBudgetMatchesDeliveredPrompt(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	const prompt = "worker prompt without the guidance heading"
+	writePromptBudgetCity(t, promptBudgetBareTOML, prompt)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newPrimeCmd(&stdout, &stderr)
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--strict", "worker"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc prime --json --strict = %v; stderr=%q", err, stderr.String())
+	}
+
+	var got primeJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	if got.PromptBudget == nil {
+		t.Fatalf("primeJSONResult.PromptBudget = nil, want a populated budget")
+	}
+	if !strings.Contains(got.Content, filesystemSearchGuidanceHeading) {
+		t.Fatalf("delivered content missing filesystem search guidance:\n%s", got.Content)
+	}
+	if got.PromptBudget.RawBytes != len(got.Content) {
+		t.Errorf("prompt_budget.raw_bytes = %d, want len(content) = %d; the strict budget must measure the prompt that is actually delivered",
+			got.PromptBudget.RawBytes, len(got.Content))
+	}
+	if wantArgv := len(shellquote.Quote(got.Content)); got.PromptBudget.ArgvBytes != wantArgv {
+		t.Errorf("prompt_budget.argv_bytes = %d, want %d", got.PromptBudget.ArgvBytes, wantArgv)
 	}
 }

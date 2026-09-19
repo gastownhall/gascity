@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"io/fs"
 	"os"
@@ -15,7 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-const formulaFilesystemSearchGuidance = "**Never use wide filesystem searches when a CLI command exists.**"
+const formulaFilesystemSearchGuidance = filesystemSearchGuidanceHeading
 
 // materializeEmbeddedGastownPack writes the module-embedded gastown pack
 // (the exact bytes the gc binary bundles) to a t.TempDir()-rooted directory
@@ -60,6 +61,62 @@ func TestRenderPromptMissingFile(t *testing.T) {
 	got := renderPrompt(f, "/city", "", "prompts/missing.md", PromptContext{}, "", io.Discard, nil, nil, nil)
 	if got != "" {
 		t.Errorf("renderPrompt(missing) = %q, want empty", got)
+	}
+}
+
+func TestWritePrimePromptAddsFilesystemSearchGuidanceOnce(t *testing.T) {
+	for _, prompt := range []string{
+		"Custom agent prompt.\n",
+		"Custom agent prompt.\n\n" + filesystemSearchGuidance,
+	} {
+		var stdout strings.Builder
+		writePrimePromptWithFormat(&stdout, "test-city", "custom", prompt, false, "", false, "", nil)
+		if count := strings.Count(stdout.String(), formulaFilesystemSearchGuidance); count != 1 {
+			t.Fatalf("filesystem search guidance count = %d, want 1:\n%s", count, stdout.String())
+		}
+		for _, want := range []string{
+			"`find /`",
+			"`find ~`",
+			"`find /Users`",
+			"`find $HOME`",
+			"Desktop",
+			"Downloads",
+			"Music",
+			"network mounts",
+			"current city, rig,",
+		} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("prime prompt missing %q:\n%s", want, stdout.String())
+			}
+		}
+	}
+}
+
+func TestWritePrimePromptFormatsFilesystemSearchGuidanceOnce(t *testing.T) {
+	var stdout strings.Builder
+	writePrimePromptWithFormat(&stdout, "test-city", "custom", "Custom agent prompt.\n", true, "codex", false, "", nil)
+
+	var output struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &output); err != nil {
+		t.Fatalf("unmarshal hook output: %v; stdout=%q", err, stdout.String())
+	}
+	if count := strings.Count(output.HookSpecificOutput.AdditionalContext, formulaFilesystemSearchGuidance); count != 1 {
+		t.Fatalf("filesystem search guidance count = %d, want 1:\n%s", count, output.HookSpecificOutput.AdditionalContext)
+	}
+}
+
+func TestWritePrimePromptSuppressedManagedSessionOmitsFilesystemSearchGuidance(t *testing.T) {
+	var stdout strings.Builder
+	writePrimePromptWithFormat(&stdout, "test-city", "custom", "Custom agent prompt.\n", true, "", true, "", nil)
+	if strings.Contains(stdout.String(), formulaFilesystemSearchGuidance) {
+		t.Fatalf("suppressed managed SessionStart leaked filesystem search guidance:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Custom agent prompt.") {
+		t.Fatalf("suppressed managed SessionStart leaked the startup prompt:\n%s", stdout.String())
 	}
 }
 
@@ -935,6 +992,31 @@ func TestFormulaFilesystemSearchGuidanceCoversPromptSources(t *testing.T) {
 				t.Fatalf("%s missing %q", rel, commandGuidance)
 			}
 		})
+	}
+}
+
+// TestAppendFilesystemSearchGuidanceIsIdempotentForBundledPackText pins the
+// suppression check against the real bundled pack body rather than a
+// synthetic prompt built from the Go constant. The pack copies and
+// filesystemSearchGuidance have drifted in body wording while the heading
+// matches, so appending to already-guided pack text must still yield exactly
+// one heading — a divergence that a constant-only fixture cannot catch.
+func TestAppendFilesystemSearchGuidanceIsIdempotentForBundledPackText(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("filepath.Abs(repo root): %v", err)
+	}
+	path := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "assets", "prompts", "graph-worker.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile(%s): %v", path, err)
+	}
+	got := appendFilesystemSearchGuidance(string(data))
+	if count := strings.Count(got, filesystemSearchGuidanceHeading); count != 1 {
+		t.Fatalf("filesystem search guidance heading count = %d, want 1 after appending to bundled graph-worker.md", count)
+	}
+	if got != string(data) {
+		t.Fatalf("appendFilesystemSearchGuidance modified bundled graph-worker.md; want no-op")
 	}
 }
 
