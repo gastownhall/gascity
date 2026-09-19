@@ -258,6 +258,25 @@ func runMemGraphWorkflowToCompletion(t *testing.T, store beads.Store, workflowID
 
 		ready = memGraphReady(t, store)
 		for {
+			// Fixed agents now claim routed work just like pools. Mirror that
+			// transition before selecting the worker's assigned queue.
+			for i, candidate := range ready {
+				if candidate.Assignee != "" || candidate.Metadata["gc.routed_to"] != workerSession {
+					continue
+				}
+				kind := candidate.Metadata["gc.kind"]
+				if graphroute.IsControlDispatcherKind(kind) || kind == "workflow" || kind == "scope" || kind == "ralph" || kind == "retry" || kind == "spec" {
+					continue
+				}
+				writer, ok := beads.ConditionalWriterFor(store)
+				if !ok {
+					t.Fatal("memory workflow store does not support conditional claims")
+				}
+				if err := writer.UpdateIfMatch(candidate.ID, candidate.Revision, beads.UpdateOpts{Assignee: &workerSession}); err != nil {
+					t.Fatalf("claim routed worker bead %s: %v", candidate.ID, err)
+				}
+				ready[i] = mustGetMemBead(t, store, candidate.ID)
+			}
 			bead, ok, err := selectExecutableGraphWorkerBead(ready, workerSession)
 			if err != nil {
 				t.Fatal(err)
