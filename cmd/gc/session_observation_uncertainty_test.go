@@ -42,7 +42,7 @@ func (p *secondLivenessObservationUnavailableProvider) observationCount() int {
 func TestProviderDecoratorsPreserveLivenessObservationUncertainty(t *testing.T) {
 	base := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
 	for name, sp := range map[string]runtime.Provider{
-		"bounded status":   newBoundedStatusProvider(base),
+		"bounded status":   newBoundedStatusProvider(base, config.DefaultStatusProbeTimeout),
 		"attachment cache": &attachmentCachingProvider{Provider: base, cache: map[string]bool{}},
 	} {
 		t.Run(name, func(t *testing.T) {
