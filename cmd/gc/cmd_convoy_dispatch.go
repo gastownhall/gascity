@@ -3389,7 +3389,8 @@ func uniqueBeads(bb []beads.Bead) []beads.Bead {
 	return out
 }
 
-// findWorkflowBeads returns every bead of a workflow that this store holds.
+// findWorkflowBeads returns every bead of a workflow that this store holds,
+// with every root ordered last.
 //
 // A read that FAILS is returned, never folded into the empty result. The
 // difference is invisible in the return value alone — a store that lost its
@@ -3397,11 +3398,22 @@ func uniqueBeads(bb []beads.Bead) []beads.Bead {
 // beads — and a sweep planned off the second reading of the first is the
 // partial sweep that reports success. A not-found root is genuinely absent and
 // stays a skip.
+//
+// Roots are ordered last because the caller closes this slice in order, with
+// no transaction: a kill or timeout partway through leaves whatever prefix
+// was already closed. Root-first left that prefix able to start with the
+// root, so an interruption could close the root while descendants stayed
+// open and still routed — the exact shape (#6332) that keeps pool demand
+// alive on a bead the sweep meant to retire. Root-last makes "root closed"
+// imply "every step closed" across any interruption; an interrupted sweep
+// instead leaves an open root, which the existing dead-root sweeps already
+// handle.
 func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, error) {
 	result := make([]beads.Bead, 0, 4)
 	seen := make(map[string]struct{}, 4)
 	rootIDs := make([]string, 0, 2)
 	rootSeen := make(map[string]struct{}, 2)
+	pendingRoots := make([]beads.Bead, 0, 2)
 	addBead := func(b beads.Bead) {
 		if b.ID == "" {
 			return
@@ -3430,7 +3442,7 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 		}
 		rootSeen[root.ID] = struct{}{}
 		rootIDs = append(rootIDs, root.ID)
-		addBead(root)
+		pendingRoots = append(pendingRoots, root)
 	}
 	switch root, err := store.Get(workflowID); {
 	case err == nil:
@@ -3440,7 +3452,7 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 	}
 	// Query on gc.workflow_id only; the predicate is applied in-memory via
 	// addRoot so we pick up graph.v2-only roots alongside legacy roots.
-	roots, err := store.List(beads.ListQuery{
+	queriedRoots, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			beadmeta.WorkflowIDMetadataKey: workflowID,
 		},
@@ -3449,7 +3461,7 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 	if err != nil {
 		return nil, fmt.Errorf("listing roots of workflow %s: %w", workflowID, err)
 	}
-	for _, root := range roots {
+	for _, root := range queriedRoots {
 		addRoot(root)
 	}
 	for _, rootID := range rootIDs {
@@ -3464,9 +3476,15 @@ func findWorkflowBeads(store beads.Store, workflowID string) ([]beads.Bead, erro
 			addBead(b)
 		}
 	}
+	for _, root := range pendingRoots {
+		addBead(root)
+	}
 	return result, nil
 }
 
+// findWorkflowBeadsFromRoot returns root and its descendants, with root
+// ordered last — see findWorkflowBeads for why a caller that closes this
+// slice in order needs the root closed after every descendant.
 func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead, error) {
 	if store == nil || root.ID == "" {
 		return nil, nil
@@ -3478,7 +3496,7 @@ func findWorkflowBeadsFromRoot(store beads.Store, root beads.Bead) ([]beads.Bead
 	if err != nil {
 		return nil, fmt.Errorf("listing descendants of workflow %s: %w", root.ID, err)
 	}
-	return uniqueBeads(append([]beads.Bead{root}, descendants...)), nil
+	return uniqueBeads(append(descendants, root)), nil
 }
 
 func workflowBeadIDs(bb []beads.Bead) []string {
