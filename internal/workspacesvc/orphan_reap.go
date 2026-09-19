@@ -1,7 +1,6 @@
 package workspacesvc
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -112,10 +111,7 @@ func (id orphanIdentity) matchesLive(pid int) bool {
 // ("no live supervisor owns it") thus holds under both the plain-init and
 // systemd --user reparenting models.
 func (id orphanIdentity) parentIsSubreaper(ppid int) bool {
-	if ppid == 1 {
-		return true
-	}
-	return id.subreaperPID > 1 && ppid == id.subreaperPID
+	return pidutil.IsReparentedOrphan(ppid, id.subreaperPID)
 }
 
 // reapOrphanedServiceProcesses terminates orphaned survivors of previous
@@ -145,32 +141,11 @@ func reapOrphanedServiceProcesses(id orphanIdentity) {
 // manager, distinct from the system systemd at pid 1. The walk is bounded to
 // guard against malformed /proc data and stops at pid 1.
 func detectUserSubreaperPID(self int) int {
-	return detectUserSubreaperPIDWith(self, processParentPID, processComm)
+	return pidutil.DetectUserSubreaperPID(self)
 }
 
 func detectUserSubreaperPIDWith(self int, parentOf func(int) (int, error), commOf func(int) string) int {
-	pid := self
-	for depth := 0; depth < 64; depth++ {
-		ppid, err := parentOf(pid)
-		if err != nil || ppid <= 1 {
-			return 0
-		}
-		if commOf(ppid) == "systemd" {
-			return ppid
-		}
-		pid = ppid
-	}
-	return 0
-}
-
-// processComm returns the executable name from /proc/<pid>/comm, or "" if it
-// cannot be read.
-func processComm(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
+	return pidutil.DetectUserSubreaperPIDWith(self, parentOf, commOf)
 }
 
 // findOrphanedServiceProcesses scans /proc for processes matching id.
@@ -281,19 +256,7 @@ func liveMatchingOrphans(pids []int, id orphanIdentity) []int {
 // field may contain spaces and parentheses, so parsing starts after the
 // last ')'.
 func processParentPID(pid int) (int, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	idx := bytes.LastIndexByte(data, ')')
-	if idx < 0 {
-		return 0, fmt.Errorf("malformed stat for pid %d", pid)
-	}
-	fields := strings.Fields(string(data[idx+1:]))
-	if len(fields) < 2 {
-		return 0, fmt.Errorf("malformed stat for pid %d", pid)
-	}
-	return strconv.Atoi(fields[1])
+	return pidutil.ParentPID(pid)
 }
 
 // processCmdlineEquals reports whether the process's command line equals
