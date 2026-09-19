@@ -66,6 +66,10 @@ func (o *providerDrainOps) clearDrain(sessionName string) error {
 	return errors.Join(
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN_ACK"),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckSourceKey),
+		// The incarnation stamp has exactly the acknowledgement's lifetime. Left
+		// behind, it outlives every drain it described and waits on the pane to be
+		// paired with some later ack's source.
+		o.sp.RemoveMeta(sessionName, drainAckRequesterInstanceTokenKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.RemoveMeta(sessionName, "GC_DRAIN"),
@@ -96,12 +100,43 @@ func (o *providerDrainOps) drainStartTime(sessionName string) (time.Time, error)
 }
 
 func (o *providerDrainOps) setDrainAck(sessionName string) error {
+	// The acknowledging agent records which incarnation it was. Readers bind
+	// against this rather than trusting a bare source value that a recycled
+	// chair carries over from whoever sat there last.
+	requesterInstanceToken := drainAckRequesterInstanceToken(sessionName)
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
 		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
+		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
+}
+
+// drainAckRequesterInstanceToken returns the acking pane's own incarnation
+// token, and ONLY when this pane is the session being acked. `gc runtime
+// drain-ack <other>` is a cross-session ack: the caller's token is evidence
+// about the CALLER, not about the target, and stamping it on the target's row
+// reads back as agentAckBindingStale — positive proof of residue for an
+// acknowledgement that landed seconds ago. An empty stamp degrades to
+// agentAckBindingUnprovable instead, which is the direction this reader is
+// meant to fail in.
+//
+// The identity comparison is deliberately made against the pane's own
+// environment rather than through currentSessionRuntimeTarget: that resolver
+// also demands a city path, so it errors for reasons that have nothing to do
+// with WHO is acking, and a legitimate self-ack would silently degrade to
+// unprovable whenever the city context was unresolvable.
+func drainAckRequesterInstanceToken(sessionName string) string {
+	target := strings.TrimSpace(sessionName)
+	self := strings.TrimSpace(os.Getenv("GC_TMUX_SESSION"))
+	if self == "" {
+		self = strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	}
+	if target == "" || self == "" || self != target {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 }
 
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
