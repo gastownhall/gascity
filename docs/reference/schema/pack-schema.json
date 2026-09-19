@@ -50,7 +50,7 @@
         },
         "nudge": {
           "type": "string",
-          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\npool session whose trigger remains unclaimed after the 90-second recovery\ngrace period, an empty or whitespace-only Nudge does not opt out: it sends\n\"Run gc hook --claim --drain-ack --json now; if it returns work, execute\nit immediately.\" This fallback applies only to the initial stalled-claim\nrecovery; continuation-claim recovery remains configured-only. Unknown\ntemplates receive no fallback."
+          "description": "Nudge is text typed into the agent's session after startup.\nUsed for CLI agents that don't accept command-line prompts. For a known\nsession — pool OR named — whose trigger remains unclaimed after the\n90-second recovery grace period, an empty or whitespace-only Nudge does\nnot opt out: it sends \"Run gc hook --claim --drain-ack --json now; if it\nreturns work, execute it immediately.\" (claim_backstop.go's named-seat\nlane and idle_nudge.go's pool-slot lane share this same fallback.) This\nfallback applies only to the initial stalled-claim recovery;\ncontinuation-claim recovery remains configured-only. Unknown templates\nreceive no fallback."
         },
         "session": {
           "type": "string",
