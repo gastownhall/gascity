@@ -429,7 +429,10 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 			if rec.SiteCode == TraceSiteMutationBeadMetadata && rec.Fields["template"] == "repo/worker" {
 				haveStartMutation = true
 			}
-			if rec.SiteCode == TraceSiteMutationRuntimeMeta && rec.Fields["template"] == "repo/db" && rec.Fields["field"] == "GC_DRAIN_ACK" {
+			// The reconciler's own drain ack is its source/reason/generation
+			// marker, recorded as one runtime-meta mutation on the source key
+			// (never GC_DRAIN_ACK, the agent's key).
+			if rec.SiteCode == TraceSiteMutationRuntimeMeta && rec.Fields["template"] == "repo/db" && rec.Fields["field"] == reconcilerDrainAckSourceKey {
 				haveDrainMutation = true
 				if rec.TraceMode != TraceModeDetail {
 					t.Fatalf("drain mutation trace_mode = %q, want detail", rec.TraceMode)
@@ -456,7 +459,7 @@ func TestSessionReconcilerTraceStartAndDrainSubOps(t *testing.T) {
 		t.Fatal("missing start mutation record")
 	}
 	if !haveDrainMutation {
-		t.Fatal("missing drain GC_DRAIN_ACK mutation record")
+		t.Fatalf("missing drain ack marker (%s) mutation record", reconcilerDrainAckSourceKey)
 	}
 	if !haveCycleResult {
 		t.Fatal("missing cycle_result record")

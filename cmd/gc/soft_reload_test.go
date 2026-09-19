@@ -377,8 +377,16 @@ func TestAcceptConfigDriftAcrossSessions_FailsWhenAckMetadataClearFails(t *testi
 	if unchanged.Metadata["started_config_hash"] != oldHash {
 		t.Fatalf("started_config_hash = %q, want unchanged %q", unchanged.Metadata["started_config_hash"], oldHash)
 	}
-	if gotAck, err := sp.GetMeta("worker", "GC_DRAIN_ACK"); err != nil || gotAck != "1" {
-		t.Fatalf("GC_DRAIN_ACK = %q, %v; want still set after injected remove failure", gotAck, err)
+	// The reconciler's own ack is its source/reason/generation marker; the
+	// failed clear must leave every key of it standing.
+	for key, want := range map[string]string{
+		reconcilerDrainAckSourceKey:     reconcilerDrainAckSourceValue,
+		reconcilerDrainAckReasonKey:     "config-drift",
+		reconcilerDrainAckGenerationKey: "7",
+	} {
+		if gotValue, err := sp.GetMeta("worker", key); err != nil || gotValue != want {
+			t.Fatalf("%s = %q, %v; want %q still set after injected remove failure", key, gotValue, err, want)
+		}
 	}
 	warnings := strings.Join(got.warnings(), "\n")
 	if !strings.Contains(warnings, "worker") {
