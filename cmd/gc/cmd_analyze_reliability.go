@@ -92,7 +92,7 @@ func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, _ io.Writer) erro
 		}
 	}
 
-	eventsPath, err := resolveEventsPath(opts)
+	eventsPath, err := resolveEventsPath(opts.cityPath, opts.eventPath)
 	if err != nil {
 		return err
 	}
@@ -118,12 +118,14 @@ func runAnalyzeReliability(opts reliabilityCmdOptions, stdout, _ io.Writer) erro
 
 // resolveEventsPath returns the absolute path to events.jsonl using
 // the explicit --events flag when set, --city when present, or the
-// standard discovery cascade (env, cwd) otherwise.
-func resolveEventsPath(opts reliabilityCmdOptions) (string, error) {
-	if strings.TrimSpace(opts.eventPath) != "" {
-		return opts.eventPath, nil
+// standard discovery cascade (env, cwd) otherwise. Shared by every
+// `gc analyze` subcommand (reliability, latency, ...): they all resolve
+// the same events.jsonl the same way, only the analysis differs.
+func resolveEventsPath(cityPathFlag, eventPathFlag string) (string, error) {
+	if strings.TrimSpace(eventPathFlag) != "" {
+		return eventPathFlag, nil
 	}
-	cityPath := strings.TrimSpace(opts.cityPath)
+	cityPath := strings.TrimSpace(cityPathFlag)
 	if cityPath != "" {
 		resolved, err := validateCityPath(cityPath)
 		if err != nil {
