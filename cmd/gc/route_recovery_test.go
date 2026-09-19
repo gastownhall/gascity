@@ -314,12 +314,12 @@ func mustRoutedTo(t *testing.T, store beads.Store, id string) string {
 // blocked in the backing store. Two behaviors combine there, and neither is
 // visible from the bead alone:
 //
-//  1. mapBdStatus folds bd's blocked/deferred/review/testing into Gas City's
-//     three statuses, so a blocked bead decodes with Status "open". Every read
-//     that returns a beads.Bead — the cached List and the live Get alike — sees
-//     "open", so no status comparison downstream can recognize the block.
+//  1. blocked stays a member of the open SET (beads.IsOpenStatus) and
+//     deferred/review/testing still collapse to "open", so every read that
+//     returns a beads.Bead — the cached List and the live Get alike — reports a
+//     parked bead as open work, and no status comparison downstream rejects it.
 //  2. CachingStore.List serves a non-Live query from its in-memory active set,
-//     filtering with ListQuery.Matches against that already-collapsed status.
+//     filtering with ListQuery.Matches, which matches that whole open set.
 //     bd's server-side --status=open filter does see the raw status and does
 //     exclude blocked, but a cached read never reaches it.
 //
@@ -355,8 +355,8 @@ func (s collapsedBlockedStatusStore) List(q beads.ListQuery) ([]beads.Bead, erro
 // the Live query delegates to bd.
 func TestRouteRecoveryBackstopLegSkipsBlockedBead(t *testing.T) {
 	const pool = "/home/ds/projects/EnterpriseBench/enterprisebench-worker"
-	// Backing bead: blocked in bd, but decoded as "open" by mapBdStatus, so a
-	// live Get cannot reveal the block either. The reaper has already cleared
+	// Backing bead: parked in bd, but still an open-set member, so a live Get
+	// cannot reveal the block either. The reaper has already cleared
 	// gc.routed_to, leaving exactly carriedPoolRoute's recoverable shape.
 	live := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "EB-42o8", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{

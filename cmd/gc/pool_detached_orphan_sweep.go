@@ -58,10 +58,10 @@ func sweepDetachedHandoffOrphansWithRouteStore(store, routeStore beads.Store) (d
 		return result, nil
 	}
 	// Scan open beads for detached handoff orphans. Live is what makes
-	// Status:"open" mean open: mapBdStatus folds bd's blocked/deferred/review/
-	// testing into Gas City's three statuses, so such a bead decodes with Status
-	// "open", and a cached List (which filters the collapsed status via
-	// ListQuery.Matches) hands it back as if it were ready. Only the backing store
+	// Status:"open" mean open: mapBdStatus folds bd's deferred/review/testing
+	// into "open", and blocked decodes as "blocked" but stays in the open SET,
+	// so a cached List (which matches that set via ListQuery.Matches) hands such
+	// a bead back as if it were ready. Only the backing store
 	// filters on the raw status, so without Live a bead parked in bd review/
 	// testing with a pushed branch and a consumed gc.routed_to — an ordinary
 	// post-work state — is re-stamped every tick and respawns a worker that drains
@@ -186,7 +186,7 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 // gc.kind is a workflow-root/control/topology bead that carriedPoolRoute
 // deliberately keeps out of pool demand.
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
-	if b.Status != "open" {
+	if !beads.IsOpenStatus(b.Status) {
 		return false
 	}
 	if strings.TrimSpace(b.Assignee) != "" {
