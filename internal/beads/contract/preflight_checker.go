@@ -262,14 +262,50 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "bd/beads version compatibility could not be confirmed", details)
 	}
 	if reason := library.unconfirmableReason(); reason != "" {
-		// The compare below only means something when both sides name the same
-		// released beads artifact. When the linked library does not — a source
-		// build, a replaced module, or a pseudo-version naming an untagged
-		// commit — the two strings can never be equal, and answering "mismatch"
-		// reports a verdict the check never had the evidence to reach. The
-		// schema version is validated above and is the real compatibility
-		// signal, so an unconfirmable library version must not take the native
-		// store offline; only a *confirmed* mismatch (below) should.
+		// A pseudo-version cannot be compared to a bd RELEASE version, but it CAN
+		// be compared to bd's own pseudo-version: both name a commit in the same
+		// repository, and equality of those commits is the strongest evidence of
+		// compatibility this check can obtain — stronger than the semver compare
+		// below, which only ever compares release tags.
+		//
+		// This is not an edge case. gc pins beads at a pseudo-version whenever it
+		// tracks beads ahead of beads' last tag, which is gc's normal state, and
+		// bd built from source reports one too. So the branch that declared the
+		// question unanswerable was covering the configuration in which the two
+		// binaries most often drift — and drift here is not cosmetic: opening the
+		// native store runs MigrateUp, so a gc built from a newer beads commit
+		// migrates every store it touches past what an older bd can read,
+		// irreversibly and on first contact. Observed 2026-09-08: a gc carrying
+		// beads bf97b73749ac (max migration 0059) took a fleet's bd — built from
+		// 98b4b79e6a4d (max migration 0054) — offline for every read, with this
+		// check passing throughout.
+		//
+		// Failing is therefore the safe verdict AND the preventive one: the
+		// factory routes a failed preflight to openBdFallback, so the migration
+		// that would break bd never runs at all.
+		if libRev, ok := library.pseudoRev(); ok {
+			if bdRev, bdOK := pseudoVersionRev(ctx.BDVersion); bdOK {
+				if bdRev == libRev {
+					return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd and the linked beads library are built from beads commit "+libRev, details)
+				}
+				return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd is built from beads commit "+bdRev+"; the linked beads library is "+libRev, details)
+			}
+		}
+		// Otherwise the compare below still means nothing: it only works when both
+		// sides name the same released beads artifact. When the linked library
+		// does not — a source build, a replaced module, or a pseudo-version faced
+		// with a bd that reports a release — the two strings can never be equal,
+		// and answering "mismatch" reports a verdict the check never had the
+		// evidence to reach. So an unconfirmable library version must not take
+		// the native store offline; only a *confirmed* mismatch should.
+		//
+		// Note what is NOT a safety net here: ctx.SchemaVersion. It is the bd
+		// CONTRACT shape (bd context reports 1), not the store's migration
+		// number, so the `SchemaVersion <= 0` guard above says nothing about
+		// migration skew and passing this check is not evidence that bd can read
+		// the store. The version comparison is the only migration-skew signal
+		// this check has, which is why the pseudo-version case above must
+		// answer rather than abstain.
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
@@ -421,6 +457,35 @@ func (b beadsLibrary) unconfirmableReason() string {
 func comparableReleaseVersion(version string) bool {
 	canonical := "v" + strings.TrimPrefix(strings.TrimSpace(version), "v")
 	return semver.IsValid(canonical) && !module.IsPseudoVersion(canonical)
+}
+
+// pseudoRev returns the beads commit this library was built from, when its
+// version is a pseudo-version naming one. A REPLACED module is excluded even
+// when its version looks like a pseudo-version: the replacement's revision
+// belongs to the replacement, so comparing it to a bd revision would assert
+// agreement between commits in two different repositories.
+func (b beadsLibrary) pseudoRev() (string, bool) {
+	if b.Replaced {
+		return "", false
+	}
+	return pseudoVersionRev(b.Version)
+}
+
+// pseudoVersionRev returns the 12-hex commit revision a pseudo-version names,
+// and reports whether version was a pseudo-version at all. A released version,
+// a "(devel)" source build, and anything that is not valid semver all return
+// false — the caller must treat "not comparable" and "different" as distinct
+// answers, because only the second is evidence of drift.
+func pseudoVersionRev(version string) (string, bool) {
+	canonical := "v" + strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if !semver.IsValid(canonical) || !module.IsPseudoVersion(canonical) {
+		return "", false
+	}
+	rev, err := module.PseudoVersionRev(canonical)
+	if err != nil || rev == "" {
+		return "", false
+	}
+	return rev, true
 }
 
 // linkedBeadsLibraryFrom extracts the linked beads library from build info.
