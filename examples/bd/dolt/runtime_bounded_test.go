@@ -5,7 +5,9 @@
 // previously escalated straight to SIGKILL. See gascity#4823: the
 // mismatch let a bounded `dolt backup sync` be killed without any
 // chance to run its own signal handler, leaking unreferenced backup
-// archives (dolt has no prune verb).
+// archives. Dolt 2.3.0 added `dolt backup sync
+// --prune-with-grace-period` to reclaim them, which mol-dog-backup.sh
+// now passes; a leak is recoverable, not permanent.
 package dolt_test
 
 import (
