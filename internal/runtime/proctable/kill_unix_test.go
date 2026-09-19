@@ -149,3 +149,63 @@ func TestWaitUntilRespectsZeroTimeout(t *testing.T) {
 		t.Fatal("waitUntil should report false when the condition never holds at zero timeout")
 	}
 }
+
+// stubKillByPIDDeps swaps KillByPID's injected dependencies for one test and
+// restores them on cleanup, so the infrastructure refusal is exercised through
+// KillByPID itself with no process spawned and nothing read from the host. A
+// guard that is correct but unreferenced is exactly the failure mode the first
+// fix for gastownhall/gascity#5837 had: installed on a different kill family
+// than the one that fired.
+func stubKillByPIDDeps(t *testing.T, infra func(int) bool, alive func(int) bool, kill func(int, syscall.Signal) error) {
+	t.Helper()
+	prevInfra, prevAlive, prevKill, prevStart := killByPIDInfrastructureTarget, killByPIDAlive, killByPIDSignal, killByPIDStartTime
+	killByPIDInfrastructureTarget, killByPIDAlive, killByPIDSignal = infra, alive, kill
+	killByPIDStartTime = func(int) (string, error) { return "", nil }
+	t.Cleanup(func() {
+		killByPIDInfrastructureTarget, killByPIDAlive, killByPIDSignal, killByPIDStartTime = prevInfra, prevAlive, prevKill, prevStart
+	})
+}
+
+// TestKillByPIDRefusesTmuxInfrastructureTarget fails immediately without the
+// guard: the liveness stub says alive, so KillByPID would signal the group,
+// and the signal stub fails the test on the first delivery.
+func TestKillByPIDRefusesTmuxInfrastructureTarget(t *testing.T) {
+	stubKillByPIDDeps(t,
+		func(pid int) bool { return pid == 4242 },
+		func(int) bool { return true },
+		func(pid int, sig syscall.Signal) error {
+			t.Fatalf("KillByPID signaled %d with %v: the tmux-infrastructure guard is not wired in", pid, sig)
+			return nil
+		},
+	)
+	if err := KillByPID(4242); err != nil {
+		t.Fatalf("KillByPID(tmux infrastructure) = %v, want nil: refusing is success", err)
+	}
+}
+
+// TestKillByPIDStillSignalsNonInfrastructureTarget pins that the guard does
+// not over-refuse: an agent PID still gets the group SIGTERM. The liveness
+// stub reports alive at entry and gone on the next poll, so neither grace
+// window is waited on; the SIGKILL escalation stays covered by the killByPID
+// core tests above.
+func TestKillByPIDStillSignalsNonInfrastructureTarget(t *testing.T) {
+	var signals []int
+	polls := 0
+	stubKillByPIDDeps(t,
+		func(int) bool { return false },
+		func(int) bool { polls++; return polls <= 1 },
+		func(pid int, sig syscall.Signal) error {
+			if sig != syscall.SIGTERM {
+				t.Fatalf("signal = %v, want SIGTERM", sig)
+			}
+			signals = append(signals, pid)
+			return nil
+		},
+	)
+	if err := KillByPID(4242); err != nil {
+		t.Fatalf("KillByPID(agent) = %v, want nil", err)
+	}
+	if !slices.Equal(signals, []int{-4242}) {
+		t.Fatalf("signals = %v, want the process group signaled once", signals)
+	}
+}
