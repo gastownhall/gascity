@@ -71,7 +71,7 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no stashes, and no commits that
+//  6. Git state: no uncommitted changes and no commits that
 //     removing the worktree would orphan — commits reachable from no branch,
 //     tag, or remote-tracking ref (git.HasUnreachableCommitsResult). The test
 //     is deliberately reachability, not push state: `git worktree remove`
@@ -307,14 +307,11 @@ func reapClosedBeadWorktrees(
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnreachable, unreachableErr := wg.HasUnreachableCommitsResult()
-				hasStashes, stashErr := wg.HasStashesResult()
 				switch {
 				case unreachableErr != nil:
 					reason = fmt.Sprintf("git probe failed (failing closed): %v", unreachableErr)
-				case stashErr != nil:
-					reason = fmt.Sprintf("git probe failed (failing closed): %v", stashErr)
-				case hasUncommitted || hasUnreachable || hasStashes:
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v stashes=%v", hasUncommitted, hasUnreachable, hasStashes)
+				case hasUncommitted || hasUnreachable:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v", hasUncommitted, hasUnreachable)
 				}
 			}
 
