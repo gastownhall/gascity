@@ -799,6 +799,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3296,6 +3299,27 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on
+	// new demand, its zeros included.
+	//
+	// By default a cold pool with a custom ScaleCheck is ALSO probed by gc's
+	// own Ready()/gc.routed_to count, merged with max(). That default exists
+	// for a real case: a rig-scoped check cannot see work routed to it that
+	// lives in the city store, so without the probe such a pool would never
+	// wake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a
+	// custom check can never answer "no demand" while cold — max(0,1) is 1 —
+	// so a pool whose check deliberately withholds demand is re-woken every
+	// tick, finds the work its own check already judged unactionable, and
+	// drains. Measured on lookout/hand 2026-08-31: 43 spawn/drain cycles in
+	// 40 minutes, one Claude cold start every ~30s, for as long as a review
+	// was outstanding.
+	//
+	// Set this only when the check reads the same store the routed work lives
+	// in — then the probe can discover nothing the check has not already
+	// weighed, and its disagreement is pure churn. A check that FAILS is
+	// still not a zero: it stays partial and falls through to the probe, so
+	// this cannot strand routed work behind a broken check.
+	ScaleCheckAuthoritative bool `toml:"scale_check_authoritative,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".
