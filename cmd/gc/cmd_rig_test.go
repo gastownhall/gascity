@@ -231,8 +231,8 @@ esac
 	if err := json.Unmarshal(metaData, &meta); err != nil {
 		t.Fatalf("Unmarshal(metadata): %v", err)
 	}
-	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "server" {
-		t.Fatalf("metadata dolt_mode = %q, want server", got)
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "proxied-server" {
+		t.Fatalf("metadata dolt_mode = %q, want proxied-server", got)
 	}
 
 	store, err := openStoreAtForCity(rigPath, cityPath)
@@ -248,7 +248,7 @@ esac
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"init --server -p tc --skip-hooks --database tc",
+		"init --proxied-server -p tc --skip-hooks --database tc",
 		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
 	} {
 		if !strings.Contains(log, want) {

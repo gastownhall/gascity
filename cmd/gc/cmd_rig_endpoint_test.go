@@ -279,8 +279,8 @@ func TestCanonicalizeScopeMetadataIfPresentSkipsOnlyAbsentMetadata(t *testing.T)
 		if err := canonicalizeScopeMetadataIfPresent(fsys.OSFS{}, scopeDir); err != nil {
 			t.Fatalf("canonicalizeScopeMetadataIfPresent: %v", err)
 		}
-		if mode := readScopeDoltMode(t, scopeDir); mode != "server" {
-			t.Fatalf("dolt_mode = %q, want server", mode)
+		if mode := readScopeDoltMode(t, scopeDir); mode != "embedded" {
+			t.Fatalf("dolt_mode = %q, want embedded", mode)
 		}
 	})
 }
