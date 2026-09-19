@@ -260,6 +260,44 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *tes
 	}
 }
 
+func TestFilterAssignedWorkBeadsForPoolDemandKeepsUnreadPoolAliasMail(t *testing.T) {
+	maxOne := 1
+	cfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	notified := map[string]string{"mail.read": "false", "mail.notify": "true"}
+	work := []beads.Bead{
+		{
+			ID:       "pool-mail",
+			Title:    "operator request",
+			Type:     "message",
+			Status:   "open",
+			Assignee: "codex-im",
+			Metadata: notified,
+		},
+		{
+			ID:       "plain-mail",
+			Title:    "no notify intent",
+			Type:     "message",
+			Status:   "open",
+			Assignee: "codex-im",
+			Metadata: map[string]string{"mail.read": "false"},
+		},
+		{
+			ID:       "stray-mail",
+			Title:    "unknown recipient",
+			Type:     "message",
+			Status:   "open",
+			Assignee: "unknown",
+			Metadata: notified,
+		},
+	}
+
+	got := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, nil, work, []string{"", "", ""})
+
+	if len(got) != 1 || got[0].ID != "pool-mail" {
+		t.Fatalf("filtered work = %#v, want only notified unread mail to the pool alias", got)
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandKeepsPersistedBoundRoute(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "gascity-packs")

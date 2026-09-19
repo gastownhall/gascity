@@ -40,7 +40,18 @@ const (
 	// ("true"/"false"), set alongside the label by MarkRead/MarkUnread. Retention
 	// sweeps query it directly (the label-based query is recipient-scoped).
 	ReadMetadataKey = "mail.read"
+	// NotificationIntentMetadataKey records that a sender requested immediate
+	// notification for this message. It is written before delivery is attempted
+	// so a temporarily unavailable recipient can be woken from durable mail.
+	NotificationIntentMetadataKey = "mail.notify"
 )
+
+// NotificationIntentMarker is implemented by mail providers that can persist
+// notification intent on an already-created message. Providers without a
+// durable message store may omit it and retain their existing delivery behavior.
+type NotificationIntentMarker interface {
+	MarkNotificationIntent(id string) error
+}
 
 // Message represents a mail message between agents or humans.
 type Message struct {

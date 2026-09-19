@@ -226,6 +226,13 @@ func filterAssignedWorkBeadsForPoolDemand(
 				}
 			}
 		}
+		if template == "" && isUnreadPoolMail(cfg, wb) {
+			// Unread mail addressed to a configured pool alias is wake demand
+			// for that pool rather than routed work: resolve the alias to its
+			// template so a cold pool can materialize one session to read the
+			// durable message. The reachability check below still applies.
+			template = mailAliasPoolTemplate(cfg, wb.Assignee)
+		}
 		if template == "" {
 			continue
 		}

@@ -1890,6 +1890,12 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 		fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if nudgeFn != nil && to != "human" {
+		if err := markMailNotificationIntent(mp, m.ID); err != nil {
+			fmt.Fprintf(stderr, "gc mail send: recording notification intent: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	rec.Record(events.Event{
 		Type:    events.MailSent,
 		Actor:   m.From,
@@ -1959,6 +1965,12 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		if err != nil {
 			fmt.Fprintf(stderr, "gc mail send --all: sending to %s: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			return 1
+		}
+		if nudgeFn != nil {
+			if err := markMailNotificationIntent(mp, m.ID); err != nil {
+				fmt.Fprintf(stderr, "gc mail send --all: recording notification intent for %s: %v\n", to, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 		rec.Record(events.Event{
 			Type:    events.MailSent,
@@ -2295,6 +2307,12 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if nudgeFn != nil && reply.To != "human" {
+		if err := markMailNotificationIntent(mp, reply.ID); err != nil {
+			fmt.Fprintf(stderr, "gc mail reply: recording notification intent: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	rec.Record(events.Event{
 		Type:    events.MailReplied,
 		Actor:   reply.From,
@@ -2319,6 +2337,17 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
 	}
 	return 0
+}
+
+// markMailNotificationIntent preserves the --notify request when the provider
+// exposes durable message metadata. Providers without that capability keep the
+// historical best-effort nudge behavior.
+func markMailNotificationIntent(mp mail.Provider, id string) error {
+	marker, ok := mp.(mail.NotificationIntentMarker)
+	if !ok {
+		return nil
+	}
+	return marker.MarkNotificationIntent(id)
 }
 
 // cmdMailMarkRead marks a message as read.

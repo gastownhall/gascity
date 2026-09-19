@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/poolplan"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -1562,6 +1563,11 @@ func collectAssignedWorkBeadsWithStores(
 		errs      []error
 	}
 	results := make([]storeAssignedWorkResult, len(stores))
+	// Unread pool-alias mail can only be wake demand when cfg names at
+	// least one eligible pool agent, so resolve that once per collection
+	// and skip the per-store message listing on pool-less cities instead
+	// of paying an extra query per store on every tick.
+	scanPoolMail := cityHasEligiblePoolAgent(cfg)
 	var wg sync.WaitGroup
 	for idx, source := range stores {
 		idx, source := idx, source
@@ -1629,6 +1635,22 @@ func collectAssignedWorkBeadsWithStores(
 				errs = append(errs, fmt.Errorf("List(open): %w", err))
 				if beads.IsPartialResult(err) && len(openRouted) > 0 {
 					appendOpenRoutedWorkUnique(&result, &resultStores, &resultStoreRefs, openRouted, seen, source.store, source.ref)
+				}
+			}
+			// Mail is deliberately excluded from Ready() and hook work claims, but
+			// unread mail addressed to a configured pool alias is wake demand. A
+			// cold singleton otherwise has no live session identity for --notify
+			// to nudge, leaving the durable message stranded indefinitely.
+			// scanPoolMail is false on cities without an eligible pool agent,
+			// where no alias could ever resolve, so the listing is skipped.
+			if scanPoolMail {
+				if messages, err := listBothTiersForControllerDemand(source.store, beads.ListQuery{Status: "open", Type: "message"}); err == nil {
+					appendUnreadPoolMailUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, messages, seen, source.store, source.ref)
+				} else {
+					errs = append(errs, fmt.Errorf("List(open message): %w", err))
+					if beads.IsPartialResult(err) && len(messages) > 0 {
+						appendUnreadPoolMailUnique(cfg, &result, &resultStores, &resultStoreRefs, readyIDs, messages, seen, source.store, source.ref)
+					}
 				}
 			}
 			results[idx] = storeAssignedWorkResult{ref: source.ref, beads: result, stores: resultStores, storeRefs: resultStoreRefs, readyIDs: readyIDs, errs: errs}
@@ -2812,6 +2834,71 @@ func appendOpenRoutedWorkUnique(dst *[]beads.Bead, stores *[]beads.Store, storeR
 		}
 		appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef)
 	}
+}
+
+// appendUnreadPoolMailUnique admits only unread message beads addressed to a
+// configured generic pool identity. They are wake demand, never software work:
+// hook claim continues to reject Type="message" independently.
+func appendUnreadPoolMailUnique(cfg *config.City, dst *[]beads.Bead, stores *[]beads.Store, storeRefs *[]string, readyIDs map[string]bool, beadList []beads.Bead, seen map[string]struct{}, store beads.Store, storeRef string) {
+	for _, b := range beadList {
+		if b.Type != "message" || b.Status != "open" || !isUnreadPoolMail(cfg, b) {
+			continue
+		}
+		if appendWorkUnique(dst, stores, storeRefs, b, seen, store, storeRef) {
+			markReadyAssigned(readyIDs, b)
+		}
+	}
+}
+
+func isUnreadPoolMail(cfg *config.City, b beads.Bead) bool {
+	if cfg == nil ||
+		!strings.EqualFold(strings.TrimSpace(b.Metadata[mail.NotificationIntentMetadataKey]), "true") ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[mail.ReadMetadataKey]), "true") {
+		return false
+	}
+	for _, label := range b.Labels {
+		if strings.EqualFold(strings.TrimSpace(label), "read") {
+			return false
+		}
+	}
+	return mailAliasPoolTemplate(cfg, b.Assignee) != ""
+}
+
+// cityHasEligiblePoolAgent reports whether cfg names at least one pool agent
+// that mailAliasPoolTemplate could ever resolve to: non-suspended and able
+// to host generic ephemeral sessions. The per-store unread-mail listing only
+// runs when this holds, so cities without pools pay no extra query per tick.
+func cityHasEligiblePoolAgent(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if !agent.Suspended && agent.SupportsGenericEphemeralSessions() {
+			return true
+		}
+	}
+	return false
+}
+
+// mailAliasPoolTemplate resolves a mail assignee to the qualified name of the
+// configured generic pool agent it names, or "" when it names no eligible
+// pool. Suspended agents and agents that cannot host generic ephemeral
+// sessions never resolve: mail to them is not wake demand.
+func mailAliasPoolTemplate(cfg *config.City, assignee string) string {
+	if cfg == nil {
+		return ""
+	}
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended || !agent.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		if agentTemplateIdentitiesEquivalent(cfg, assignee, agent.QualifiedName()) {
+			return agent.QualifiedName()
+		}
+	}
+	return ""
 }
 
 // appendWorkUnique appends b to the aligned dst/stores/storeRefs slices unless

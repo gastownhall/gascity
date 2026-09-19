@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -252,6 +253,27 @@ type partialAssignedWorkStore struct {
 	*beads.MemStore
 	partialInProgress bool
 	partialReady      bool
+}
+
+// listQueryRecordingStore records every List query so tests can assert which
+// listings a collection pass issued, following demandListCountingStore.
+type listQueryRecordingStore struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (s *listQueryRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.queries = append(s.queries, query)
+	return s.Store.List(query)
+}
+
+func messageListIssued(queries []beads.ListQuery) bool {
+	for _, q := range queries {
+		if q.Type == "message" {
+			return true
+		}
+	}
+	return false
 }
 
 type controllerDemandPartialStore struct {
@@ -2121,6 +2143,127 @@ func TestCollectAssignedWorkBeads_ExcludesSessionBeads(t *testing.T) {
 	}
 	if got[0].ID != task.ID {
 		t.Fatalf("expected task %q, got %q", task.ID, got[0].ID)
+	}
+}
+
+// TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDemand
+// covers mail sent to a configured singleton pool alias after its previous
+// session has closed.  Mail is intentionally not Ready()-claimable work, but
+// unread mail must still reach pool desired state so it can materialize one
+// replacement session.
+func TestCollectAssignedWorkBeads_UnreadMailForColdSingletonPoolCreatesWakeDemand(t *testing.T) {
+	store := beads.NewMemStore()
+	maxOne := 1
+	cfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	msg, err := store.Create(beads.Bead{
+		Title:    "operator request",
+		Type:     "message",
+		Status:   "open",
+		Assignee: "codex-im",
+		Metadata: map[string]string{"mail.read": "false", mail.NotificationIntentMetadataKey: "true"},
+	})
+	if err != nil {
+		t.Fatalf("create unread mail: %v", err)
+	}
+
+	work, _, _, ready, partial := collectAssignedWorkBeadsWithStores("", cfg, store, nil, nil, nil)
+	if partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if len(work) != 1 || work[0].ID != msg.ID {
+		t.Fatalf("collected work = %#v, want unread mail %q", work, msg.ID)
+	}
+	if !ready[storeScopedBeadKey{ID: msg.ID}] {
+		t.Fatalf("unread mail %q was not marked ready for wake demand", msg.ID)
+	}
+
+	states := ComputePoolDesiredStates(cfg, work, nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("pool requests = %#v, want one fresh wake", states)
+	}
+	req := states[0].Requests[0]
+	if req.Tier != "wake-known-identity" || req.WorkBeadID != msg.ID {
+		t.Fatalf("request = %#v, want wake-known-identity for mail %q", req, msg.ID)
+	}
+	secondMessage := msg
+	secondMessage.ID = "another-notified-message"
+	states = ComputePoolDesiredStates(cfg, append(work, secondMessage), nil, nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("multiple notified messages produced %#v, want one max-one wake", states)
+	}
+
+	// On the next tick the pending replacement is part of the snapshot. It
+	// must be reused under max-one rather than minting another pool session.
+	pending := beads.Bead{
+		ID:     "replacement",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":             "codex-im",
+			"session_name":         "codex-im",
+			"state":                "creating",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	states = ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads([]beads.Bead{pending}), nil)
+	if len(states) != 1 || len(states[0].Requests) != 1 {
+		t.Fatalf("second-tick pool requests = %#v, want one reused session", states)
+	}
+	if got := states[0].Requests[0].SessionBeadID; got != pending.ID {
+		t.Fatalf("second-tick SessionBeadID = %q, want existing replacement %q", got, pending.ID)
+	}
+}
+
+func TestIsUnreadPoolMailRequiresNotifyAndEligibleConfiguredAlias(t *testing.T) {
+	maxOne := 1
+	poolCfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	base := beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{
+		mail.NotificationIntentMetadataKey: "true",
+		mail.ReadMetadataKey:               "false",
+	}}
+	cases := []struct {
+		name string
+		cfg  *config.City
+		bead beads.Bead
+		want bool
+	}{
+		{name: "notified cold pool alias", cfg: poolCfg, bead: base, want: true},
+		{name: "plain unread mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.ReadMetadataKey: "false"}}},
+		{name: "read notified mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true", mail.ReadMetadataKey: "true"}}},
+		{name: "read label notified mail", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "codex-im", Labels: []string{"read"}, Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true", mail.ReadMetadataKey: "false"}}},
+		{name: "unknown recipient", cfg: poolCfg, bead: beads.Bead{Type: "message", Status: "open", Assignee: "unknown", Metadata: map[string]string{mail.NotificationIntentMetadataKey: "true"}}},
+		{name: "suspended pool", cfg: &config.City{Agents: []config.Agent{{Name: "codex-im", Suspended: true}}}, bead: base},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isUnreadPoolMail(tc.cfg, tc.bead); got != tc.want {
+				t.Errorf("isUnreadPoolMail() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCollectAssignedWorkBeads_SkipsMessageScanWithoutEligiblePoolAgent(t *testing.T) {
+	// A city with no eligible pool agent must not pay the per-store
+	// Type=message listing on any tick.
+	bare := &listQueryRecordingStore{Store: beads.NewMemStore()}
+	if _, _, _, _, partial := collectAssignedWorkBeadsWithStores("", &config.City{}, bare, nil, nil, nil); partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if messageListIssued(bare.queries) {
+		t.Fatalf("pool-less city issued a message listing: %#v", bare.queries)
+	}
+
+	// A city with an eligible pool agent keeps the listing: behaviour is
+	// identical to before the gate.
+	maxOne := 1
+	poolCfg := &config.City{Agents: []config.Agent{poolAgent("codex-im", "", &maxOne, 0)}}
+	pooled := &listQueryRecordingStore{Store: beads.NewMemStore()}
+	if _, _, _, _, partial := collectAssignedWorkBeadsWithStores("", poolCfg, pooled, nil, nil, nil); partial {
+		t.Fatal("collectAssignedWorkBeadsWithStores reported partial result")
+	}
+	if !messageListIssued(pooled.queries) {
+		t.Fatal("pool city issued no message listing, want the scan to run")
 	}
 }
 
