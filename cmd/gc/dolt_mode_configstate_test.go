@@ -8,24 +8,22 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// TestConfigStateConstructorsSetDoltModeServer verifies that the managed-scope
-// ConfigState constructors set DoltMode:"server" so EnsureCanonicalConfig writes
-// dolt.mode: server into .beads/config.yaml. Without it, `bd context` reports
-// dolt_mode=embedded and the preflight dolt_mode_safe gate
+// TestConfigStateConstructorsSetDoltMode verifies that fresh managed scopes
+// default to Beads' proxied-server mode while explicit endpoints remain direct.
 // (internal/beads/contract/preflight_checker.go checkDoltModeSafe) cannot confirm
 // server mode on the Darwin managed-city on-ramp.
 //
 // This re-lands the reviewed+approved fix from commit cd83f6da8 (ga-yqn5py Slice 2,
 // review bead ga-94h3qv "pass"), which was lost during branch churn and never
 // merged to main (PR #3722 carried a now-stale copy against pre-refactor structure).
-func TestConfigStateConstructorsSetDoltModeServer(t *testing.T) {
+func TestConfigStateConstructorsSetDoltMode(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
 	// Managed city (gc runs the Dolt sql-server; no external host/port).
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
-	if managedCity.DoltMode != "server" {
-		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "server")
+	if managedCity.DoltMode != "proxied-server" {
+		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
 	}
 
 	// External city (explicit host/port endpoint).
