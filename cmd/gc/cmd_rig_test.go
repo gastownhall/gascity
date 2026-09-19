@@ -2941,6 +2941,69 @@ func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
 	}
 }
 
+// TestDoRigAdd_AdoptPreservesPrefixCase: adopting a store whose issue_prefix
+// is mixed case must keep it byte-for-byte in city.toml and in the
+// canonicalized config.yaml — Beads prefix matching is case-sensitive, so a
+// lowercased prefix forks the id series of the adopted store.
+func TestDoRigAdd_AdoptPreservesPrefixCase(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "file")
+
+	rigPath := filepath.Join(t.TempDir(), "contentbuild")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"contentbuild","issue_prefix":"KitFlowApp"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "issue_prefix: KitFlowApp\nissue-prefix: KitFlowApp\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, requested := range []string{"KitFlowApp", "kitflowapp"} {
+		t.Run("prefix="+requested, func(t *testing.T) {
+			cityPath := t.TempDir()
+			writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+			var stdout, stderr bytes.Buffer
+			code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", requested, "", false, true, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doRigAdd --adopt --prefix %s returned %d, stderr: %s", requested, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Prefix: KitFlowApp") {
+				t.Errorf("stdout should report the store's prefix verbatim: %s", stdout.String())
+			}
+			cityToml, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(cityToml), `prefix = "KitFlowApp"`) {
+				t.Errorf("city.toml should store the adopted prefix verbatim:\n%s", cityToml)
+			}
+			cfgYaml, err := os.ReadFile(filepath.Join(rigPath, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(cfgYaml), "kitflowapp") || !strings.Contains(string(cfgYaml), "issue_prefix: KitFlowApp") {
+				t.Errorf("config.yaml must keep issue_prefix: KitFlowApp:\n%s", cfgYaml)
+			}
+		})
+	}
+
+	t.Run("different --prefix is rejected", func(t *testing.T) {
+		cityPath := t.TempDir()
+		writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+		var stdout, stderr bytes.Buffer
+		code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "other", "", false, true, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), `already has bead prefix "KitFlowApp" (requested "other")`) {
+			t.Fatalf("expected prefix mismatch failure, got code %d, stderr: %s", code, stderr.String())
+		}
+	})
+}
+
 // TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit is a
 // control: the same stubbed harness wired through a NON-adopt add also calls
 // initAndHookDir, proving that the empty-initCalls failure above (pre-fix) was
