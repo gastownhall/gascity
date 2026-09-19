@@ -1840,3 +1840,99 @@ func TestContainsFeedbackSurveyModal(t *testing.T) {
 		})
 	}
 }
+
+// bugReportDraftInlineFixture reproduces ga-l769uu's transcription of the
+// bug-report draft dialog's option row verbatim (a single slash-joined
+// line).
+const bugReportDraftInlineFixture = `Something went wrong. A bug report has been drafted.
+  1 to review / 2 to send / 0 to dismiss`
+
+// bugReportDraftMultilineFixture covers the possibility that the
+// transcription in ga-l769uu paraphrased a bordered multi-line layout
+// (one option per line) rather than one literal joined line.
+const bugReportDraftMultilineFixture = `╭──────────────────────────────────────────────────────────╮
+│ Something went wrong and Claude drafted a bug report.     │
+│                                                            │
+│   1 to review the draft                                   │
+│   2 to send as written                                    │
+│   0 to dismiss                                             │
+╰──────────────────────────────────────────────────────────╯`
+
+func TestContainsBugReportDraftModal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "investigator-transcribed inline shape",
+			content: bugReportDraftInlineFixture,
+			want:    true,
+		},
+		{
+			name:    "hypothetical multi-line layout",
+			content: bugReportDraftMultilineFixture,
+			want:    true,
+		},
+		{
+			name: "tokens scattered beyond the window is not a match",
+			content: "1 things to review eventually.\n\n\n\n\n" +
+				"2 items to send tomorrow.\n\n\n\n\n" +
+				"0 nothing to dismiss right now.",
+			want: false,
+		},
+		{
+			name:    "normal output",
+			content: "Starting Claude Code...",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			content: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsBugReportDraftModal(tt.content); got != tt.want {
+				t.Fatalf("ContainsBugReportDraftModal(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsAnyBlockingDialog(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		content     string
+		wantKind    string
+		wantBlocked bool
+	}{
+		{
+			name:        "bug report draft",
+			content:     bugReportDraftInlineFixture,
+			wantKind:    "bug_report_draft",
+			wantBlocked: true,
+		},
+		{
+			name:        "normal output",
+			content:     "Starting Claude Code...",
+			wantKind:    "",
+			wantBlocked: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, blocked := ContainsAnyBlockingDialog(tt.content)
+			if blocked != tt.wantBlocked || kind != tt.wantKind {
+				t.Fatalf("ContainsAnyBlockingDialog(%q) = (%q, %v), want (%q, %v)", tt.content, kind, blocked, tt.wantKind, tt.wantBlocked)
+			}
+		})
+	}
+}

@@ -1555,7 +1555,10 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if err != nil || !matches {
 		return false, err
 	}
-	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
+	if idleEnough, blockedByDialogKind := pollerSessionIdleEnough(target, sp, quiescence, obs); !idleEnough {
+		if blockedByDialogKind != "" {
+			hookEmitNudgeDialogBlocked(target, blockedByDialogKind)
+		}
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -1676,7 +1679,32 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
 }
 
-func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+// pollerSessionIdleEnough reports whether the target session is idle long
+// enough for the poller to attempt delivery AND is not currently blocked by
+// a known dialog that owns the pane's input (see [runtime.DialogAwareProvider]).
+// A pane blocked by such a dialog can be persistently idle by activity
+// standards yet never accept a submitted Enter, so the two checks must
+// combine here rather than leaving dialog awareness to a later escalation
+// path: gating delivery is how a caller avoids incrementing Attempts and
+// re-pasting into a pane that cannot consume the paste.
+//
+// When idleEnough is false because of a dialog, blockedByDialogKind names it;
+// it is empty in every other case (not idle by activity, or idle and
+// unblocked). The caller uses this to give gate-level visibility into the
+// deferral instead of letting it look identical to ordinary quiescence.
+func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (idleEnough bool, blockedByDialogKind string) {
+	if !pollerSessionIdleByActivity(target, sp, quiescence, obs) {
+		return false, ""
+	}
+	if dap, ok := sp.(runtime.DialogAwareProvider); ok {
+		if blocked, kind, err := dap.BlockedByDialog(context.Background(), target.sessionName); err == nil && blocked {
+			return false, kind
+		}
+	}
+	return true, ""
+}
+
+func pollerSessionIdleByActivity(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
 	if quiescence <= 0 {
 		return true
 	}

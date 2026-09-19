@@ -38,6 +38,7 @@ var instanceTokenReader = rand.Reader
 var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
+	_ runtime.DialogAwareProvider           = (*Provider)(nil)
 	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
@@ -533,6 +534,12 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 // running session using a bounded timeout.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	return p.tm.DismissKnownDialogs(ctx, name, timeout)
+}
+
+// BlockedByDialog reports whether a known blocking dialog currently owns the
+// named session's pane input. See runtime.DialogAwareProvider.
+func (p *Provider) BlockedByDialog(ctx context.Context, name string) (bool, string, error) {
+	return p.tm.BlockedByDialog(ctx, name)
 }
 
 // Nudge sends a message to the named session to wake or redirect the agent.

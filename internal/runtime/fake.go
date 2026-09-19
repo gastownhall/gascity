@@ -14,26 +14,30 @@ import (
 // When broken is true (via [NewFailFake]), all mutating operations return
 // an error and IsRunning always returns false. Calls are still recorded.
 type Fake struct {
-	mu                      sync.Mutex
-	sessions                map[string]Config            // live sessions
-	meta                    map[string]map[string]string // session → key → value
-	Calls                   []Call                       // recorded calls in order
-	broken                  bool                         // when true, all ops fail
-	OrphanedRuntimes        map[string]LiveRuntime       // session ID → untracked live runtime
-	Zombies                 map[string]bool              // sessions with dead agent processes
-	Attached                map[string]bool              // sessions with attached terminals
-	AttachedSequence        map[string][]bool            // scripted IsAttached results by session
-	PeekOutput              map[string]string            // session → canned peek output
-	Activity                map[string]time.Time         // session → last activity time
-	StartErrors             map[string]error             // per-session Start errors for testing
-	StopErrors              map[string]error             // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool              // per-session Stop returns nil without deleting the session
-	PendingInteractions     map[string]*PendingInteraction
-	Responses               map[string][]InteractionResponse
-	SleepCapabilityValue    SessionSleepCapability
-	WaitForIdleErrors       map[string]error
-	WaitForIdleSequence     map[string][]error
-	DialogErrors            map[string]error
+	mu                   sync.Mutex
+	sessions             map[string]Config            // live sessions
+	meta                 map[string]map[string]string // session → key → value
+	Calls                []Call                       // recorded calls in order
+	broken               bool                         // when true, all ops fail
+	OrphanedRuntimes     map[string]LiveRuntime       // session ID → untracked live runtime
+	Zombies              map[string]bool              // sessions with dead agent processes
+	Attached             map[string]bool              // sessions with attached terminals
+	AttachedSequence     map[string][]bool            // scripted IsAttached results by session
+	PeekOutput           map[string]string            // session → canned peek output
+	Activity             map[string]time.Time         // session → last activity time
+	StartErrors          map[string]error             // per-session Start errors for testing
+	StopErrors           map[string]error             // per-session Stop errors for testing
+	StopLeavesRunning    map[string]bool              // per-session Stop returns nil without deleting the session
+	PendingInteractions  map[string]*PendingInteraction
+	Responses            map[string][]InteractionResponse
+	SleepCapabilityValue SessionSleepCapability
+	WaitForIdleErrors    map[string]error
+	WaitForIdleSequence  map[string][]error
+	DialogErrors         map[string]error
+	// DialogBlocked configures BlockedByDialog's result per session name: an
+	// entry present (even "") reports blocked with that kind; an absent name
+	// reports not blocked.
+	DialogBlocked           map[string]string
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
@@ -59,6 +63,7 @@ type Fake struct {
 }
 
 var (
+	_ DialogAwareProvider = (*Fake)(nil)
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
 )
@@ -250,6 +255,22 @@ func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.
 		return err
 	}
 	return nil
+}
+
+// BlockedByDialog records the call and returns the configured result. A name
+// present in DialogBlocked (even with an empty kind) reports blocked; an
+// absent name reports not blocked.
+func (f *Fake) BlockedByDialog(_ context.Context, name string) (bool, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "BlockedByDialog", Name: name})
+	if f.broken {
+		return false, "", fmt.Errorf("session unavailable")
+	}
+	if kind, ok := f.DialogBlocked[name]; ok {
+		return true, kind, nil
+	}
+	return false, "", nil
 }
 
 // ResetInterruptedTurn records the call and returns the configured result.

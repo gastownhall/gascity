@@ -2634,6 +2634,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/NudgeDialogBlockedPayload"
+          },
+          {
             "$ref": "#/components/schemas/OrderSuppressedPayload"
           },
           {
@@ -5063,6 +5066,25 @@
       },
       "NoPayload": {
         "additionalProperties": false,
+        "type": "object"
+      },
+      "NudgeDialogBlockedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "dialog_kind": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "dialog_kind"
+        ],
         "type": "object"
       },
       "OKResponseBody": {
@@ -12368,6 +12390,7 @@
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
+            "nudge.dialog_blocked": "#/components/schemas/TypedEventStreamEnvelopeNudgeDialogBlocked",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
@@ -12575,6 +12598,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeNudgeDialogBlocked"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
@@ -14051,7 +14077,8 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "nudge.dialog_blocked"
               ]
             },
             "type": "string"
@@ -15892,6 +15919,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeNudgeDialogBlocked": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeDialogBlockedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.dialog_blocked",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope nudge.dialog_blocked",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderCompleted": {
@@ -18516,6 +18600,7 @@
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
+            "nudge.dialog_blocked": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDialogBlocked",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
@@ -18723,6 +18808,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeNudgeDialogBlocked"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
@@ -20286,7 +20374,8 @@
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
                 "storage.binding.uncheckable",
-                "storage.binding.not_configured"
+                "storage.binding.not_configured",
+                "nudge.dialog_blocked"
               ]
             },
             "type": "string"
@@ -22256,6 +22345,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeNudgeDialogBlocked": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/NudgeDialogBlockedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "nudge.dialog_blocked",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope nudge.dialog_blocked",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {

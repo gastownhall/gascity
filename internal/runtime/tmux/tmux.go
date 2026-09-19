@@ -2824,6 +2824,31 @@ func (t *Tmux) DismissFeedbackSurveyModalIfPresent(session string) {
 	_, _ = dismissFeedbackSurveyModal(content, sendKeys, time.Sleep)
 }
 
+// BlockedByDialog reports whether a known blocking dialog currently owns the
+// session's pane input (see runtime.DialogAwareProvider). Detection only:
+// unlike the Dismiss* methods above, this never sends input to the pane, since
+// a blocking dialog may be holding unseen agent-authored content (e.g. an
+// in-progress bug-report draft) that a dismiss keystroke would discard.
+//
+// This takes its own CapturePane snapshot rather than reusing a cached one:
+// the state cache used elsewhere in this package holds only pane
+// command/PID metadata for liveness checks, not captured pane text, so there
+// is no existing same-cycle text capture to reuse here. This mirrors
+// DismissFeedbackSurveyModalIfPresent's own per-call capture above, for the
+// same reason.
+func (t *Tmux) BlockedByDialog(_ context.Context, session string) (bool, string, error) {
+	target := session
+	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
+		target = agentPane
+	}
+	content, err := t.CapturePane(target, promptObservationLines)
+	if err != nil {
+		return false, "", err
+	}
+	kind, blocked := runtime.ContainsAnyBlockingDialog(content)
+	return blocked, kind, nil
+}
+
 // GetPaneCommand returns the current command running in a pane.
 // Returns "bash", "zsh", "claude", "node", etc.
 func (t *Tmux) GetPaneCommand(session string) (string, error) {

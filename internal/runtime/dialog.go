@@ -1626,6 +1626,45 @@ func ContainsFeedbackSurveyModal(content string) bool {
 	return lineContainsAll(content, "1: Bad", "2: Fine", "3: Good", "0: Dismiss")
 }
 
+// bugReportDraftModalWindowLines bounds how many consecutive lines the
+// bug-report draft dialog's three option-row anchors may span. The anchor
+// tokens are transcribed from a prior live-pane investigation (ga-l769uu) as
+// "1 to review / 2 to send / 0 to dismiss"; no fresh live capture of this
+// dialog was available to re-verify that transcription byte-exactly (see
+// ga-1yqxh7.1 notes), and a slash-joined transcription may itself be a
+// paraphrase of a multi-line layout rather than one verbatim line. Matching
+// each digit paired with its own keyword — rather than the full phrase,
+// which assumes filler words like "to" are present verbatim — is more
+// robust to that transcription risk while six co-occurring short tokens
+// stay a distinctive-enough signature to avoid false positives. Flagging
+// this residual gap explicitly for the reviewer, per the bead's own
+// evidence-based-diligence instruction.
+const bugReportDraftModalWindowLines = 4
+
+// ContainsBugReportDraftModal reports whether pane content shows Claude
+// Code's bug-report draft dialog. That dialog holds an in-progress,
+// possibly agent-authored draft that a blind dismiss keystroke would
+// discard, so detection here must stay read-only — see
+// [DialogAwareProvider]. See [bugReportDraftModalWindowLines] for the anchor
+// provenance and matching rationale.
+func ContainsBugReportDraftModal(content string) bool {
+	return linesContainAllWithin(content, bugReportDraftModalWindowLines,
+		"1", "review", "2", "send", "0", "dismiss")
+}
+
+// ContainsAnyBlockingDialog reports whether pane content shows any known
+// dialog shape that owns the pane's input in a way that would swallow or
+// misdirect a submitted Enter. It tries known blocking-dialog matchers in
+// turn and returns the first match's kind. This is a short local list, not
+// a matcher registry — add a case here when a second blocking-dialog shape
+// is identified, not a plugin framework.
+func ContainsAnyBlockingDialog(content string) (kind string, blocked bool) {
+	if ContainsBugReportDraftModal(content) {
+		return "bug_report_draft", true
+	}
+	return "", false
+}
+
 // ContainsProviderRateLimitScreen reports whether pane content has
 // high-confidence provider rate-limit screen evidence.
 func ContainsProviderRateLimitScreen(content string) bool {

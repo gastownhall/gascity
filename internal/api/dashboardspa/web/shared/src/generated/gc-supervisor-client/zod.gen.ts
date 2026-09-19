@@ -902,6 +902,12 @@ export const zFormulaFeedBody = z.object({
 
 export const zNoPayload = z.record(z.string(), z.never());
 
+export const zNudgeDialogBlockedPayload = z.object({
+    bead_id: z.string().optional(),
+    dialog_kind: z.string(),
+    session_id: z.string()
+});
+
 export const zOkResponseBody = z.object({
     status: z.string()
 });
@@ -3331,6 +3337,7 @@ export const zEventPayload = z.union([
     zMailEventPayload,
     zMoleculeResolvedPayload,
     zNoPayload,
+    zNudgeDialogBlockedPayload,
     zOrderSuppressedPayload,
     zOutboundChannelMismatchPayload,
     zOutboundEventPayload,
@@ -4428,6 +4435,24 @@ export const zTypedEventStreamEnvelopeMoleculeResolved = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope nudge.dialog_blocked
+ */
+export const zTypedEventStreamEnvelopeNudgeDialogBlocked = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNudgeDialogBlockedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.dialog_blocked'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope order.completed
  */
 export const zTypedEventStreamEnvelopeOrderCompleted = z.object({
@@ -5296,6 +5321,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
+    zTypedEventStreamEnvelopeNudgeDialogBlocked.extend({ type: z.literal('nudge.dialog_blocked') }),
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
@@ -6379,6 +6405,25 @@ export const zTypedTaggedEventStreamEnvelopeMoleculeResolved = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope nudge.dialog_blocked
+ */
+export const zTypedTaggedEventStreamEnvelopeNudgeDialogBlocked = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zNudgeDialogBlockedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('nudge.dialog_blocked'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope order.completed
  */
 export const zTypedTaggedEventStreamEnvelopeOrderCompleted = z.object({
@@ -7292,6 +7337,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedTaggedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
     zTypedTaggedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
+    zTypedTaggedEventStreamEnvelopeNudgeDialogBlocked.extend({ type: z.literal('nudge.dialog_blocked') }),
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),

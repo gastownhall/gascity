@@ -53,6 +53,14 @@ type activitylessTimedOnlyNudgeProvider struct {
 	*runtime.Fake
 }
 
+// noDialogAwareProvider embeds the runtime.Provider interface (not
+// *runtime.Fake) so it does not promote a BlockedByDialog method, exercising
+// pollerSessionIdleEnough's behavior for providers that do not implement
+// runtime.DialogAwareProvider at all.
+type noDialogAwareProvider struct {
+	runtime.Provider
+}
+
 func (p *activitylessTimedOnlyNudgeProvider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{}
 }
@@ -1222,13 +1230,13 @@ func TestPollerSessionIdleEnoughUsesSuppliedLastActivity(t *testing.T) {
 	last := time.Now().Add(-5 * time.Second)
 	obs := worker.LiveObservation{LastActivity: &last}
 
-	if !pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if idleEnough, _ := pollerSessionIdleEnough(target, nil, 3*time.Second, obs); !idleEnough {
 		t.Fatal("pollerSessionIdleEnough = false, want true when supplied last activity is old enough")
 	}
 
 	recent := time.Now().Add(-1 * time.Second)
 	obs.LastActivity = &recent
-	if pollerSessionIdleEnough(target, nil, 3*time.Second, obs) {
+	if idleEnough, _ := pollerSessionIdleEnough(target, nil, 3*time.Second, obs); idleEnough {
 		t.Fatal("pollerSessionIdleEnough = true, want false when supplied last activity is too recent")
 	}
 }
@@ -1242,7 +1250,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if idleEnough, _ := pollerSessionIdleEnough(target, fake, 3*time.Second, obs); !idleEnough {
 		t.Fatal("pollerSessionIdleEnough = false, want idle wait fallback to allow delivery")
 	}
 
@@ -1258,7 +1266,7 @@ func TestPollerSessionIdleEnoughFallsBackToIdleWaitWhenActivityUnavailable(t *te
 	}
 
 	fake.WaitForIdleErrors["sess-worker"] = errors.New("timed out waiting for idle")
-	if pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if idleEnough, _ := pollerSessionIdleEnough(target, fake, 3*time.Second, obs); idleEnough {
 		t.Fatal("pollerSessionIdleEnough = true, want idle wait error to suppress delivery")
 	}
 }
@@ -1272,11 +1280,53 @@ func TestPollerSessionIdleEnoughAllowsActivitylessTimedOnlySession(t *testing.T)
 	target := nudgeTarget{sessionName: "sess-worker"}
 	obs := worker.LiveObservation{}
 
-	if !pollerSessionIdleEnough(target, fake, 3*time.Second, obs) {
+	if idleEnough, _ := pollerSessionIdleEnough(target, fake, 3*time.Second, obs); !idleEnough {
 		t.Fatal("pollerSessionIdleEnough = false, want activityless timed-only sessions to allow queued delivery")
 	}
 	if calls := fake.CountCalls("WaitForIdle", "sess-worker"); calls != 0 {
 		t.Fatalf("WaitForIdle calls = %d, want 0 for activityless timed-only session", calls)
+	}
+}
+
+func TestPollerSessionIdleEnoughUnchangedWithoutDialogAwareProvider(t *testing.T) {
+	provider := &noDialogAwareProvider{Provider: runtime.NewFake()}
+	target := nudgeTarget{sessionName: "sess-worker"}
+	last := time.Now().Add(-5 * time.Second)
+	obs := worker.LiveObservation{LastActivity: &last}
+
+	if idleEnough, _ := pollerSessionIdleEnough(target, provider, 3*time.Second, obs); !idleEnough {
+		t.Fatal("pollerSessionIdleEnough = false, want true for an idle session on a provider without DialogAwareProvider")
+	}
+}
+
+func TestPollerSessionIdleEnoughReturnsFalseWhenBlockedByDialog(t *testing.T) {
+	fake := runtime.NewFake()
+	fake.DialogBlocked = map[string]string{"sess-worker": "bug_report_draft"}
+	target := nudgeTarget{sessionName: "sess-worker"}
+	last := time.Now().Add(-5 * time.Second)
+	obs := worker.LiveObservation{LastActivity: &last}
+
+	idleEnough, kind := pollerSessionIdleEnough(target, fake, 3*time.Second, obs)
+	if idleEnough {
+		t.Fatal("pollerSessionIdleEnough = true, want false when the session is blocked by a dialog even though it is idle")
+	}
+	if kind != "bug_report_draft" {
+		t.Fatalf("blockedByDialogKind = %q, want %q", kind, "bug_report_draft")
+	}
+}
+
+func TestPollerSessionIdleEnoughUnchangedWhenNotBlockedByDialog(t *testing.T) {
+	fake := runtime.NewFake()
+	target := nudgeTarget{sessionName: "sess-worker"}
+	last := time.Now().Add(-5 * time.Second)
+	obs := worker.LiveObservation{LastActivity: &last}
+
+	idleEnough, kind := pollerSessionIdleEnough(target, fake, 3*time.Second, obs)
+	if !idleEnough {
+		t.Fatal("pollerSessionIdleEnough = false, want true when the session is idle and not blocked by any dialog")
+	}
+	if kind != "" {
+		t.Fatalf("blockedByDialogKind = %q, want empty when not blocked", kind)
 	}
 }
 
@@ -2647,12 +2697,20 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
 
+	var dialogBlockedHookCalled bool
+	prevHook := hookEmitNudgeDialogBlocked
+	hookEmitNudgeDialogBlocked = func(nudgeTarget, string) { dialogBlockedHookCalled = true }
+	t.Cleanup(func() { hookEmitNudgeDialogBlocked = prevHook })
+
 	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
 	if err != nil {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
 	if !delivered {
 		t.Fatal("delivered = false, want true")
+	}
+	if dialogBlockedHookCalled {
+		t.Fatal("hookEmitNudgeDialogBlocked called, want no call when the session is not blocked by a dialog")
 	}
 
 	var nudgeCalls []runtime.Call
@@ -2683,6 +2741,90 @@ func TestTryDeliverQueuedNudgesByPollerDeliversAndAcks(t *testing.T) {
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerEmitsNudgeDialogBlockedWhenBlocked guards
+// ga-1yqxh7.2: when the gate defers delivery because a dialog owns the
+// pane's input, the poller must emit nudge.dialog_blocked via the hook seam
+// so the deferral is distinguishable from ordinary quiescence on the event
+// bus, instead of silently returning false the same way an idle-wait
+// timeout would.
+func TestTryDeliverQueuedNudgesByPollerEmitsNudgeDialogBlockedWhenBlocked(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.DialogBlocked = map[string]string{info.SessionName: "bug_report_draft"}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	var hookCalls int
+	var gotTarget nudgeTarget
+	var gotKind string
+	prevHook := hookEmitNudgeDialogBlocked
+	hookEmitNudgeDialogBlocked = func(target nudgeTarget, kind string) {
+		hookCalls++
+		gotTarget = target
+		gotKind = kind
+	}
+	t.Cleanup(func() { hookEmitNudgeDialogBlocked = prevHook })
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false when the session is blocked by a dialog")
+	}
+	if hookCalls != 1 {
+		t.Fatalf("hookEmitNudgeDialogBlocked calls = %d, want 1", hookCalls)
+	}
+	if gotKind != "bug_report_draft" {
+		t.Fatalf("hook kind = %q, want %q", gotKind, "bug_report_draft")
+	}
+	if gotTarget.sessionName != info.SessionName {
+		t.Fatalf("hook target.sessionName = %q, want %q", gotTarget.sessionName, info.SessionName)
+	}
+
+	var nudgeCalls []runtime.Call
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeCalls = append(nudgeCalls, call)
+		}
+	}
+	if len(nudgeCalls) != 0 {
+		t.Fatalf("nudge calls = %d, want 0 when the gate defers for a dialog", len(nudgeCalls))
+	}
+
+	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1 (item must stay unclaimed when the gate defers before claiming)", len(pending))
 	}
 }
 

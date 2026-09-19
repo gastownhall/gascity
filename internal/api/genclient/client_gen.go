@@ -2670,6 +2670,13 @@ type MonitorFeedItemResponse struct {
 // NoPayload defines model for NoPayload.
 type NoPayload = map[string]interface{}
 
+// NudgeDialogBlockedPayload defines model for NudgeDialogBlockedPayload.
+type NudgeDialogBlockedPayload struct {
+	BeadId     *string `json:"bead_id,omitempty"`
+	DialogKind string  `json:"dialog_kind"`
+	SessionId  string  `json:"session_id"`
+}
+
 // OKResponseBody defines model for OKResponseBody.
 type OKResponseBody struct {
 	// Status Operation result.
@@ -6209,6 +6216,22 @@ type TypedEventStreamEnvelopeMoleculeResolved struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeNudgeDialogBlocked defines model for TypedEventStreamEnvelopeNudgeDialogBlocked.
+type TypedEventStreamEnvelopeNudgeDialogBlocked struct {
+	Actor            string                    `json:"actor"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          NudgeDialogBlockedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
 type TypedEventStreamEnvelopeOrderCompleted struct {
 	Actor            string                   `json:"actor"`
@@ -7850,6 +7873,23 @@ type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeNudgeDialogBlocked defines model for TypedTaggedEventStreamEnvelopeNudgeDialogBlocked.
+type TypedTaggedEventStreamEnvelopeNudgeDialogBlocked struct {
+	Actor            string                    `json:"actor"`
+	City             string                    `json:"city"`
+	DependsOnStepIds *[]string                 `json:"depends_on_step_ids,omitempty"`
+	Message          *string                   `json:"message,omitempty"`
+	Payload          NudgeDialogBlockedPayload `json:"payload"`
+	RunId            *string                   `json:"run_id,omitempty"`
+	Seq              int64                     `json:"seq"`
+	SessionId        *string                   `json:"session_id,omitempty"`
+	StepId           *string                   `json:"step_id,omitempty"`
+	Subject          *string                   `json:"subject,omitempty"`
+	Ts               time.Time                 `json:"ts"`
+	Type             string                    `json:"type"`
+	Workflow         *WorkflowEventProjection  `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeOrderCompleted defines model for TypedTaggedEventStreamEnvelopeOrderCompleted.
@@ -10812,6 +10852,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsNudgeDialogBlockedPayload returns the union data inside the EventPayload as a NudgeDialogBlockedPayload
+func (t EventPayload) AsNudgeDialogBlockedPayload() (NudgeDialogBlockedPayload, error) {
+	var body NudgeDialogBlockedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromNudgeDialogBlockedPayload overwrites any union data inside the EventPayload as the provided NudgeDialogBlockedPayload
+func (t *EventPayload) FromNudgeDialogBlockedPayload(v NudgeDialogBlockedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeNudgeDialogBlockedPayload performs a merge with any union data inside the EventPayload, using the provided NudgeDialogBlockedPayload
+func (t *EventPayload) MergeNudgeDialogBlockedPayload(v NudgeDialogBlockedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -14813,6 +14879,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved
 	return err
 }
 
+// AsTypedEventStreamEnvelopeNudgeDialogBlocked returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeNudgeDialogBlocked
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeNudgeDialogBlocked() (TypedEventStreamEnvelopeNudgeDialogBlocked, error) {
+	var body TypedEventStreamEnvelopeNudgeDialogBlocked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeNudgeDialogBlocked overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeNudgeDialogBlocked
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeNudgeDialogBlocked(v TypedEventStreamEnvelopeNudgeDialogBlocked) error {
+	v.Type = "nudge.dialog_blocked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeNudgeDialogBlocked performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeNudgeDialogBlocked
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeNudgeDialogBlocked(v TypedEventStreamEnvelopeNudgeDialogBlocked) error {
+	v.Type = "nudge.dialog_blocked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderCompleted
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderCompleted() (TypedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedEventStreamEnvelopeOrderCompleted
@@ -16223,6 +16317,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
+	case "nudge.dialog_blocked":
+		return t.AsTypedEventStreamEnvelopeNudgeDialogBlocked()
 	case "order.completed":
 		return t.AsTypedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
@@ -17812,6 +17908,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMole
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeNudgeDialogBlocked returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeNudgeDialogBlocked
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeNudgeDialogBlocked() (TypedTaggedEventStreamEnvelopeNudgeDialogBlocked, error) {
+	var body TypedTaggedEventStreamEnvelopeNudgeDialogBlocked
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeNudgeDialogBlocked overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeNudgeDialogBlocked
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeNudgeDialogBlocked(v TypedTaggedEventStreamEnvelopeNudgeDialogBlocked) error {
+	v.Type = "nudge.dialog_blocked"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeNudgeDialogBlocked performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeNudgeDialogBlocked
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeNudgeDialogBlocked(v TypedTaggedEventStreamEnvelopeNudgeDialogBlocked) error {
+	v.Type = "nudge.dialog_blocked"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderCompleted
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderCompleted() (TypedTaggedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedTaggedEventStreamEnvelopeOrderCompleted
@@ -19222,6 +19346,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
+	case "nudge.dialog_blocked":
+		return t.AsTypedTaggedEventStreamEnvelopeNudgeDialogBlocked()
 	case "order.completed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":

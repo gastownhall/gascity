@@ -401,6 +401,15 @@ const (
 	StorageBindingUnconverged   = "storage.binding.unconverged"
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
+
+	// NudgeDialogBlocked fires when the queued-nudge delivery gate defers
+	// because a dialog owns the target session's input, rather than because
+	// the pane is genuinely busy. Gives gate-level visibility into the
+	// asymmetry between the gate (pane inactivity) and the delivery confirm
+	// (pane busy-ness): a pane blocked by an unmatched dialog is persistently
+	// inactive but never goes busy, so without this signal the deferral looks
+	// identical to ordinary quiescence and the poller silently keeps retrying.
+	NudgeDialogBlocked = "nudge.dialog_blocked"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -459,6 +468,7 @@ var KnownEventTypes = []string{
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,
+	NudgeDialogBlocked,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

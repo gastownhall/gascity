@@ -314,6 +314,19 @@ type DialogProvider interface {
 	DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error
 }
 
+// DialogAwareProvider is an optional extension for runtimes that can report
+// whether a known dialog currently owns a session's pane input in a way that
+// would swallow or misdirect a submitted Enter (e.g. an option-row dialog
+// with its own numeric shortcuts, rather than the agent's composer). Unlike
+// [DialogProvider], this is detection-only: implementations must not send
+// any input to the pane. A blocking dialog may be holding unseen
+// agent-authored content — e.g. an in-progress bug-report draft — that a
+// blind dismiss keystroke would discard, so the caller's contract is to
+// defer delivery rather than dismiss.
+type DialogAwareProvider interface {
+	BlockedByDialog(ctx context.Context, name string) (blocked bool, kind string, err error)
+}
+
 // SessionRosterProvider is an optional extension for providers whose
 // per-session attribute reads are otherwise expensive (e.g. one subprocess
 // fork per call). Callers iterating a full session roster should prefer
