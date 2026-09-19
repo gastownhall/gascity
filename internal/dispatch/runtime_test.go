@@ -1232,12 +1232,18 @@ func TestProcessScopeCheckAbortScopeAffirmativeAndLegacyOutcomes(t *testing.T) {
 }
 
 // Retry-managed attempt subjects are exempt from the fail-closed abort_scope
-// contract: a bare-closed nested-retry attempt (gc.logical_bead_id +
-// gc.attempt, with the opt-in hardcoded at dispatch) must keep routing
-// through retry-eval as a transient contract violation, not abort its
-// iteration scope. An explicit gc.outcome=fail still counts as failed. The
-// opt-in match itself is whitespace-tolerant so formula-authored variants
-// cannot silently keep the legacy lenient contract.
+// contract: a nested-retry attempt (gc.logical_bead_id + gc.attempt, with the
+// opt-in hardcoded at dispatch) must keep routing through retry-eval as a
+// transient contract violation, not abort its iteration scope — whether it
+// closed bare or with an explicit gc.outcome=fail. The retry controller
+// itself carries gc.on_fail=abort_scope and aborts the scope at the level
+// that owns the retry budget if the retry is ultimately exhausted
+// (internal/formula/ralph.go:237), so exempting the individual attempt does
+// not remove the abort, it moves it. A non-retry-attempt member still
+// fail-closes on an explicit gc.outcome=fail: the exemption is scoped to
+// retry attempts, not a blanket lenience. The opt-in match itself is
+// whitespace-tolerant so formula-authored variants cannot silently keep the
+// legacy lenient contract.
 func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 	t.Parallel()
 
@@ -1256,12 +1262,23 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "explicit fail on retry attempt still counts as failed",
+			// Regression for gc-pl7ujz: the exemption used to sit after the
+			// unconditional gc.outcome=fail short-circuit, so it was never
+			// reached by the one case it exists for.
+			name: "explicit fail on retry attempt is exempt from fail-closed",
 			meta: map[string]string{
 				"gc.on_fail":         "abort_scope",
 				"gc.logical_bead_id": "ga-logical-1",
 				"gc.attempt":         "1",
 				"gc.outcome":         "fail",
+			},
+			want: false,
+		},
+		{
+			name: "explicit fail on a non-retry-attempt member still counts as failed",
+			meta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "fail",
 			},
 			want: true,
 		},
@@ -1292,6 +1309,160 @@ func TestBeadOutcomeFailedRetryAttemptExemptionAndOptInTrim(t *testing.T) {
 			}
 			if got := beadOutcomeFailed(subject); got != tc.want {
 				t.Fatalf("beadOutcomeFailed = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+// Regression for gc-pl7ujz: reconcileTerminalScopedMember is one of the two
+// direct abort_scope call sites (the other is processScopeCheck's non-retry
+// branch). A retry-managed attempt that closed gc.outcome=fail must not abort
+// its scope through this path either, mirroring
+// TestReconcileTerminalScopedMemberAbortScopeBareCloseAbortsScope, whose bare
+// (non-retry) failed member must still abort.
+func TestReconcileTerminalScopedMemberRetryAttemptExplicitFailDoesNotAbortScope(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	failedAttempt := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "review codex attempt 1",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.kind":            "retry-run",
+			"gc.root_bead_id":    workflow.ID,
+			"gc.scope_ref":       "body",
+			"gc.scope_role":      "member",
+			"gc.on_fail":         "abort_scope",
+			"gc.logical_bead_id": "logical-review-codex",
+			"gc.attempt":         "1",
+			"gc.outcome":         "fail",
+			"gc.failure_class":   "transient",
+		},
+	})
+	// The retry controller's next attempt, still open: representative of the
+	// live-fleet timeline in gc-pl7ujz where attempt 1 fails before attempt 2
+	// is spawned. Its presence is what must keep the scope open instead of
+	// aborting on attempt 1's own failure.
+	_ = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "review codex attempt 2",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+		},
+	})
+
+	result, err := reconcileTerminalScopedMember(store, failedAttempt)
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(retry attempt explicit fail): %v", err)
+	}
+	if result.Action == "scope-fail" {
+		t.Fatalf("action = %q, want the scope left open for the retry, not aborted", result.Action)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "open" {
+		t.Fatalf("body status = %q, want open (retry attempt failure must not abort the scope)", bodyAfter.Status)
+	}
+}
+
+// Regression for gc-pl7ujz: beadOutcomeFailed backs three decision sites —
+// the processScopeCheck non-retry abort branch (runtime.go:482), the
+// reconcileTerminalScopedMember abort branch (runtime.go:1491), and
+// terminalAbortScopeFailure used by workflow-finalize — and they must never
+// diverge for the same bead again.
+func TestBeadOutcomeFailedConvergesAcrossAbortScopeDecisionSites(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		meta map[string]string
+		want bool
+	}{
+		{
+			name: "retry attempt explicit fail is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.logical_bead_id": "logical-1",
+				"gc.attempt":         "1",
+				"gc.outcome":         "fail",
+			},
+			want: false,
+		},
+		{
+			name: "non-retry explicit fail is terminal everywhere",
+			meta: map[string]string{
+				"gc.on_fail": "abort_scope",
+				"gc.outcome": "fail",
+			},
+			want: true,
+		},
+		{
+			// gc.failure_class=transient is only ever set on retry-attempt
+			// subjects (classifyRetryAttempt in retry.go), so a realistic
+			// transient fixture also carries retry-attempt metadata.
+			name: "transient retry attempt failure is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.outcome":         "fail",
+				"gc.failure_class":   "transient",
+				"gc.attempt":         "2",
+				"gc.logical_bead_id": "logical-3",
+			},
+			want: false,
+		},
+		{
+			name: "superseded attempt is not terminal anywhere",
+			meta: map[string]string{
+				"gc.on_fail":         "abort_scope",
+				"gc.outcome":         "fail",
+				"gc.failure_class":   "hard",
+				"gc.attempt":         "3",
+				"gc.logical_bead_id": "logical-2",
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bead := beads.Bead{ID: "ga-subject-1", Status: "closed", Metadata: tc.meta}
+
+			gotPredicate := beadOutcomeFailed(bead)
+			if gotPredicate != tc.want {
+				t.Fatalf("beadOutcomeFailed = %t, want %t", gotPredicate, tc.want)
+			}
+
+			// terminalAbortScopeFailure additionally filters on
+			// gc.failure_class=transient and superseded attempts, but for
+			// these cases (all abort_scope, all closed) it must agree with
+			// the bare predicate: neither the transient nor the superseded
+			// case reaches terminalAbortScopeFailure's extra filters via a
+			// path beadOutcomeFailed disagrees on.
+			gotTerminal := terminalAbortScopeFailure(bead)
+			if gotTerminal != gotPredicate {
+				t.Fatalf("terminalAbortScopeFailure = %t, beadOutcomeFailed = %t; the three abort_scope decision sites diverged", gotTerminal, gotPredicate)
 			}
 		})
 	}
