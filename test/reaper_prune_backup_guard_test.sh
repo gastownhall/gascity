@@ -16,6 +16,9 @@
 #  12. Dolt-native destination registered but empty  → bd NOT called, primary verdict stands
 #  13. Two destinations, remote listed first + file:// → the datable one is used
 #  14. Dolt-native destination holding many objects  → the newest is still found
+#  15. Dolt-native backup fresh (backup gate passes) AND non-session beads in
+#      scope → type-scope guard still blocks, no bd prune (combined case:
+#      neither guard may silently supersede the other after #5694's merge)
 
 set -euo pipefail
 
@@ -91,6 +94,10 @@ touch_ago() {
 #               and a file:// destination second;
 #               "many:<seconds>" — a file:// destination holding ~1500 objects,
 #               only the newest of which was written that many seconds ago.
+#   sql_count   what get_sql_count reports for the type-scope guard's own
+#               non-session-bead-in-pattern count (default "0" — scope clear).
+#               A nonzero value exercises the type-scope guard downstream of
+#               whatever the backup gate above decided.
 #
 # Returns: <bd_called>|<anomaly_called>|<exit_status>|<anomaly_msg>
 run_prune_scenario() {
@@ -100,6 +107,7 @@ run_prune_scenario() {
     local legacy_age="${4:-absent}"
     local frac="${5:-}"
     local dolt_native="${6:-absent}"
+    local sql_count="${7:-0}"
     local tmpdir bd_flag anomaly_flag anomaly_msg_file step6_file run_script
     tmpdir=$(mktemp -d)
     bd_flag="$tmpdir/bd_called"
@@ -191,7 +199,8 @@ export -f dolt_sql"
 set -euo pipefail
 gc()            { touch '$bd_flag'; printf '{"pruned_count":3}'; }
 record_anomaly(){ touch '$anomaly_flag'; printf '%s\n' "\$*" >> '$anomaly_msg_file'; }
-export -f gc record_anomaly
+get_sql_count() { SQL_COUNT_RESULT=$sql_count; }
+export -f gc record_anomaly get_sql_count
 $dolt_stub
 CITY_ABS='$tmpdir'
 CITY_BEADS_DIR='$tmpdir/.beads'
@@ -407,6 +416,24 @@ if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
     pass "T14: dolt-native destination with ~1500 objects → newest found, bd called"
 else
     fail "T14: dolt-native many objects → expected bd=yes anomaly=no; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T15: dolt-native backup fresh (backup gate passes) + non-session beads ───
+# in scope → type-scope guard still blocks, no bd prune. This is the case
+# #5694 introduced risk for: a Dolt-native rescue can flip _PRUNE_SKIP back to
+# 0 well after the primary legacy-state check already failed it, so the
+# type-scope guard downstream must still see and veto a scope violation
+# rather than the passing backup gate being mistaken for full clearance.
+result=$(run_prune_scenario "absent" "86400" "legacy" "absent" "" "60" "3")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
+        && printf '%s' "$anomaly_msg" | grep -qi "scope\|type"; then
+    pass "T15: dolt-native backup fresh (gate passes) + non-session beads in scope → type-scope guard still blocks, no bd prune"
+else
+    fail "T15: dolt-native fresh + type scope violation → expected bd=no anomaly=yes+scope keyword; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
 fi
 
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1

@@ -255,6 +255,10 @@
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
         },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
@@ -545,6 +549,10 @@
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string (e.g., \"30s\") or \"off\"."
+        },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
         },
         "install_agent_hooks": {
           "items": {
@@ -838,6 +846,10 @@
         "sleep_after_idle": {
           "type": "string",
           "description": "SleepAfterIdle overrides idle sleep policy for this agent. Accepts a\nduration string or \"off\"."
+        },
+        "auto_reclaim_stale_claims": {
+          "type": "boolean",
+          "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
         },
         "install_agent_hooks": {
           "items": {
@@ -2291,6 +2303,13 @@
           },
           "type": "array",
           "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
+        },
+        "flag_template": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FlagTemplate makes this option OPEN: a value that is not one of Choices\nis still honored by substituting it for OptionValuePlaceholder in this\ntemplate. Options with no template are CLOSED — an undeclared value\ncannot be turned into flags at all.\n\nModel ids are an open, fast-moving set: every provider ships new ones\nbetween gc releases. Modeling them as a closed enum meant a pin the\ncatalog had not caught up to produced no FlagArgs and the launch path\nsilently omitted the flag, unpinning the agent onto whatever the CLI\ndefaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6).\nChoices stay as the curated suggestion list for pickers; the template\nis what guarantees an explicit pin is never discarded.\n\njson:\"-\" for the same reason as OptionChoice.FlagArgs: CLI flag shapes\nare server-side only and must not reach the public API DTO."
         },
         "omit": {
           "type": "boolean",

@@ -964,26 +964,49 @@ func TestFactorySweepSessionModelUsageKeylessClaudeAmbiguousSettles(t *testing.T
 		t.Fatalf("NewFactory: %v", err)
 	}
 
-	// Two open sessions, same workdir, no session_key → ambiguous workdir fallback.
-	for _, title := range []string{"one", "two"} {
-		h, err := factory.Session(SessionSpec{
-			Profile:  ProfileClaudeTmuxCLI,
-			Template: "probe",
-			Title:    title,
-			Command:  "claude",
-			WorkDir:  workDir,
-			Provider: "claude",
-		})
-		if err != nil {
-			t.Fatalf("Session(%s): %v", title, err)
-		}
-		if err := h.Start(context.Background()); err != nil {
-			t.Fatalf("Start(%s): %v", title, err)
-		}
-		// Clear any captured session_key so discovery is forced into workdir fallback.
-		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
-			t.Fatal(err)
-		}
+	// One keyless session is created, started, and killed before a second is
+	// created sharing the same workdir. Kill (not Close) leaves its bead open
+	// so the ambiguity check below still counts it, while releasing the
+	// runtime so the second Start is not refused as a live cwd collision.
+	one, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(one): %v", err)
+	}
+	if err := one.Start(context.Background()); err != nil {
+		t.Fatalf("Start(one): %v", err)
+	}
+	// Clear any captured session_key so discovery is forced into workdir fallback.
+	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := one.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill(one): %v", err)
+	}
+
+	two, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "two",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(two): %v", err)
+	}
+	if err := two.Start(context.Background()); err != nil {
+		t.Fatalf("Start(two): %v", err)
+	}
+	// Clear any captured session_key so discovery is forced into workdir fallback.
+	if err := store.SetMetadata(two.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
 	}
 
 	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
@@ -1032,25 +1055,47 @@ func TestDiscoverSweepTranscriptKeylessClaudeAmbiguousSettles(t *testing.T) {
 		t.Fatalf("NewFactory: %v", err)
 	}
 
-	// Two open sessions, same workdir, no session_key -> ambiguous workdir fallback.
-	for _, title := range []string{"one", "two"} {
-		h, err := factory.Session(SessionSpec{
-			Profile:  ProfileClaudeTmuxCLI,
-			Template: "probe",
-			Title:    title,
-			Command:  "claude",
-			WorkDir:  workDir,
-			Provider: "claude",
-		})
-		if err != nil {
-			t.Fatalf("Session(%s): %v", title, err)
-		}
-		if err := h.Start(context.Background()); err != nil {
-			t.Fatalf("Start(%s): %v", title, err)
-		}
-		if err := store.SetMetadata(h.sessionID, "session_key", ""); err != nil {
-			t.Fatal(err)
-		}
+	// One keyless session is created, started, and killed before a second is
+	// created sharing the same workdir. Kill (not Close) leaves its bead open
+	// so the ambiguity check below still counts it, while releasing the
+	// runtime so the second Start is not refused as a live cwd collision.
+	one, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(one): %v", err)
+	}
+	if err := one.Start(context.Background()); err != nil {
+		t.Fatalf("Start(one): %v", err)
+	}
+	if err := store.SetMetadata(one.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := one.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill(one): %v", err)
+	}
+
+	two, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "two",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session(two): %v", err)
+	}
+	if err := two.Start(context.Background()); err != nil {
+		t.Fatalf("Start(two): %v", err)
+	}
+	if err := store.SetMetadata(two.sessionID, "session_key", ""); err != nil {
+		t.Fatal(err)
 	}
 
 	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))

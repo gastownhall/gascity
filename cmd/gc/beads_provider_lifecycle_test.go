@@ -12315,7 +12315,15 @@ provider = "bd"
 		return alreadyErr
 	}
 
-	err := initBeadsForDirWithExecutor(cityDir, rigDir, "gsp", "gsp", execute)
+	// doltDatabase is deliberately overridden to a beads_test_-prefixed name
+	// (rather than the "gsp" a real gascity-packs rig would use) because
+	// this test exercises the real finalizeCanonicalBdScopeInit success path
+	// (it opens a real store — see initBeadsForDirWithExecutor's
+	// isBdAlreadyInitializedError branch), which the fake execute above
+	// never touches. The prefix keeps that store identifiable and reapable
+	// by defaultStaleDatabasePrefixes (ga-szv0ge) instead of colliding with
+	// production "gsp" naming.
+	err := initBeadsForDirWithExecutor(cityDir, rigDir, "gsp", "beads_test_gsp", execute)
 	if errors.Is(err, alreadyErr) {
 		t.Fatalf("initBeadsForDirWithExecutor error = %v, want the recovery to be treated as success", err)
 	}

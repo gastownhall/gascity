@@ -531,13 +531,13 @@ The v2 compiler must emit a flat, topologically ordered graph:
   terminal. Steps carrying `gc.scope_role = "teardown"` are excluded from
   the sink set: teardown runs after the workflow settles (section 3.5), so
   gating settlement on it would deadlock the run.
-- **The root blocks on the finalize step.** The workflow root bead is made
-  to depend on `workflow-finalize` (or, when a recipe has no finalize step,
-  on every step whose `gc.kind` is not one of the generated `run`, `check`,
-  `retry-run`, `retry-eval`, or `spec` kinds).
-  Consequence: the root is never Ready-visible while the workflow runs and
-  only surfaces when the workflow completes. Step beads — not the root —
-  are the Ready-visible work that wakes agents and pools.
+- **The root tracks the finalize step.** The workflow root reaches
+  `workflow-finalize` through an informational `tracks` edge. A blocking edge
+  would prevent the finalizer from closing the root while it is still open.
+  When a recipe has no finalize step, the root instead depends on every step
+  whose `gc.kind` is not one of the generated `run`, `check`, `retry-run`,
+  `retry-eval`, or `spec` kinds. The root is controller-owned; step beads are
+  the work that wakes agents and pools.
 - **Non-blocking `tracks` edges to the root.** Batch instantiation connects
   every non-root node to the root with a `tracks` edge so cascade deletion
   from the root discovers all workflow beads without making the root a

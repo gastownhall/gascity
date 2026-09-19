@@ -1630,7 +1630,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1747,7 +1747,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -1775,12 +1775,21 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 		}
 	}
 	if cfg != nil {
+		cityName := config.EffectiveCityName(cfg, "")
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
 			identity := cfg.NamedSessions[i].QualifiedName()
 			add(identity)
+			// A closed phantom session bead for this identity means the
+			// on-demand session's own ready-assigned work is now filed under
+			// its runtime session name (#5231's assignee form), not the
+			// qualified identity above — enumerate that form too, or it is
+			// never queried and the work never re-materializes a session.
+			if _, ok := findClosedNamedSessionBead(cityStore, identity); ok {
+				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
+			}
 		}
 	}
 	return result
@@ -2171,8 +2180,29 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // with pre-ga-eld2x workflow roots. It matches the shell claim/count shape:
 // canonical gc.routed_to first, then gc.run_target only for workflow roots
 // stamped before root routing switched to gc.routed_to.
+//
+// The gc.run_target half applies workflowRunTargetFallbackEligible, so the
+// demand side counts exactly the roots hookClaimMatchesRoute will accept
+// (#5900). Without it a fully-expanded root whose real children have all
+// closed stays permanent capacity demand for a template whose own workers
+// refuse the claim: the seat spawns, its hook reads empty, it drains, and the
+// row is counted again next tick. The gate lives here rather than in
+// legacyWorkflowRunTarget because route recovery and pool session naming read
+// that helper for identity, not claimability, and must keep resolving an
+// expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
-	return routedToAndLegacyWorkflowCandidates(b)
+	candidates := routedToAndLegacyWorkflowCandidates(b)
+	if len(candidates) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {
+		return candidates
+	}
+	// The lone remaining candidate is the legacy gc.run_target fallback.
+	if !workflowRunTargetFallbackEligible(b) {
+		return nil
+	}
+	return candidates
 }
 
 func openControlDispatcherDemand(cfg *config.City, workBeads []beads.Bead) map[string]bool {

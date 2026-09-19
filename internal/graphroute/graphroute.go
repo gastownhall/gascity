@@ -246,6 +246,21 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 	return nil
 }
 
+// GraphRouteBindingForAgent derives the config-backed routing behavior for an
+// agent. Pool routes stay metadata-only; a one-shot pool additionally marks
+// each graph step IndependentSteps, because no runtime survives to carry
+// session affinity into the next step. IndependentSteps does not authorize
+// dropping a formula-declared continuation group: ApplyGraphRouteBinding
+// refuses that loudly instead of silently clearing the group.
+func GraphRouteBindingForAgent(agentCfg config.Agent) GraphRouteBinding {
+	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
+	if agentCfg.SupportsInstanceExpansion() {
+		binding.MetadataOnly = true
+		binding.IndependentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
+	}
+	return binding
+}
+
 // ApplyGraphControlRouteBinding routes control steps to the store-scoped
 // control-dispatcher config queue. Direct session assignment is reserved for
 // already-existing concrete session owners, not future on-demand sessions.
@@ -479,9 +494,8 @@ func ResolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
-	if agentCfg.SupportsInstanceExpansion() {
-		binding.MetadataOnly = true
+	binding := GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
 		cache[stepID] = binding
 		return binding, nil
 	}
@@ -715,15 +729,19 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 		a = &resolved
 	}
 
-	var sessionName string
-	if !a.SupportsInstanceExpansion() {
-		sessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		if sessionName == "" {
+	defaultRoute := GraphRouteBindingForAgent(*a)
+	// routedTo is the caller's already-normalized persisted identity. Preserve
+	// it rather than recomputing in case the caller resolved a compatibility
+	// spelling that agentutil intentionally keeps stable on the wire.
+	defaultRoute.QualifiedName = routedTo
+	if !defaultRoute.MetadataOnly {
+		defaultRoute.SessionName = agentutil.LookupSessionName(store, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
+		if defaultRoute.SessionName == "" {
 			return fmt.Errorf("could not resolve session name for %q", a.QualifiedName())
 		}
 	}
 	routeVars := GraphWorkflowRouteVars(recipe, vars)
-	return DecorateGraphWorkflowRecipe(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, routedTo, sessionName, store, cityName, cfg, deps)
+	return DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, routeVars, sourceBeadID, scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, deps)
 }
 
 // stampLegacyRecipeRouting mirrors the graph.v2 path in ApplyGraphRouteBinding:
