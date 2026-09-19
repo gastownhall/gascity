@@ -124,11 +124,11 @@ func TestRecordOnceWritesOneImmutableEventAndConservativeQuotaWithoutScanning(t 
 	}
 }
 
-// TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget proves the
-// lock deadline is real wall-clock time even though the frozen test clock
-// reports the full decision budget as always remaining: a genuine state.lock
-// hold longer than defaultRecordDecisionBudget must not make RecordOnce
-// drop the event.
+// TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget proves a real
+// state.lock hold longer than defaultRecordDecisionBudget cannot expire the
+// frozen-clock decision budget, because the fixture's injected deadline builder
+// follows the same clock model as the injected now: a genuine 200 ms hold must
+// not make RecordOnce drop the event.
 func TestRecordOnceRealLockContentionDoesNotExpireFrozenClockBudget(t *testing.T) {
 	home, service, permit := newRecordServiceFixture(t, testEventIDOne)
 
