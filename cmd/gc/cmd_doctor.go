@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -490,14 +491,127 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
+type remoteDoctorStatusCheck struct {
+	client   *api.Client
+	cityName string
+}
+
+func (c *remoteDoctorStatusCheck) Name() string { return "remote-status" }
+
+func (c *remoteDoctorStatusCheck) CanFix() bool { return false }
+
+func (c *remoteDoctorStatusCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c *remoteDoctorStatusCheck) WarmupEligible() bool { return false }
+
+func (c *remoteDoctorStatusCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	r := &doctor.CheckResult{Name: c.Name()}
+	status, err := c.client.GetStatus()
+	if err != nil {
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("remote status read failed: %v", err)
+		r.FixHint = "verify the remote city API and rerun gc doctor"
+		return r
+	}
+
+	if status.Body.Partial {
+		r.Status = doctor.StatusWarning
+		r.Severity = doctor.SeverityAdvisory
+		r.Message = fmt.Sprintf("remote city %q status read with partial data", c.cityName)
+		r.Details = append([]string(nil), status.Body.PartialErrors...)
+		return r
+	}
+
+	r.Status = doctor.StatusOK
+	r.Message = fmt.Sprintf("remote city %q status read", c.cityName)
+	return r
+}
+
+type remoteDoctorSkippedCheck struct {
+	name   string
+	reason string
+}
+
+func (c remoteDoctorSkippedCheck) Name() string { return c.name }
+
+func (c remoteDoctorSkippedCheck) CanFix() bool { return false }
+
+func (c remoteDoctorSkippedCheck) Fix(_ *doctor.CheckContext) error { return nil }
+
+func (c remoteDoctorSkippedCheck) WarmupEligible() bool { return false }
+
+func (c remoteDoctorSkippedCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	return &doctor.CheckResult{
+		Name:    c.Name(),
+		Status:  doctor.StatusOK,
+		Message: "SKIPPED: " + c.reason,
+	}
+}
+
+// These checks are intentionally explicit. A remote doctor invocation can
+// inspect only the API's read snapshot; it must not pretend that a local
+// filesystem, process, cache, or store check ran against the remote city.
+var remoteDoctorLocalOnlyChecks = []remoteDoctorSkippedCheck{
+	{name: "store-maintenance", reason: "requires the local city store"},
+	{name: "compaction", reason: "requires the local city store"},
+	{name: "local-supervisor", reason: "requires the local supervisor process"},
+	{name: "local-pack-cache", reason: "requires the local pack cache"},
+}
+
+func doRemoteDoctor(opts doctorOpts, client *api.Client, cityName string, stdout, stderr io.Writer) int {
+	registered := []doctor.Check{
+		&remoteDoctorStatusCheck{client: client, cityName: cityName},
+	}
+	for _, check := range remoteDoctorLocalOnlyChecks {
+		registered = append(registered, check)
+	}
+
+	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
+	if len(unmatched) > 0 {
+		return reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
+	}
+	// SelectChecks returns the registered values in their original order. Use a
+	// fresh runner so a filtered invocation does not execute an unselected check.
+	selectedDoctor := &doctor.Doctor{CheckTimeout: opts.CheckTimeout}
+	for _, check := range selected {
+		selectedDoctor.Register(check)
+	}
+
+	var report *doctor.Report
+	ctx := &doctor.CheckContext{Verbose: opts.Verbose}
+	if opts.JSON {
+		report = selectedDoctor.RunCollect(ctx, false)
+		if err := writeDoctorJSON(stdout, report); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	} else {
+		report = selectedDoctor.Run(ctx, stdout, false)
+		doctor.PrintSummary(stdout, report)
+	}
+	if report.BlockingFailed > 0 {
+		return 1
+	}
+	return 0
+}
+
 // doDoctor runs the health checks and prints results. With opts.Checks set it
 // runs only those checks and derives the exit code from them alone.
 func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	rctx, err := resolveContextAllowRemote()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if rctx.Remote != nil {
+		client, err := buildRemoteClient(rctx.Remote)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doRemoteDoctor(opts, client, rctx.Remote.CityName, stdout, stderr)
+	}
+	cityPath := rctx.CityPath
 
 	// Deliberately no d.Wait() here: gc doctor's whole point in bounding a check
 	// is that a wedged one cannot stall the command, and waiting on an abandoned
