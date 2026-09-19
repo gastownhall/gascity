@@ -228,7 +228,7 @@ func parseTailUsage(data []byte) ([]TailUsage, error) {
 			OutputTokens:        msg.Usage.OutputTokens,
 			CacheReadTokens:     msg.Usage.CacheReadInputTokens,
 			CacheCreationTokens: msg.Usage.CacheCreationInputTokens,
-			Timestamp:           entry.Timestamp,
+			Timestamp:           entry.Timestamp.Time,
 		}
 		if u.InputTokens <= 0 && u.OutputTokens <= 0 && u.CacheReadTokens <= 0 && u.CacheCreationTokens <= 0 {
 			continue

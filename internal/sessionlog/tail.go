@@ -189,7 +189,31 @@ type tailEntry struct {
 	Subtype   string          `json:"subtype,omitempty"`
 	UUID      string          `json:"uuid"`
 	Message   json.RawMessage `json:"message"`
-	Timestamp time.Time       `json:"timestamp"`
+	Timestamp tailTime        `json:"timestamp"`
+}
+
+// tailTime decodes a transcript entry timestamp without letting an
+// off-format value reject the whole line. Anything that is not a parseable
+// RFC3339 string decodes to the zero time, which is what TailUsage.Timestamp
+// documents and what every consumer already handles via the fall-back-to-now
+// path in modelUsageFact. A strict time.Time field would instead fail the
+// whole json.Unmarshal, and both decode sites drop the entry on error —
+// taking usage, model, context and activity with it.
+type tailTime struct{ time.Time }
+
+// UnmarshalJSON decodes an RFC3339 timestamp string, yielding the zero time
+// for any other shape.
+func (t *tailTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Time = time.Time{}
+		return nil
+	}
+	// parseCodexSessionTime is the package's lenient RFC3339Nano→RFC3339
+	// parser (reader.go); despite the name it is format-generic and returns
+	// the zero time rather than an error.
+	t.Time = parseCodexSessionTime(s)
+	return nil
 }
 
 // messageStopReason extracts stop_reason from an assistant message.

@@ -227,6 +227,16 @@ func TestExtractCodexTailUsageDuplicateKeepsFirstModel(t *testing.T) {
 	if usages[0].EntryUUID != "2026-04-16T21:49:40.470Z" {
 		t.Errorf("first.EntryUUID = %q, want the last duplicate's timestamp (collapse still refreshes the rest)", usages[0].EntryUUID)
 	}
+	// Timestamp, unlike EntryUUID, keeps the first-observed line's time: the
+	// invocation completed at 21:49:38.304Z and was merely replayed at
+	// 21:49:40.470Z, under the next turn_context.
+	wantFirstTime, err := time.Parse(time.RFC3339Nano, "2026-04-16T21:49:38.304Z")
+	if err != nil {
+		t.Fatalf("time.Parse: %v", err)
+	}
+	if !usages[0].Timestamp.Equal(wantFirstTime) {
+		t.Errorf("first.Timestamp = %v, want the original emission %v (not the re-emission)", usages[0].Timestamp, wantFirstTime)
+	}
 	if usages[1].Model != "gpt-5.5" {
 		t.Errorf("second.Model = %q, want gpt-5.5 (new invocation under the new turn_context)", usages[1].Model)
 	}
