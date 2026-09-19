@@ -37,7 +37,7 @@ import (
 //
 // Fix a violation by adding one of, on the SAME line as the bd invocation:
 //
-//	--actor "${GC_ALIAS:-${GC_SESSION_NAME:-$GC_SESSION_ID}}"   (preferred)
+//	--actor "${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"   (preferred)
 //	--force                                                     (admin/reaper use)
 //	# guard-ack:<slug>                                          (reviewed exception)
 //
@@ -67,7 +67,8 @@ func TestRawBdMutationRequiresActorOrForce(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if rawBdMutationAllowlistFiles[filepath.ToSlash(rel)] {
+			relSlash := filepath.ToSlash(rel)
+			if rawBdMutationAllowlistFiles[relSlash] {
 				return nil
 			}
 			data, err := os.ReadFile(path)
@@ -85,7 +86,7 @@ func TestRawBdMutationRequiresActorOrForce(t *testing.T) {
 				if verb == "update" && !bdUpdateStatusClosedRE.MatchString(line) {
 					continue
 				}
-				if bdActorGuardExemptRE.MatchString(line) {
+				if bdActorGuardExempt(relSlash, line) {
 					continue
 				}
 				violations = append(violations, fmt.Sprintf("%s:%d: %s", rel, lineNo+1, strings.TrimSpace(line)))
@@ -121,6 +122,102 @@ var rawBdMutationScanExts = map[string]bool{
 // (mirrors gc_nudge_form_test.go's nudgeAllowlistFiles). Empty until a real
 // exception is needed.
 var rawBdMutationAllowlistFiles = map[string]bool{}
+
+// bdActorOrderCheckFiles opts a file into resolved-order validation of its
+// --actor "${...}" fallback chains, on top of the baseline presence check
+// above (AMENDED FR-4 DESIGN, ga-gskond REVISION 3). Inverted shape of
+// rawBdMutationAllowlistFiles: presence here means "hold to the stronger
+// invariant," not "skip."
+//
+// This is deliberately an opt-in allowlist rather than a codebase-wide rule
+// because correctness here is claim-path-dependent, not universal.
+// mol-dog-stale-db.toml is exclusively claimed via `gc hook --claim`, so its
+// assignee is always hookClaimAssigneeIdentity's alias>sessionID>...
+// >sessionName order (cmd/gc/cmd_hook.go) collapsed to
+// GC_ALIAS>GC_SESSION_ID>GC_SESSION_NAME for a formula shell script. A
+// formula that instead self-claims with a bare `bd update --claim` stamps
+// BEADS_ACTOR, which resolves to the session NAME (not ID) in an unaliased
+// pool session — e.g.
+// packs/actual/deployer/formulas/mol-deployer-gate.formula.toml:97 in
+// gc-management — so forcing ID-first there would turn a close that works
+// today into a guard failure. Extend this list only after confirming a new
+// file's claim path the way this ruling confirmed mol-dog-stale-db.toml's.
+var bdActorOrderCheckFiles = map[string]bool{
+	"examples/bd/dolt/formulas/mol-dog-stale-db.toml": true,
+}
+
+// actorFallbackTokenRE finds a recognized identity var immediately following
+// a `${` inside a --actor value. Matching left-to-right over the value
+// yields the tokens in nesting order, which for a bash `${VAR:-${VAR2:-...}}`
+// chain is also fallback-precedence order: bash tries the outermost VAR
+// before ever evaluating its own default expression.
+var actorFallbackTokenRE = regexp.MustCompile(`\$\{(GC_ALIAS|GC_SESSION_ID|GC_SESSION_NAME)\b`)
+
+// actorFallbackOrder returns the GC_ALIAS/GC_SESSION_ID/GC_SESSION_NAME
+// tokens referenced in line's --actor value, in first-seen (left-to-right)
+// order, or nil if line has no --actor flag or its value references none of
+// the three recognized vars (e.g. a literal string, $BEADS_ACTOR alone, or
+// the dynamic current-assignee shape noted on ga-gskond — out of scope
+// here; no gascity formula uses it today).
+func actorFallbackOrder(line string) []string {
+	idx := strings.Index(line, "--actor")
+	if idx < 0 {
+		return nil
+	}
+	var order []string
+	for _, m := range actorFallbackTokenRE.FindAllStringSubmatch(line[idx:], -1) {
+		order = append(order, m[1])
+	}
+	return order
+}
+
+// actorFallbackOrderViolation reports a human-readable defect if order (as
+// returned by actorFallbackOrder) does not resolve GC_ALIAS before
+// GC_SESSION_ID before GC_SESSION_NAME, or "" if order respects it (which is
+// vacuously true when fewer than two of the three tokens appear at all).
+func actorFallbackOrderViolation(order []string) string {
+	pos := make(map[string]int, len(order))
+	for i, tok := range order {
+		if _, seen := pos[tok]; !seen {
+			pos[tok] = i
+		}
+	}
+	aliasPos, hasAlias := pos["GC_ALIAS"]
+	idPos, hasID := pos["GC_SESSION_ID"]
+	namePos, hasName := pos["GC_SESSION_NAME"]
+
+	if hasID && hasName && idPos > namePos {
+		return "GC_SESSION_ID must precede GC_SESSION_NAME"
+	}
+	if hasAlias && hasID && aliasPos > idPos {
+		return "GC_ALIAS must precede GC_SESSION_ID"
+	}
+	if hasAlias && hasName && aliasPos > namePos {
+		return "GC_ALIAS must precede GC_SESSION_NAME"
+	}
+	return ""
+}
+
+// bdActorGuardExempt reports whether line is exempt from the raw-bd-mutation
+// actor guard for the file at rel (repo-relative, slash-separated). For a
+// file not in bdActorOrderCheckFiles this is the original presence-only
+// check. For a checked file, presence of --force or a guard-ack still
+// exempts unconditionally, but presence of --actor is necessary and no
+// longer sufficient: its resolved fallback order must also pass
+// actorFallbackOrderViolation.
+func bdActorGuardExempt(rel, line string) bool {
+	if !bdActorGuardExemptRE.MatchString(line) {
+		return false
+	}
+	if !bdActorOrderCheckFiles[rel] {
+		return true
+	}
+	order := actorFallbackOrder(line)
+	if order == nil {
+		return true
+	}
+	return actorFallbackOrderViolation(order) == ""
+}
 
 // bdMutationVerbRE finds a raw `bd <verb>` command-token occurrence for one
 // of the four guarded verbs. \b before "bd" already rules out it being a
@@ -175,4 +272,45 @@ func precededByGc(before string) bool {
 	// ...`" prose), not just trail it.
 	last := strings.Trim(fields[len(fields)-1], "`\"';&|()")
 	return last == "gc"
+}
+
+// TestBdActorGuardExemptOrderCheck is the isolated unit test for the
+// order-validation helper (AMENDED FR-4 DESIGN, ga-gskond REVISION 3): it
+// exercises bdActorGuardExempt directly against synthetic rel/line pairs,
+// not the whole-repo file walk TestRawBdMutationRequiresActorOrForce
+// performs.
+func TestBdActorGuardExemptOrderCheck(t *testing.T) {
+	const checkedFile = "examples/bd/dolt/formulas/mol-dog-stale-db.toml"
+	cases := []struct {
+		name string
+		rel  string
+		line string
+		want bool
+	}{
+		{
+			name: "checked file with alias-id-name order is exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_ID:-${GC_SESSION_NAME:-}}}"`,
+			want: true,
+		},
+		{
+			name: "checked file with name-before-id order is NOT exempt",
+			rel:  checkedFile,
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
+			want: false,
+		},
+		{
+			name: "unlisted file with the same wrong order is exempt on presence alone",
+			rel:  "packs/actual/deployer/formulas/mol-deployer-gate.formula.toml",
+			line: `bd close "$WORK_BEAD" --actor "${GC_ALIAS:-${GC_SESSION_NAME:-${GC_SESSION_ID:-}}}"`,
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bdActorGuardExempt(tc.rel, tc.line); got != tc.want {
+				t.Errorf("bdActorGuardExempt(%q, %q) = %v, want %v", tc.rel, tc.line, got, tc.want)
+			}
+		})
+	}
 }
