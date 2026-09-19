@@ -118,7 +118,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rotation are unchanged for cooldown, cron and event orders, and a tick that
   spends its budget logs one line naming the orders it did not reach.
 
-
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
   sling whose only live root is gone.** A storage migration copies rows into the

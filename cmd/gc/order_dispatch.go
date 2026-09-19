@@ -783,7 +783,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		if spendDispatchBudget(cand.idx) {
-			m.logDeferredCandidates(budgeted[i+1:])
+			m.logUnreachedCandidates(budgeted[i+1:])
 			return
 		}
 	}
@@ -810,35 +810,37 @@ func dueConditionCandidate(cand *orderDispatchCandidate) bool {
 	return cand.order.Trigger == "condition" && cand.conditionResult != nil && cand.conditionResult.Due
 }
 
-// maxDeferredOrderNames bounds the deferral line below. A city with forty
-// orders and a spent budget defers most of them, and the question the line
+// maxUnreachedOrderNames bounds the line below. A city with forty orders and a
+// spent budget leaves most of them unreached, and the question the line
 // answers — "is the budget the reason nothing fired?" — is answered by the
 // count plus a sample, not by forty names.
-const maxDeferredOrderNames = 8
+const maxUnreachedOrderNames = 8
 
-// logDeferredCandidates emits the one line a tick that spent its budget owes an
+// logUnreachedCandidates emits the one line a tick that spent its budget owes an
 // operator. Budget starvation used to be invisible: no gate error, no
 // suppression event, nothing in the journal — the tick simply stopped part-way
 // through the rotation and the next one started over from the cursor.
 //
-// deferred is the candidates the rotation never reached, which is not the same
+// unreached is the candidates the rotation never got to, which is not the same
 // as a due-list: settling due-ness for the tail costs the per-order last-run and
-// event-cursor reads the budget exists to avoid (#3201, ga-l7jdg), so the line
-// reports what the tick already knows for free.
-func (m *memoryOrderDispatcher) logDeferredCandidates(deferred []*orderDispatchCandidate) {
-	if len(deferred) == 0 {
+// event-cursor reads the budget exists to avoid (#3201, ga-l7jdg). So the line
+// claims only what the tick already knows for free — that these orders were not
+// reached — and leaves the operator to judge whether the ones they expected to
+// fire are among them before reaching for orders.max_dispatches_per_tick.
+func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatchCandidate) {
+	if len(unreached) == 0 {
 		return
 	}
-	names := make([]string, 0, maxDeferredOrderNames+1)
-	for _, cand := range deferred {
-		if len(names) == maxDeferredOrderNames {
-			names = append(names, fmt.Sprintf("(+%d more)", len(deferred)-maxDeferredOrderNames))
+	names := make([]string, 0, maxUnreachedOrderNames+1)
+	for _, cand := range unreached {
+		if len(names) == maxUnreachedOrderNames {
+			names = append(names, fmt.Sprintf("(+%d more)", len(unreached)-maxUnreachedOrderNames))
 			break
 		}
 		names = append(names, cand.scoped)
 	}
-	logDispatchError(m.stderr, "gc: order dispatch: per-tick budget %d spent; %d order(s) deferred to a later tick: %s — raise orders.max_dispatches_per_tick if this repeats every tick",
-		m.maxDispatchesPerTick, len(deferred), strings.Join(names, ", "))
+	logDispatchError(m.stderr, "gc: order dispatch: per-tick budget %d spent; the rotation did not reach %d more order(s) this tick (due-ness not evaluated): %s",
+		m.maxDispatchesPerTick, len(unreached), strings.Join(names, ", "))
 }
 
 // openWorkGateShut reports whether the wisp-aware open-work gate (#2921) is

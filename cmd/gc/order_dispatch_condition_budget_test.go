@@ -162,10 +162,10 @@ func TestDispatchConditionOrderWithFailingCheckDoesNotFire(t *testing.T) {
 	}
 }
 
-// TestDispatchBudgetExhaustionLogsDeferredDueOrders: the starvation this whole
+// TestDispatchBudgetExhaustionLogsUnreachedOrders: the starvation this whole
 // change is about was invisible. A tick that stops on its budget says so, and
 // names what it did not reach.
-func TestDispatchBudgetExhaustionLogsDeferredDueOrders(t *testing.T) {
+func TestDispatchBudgetExhaustionLogsUnreachedOrders(t *testing.T) {
 	aa := []orders.Order{cooldownBudgetOrder("sweep-a"), cooldownBudgetOrder("sweep-b")}
 	m, stderr, _ := newConditionBudgetDispatcher(t, aa, 1)
 
@@ -177,20 +177,20 @@ func TestDispatchBudgetExhaustionLogsDeferredDueOrders(t *testing.T) {
 		t.Fatalf("dispatch stderr = %q, want a line reporting the spent per-tick budget", logged)
 	}
 	if !strings.Contains(logged, "sweep-b") {
-		t.Fatalf("dispatch stderr = %q, want the deferred order named", logged)
+		t.Fatalf("dispatch stderr = %q, want the unreached order named", logged)
 	}
 }
 
-// TestDispatchLogsNoDeferralWhenEveryDueOrderFires keeps the line above from
-// becoming per-tick noise on a city that is keeping up.
-func TestDispatchLogsNoDeferralWhenEveryDueOrderFires(t *testing.T) {
+// TestDispatchLogsNothingUnreachedWhenEveryDueOrderFires keeps the line above
+// from becoming per-tick noise on a city that is keeping up.
+func TestDispatchLogsNothingUnreachedWhenEveryDueOrderFires(t *testing.T) {
 	aa := []orders.Order{cooldownBudgetOrder("sweep-a"), cooldownBudgetOrder("sweep-b")}
 	m, stderr, _ := newConditionBudgetDispatcher(t, aa, 4)
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
 	drainOrderDispatch(t, m)
 
-	if logged := stderr.String(); strings.Contains(logged, "deferred to a later tick") {
-		t.Fatalf("dispatch stderr = %q, want no deferral line when the budget covered every due order", logged)
+	if logged := stderr.String(); strings.Contains(logged, "the rotation did not reach") {
+		t.Fatalf("dispatch stderr = %q, want no unreached-orders line when the budget covered every due order", logged)
 	}
 }
