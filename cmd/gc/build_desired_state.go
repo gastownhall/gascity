@@ -793,18 +793,6 @@ func buildDesiredStateWithSessionBeadsAt(
 	if store != nil {
 		subPhaseStart = time.Now()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
-		// Resolved by bead ID here, while assignedWorkBeads/assignedWorkStoreRefs
-		// are still index-aligned with readyAssigned's store-scoped keys — below,
-		// filterAssignedWorkBeadsForPoolDemand narrows assignedWorkBeads and loses
-		// that alignment. Reduced to poolReadyAssigned just before the
-		// ComputePoolDesiredStatesWithDemandTracedAt call.
-		readyAssignedByID := make(map[string]bool, len(assignedWorkBeads))
-		for i, wb := range assignedWorkBeads {
-			if i >= len(assignedWorkStoreRefs) {
-				continue
-			}
-			readyAssignedByID[wb.ID] = readyAssigned[storeScopedBeadKey{StoreRef: assignedWorkStoreRefs[i], ID: wb.ID}]
-		}
 		recordDemandSubPhase(trace, "demand_snapshot.collect_assigned_work", subPhaseStart, map[string]any{
 			"beads":   len(assignedWorkBeads),
 			"partial": storePartial,
@@ -968,21 +956,17 @@ func buildDesiredStateWithSessionBeadsAt(
 		if len(scaleCheckPartialTemplates) > 0 {
 			fmt.Fprintf(stderr, "scaleCheck: PARTIAL — scale_check failed for %s, retaining affected sessions\n", strings.Join(sortedBoolMapKeys(scaleCheckPartialTemplates), ",")) //nolint:errcheck
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads, poolWorkStoreRefs := filterAssignedWorkBeadsForPoolDemandWithStores(cfg, cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolReadyAssigned := make([]bool, len(poolWorkBeads))
-		for i, wb := range poolWorkBeads {
-			poolReadyAssigned[i] = readyAssignedByID[wb.ID]
-		}
 		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
 			cfg,
 			poolWorkBeads,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
-			poolReadyAssigned,
+			readyAssignedFlagsForBeads(readyAssigned, poolWorkBeads, poolWorkStoreRefs),
 			poolDecisionTime,
 			trace,
 		)
