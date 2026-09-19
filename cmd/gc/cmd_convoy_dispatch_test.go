@@ -546,7 +546,6 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	mayorSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
-	reviewerSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer", cfg.Workspace.SessionTemplate)
 
 	source := beads.Bead{
 		ID:       "gc-source",
@@ -595,8 +594,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	review := steps["expansion-review.review"]
-	if review.Assignee != reviewerSession {
-		t.Fatalf("review assignee = %q, want %q", review.Assignee, reviewerSession)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want unclaimed routed work", review.Assignee)
 	}
 	if review.Metadata["gc.routed_to"] != "reviewer" {
 		t.Fatalf("review gc.routed_to = %q, want reviewer", review.Metadata["gc.routed_to"])
@@ -613,8 +612,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
 	submit := steps["expansion-review.submit"]
-	if submit.Assignee != mayorSession {
-		t.Fatalf("submit assignee = %q, want %q", submit.Assignee, mayorSession)
+	if submit.Assignee != "" {
+		t.Fatalf("submit assignee = %q, want unclaimed routed work", submit.Assignee)
 	}
 	if submit.Metadata["gc.routed_to"] != "mayor" {
 		t.Fatalf("submit gc.routed_to = %q, want mayor", submit.Metadata["gc.routed_to"])
@@ -2525,9 +2524,8 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 	}
 
 	review := fragment.Steps[0]
-	wantSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "frontend/reviewer", cfg.Workspace.SessionTemplate)
-	if review.Assignee != wantSession {
-		t.Fatalf("review assignee = %q, want %q", review.Assignee, wantSession)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want unclaimed routed work", review.Assignee)
 	}
 	if review.Metadata["gc.routed_to"] != "frontend/reviewer" {
 		t.Fatalf("review gc.routed_to = %q, want frontend/reviewer", review.Metadata["gc.routed_to"])
