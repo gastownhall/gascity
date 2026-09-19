@@ -400,6 +400,50 @@ Apply the change by regenerating the service file:
 gc service restart     # restarts the launchd/systemd service
 ```
 
+## A Custom Environment Variable Doesn't Reach Agent Sessions
+
+Symptom: a non-`GC_`-prefixed variable you've exported and confirmed is set
+(e.g. in your shell, `~/.bash_env`, or a systemd/launchd unit) never shows up
+inside a spawned agent session's environment, even though `gc supervisor
+run` itself can see it.
+
+Cause: `passthroughEnv` only forwards a variable into a session if it is
+either `GC_`-prefixed, part of the small fixed provider/locale/XDG set, or
+named in `GC_SUPERVISOR_ENV` — the same opt-in `gc supervisor install` uses to
+widen the persisted service-file env (see above). Everything else is dropped
+silently, by design: an unbounded sweep of the calling environment would leak
+whatever secrets happen to be sitting in the supervisor's process, into every
+agent session.
+
+Fix: name the variable in `GC_SUPERVISOR_ENV` in the environment the
+supervisor daemon itself runs with, then restart it so the daemon process
+picks up both the opt-in list and the variable's value:
+
+```bash
+export GC_SUPERVISOR_ENV=MY_CUSTOM_VAR      # add to any existing list, comma or space separated
+export MY_CUSTOM_VAR=/path/to/thing
+gc supervisor install   # regenerates the service file with both persisted
+gc service restart      # restarts the supervisor so it inherits them
+```
+
+`GC_SUPERVISOR_ENV` itself needs to be present in the supervisor daemon's own
+environment for this to survive a later restart — it is not automatically
+persisted into the generated service file the way `PATH`/`GC_HOME` are. If
+you rely on a managed service file, either list `GC_SUPERVISOR_ENV` among its
+own opted-in names (`GC_SUPERVISOR_ENV=GC_SUPERVISOR_ENV,MY_CUSTOM_VAR`) or
+set it directly in the unit's `Environment=` lines.
+
+For a value that's the same on every city, `[workspace.env]` in `city.toml` is
+usually simpler than an opt-in — it doesn't depend on the supervisor's own
+process environment at all:
+
+```toml
+[workspace.env]
+MY_CUSTOM_VAR = "/path/to/thing"
+# or, to read it from whatever the supervisor's own environment holds:
+MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
+```
+
 ## Supervisor Log Written Twice (journald + supervisor.log)
 
 `gc supervisor run` tees its output into `${GC_HOME}/supervisor.log`

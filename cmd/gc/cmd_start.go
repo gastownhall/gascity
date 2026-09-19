@@ -1539,14 +1539,29 @@ var controllerOnlyEnvKeys = func() map[string]bool {
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
 // and Claude auth/home context so managed sessions can launch reliably under
-// shell and supervisor-driven flows. The GC_ sweep is otherwise complete;
-// controllerOnlyEnvKeys is the one exclusion it applies, and those keys come
-// back pinned to the empty string rather than absent.
+// shell and supervisor-driven flows. The GC_ sweep covers every gc-owned key
+// by name rather than an enumerated list; a non-GC_-prefixed key reaches a
+// session only via [workspace.env] (a per-city, always-on declaration) or by
+// being named in GC_SUPERVISOR_ENV — the same opt-in that
+// supervisorServiceExtraEnv uses to widen the persisted service-file env, so
+// one comma-separated list controls both "survives a supervisor restart" and
+// "reaches every agent session" instead of requiring two separate,
+// independently-maintained allowlists to agree. controllerOnlyEnvKeys is
+// checked before either path and cannot be bypassed by an opt-in; those keys
+// come back pinned to the empty string rather than absent.
 func passthroughEnv() map[string]string {
 	m := providerProcessPassthroughEnv()
+	explicitKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicit := make(map[string]bool, len(explicitKeys))
+	for _, key := range explicitKeys {
+		explicit[key] = true
+	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !strings.HasPrefix(key, "GC_") || controllerOnlyEnvKeys[key] {
+		if !ok || val == "" || controllerOnlyEnvKeys[key] {
+			continue
+		}
+		if !strings.HasPrefix(key, "GC_") && !explicit[key] {
 			continue
 		}
 		m[key] = val
