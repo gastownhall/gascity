@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -19,7 +20,7 @@ func TestSubmitEnterAndConfirmReEntersWhileIdle(t *testing.T) {
 	busy := func() (bool, error) { return enters >= 2, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -38,7 +39,7 @@ func TestSubmitEnterAndConfirmStopsWhenBusy(t *testing.T) {
 	busy := func() (bool, error) { return enters >= 1, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -63,7 +64,7 @@ func TestSubmitEnterAndConfirmNoDoubleSubmitOnFastTurn(t *testing.T) {
 	}
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -83,7 +84,7 @@ func TestSubmitEnterAndConfirmBestEffortWhenNeverBusy(t *testing.T) {
 	busy := func() (bool, error) { return false, nil }
 	sendEnter := func() error { enters++; return nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -110,7 +111,7 @@ func TestSubmitEnterAndConfirmClearsStaleSendError(t *testing.T) {
 	}
 	busy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if err != nil {
 		t.Fatalf("err = %v, want nil (later send succeeded)", err)
 	}
@@ -130,7 +131,7 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	sendEnter := func() error { enters++; return sendErr }
 	busy := func() (bool, error) { return false, nil }
 
-	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, nil, noSleep)
 	if confirmed {
 		t.Fatal("confirmed = true, want false")
 	}
@@ -139,5 +140,111 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	}
 	if enters != submitEnterMaxSends {
 		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
+	}
+}
+
+// TestSubmitEnterAndConfirmRecoversAStagedDraft pins ga-wr4ft: the ordinary
+// confirm window can expire entirely inside a large paste's ingest with every
+// Enter swallowed. While the composer visibly holds the staged draft the
+// submit has definitively not happened, so the recovery loop keeps re-sending
+// on a generous pace and succeeds when the draft finally clears.
+func TestSubmitEnterAndConfirmRecoversAStagedDraft(t *testing.T) {
+	sends := 0
+	// The first 5 Enters are swallowed by paste ingest; the 6th submits.
+	sendEnter := func() error { sends++; return nil }
+	busy := func() (bool, error) { return sends >= 6 && sends > 0, nil }
+	drafted := func() (bool, error) { return sends < 6, nil }
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, drafted, func(time.Duration) {})
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%t err=%v, want the recovery loop to land the submit", confirmed, err)
+	}
+	if sends < 6 {
+		t.Fatalf("sends=%d, want the loop to persist past the swallowed Enters", sends)
+	}
+}
+
+// TestSubmitEnterAndConfirmDraftClearWithoutBusyCountsAsSubmitted: a short
+// turn can complete between polls — the draft clearing is itself the proof
+// the submit landed.
+func TestSubmitEnterAndConfirmDraftClearWithoutBusyCountsAsSubmitted(t *testing.T) {
+	sends := 0
+	sendEnter := func() error { sends++; return nil }
+	busy := func() (bool, error) { return false, nil }
+	drafted := func() (bool, error) { return sends < 4, nil }
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, drafted, func(time.Duration) {})
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%t err=%v, want draft-clear to count as submitted", confirmed, err)
+	}
+}
+
+// TestSubmitEnterAndConfirmNoDraftKeepsTheOldContract: without a visible
+// draft the recovery loop must not fire — an idle pane with no draft is the
+// ambiguous state where extra Enters are NOT provably safe.
+func TestSubmitEnterAndConfirmNoDraftKeepsTheOldContract(t *testing.T) {
+	sends := 0
+	sendEnter := func() error { sends++; return nil }
+	busy := func() (bool, error) { return false, nil }
+	drafted := func() (bool, error) { return false, nil }
+	confirmed, err := submitEnterAndConfirm(sendEnter, func() {}, busy, drafted, func(time.Duration) {})
+	if err != nil || confirmed {
+		t.Fatalf("confirmed=%t err=%v, want the old unconfirmed outcome", confirmed, err)
+	}
+	if sends != submitEnterMaxSends {
+		t.Fatalf("sends=%d, want exactly the ordinary window %d", sends, submitEnterMaxSends)
+	}
+}
+
+// TestLinesShowStagedDraftIgnoresScrollbackMarker pins the scope of the
+// ga-wr4ft probe: CapturePane reaches 120 lines back, so a '[Pasted Content'
+// line from a turn that already submitted sits in scrollback forever. An
+// unscoped match would let that stale marker authorize recovery Enters into
+// an idle pane on every later nudge.
+func TestLinesShowStagedDraftIgnoresScrollbackMarker(t *testing.T) {
+	lines := []string{"[Pasted Content 11234 chars]"}
+	for i := 0; i < stagedDraftObservationLines+3; i++ {
+		lines = append(lines, fmt.Sprintf("transcript line %d", i))
+	}
+	lines = append(lines, "> ")
+
+	if linesShowStagedDraft(lines) {
+		t.Fatalf("linesShowStagedDraft() = true for a marker %d non-empty lines back, want false", len(lines)-1)
+	}
+}
+
+// TestLinesShowStagedDraftSeesTheLiveComposerMarker: the composer is always at
+// the bottom of the pane, so a marker inside the recency window is the live
+// staged draft and must still be seen -- including when the TUI pads the
+// composer with blank rows, which do not consume the window.
+func TestLinesShowStagedDraftSeesTheLiveComposerMarker(t *testing.T) {
+	transcript := func() []string {
+		var out []string
+		for i := 0; i < stagedDraftObservationLines+5; i++ {
+			out = append(out, fmt.Sprintf("transcript line %d", i))
+		}
+		return out
+	}
+
+	tests := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			name:  "marker in the live composer",
+			lines: append(transcript(), "[Pasted Content 11234 chars]", "> "),
+		},
+		{
+			name: "blank rows do not consume the window",
+			lines: append(transcript(),
+				"[Pasted Content 11234 chars]", "", "", "", "", "", "",
+				"", "", "", "", "", "", "> "),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !linesShowStagedDraft(tt.lines) {
+				t.Fatalf("linesShowStagedDraft() = false, want true (the draft is live)")
+			}
+		})
 	}
 }
