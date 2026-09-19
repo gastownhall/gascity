@@ -2050,9 +2050,13 @@ func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr 
 	if !runningSessionMatchesPendingCreateInfo(result.prepared.candidate.info, name, sp) {
 		return
 	}
+	agentName := result.prepared.candidate.tp.DisplayName()
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping stale async start runtime %s: %v\n", name, err) //nolint:errcheck
+		telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", err)
+		return
 	}
+	telemetry.RecordAgentStop(context.Background(), name, agentName, "stale-async-start", nil)
 }
 
 // asyncStartSessionStillCurrentInfo decides whether an async start result should
@@ -2138,6 +2142,16 @@ func startPreparedStartCandidate(
 			// create back just recreates the bead next tick against the same
 			// zombie — so recycle it: stop the stale session and fall
 			// through to a fresh start.
+			//
+			// This is the same "pane up, process dead" condition the
+			// steady-state reconciler classifies as a crash (session_reconciler.go's
+			// zombie-capture block), just detected here at start-retry time instead
+			// of on a normal reconcile tick — so it is recorded the same way
+			// (gc.agent.crashes.total), not as a stop: nothing here was
+			// deliberately shut down, gc is discovering and clearing wreckage
+			// left by the agent process's own exit.
+			crashOutput, _ := sp.Peek(name, rateLimitPeekLines)
+			telemetry.RecordAgentCrash(context.Background(), item.candidate.tp.DisplayName(), crashOutput)
 			recycleBegin := time.Now()
 			stopErr := sp.Stop(name)
 			if phases != nil {
@@ -2503,6 +2517,12 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	name := result.prepared.candidate.name()
 	tp := result.prepared.candidate.tp
 	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	// Every exit from this function is a failed start attempt, so record it
+	// here once rather than at each arm below — mirrors the single call site
+	// on the success path (commitStartResultTraced) and closes the gap where
+	// a start failure (e.g. a folder-trust-dialog abort on the rollback-pending
+	// arm below) never reached gc.agent.starts.total at all.
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
