@@ -1290,24 +1290,37 @@ const (
 
 var bdCommandRetrySleep = time.Sleep
 
+// bdTransportRetryableMarkers is the bd stderr/error string table gc uses
+// to classify transport-class failures. The managed retry below and gc
+// hook's store-unavailable signal both read it, so it is hoisted out of
+// bdTransportRetryableError rather than inlined: a marker added for one
+// consumer must classify for the other.
+//
+// It is an explicit compatibility surface with the bd CLI, and remains the
+// classification mechanism until bd ships a typed machine-readable error
+// envelope (a reserved exit-code contract distinguishing transport from
+// application failures; bd currently exits 1 for both, so exit codes carry
+// no transport signal today).
+var bdTransportRetryableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"bad connection",
+	"use of closed network connection",
+	// bd silently falls back to opening the on-disk store when it cannot
+	// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
+	// triggers a JSONL auto-import, which presents as a 2m command timeout
+	// rather than a network error. Treat the auto-import marker as a
+	// transport failure so the managed-retry path republishes the correct
+	// port and retries against the live server. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
+}
+
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
-	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
-		"server unreachable",
-		"dial tcp",
-		"connection refused",
-		"broken pipe",
-		"unexpected eof",
-		"bad connection",
-		"use of closed network connection",
-		// bd silently falls back to opening the on-disk store when it cannot
-		// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
-		// triggers a JSONL auto-import, which presents as a 2m command timeout
-		// rather than a network error. Treat the auto-import marker as a
-		// transport failure so the managed-retry path republishes the correct
-		// port and retries against the live server. See gastownhall/gascity#1930.
-		bdSilentFallbackMarkerImport,
-		bdSilentFallbackMarkerEmptyDB,
-	})
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)
 }
 
 func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
