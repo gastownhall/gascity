@@ -1110,6 +1110,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads, nil,
 	)
 
+	// Pack-owned services come up once city infrastructure and sessions are
+	// running, mirroring the city-stop teardown order.
+	runPackLifecycleHooks(cityPath, cfg, config.LifecycleEventCityStart, stdout, stderr)
+
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
 	return 0
 }
