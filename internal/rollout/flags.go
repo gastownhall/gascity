@@ -22,6 +22,7 @@ type Flags struct {
 	beadsConditionalWrites resolved[Mode]
 	beadsGuardedRelease    resolved[Mode]
 	formulaV2              resolved[bool]
+	strandedRoutedDemand   resolved[Mode]
 	notices                []Notice
 }
 
@@ -36,6 +37,8 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.beadsGuardedRelease.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
+	case keyDemandStrandedRoutePolicy:
+		return f.strandedRoutedDemand.origin
 	default:
 		return ""
 	}
@@ -52,6 +55,8 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.beadsGuardedRelease.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
+	case keyDemandStrandedRoutePolicy:
+		return string(f.strandedRoutedDemand.value)
 	default:
 		return ""
 	}

@@ -192,3 +192,36 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 		t.Errorf("config accessor formula_v2 default = false, want true")
 	}
 }
+
+// TestDemandStrandedRoutePolicySpecDoesNotRestateSupersededMinActiveSessionsPremise
+// guards the demand.stranded_route_policy gate's operator-facing
+// SelectsBetween/Justification text against restating the
+// "min_active_sessions=0" trigger premise that routedTemplateIsUnwakeable
+// (cmd/gc/stranded_routed_demand.go) no longer implements: the predicate was
+// corrected to key on agent resolution/Suspended/generic-ephemeral-session
+// support, but round-1 review (ga-cks4ct) found the gate's own rollout
+// metadata still described the corrected-away premise — operator-visible via
+// rollout inspection. Three sibling fix locations for the same stale premise
+// (cmd/gc/stranded_routed_demand.go:53, internal/config/config.go's
+// DemandConfig doc, internal/events/events.go's RoutedDemandStranded doc) are
+// plain `//` doc comments — compiler-stripped, not reflectable — so this
+// Spec's fields are the one of the four that is genuine runtime data an
+// actual test can address.
+func TestDemandStrandedRoutePolicySpecDoesNotRestateSupersededMinActiveSessionsPremise(t *testing.T) {
+	t.Parallel()
+	byKey := map[string]Spec{}
+	for _, s := range Specs() {
+		byKey[s.Key] = s
+	}
+	spec := byKey[keyDemandStrandedRoutePolicy]
+
+	stale := []string{"min_active_sessions=0", "min=0"}
+	for _, phrase := range stale {
+		if strings.Contains(spec.SelectsBetween[0], phrase) || strings.Contains(spec.SelectsBetween[1], phrase) {
+			t.Errorf("SelectsBetween restates superseded premise %q: %v", phrase, spec.SelectsBetween)
+		}
+		if strings.Contains(spec.Justification, phrase) {
+			t.Errorf("Justification restates superseded premise %q: %q", phrase, spec.Justification)
+		}
+	}
+}

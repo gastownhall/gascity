@@ -290,6 +290,8 @@ type City struct {
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
+	// Demand configures stranded routed-demand detection policy.
+	Demand DemandConfig `toml:"demand,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
@@ -2510,6 +2512,26 @@ func (d DoltMaintenance) IntervalOrDefault() time.Duration {
 // when unset or unparseable.
 func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 	return durationOr(d.GCTimeout, 10*time.Minute)
+}
+
+// DemandConfig configures stranded routed-demand detection: a gc.routed_to
+// target that resolves to no configured agent (dead or misspelled route),
+// or to an agent that is suspended or cannot support a generic ephemeral
+// session — and no session is presently open for it.
+type DemandConfig struct {
+	// StrandedRoutePolicy selects the off|auto|require rollout gate
+	// (rollout.KeyDemandStrandedRoutePolicy). Empty defers to the gate's
+	// built-in default.
+	StrandedRoutePolicy string `toml:"stranded_route_policy,omitempty"`
+	// StrandedRouteDebounce is the minimum bead age before it counts as
+	// stranded, as a duration string (e.g., "60s"). Defaults to 60s.
+	StrandedRouteDebounce string `toml:"stranded_route_debounce,omitempty" jsonschema:"default=60s"`
+}
+
+// StrandedRouteDebounceOrDefault returns the parsed StrandedRouteDebounce,
+// falling back to 60s when unset or unparseable.
+func (d DemandConfig) StrandedRouteDebounceOrDefault() time.Duration {
+	return durationOr(d.StrandedRouteDebounce, 60*time.Second)
 }
 
 // DaemonConfig holds controller daemon settings.

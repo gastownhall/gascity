@@ -905,7 +905,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | RoutedDemandStrandedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2854,6 +2854,29 @@ export type RotatedPayload = {
     prior_archive: string;
     prior_first_seq: number;
     prior_last_seq: number;
+};
+
+export type RoutedDemandStrandedPayload = {
+    /**
+     * IDs of the stranded demand beads routed to Template. Never truncated.
+     */
+    bead_ids?: Array<string> | null;
+    /**
+     * False on the first-sight emission; true when re-emitted after a bead has sat stranded past the escalation threshold.
+     */
+    escalated: boolean;
+    /**
+     * RFC3339 timestamp the earliest bead driving this emission was first observed stranded; the escalation clock counts from here.
+     */
+    first_seen?: string;
+    /**
+     * Resolved policy severity for this detection: "warning" (Auto) or "failure" (Require).
+     */
+    severity: string;
+    /**
+     * The gc.routed_to target that no session can currently wake for.
+     */
+    template?: string;
 };
 
 export type Run = {
@@ -5377,6 +5400,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'routed_demand.stranded';
+} & TypedEventStreamEnvelopeRoutedDemandStranded) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -6667,6 +6692,24 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
 };
 
 /**
+ * TypedEventStreamEnvelope routed_demand.stranded
+ */
+export type TypedEventStreamEnvelopeRoutedDemandStranded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RoutedDemandStrandedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'routed_demand.stranded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
@@ -7364,6 +7407,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'routed_demand.stranded';
+} & TypedTaggedEventStreamEnvelopeRoutedDemandStranded) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -8718,6 +8763,25 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
     subject?: string;
     ts: string;
     type: 'rig.provision.progress';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope routed_demand.stranded
+ */
+export type TypedTaggedEventStreamEnvelopeRoutedDemandStranded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RoutedDemandStrandedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'routed_demand.stranded';
     workflow?: WorkflowEventProjection;
 };
 

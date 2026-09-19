@@ -1243,6 +1243,10 @@
           "$ref": "#/$defs/MaintenanceConfig",
           "description": "Maintenance configures periodic store-maintenance loops."
         },
+        "demand": {
+          "$ref": "#/$defs/DemandConfig",
+          "description": "Demand configures stranded routed-demand detection policy."
+        },
         "service": {
           "items": {
             "$ref": "#/$defs/Service"
@@ -1476,6 +1480,22 @@
       "additionalProperties": false,
       "type": "object",
       "description": "DaemonConfig holds controller daemon settings."
+    },
+    "DemandConfig": {
+      "properties": {
+        "stranded_route_policy": {
+          "type": "string",
+          "description": "StrandedRoutePolicy selects the off|auto|require rollout gate\n(rollout.KeyDemandStrandedRoutePolicy). Empty defers to the gate's\nbuilt-in default."
+        },
+        "stranded_route_debounce": {
+          "type": "string",
+          "description": "StrandedRouteDebounce is the minimum bead age before it counts as\nstranded, as a duration string (e.g., \"60s\"). Defaults to 60s.",
+          "default": "60s"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DemandConfig configures stranded routed-demand detection: a gc.routed_to target that resolves to no configured agent (dead or misspelled route), or to an agent that is suspended or cannot support a generic ephemeral session — and no session is presently open for it."
     },
     "DoctorConfig": {
       "properties": {
