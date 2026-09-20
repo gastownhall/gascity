@@ -67,9 +67,17 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
-	_, providerOwned, err := providerScopeOwnership(cityPath, cityPath)
+	// The journal alone is not the classification. A city migrated in place by
+	// `gc beads city migrate-proxied`, or cloned from a proxied one, carries bd's
+	// proxied binding and no journal record at all — the migration deliberately
+	// writes none — and answering "gc-managed" for it made the controller fork a
+	// `bd ping` for the city and every rig on every reconcile tick, plus an
+	// uncooled stop+ping recover for any scope whose ping failed, none of which
+	// happens to a freshly journaled proxied city. Every other ownership gate on
+	// this path already uses the full classification.
+	providerOwned, err := cityScopeProviderOwned(cityPath)
 	if err != nil {
-		return false, fmt.Errorf("read provider scope ownership journal: %w", err)
+		return false, fmt.Errorf("classify city provider scope ownership: %w", err)
 	}
 	if providerOwned {
 		return false, nil
