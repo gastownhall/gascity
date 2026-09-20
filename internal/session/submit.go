@@ -585,11 +585,16 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
-	// Providers with a push session-event stream retire the sidecar poller
-	// class: the supervisor's nudge event dispatcher delivers queued items
+	// A live supervisor-hosted nudge dispatcher delivers queued items
 	// (deferred submits included) on idle events and dispatch passes, and a
-	// spawned poller would only race it.
-	if _, eventCapable := m.sp.(runtime.SessionEventProvider); !eventCapable && m.supportsFollowUpLocked(b) {
+	// spawned poller would only race it. Provider event-capability alone
+	// does not prove that dispatcher is actually running — the controller
+	// can be down while an event-capable provider is configured, leaving
+	// this deferred submit queued with no deliverer if only capability were
+	// checked — so this probes the live wake socket instead. A failed dial
+	// only ever fails toward starting a duplicate poller (harmless), never
+	// toward suppressing the only deliverer.
+	if !nudgequeue.DispatcherIsHosting(m.cityPath) && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil

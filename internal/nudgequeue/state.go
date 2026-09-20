@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,36 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// wakeSocketDialTimeout bounds how long DispatcherIsHosting waits for the
+// supervisor wake socket to accept a connection. Kept short: this is a
+// liveness probe on a decision's critical path (whether to spawn a sidecar
+// poller), not a delivery attempt.
+const wakeSocketDialTimeout = 200 * time.Millisecond
+
+// DispatcherIsHosting reports whether a supervisor-hosted nudge dispatcher is
+// actually listening on the wake socket for cityPath, not merely configured
+// or capable of one. A successful dial is the only signal treated as
+// hosting: the supervisor may be down, mid-restart, or running a provider
+// that leaves the socket unopened, and all of those must be treated as "no
+// deliverer" rather than guessed at. A failed dial does NOT prove a
+// dispatcher is absent (the supervisor could be hosting via patrol-interval
+// fallback with a socket bind that failed), so callers must only use this to
+// decide whether to skip a sidecar poller — a false negative here starts a
+// harmless duplicate poller, but a false positive would suppress the only
+// deliverer and silently strand queued items. This function is written to
+// never produce that false positive.
+func DispatcherIsHosting(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", WakeSocketPath(cityPath), wakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
 
 // wakeSocketPathLimit caps the canonical socket path length below the
 // platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches

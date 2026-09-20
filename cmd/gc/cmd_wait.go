@@ -1264,7 +1264,11 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), sp, now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, sp runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+// cfg and sp are accepted for call-site compatibility (callers already
+// resolve both) but no longer gate the poller decision directly: see
+// nudgeDispatcherIsHosting's use below for why config/capability alone
+// cannot prove a dispatcher is actually live.
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, _ *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, _ runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
@@ -1327,9 +1331,16 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		// Event-capable session providers retire the sidecar class: the
-		// supervisor's nudge event dispatcher owns queued delivery there.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && !providerRetiresNudgePollers(sp) {
+		//
+		// nudgeDispatcherIsHosting checks the live wake socket rather than
+		// nudgeDispatcherIsSupervisor(cfg) or providerRetiresNudgePollers(sp)
+		// alone: configuration and provider capability each only prove a
+		// dispatcher COULD own delivery, not that one currently IS — a
+		// configured-but-dead or subscribe-failed supervisor left this
+		// queued nudge with no deliverer under the weaker checks. See
+		// nudgeDispatcherIsHosting's doc comment for the duplicate-delivery
+		// tradeoff this accepts to avoid that silent loss.
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsHosting(cityPath) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}

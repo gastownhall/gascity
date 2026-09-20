@@ -1928,16 +1928,24 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
+// maybeStartNudgePoller takes sp for signature/call-site compatibility with
+// callers that resolve it, but no longer branches on it: see the live wake
+// socket check below for why capability alone cannot gate this decision.
+func maybeStartNudgePoller(target nudgeTarget, _ runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
-	// Event-capable providers retire the sidecar class entirely: the
-	// supervisor-hosted nudge event dispatcher owns queued delivery for them
-	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
-	// it. Callers without a resolved provider pass nil and keep today's
-	// spawn behavior.
-	if providerRetiresNudgePollers(sp) {
+	// Event-capable providers retire the sidecar class in favor of the
+	// supervisor-hosted nudge event dispatcher, and even a non-event
+	// provider in supervisor mode has its delivery owned by that same
+	// supervisor process. Capability/config alone proves neither case is
+	// actually happening — a configured-but-dead or subscribe-failed
+	// supervisor leaves the queue with no deliverer — so this checks the
+	// live wake socket rather than providerRetiresNudgePollers(sp) or
+	// nudgeDispatcherIsSupervisor(target.cfg) alone. A failed dial only
+	// ever fails toward starting a duplicate poller (harmless under the
+	// queue's flock), never toward suppressing the only deliverer.
+	if nudgeDispatcherIsHosting(target.cityPath) {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
@@ -1948,12 +1956,6 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
 	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
-	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
-	// per-session poller would race with it and reintroduce the bd-shellout
-	// load it was designed to eliminate.
-	if nudgeDispatcherIsSupervisor(target.cfg) {
-		return
-	}
 	// ACP session/prompt delivery requires the process that owns the
 	// in-memory ACP connection. A sidecar `gc nudge poll` process can
 	// observe the control socket but cannot safely deliver prompts. In

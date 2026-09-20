@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -492,7 +493,16 @@ func (f sessionEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan 
 	return ch, nil
 }
 
-func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
+// TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutHosting is the
+// regression test for gc-3qty46 / gc-olw3uw at this deferred-submit call
+// site: provider event-capability alone does not prove a supervisor-hosted
+// dispatcher is actually running (the controller can be down while an
+// event-capable provider is configured), so enqueueDeferredSubmitLocked
+// probes the live wake socket (nudgequeue.DispatcherIsHosting) instead of
+// providerRetiresNudgePollers-style capability. With no listener on that
+// socket, the sidecar poller must still start — capability alone must never
+// suppress the only deliverer for a queued item.
+func TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutHosting(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := sessionEventedFake{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
@@ -502,6 +512,61 @@ func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	// No listener is started on nudgequeue.WakeSocketPath(cityPath): the
+	// provider is event-capable, but no dispatcher is actually hosting.
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("pending queued submits = %d, want 1", len(state.Pending))
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1 despite an event-capable provider; capability alone must not suppress the fallback poller when no dispatcher is actually hosting", pollerCalls)
+	}
+}
+
+// TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting is the sibling
+// of the regression test above: with a live listener on the wake socket
+// (nudgequeue.DispatcherIsHosting true), the sidecar poller must be
+// suppressed, since a live supervisor-hosted dispatcher already owns
+// delivery and a spawned poller would only race it.
+func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := sessionEventedFake{Fake: runtime.NewFake()}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	sockPath := nudgequeue.WakeSocketPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll wake socket dir: %v", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen on wake socket: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
 
 	var pollerCalls int
 	origPoller := startSessionSubmitPoller
@@ -526,7 +591,7 @@ func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
 		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
 	}
 	if pollerCalls != 0 {
-		t.Fatalf("pollerCalls = %d, want 0 for an event-capable provider (supervisor event dispatcher owns delivery)", pollerCalls)
+		t.Fatalf("pollerCalls = %d, want 0 when a dispatcher is actually hosting on the wake socket", pollerCalls)
 	}
 }
 

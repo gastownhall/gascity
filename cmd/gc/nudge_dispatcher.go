@@ -44,6 +44,19 @@ func pingNudgeWakeSocket(cityPath string) {
 	_, _ = conn.Write([]byte{1})
 }
 
+// nudgeDispatcherIsHosting reports whether a supervisor-hosted nudge
+// dispatcher is actually listening on the wake socket for cityPath, not
+// merely configured for supervisor mode or running against an
+// event-capable provider (nudgeDispatcherIsSupervisor and
+// providerRetiresNudgePollers each answer that weaker, configuration/
+// capability-only question). Delegates to nudgequeue.DispatcherIsHosting —
+// see its doc comment for the false-negative-over-false-positive tradeoff
+// this makes: callers must only use it to suppress a fallback poller, never
+// to prove a dispatcher is absent.
+func nudgeDispatcherIsHosting(cityPath string) bool {
+	return nudgequeue.DispatcherIsHosting(cityPath)
+}
+
 // startNudgeWakeListener opens the supervisor wake socket and spawns an
 // accept loop that signals wakeCh on every connection. The returned
 // listener is closed when ctx is canceled. Returns nil, nil when the

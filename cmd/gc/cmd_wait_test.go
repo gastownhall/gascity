@@ -2185,6 +2185,72 @@ func TestDispatchReadyWaitNudges_StartsPiPoller(t *testing.T) {
 	}
 }
 
+// TestDispatchReadyWaitNudges_StartsPollerWhenConfiguredSupervisorButNotHosting
+// is the regression test for gc-3qty46 / gc-olw3uw at the cmd_wait.go call
+// site: nudgeDispatcherIsSupervisor(cfg) only proves the city is CONFIGURED
+// for a supervisor-hosted dispatcher, not that one is actually listening.
+// A configured-but-dead supervisor previously left this ready wait nudge
+// with no deliverer and no poller. dispatchReadyWaitNudgesWithSnapshot must
+// gate on the live wake socket (nudgeDispatcherIsHosting) instead.
+func TestDispatchReadyWaitNudges_StartsPollerWhenConfiguredSupervisorButNotHosting(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	called := false
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	cfg := supervisorCfg()
+	sessFront := cliSessionFrontDoor(store, cfg, dir)
+	nudges := cliNudgesStore(store, cfg, dir)
+
+	// No wake listener is started on dir: the city is configured for a
+	// supervisor-hosted dispatcher, but none is actually running.
+	if err := dispatchReadyWaitNudgesWithSnapshot(dir, cfg, sessFront, nudges, sp, time.Now().UTC(), nil); err != nil {
+		t.Fatalf("dispatchReadyWaitNudgesWithSnapshot: %v", err)
+	}
+	if !called {
+		t.Fatal("startNudgePoller not invoked despite no dispatcher listening on the wake socket; supervisor configuration alone must not suppress the fallback poller")
+	}
+}
+
 func TestDispatchReadyWaitNudges_PropagatesNudgeIDMetadataFailure(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
