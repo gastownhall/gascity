@@ -294,7 +294,7 @@ func isInterruptMessage(message json.RawMessage) bool {
 	if msg.Content[0] == '"' {
 		var s string
 		if json.Unmarshal(msg.Content, &s) == nil {
-			return bytes.Contains([]byte(s), []byte("[Request interrupted by user]"))
+			return containsInterruptMarker(s)
 		}
 	}
 	// Array content: [{"type":"text","text":"..."}]
@@ -303,12 +303,19 @@ func isInterruptMessage(message json.RawMessage) bool {
 	}
 	if json.Unmarshal(msg.Content, &blocks) == nil {
 		for _, b := range blocks {
-			if bytes.Contains([]byte(b.Text), []byte("[Request interrupted by user]")) {
+			if containsInterruptMarker(b.Text) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// Both native markers terminate a turn. Keep the complete bracketed forms so
+// ordinary text mentioning an interruption does not become an idle signal.
+func containsInterruptMarker(text string) bool {
+	return bytes.Contains([]byte(text), []byte("[Request interrupted by user]")) ||
+		bytes.Contains([]byte(text), []byte("[Request interrupted by user for tool use]"))
 }
 
 // unwrapJSONString handles JSONL files where the message field is stored
