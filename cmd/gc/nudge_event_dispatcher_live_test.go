@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 )
 
 // TestNudgeEventDispatcherLiveHerdr proves the PR's end-to-end path against a
@@ -26,12 +27,7 @@ import (
 // are kept so the observed latency is the deployed one. Skipped when herdr is
 // unavailable or in -short mode.
 func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	herdrtest.RequireLive(t)
 	t.Setenv("GC_BEADS", "file")
 
 	// Unique per run: herdr persists session state (agent names included)
