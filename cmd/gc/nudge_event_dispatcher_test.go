@@ -510,29 +510,17 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	}
 }
 
-func TestProviderRetiresNudgePollers(t *testing.T) {
-	if providerRetiresNudgePollers(nil) {
-		t.Fatal("nil provider must not retire pollers")
-	}
-	if providerRetiresNudgePollers(runtime.NewFake()) {
-		t.Fatal("plain provider must not retire pollers")
-	}
-	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
-		t.Fatal("event-capable provider must retire pollers")
-	}
-}
-
 // TestNudgeDispatcherIsHostingCapableButSubscribeFails covers the case both
 // cross-provider review legs identified as untested: a provider that IS
 // event-capable (satisfies runtime.SessionEventProvider) but whose stream
-// never actually comes up. providerRetiresNudgePollers alone would report
-// true here — this proves the live wake-socket check does not.
+// never actually comes up. A bare type assertion would report true here —
+// this proves the live wake-socket check does not.
 func TestNudgeDispatcherIsHostingCapableButSubscribeFails(t *testing.T) {
 	dir := t.TempDir()
 	failing := newNudgeEventedFakeSubscribeErr()
 
-	if !providerRetiresNudgePollers(failing) {
-		t.Fatal("capable-but-failing provider must still report as capable")
+	if _, ok := runtime.Provider(failing).(runtime.SessionEventProvider); !ok {
+		t.Fatal("fixture must satisfy SessionEventProvider to exercise the capable-but-failing case")
 	}
 	if nudgeDispatcherIsHosting(dir) {
 		t.Fatal("no dispatcher is listening, but nudgeDispatcherIsHosting reports true")

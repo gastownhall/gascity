@@ -1941,7 +1941,7 @@ func maybeStartNudgePoller(target nudgeTarget, _ runtime.Provider) {
 	// supervisor process. Capability/config alone proves neither case is
 	// actually happening — a configured-but-dead or subscribe-failed
 	// supervisor leaves the queue with no deliverer — so this checks the
-	// live wake socket rather than providerRetiresNudgePollers(sp) or
+	// live wake socket rather than a bare provider-capability check or
 	// nudgeDispatcherIsSupervisor(target.cfg) alone. A failed dial only
 	// ever fails toward starting a duplicate poller (harmless under the
 	// queue's flock), never toward suppressing the only deliverer.

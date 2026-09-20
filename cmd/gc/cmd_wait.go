@@ -1333,8 +1333,8 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, _ *config.City, sessFr
 		// fallback covers sessions created before provider_kind was stamped.
 		//
 		// nudgeDispatcherIsHosting checks the live wake socket rather than
-		// nudgeDispatcherIsSupervisor(cfg) or providerRetiresNudgePollers(sp)
-		// alone: configuration and provider capability each only prove a
+		// nudgeDispatcherIsSupervisor(cfg) or a bare provider-capability
+		// check alone: configuration and provider capability each only prove a
 		// dispatcher COULD own delivery, not that one currently IS — a
 		// configured-but-dead or subscribe-failed supervisor left this
 		// queued nudge with no deliverer under the weaker checks. See

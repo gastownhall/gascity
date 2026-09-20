@@ -391,16 +391,3 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 	}
 	return quiescence - since, true
 }
-
-// providerRetiresNudgePollers reports whether sp's event stream retires the
-// sidecar poller class: the supervisor-hosted event dispatcher owns queued
-// delivery for such providers (in both nudge_dispatcher modes), so a spawned
-// poller would only race it. A nil provider fails open — callers without a
-// resolved provider keep today's spawn behavior.
-func providerRetiresNudgePollers(sp runtime.Provider) bool {
-	if sp == nil {
-		return false
-	}
-	_, ok := sp.(runtime.SessionEventProvider)
-	return ok
-}

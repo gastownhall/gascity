@@ -265,9 +265,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 // nudge-poller spawn on event-capable suppression. Fail open on resolution
 // errors — a hook must not start failing because the provider config is
 // momentarily broken. newSessionProviderFromContext already returns a nil
-// provider on error, which preserves the legacy sidecar spawn
-// (providerRetiresNudgePollers treats nil as not event-capable); only the
-// event-capable suppression is lost this pass.
+// provider on error, which preserves the legacy sidecar spawn (a nil
+// provider is never treated as event-capable); only the event-capable
+// suppression is lost this pass.
 func hookNudgePollerSessionProvider(spctx sessionProviderContext, stderr io.Writer) runtime.Provider {
 	sp, err := newSessionProviderFromContext(spctx, nil)
 	if err != nil {
