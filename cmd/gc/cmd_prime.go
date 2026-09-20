@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
@@ -349,8 +350,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// the session is not currently live, or its bead is missing/closed), fall
 	// through: the beacon must always be emitted, and a stale pane continuation
 	// epoch has to be able to redeliver the startup prompt (handled below via
-	// startupPromptDeliveredMarkerStale).
-	if hookMode && primeHookSessionStart(hookContext) && strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "" {
+	// startupPromptDeliveredMarkerStale). primeHookHasLiveManagedSession (#4010)
+	// requires GC_SESSION_ID and GC_SESSION_NAME to match an open session bead
+	// in active/awake/creating/start-pending state; a bare non-empty
+	// GC_SESSION_ID is not enough, since ambient/inherited env leaks a value
+	// without a live session bead ever having existed.
+	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
 		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
 		return 0, nil
 	}
@@ -654,6 +659,63 @@ func managedSessionHookPromptAlreadyDelivered(ctx primeHookContext) bool {
 
 func primeHookSessionStart(ctx primeHookContext) bool {
 	return strings.TrimSpace(ctx.HookEventName) == "SessionStart"
+}
+
+// primeHookHasLiveManagedSession is the #4010 fix: it requires GC_SESSION_ID
+// and GC_SESSION_NAME to match an open session bead in active, awake,
+// creating, or start-pending state before a SessionStart hook is allowed to
+// inject hook context. A bare non-empty GC_SESSION_ID is not sufficient — an
+// unmanaged provider session opened in a rig directory can inherit gc's
+// environment variables ambiently (shell rc files, tmux session env,
+// provider config inheritance) without gc ever having started that session,
+// and treating that leaked value as identity turns the human's own session
+// into a queue worker that ignores what they typed.
+func primeHookHasLiveManagedSession(cityPath string) bool {
+	sessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	if sessionID == "" {
+		return false
+	}
+	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
+	if sessionName == "" {
+		return false
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		return false
+	}
+	// Route the session-bead read through the session coordination-class store so
+	// a [beads.classes.sessions] relocation reaches this prime hook, mirroring
+	// primeHookSessionTemplate. The no-refresh config loader is deliberate on this
+	// hot hook path; a failed load yields nil cfg, which cliSessionStore treats as
+	// identity.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessStore := cliSessionStore(store, cfg, cityPath)
+	// The front-door Get rejects a present-but-non-session bead
+	// (ErrSessionNotFound), folding in the removed IsSessionBeadOrRepairable guard.
+	info, err := sessionFrontDoor(sessStore).Get(sessionID)
+	if err != nil {
+		return false
+	}
+	if info.Closed {
+		return false
+	}
+	// Use the RAW session_name mirror (SessionNameMetadata), not SessionName which
+	// falls back to sessionNameFor(ID) and would loosen the exact-match semantics.
+	if strings.TrimSpace(info.SessionNameMetadata) != sessionName {
+		return false
+	}
+	if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" &&
+		strings.TrimSpace(info.Template) != template {
+		return false
+	}
+	// MetadataState is the RAW state metadata; Info.State is blanked on closed
+	// beads, so the raw mirror preserves the original exact comparison.
+	switch sessionpkg.State(strings.TrimSpace(info.MetadataState)) {
+	case sessionpkg.StateActive, sessionpkg.StateAwake, sessionpkg.StateCreating, sessionpkg.StateStartPending:
+		return true
+	default:
+		return false
+	}
 }
 
 // hookIdentityEnv are the environment markers that show gc, rather than a
