@@ -624,6 +624,11 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 		return nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
+	// Re-key first, and for every rig at once: nothing below may resolve an
+	// ownership record by name while a stale label still points elsewhere.
+	if err := reattachConfiguredRigProviderOwnership(cityPath, cfg.Rigs); err != nil {
+		return err
+	}
 	// Do not resolve a city's initialization topology until there is a fresh
 	// rig that needs one. Existing embedded and non-Dolt cities remain valid
 	// unchanged cities when no new scope is being added.
@@ -631,13 +636,6 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 	for _, rig := range cfg.Rigs {
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
-		}
-		if key, _, owned, err := providerScopeOwnershipRecord(cityPath, rig.Path); err != nil {
-			return err
-		} else if owned {
-			if err := attachProviderScopeOwnershipRecord(cityPath, rig.Name, rig.Path, key); err != nil {
-				return err
-			}
 		}
 		initialized, err := scopeHasPersistedBeadsIdentity(rig.Path)
 		if err != nil {
@@ -669,13 +667,9 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 		return err
 	}
 	for _, rig := range freshRigs {
-		if key, _, owned, err := providerScopeOwnershipRecord(cityPath, rig.Path); err != nil {
+		if _, owned, err := providerScopeOwnership(cityPath, rig.Path); err != nil {
 			return err
-		} else if owned {
-			if err := attachProviderScopeOwnershipRecord(cityPath, rig.Name, rig.Path, key); err != nil {
-				return err
-			}
-		} else {
+		} else if !owned {
 			if err := persistProviderScopeOwnership(cityPath, rig.Path, intent); err != nil {
 				return fmt.Errorf("record provider ownership for fresh rig %q: %w", rig.Name, err)
 			}
@@ -684,43 +678,97 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 	return nil
 }
 
-// attachProviderScopeOwnershipRecord re-keys a rig's ownership record onto the
-// name city.toml currently gives it.
+// reattachConfiguredRigProviderOwnership re-keys every configured rig's
+// ownership record onto the name city.toml currently gives it.
 //
 // Two shapes reach here. A `path:` record is a rig detached by removal or by an
 // interrupted add, re-attached when the rig is configured again. A `rig:<other>`
 // record at the same directory is an in-place rename: the operator edited the
-// name in city.toml and moved nothing. Only the first used to be handled, so a
-// rename left the journal keyed on the old name and validateProviderScopeOwnership
+// name in city.toml and moved nothing. Neither used to be handled, so a rename
+// left the journal keyed on the old name and validateProviderScopeOwnership
 // refused the whole city with path drift — for a label change, with no gc verb
 // that repairs it.
-func attachProviderScopeOwnershipRecord(cityPath, rigName, scopeRoot, actualKey string) error {
-	if strings.TrimSpace(rigName) == "" {
-		return nil
+func reattachConfiguredRigProviderOwnership(cityPath string, rigs []config.Rig) error {
+	journal, exists, err := loadProviderScopeOwnershipJournal(cityPath)
+	if err != nil || !exists {
+		return err
 	}
-	want := "rig:" + rigName
-	if actualKey == want {
-		return nil
-	}
-	if !strings.HasPrefix(actualKey, "path:") && !strings.HasPrefix(actualKey, "rig:") {
-		return nil
+	// Most starts have nothing to re-key, and taking the journal lock on every
+	// one of them would serialize honest startups for no work.
+	if _, changed, err := rekeyedRigProviderScopes(journal, rigs); err != nil || !changed {
+		return err
 	}
 	return withProviderScopeOwnershipLock(cityPath, func() error {
 		journal, exists, err := loadProviderScopeOwnershipJournal(cityPath)
 		if err != nil || !exists {
 			return err
 		}
-		entry, ok := journal.Scopes[actualKey]
-		if !ok || !samePath(entry.ScopePath, scopeRoot) {
-			return fmt.Errorf("missing ownership record %q for rig %q", actualKey, rigName)
+		scopes, changed, err := rekeyedRigProviderScopes(journal, rigs)
+		if err != nil || !changed {
+			return err
 		}
-		if existing, collision := journal.Scopes[want]; collision && !samePath(existing.ScopePath, scopeRoot) {
-			return fmt.Errorf("scope ownership journal key collision for %q", want)
-		}
-		delete(journal.Scopes, actualKey)
-		journal.Scopes[want] = entry
+		journal.Scopes = scopes
 		return writeProviderScopeOwnershipJournal(cityPath, journal)
 	})
+}
+
+// rekeyedRigProviderScopes returns the journal's scopes with every configured
+// rig's record keyed on that rig's current name.
+//
+// Collecting every move before applying any is what makes the result
+// independent of [[rigs]] order. Renaming `api` to `web` while declaring a
+// fresh `api` at another directory in the same edit used to succeed or fail
+// depending on which of the two came first in city.toml: resolving the fresh
+// `api` while the stale `rig:api` label still named web's directory reads as
+// path drift, and the re-key that clears it had not happened yet.
+func rekeyedRigProviderScopes(journal providerScopeOwnershipJournal, rigs []config.Rig) (map[string]providerScopeOwnershipEntry, bool, error) {
+	moves := make(map[string]string, len(rigs))
+	for _, rig := range rigs {
+		if strings.TrimSpace(rig.Name) == "" || strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		actual := rigProviderScopeKeyAtPath(journal, rig.Path)
+		want := "rig:" + rig.Name
+		if actual == "" || actual == want {
+			continue
+		}
+		moves[actual] = want
+	}
+	if len(moves) == 0 {
+		return journal.Scopes, false, nil
+	}
+	scopes := make(map[string]providerScopeOwnershipEntry, len(journal.Scopes))
+	for key, entry := range journal.Scopes {
+		if _, moving := moves[key]; !moving {
+			scopes[key] = entry
+		}
+	}
+	for from, want := range moves {
+		entry := journal.Scopes[from]
+		if existing, collision := scopes[want]; collision && !samePath(existing.ScopePath, entry.ScopePath) {
+			return nil, false, fmt.Errorf("scope ownership journal key collision for %q", want)
+		}
+		scopes[want] = entry
+	}
+	return scopes, true, nil
+}
+
+// rigProviderScopeKeyAtPath returns the key of the record physically at
+// scopeRoot when it is a rig's to re-key — a `path:` detachment or a `rig:`
+// label — and "" otherwise. The city's own record is never a rig's.
+func rigProviderScopeKeyAtPath(journal providerScopeOwnershipJournal, scopeRoot string) string {
+	// The loader rejects two records resolving to one directory, so the first
+	// match is the only one.
+	for key, entry := range journal.Scopes {
+		if !samePath(entry.ScopePath, scopeRoot) {
+			continue
+		}
+		if strings.HasPrefix(key, "path:") || strings.HasPrefix(key, "rig:") {
+			return key
+		}
+		return ""
+	}
+	return ""
 }
 
 // freshScopeProviderOwnershipIntent keeps every fresh rig on the city's

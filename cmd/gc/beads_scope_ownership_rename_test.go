@@ -247,3 +247,77 @@ func TestRemovingAnInPlaceRenamedRigDetachesItsStaleRecord(t *testing.T) {
 		t.Fatalf("removed renamed rig refused city startup: %v", err)
 	}
 }
+
+// TestRenameAndReuseOfTheOldNameIsOrderIndependent pins the harder rename shape:
+// one city.toml edit renames `api` to `web` and gives the freed name to a new rig
+// somewhere else. Re-keying a rig at a time made the outcome depend on [[rigs]]
+// order — resolving the fresh `api` while the stale `rig:api` label still named
+// web's directory reads as path drift — so the same edit started the city or
+// refused it depending only on which block the operator wrote first.
+func TestRenameAndReuseOfTheOldNameIsOrderIndependent(t *testing.T) {
+	renamed := config.Rig{Name: "web", Path: "rigs/api"}
+	reused := config.Rig{Name: "api", Path: "rigs/api2"}
+	for _, tc := range []struct {
+		name string
+		rigs []config.Rig
+	}{
+		{name: "reused name first", rigs: []config.Rig{reused, renamed}},
+		{name: "renamed rig first", rigs: []config.Rig{renamed, reused}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			renamedDir := filepath.Join(city, "rigs", "api")
+			reusedDir := filepath.Join(city, "rigs", "api2")
+			for _, dir := range []string{renamedDir, reusedDir} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeOwnedRigScope(t, city, "hq")
+			writeOwnedRigScope(t, renamedDir, "rp")
+			t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(city))
+
+			writeCityToml := func(rigs ...config.Rig) {
+				t.Helper()
+				toml := "[workspace]\nname = \"c\"\n"
+				for _, rig := range rigs {
+					toml += "\n[[rigs]]\nname = \"" + rig.Name + "\"\npath = \"" + rig.Path + "\"\n"
+				}
+				if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Before the edit the one rig is `api` at rigs/api, so that is the
+			// label its journal record carries.
+			writeCityToml(config.Rig{Name: "api", Path: "rigs/api"})
+			if err := persistProviderScopeOwnership(city, renamedDir, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := markProviderScopeOwnershipReady(city, renamedDir); err != nil {
+				t.Fatal(err)
+			}
+			if key, _, _, err := providerScopeOwnershipRecord(city, renamedDir); err != nil || key != "rig:api" {
+				t.Fatalf("pre-edit record key = (%q, %v), want rig:api", key, err)
+			}
+			// The edit: rename api -> web and give the freed name to a new rig.
+			writeCityToml(tc.rigs...)
+
+			cfg := &config.City{Rigs: []config.Rig{
+				{Name: tc.rigs[0].Name, Path: filepath.Join(city, tc.rigs[0].Path)},
+				{Name: tc.rigs[1].Name, Path: filepath.Join(city, tc.rigs[1].Path)},
+			}}
+			if err := ensureFreshRigProviderOwnership(city, cfg); err != nil {
+				t.Fatalf("ensureFreshRigProviderOwnership: %v", err)
+			}
+			if err := validateProviderScopeOwnership(city, cfg); err != nil {
+				t.Fatalf("rename plus reuse refused city startup: %v", err)
+			}
+			if key, _, owned, err := providerScopeOwnershipRecord(city, renamedDir); err != nil || !owned || key != "rig:web" {
+				t.Fatalf("renamed rig record = (%q, %t, %v), want rig:web", key, owned, err)
+			}
+			if key, _, owned, err := providerScopeOwnershipRecord(city, reusedDir); err != nil || !owned || key != "rig:api" {
+				t.Fatalf("rig reusing the freed name = (%q, %t, %v), want its own rig:api record", key, owned, err)
+			}
+		})
+	}
+}
