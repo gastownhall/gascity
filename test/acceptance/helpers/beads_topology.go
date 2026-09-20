@@ -2,6 +2,7 @@ package acceptancehelpers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -504,19 +505,39 @@ func RequireTopologyTooling(t *testing.T) (bdPath, doltPath string) {
 }
 
 // LegacyGCBinary returns the pre-journal gc binary, or "" when unset.
-func LegacyGCBinary() string {
-	override := strings.TrimSpace(os.Getenv("GC_ACCEPTANCE_LEGACY_GC_BIN"))
+//
+// A set-but-unusable GC_ACCEPTANCE_LEGACY_GC_BIN is a hard failure, not a "" that
+// the caller reads as absence. Collapsing the two meant a deleted binary or a
+// typo'd path surfaced as "there is no pre-journal gc binary; set
+// GC_ACCEPTANCE_LEGACY_GC_BIN ..." — a skip telling the operator to set a
+// variable they had already set, with the path and the stat error dropped.
+// requireLegacyGCBinary in the migration tests fails on the identical input, and
+// two fixtures for the same legacy shape should not disagree about it.
+func LegacyGCBinary(t *testing.T) string {
+	t.Helper()
+	bin, err := resolveLegacyGCBinary(os.Getenv("GC_ACCEPTANCE_LEGACY_GC_BIN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// resolveLegacyGCBinary returns "" for an unset variable, the absolute path for a
+// usable one, and an error for a value that is set but names no executable file.
+func resolveLegacyGCBinary(raw string) (string, error) {
+	override := strings.TrimSpace(raw)
 	if override == "" {
-		return ""
+		return "", nil
 	}
 	bin, err := filepath.Abs(override)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("resolving GC_ACCEPTANCE_LEGACY_GC_BIN %q: %w", override, err)
 	}
-	if info, statErr := os.Stat(bin); statErr != nil || info.IsDir() {
-		return ""
+	info, statErr := os.Stat(bin)
+	if statErr != nil || info.IsDir() {
+		return "", fmt.Errorf("GC_ACCEPTANCE_LEGACY_GC_BIN %s is not an executable file: %w", bin, statErr)
 	}
-	return bin
+	return bin, nil
 }
 
 // LegacyInitEnv is the one environment every legacy-shape fixture initializes
@@ -597,7 +618,7 @@ func StartTopology(t *testing.T, base *Env, topo BeadsTopology, bdPath, doltPath
 
 	run := &TopologyRun{Topology: topo, Env: env, Root: root}
 	if topo.LegacyInit {
-		run.LegacyGCPath = LegacyGCBinary()
+		run.LegacyGCPath = LegacyGCBinary(t)
 		if run.LegacyGCPath == "" {
 			MissingLegacyGC(t, "there is no pre-journal gc binary; set GC_ACCEPTANCE_LEGACY_GC_BIN to a gc built from a commit before the ownership journal")
 		}
