@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 )
 
 // TestNudgeEventDispatcherLiveHerdr proves the PR's end-to-end path against a
@@ -26,12 +25,7 @@ import (
 // are kept so the observed latency is the deployed one. Skipped when herdr is
 // unavailable or in -short mode.
 func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	herdrtest.RequireLive(t)
 	t.Setenv("GC_BEADS", "file")
 
 	// Unique per run: herdr persists session state (agent names included)
@@ -100,7 +94,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	}
 
 	// The agent is BUSY when the nudge is queued — the wait-idle contract.
-	herdrLiveReportAgent(t, herdrSession, agentName, "working")
+	herdrtest.ReportAgent(t, herdrSession, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
 	const nudgeText = "wait satisfied: live-dispatch proceed"
 	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", nudgeText, time.Now().Add(-time.Minute))); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
@@ -118,7 +112,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 		deadline := time.Now().Add(25 * time.Second)
 		for time.Now().Before(deadline) {
 			if out, err := p.Peek(agentName, 0); err == nil && screenContains(out, "live-dispatch proceed") {
-				herdrLiveBestEffortReport(herdrSession, agentName, "working")
+				herdrtest.ReportAgentBestEffort(herdrSession, agentName, "working", func() string { return herdrLivePaneID(p, agentName) })
 				return
 			}
 			time.Sleep(250 * time.Millisecond)
@@ -129,7 +123,7 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 	// delivery: event → fresh-stamp attempt → aged-stamp retry → verified
 	// paste+submit.
 	time.Sleep(1 * time.Second)
-	herdrLiveReportAgent(t, herdrSession, agentName, "idle")
+	herdrtest.ReportAgent(t, herdrSession, agentName, "idle", func() string { return herdrLivePaneID(p, agentName) })
 	idleAt := time.Now()
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -173,84 +167,4 @@ func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
 func screenContains(screen, needle string) bool {
 	compact := func(s string) string { return strings.Join(strings.Fields(s), "") }
 	return strings.Contains(compact(screen), compact(needle))
-}
-
-// nudgeEventHerdrLivePaneID resolves the pane id for an agent name via the herdr CLI's
-// JSON envelope output. Returns "" when the agent is not (yet) listed.
-func nudgeEventHerdrLivePaneID(t *testing.T, herdrSession, agentName string) string {
-	t.Helper()
-	out, err := exec.Command("herdr", "--session", herdrSession, "agent", "list").CombinedOutput()
-	if err != nil {
-		t.Fatalf("herdr agent list: %v: %s", err, out)
-	}
-	var envelope struct {
-		Result struct {
-			Agents []struct {
-				Name   string `json:"name"`
-				PaneID string `json:"pane_id"`
-			} `json:"agents"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(out, &envelope); err != nil {
-		t.Fatalf("parsing herdr agent list output: %v: %s", err, out)
-	}
-	for _, a := range envelope.Result.Agents {
-		if a.Name == agentName {
-			return a.PaneID
-		}
-	}
-	return ""
-}
-
-// herdrLiveReportAgent forces an agent status via herdr's report-agent API,
-// generating a real pane.agent_status_changed event on the stream. The pane
-// id is re-resolved per attempt with retries: right after an agent start the
-// provider closes the placement's stray shell pane, and the listed pane id
-// can go stale for a beat.
-func herdrLiveReportAgent(t *testing.T, herdrSession, agentName, state string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	var lastErr string
-	for time.Now().Before(deadline) {
-		paneID := nudgeEventHerdrLivePaneID(t, herdrSession, agentName)
-		if paneID != "" {
-			out, err := exec.Command("herdr", "--session", herdrSession, "pane", "report-agent", paneID,
-				"--source", "gctest", "--agent", "gctest", "--state", state).CombinedOutput()
-			if err == nil {
-				return
-			}
-			lastErr = fmt.Sprintf("pane report-agent %s %s: %v: %s", paneID, state, err, out)
-		} else {
-			lastErr = fmt.Sprintf("agent %q not in herdr agent list", agentName)
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	t.Fatalf("forcing agent status %q failed: %s", state, lastErr)
-}
-
-// herdrLiveBestEffortReport is herdrLiveReportAgent without test-fatal
-// semantics, safe to call from helper goroutines.
-func herdrLiveBestEffortReport(herdrSession, agentName, state string) {
-	out, err := exec.Command("herdr", "--session", herdrSession, "agent", "list").CombinedOutput()
-	if err != nil {
-		return
-	}
-	var envelope struct {
-		Result struct {
-			Agents []struct {
-				Name   string `json:"name"`
-				PaneID string `json:"pane_id"`
-			} `json:"agents"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(out, &envelope); err != nil {
-		return
-	}
-	for _, a := range envelope.Result.Agents {
-		if a.Name == agentName {
-			_ = exec.Command("herdr", "--session", herdrSession, "pane", "report-agent", a.PaneID,
-				"--source", "gctest", "--agent", "gctest", "--state", state).Run()
-			return
-		}
-	}
 }
