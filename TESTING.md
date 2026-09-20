@@ -942,6 +942,14 @@ default `make test-acceptance` run is unaffected.
 | --- | --- | --- |
 | `GC_ACCEPTANCE_BD_BIN` | the `bd` binary under test; must have `--proxied-server`, so bd >= 1.3.0 | both tests, all shapes |
 | `GC_ACCEPTANCE_LEGACY_GC_BIN` | a `gc` built before the scope-ownership journal | the matrix's legacy GC-managed shape only |
+| `GC_ACCEPTANCE_TOPOLOGY_MATRIX` | opts a run in to the matrix; it is too slow for the Tier A smoke budget and skips without this | `TestBeadsInitTopologyMatrix` only |
+
+`make test-beads-topology-matrix` sets the matrix opt-in and
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1` itself, so a missing `bd` or `dolt` fails the
+target instead of turning it into a green no-op. Through the general
+`make test-acceptance` seam you have to pass `ACCEPTANCE_TOPOLOGY_MATRIX=1`
+yourself — `TEST_ENV` is `env -i`, so exporting the variable in your shell is
+not enough.
 
 The legacy shape needs its own binary because no `gc init` on this tree can
 produce it: every fresh scope is journaled provider-owned. Build one from a
@@ -964,6 +972,7 @@ the same seam directly:
 ```bash
 GC_ACCEPTANCE_BD_BIN=... TMPDIR=/data/tmp make test-acceptance \
   ACCEPTANCE_TIMEOUT=20m \
+  ACCEPTANCE_TOPOLOGY_MATRIX=1 \
   ACCEPTANCE_GO_TEST_FLAGS='-count=1 -v -run TestBeadsInitTopologyMatrix/M4'
 ```
 
