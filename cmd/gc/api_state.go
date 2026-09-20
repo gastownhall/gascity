@@ -429,12 +429,15 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
 	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
-		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
+		env, err := gcExecStoreEnv(cs.cityPath, execStoreTarget{
 			ScopeRoot: scopeRoot,
 			ScopeKind: "rig",
 			Prefix:    prefix,
 			RigName:   rigName,
 		}, provider)
+		if err != nil {
+			return nil, err
+		}
 		if execProviderNeedsScopedDoltStoreEnv(provider) {
 			projected, err := bdRuntimeEnvForRigWithError(cs.cityPath, cfg, scopeRoot)
 			if err != nil {

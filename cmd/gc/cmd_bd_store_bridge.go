@@ -128,18 +128,33 @@ func bdStoreBridgePassword() string {
 	return password
 }
 
-func runBdStoreBridge(op string, args []string, dir, host, port, user string, stdin io.Reader, stdout io.Writer) error {
+// newBdStoreBridgeStore validates the connection flags the bridge was invoked
+// with and builds the store every bridge op runs through.
+func newBdStoreBridgeStore(dir, host, port, user string) (*beads.BdStore, error) {
 	if strings.TrimSpace(dir) == "" {
-		return fmt.Errorf("missing --dir")
+		return nil, fmt.Errorf("missing --dir")
 	}
 	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("missing --host")
+		return nil, fmt.Errorf("missing --host")
 	}
 	if strings.TrimSpace(port) == "" {
-		return fmt.Errorf("missing --port")
+		return nil, fmt.Errorf("missing --port")
 	}
-	password := bdStoreBridgePassword()
-	store := beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(bdStoreBridgeEnv(dir, host, port, user, password)))
+	env := bdStoreBridgeEnv(dir, host, port, user, bdStoreBridgePassword())
+	// Bridge operations can trigger bd hooks that recursively invoke gc. Pin
+	// those callbacks to this exact executable so an ambient GC_BIN cannot
+	// cross the city boundary or select a different gc installation.
+	if err := pinBdGCEnvironment(env); err != nil {
+		return nil, err
+	}
+	return beads.NewBdStore(dir, beads.ExecCommandRunnerWithEnv(env)), nil
+}
+
+func runBdStoreBridge(op string, args []string, dir, host, port, user string, stdin io.Reader, stdout io.Writer) error {
+	store, err := newBdStoreBridgeStore(dir, host, port, user)
+	if err != nil {
+		return err
+	}
 	switch op {
 	case "create":
 		var req bdStoreBridgeCreateRequest

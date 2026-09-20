@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -170,6 +172,112 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+// resolveBdInvokingGCBinary resolves the physical gc executable that bd
+// subprocess environments pin GC_BIN to.
+//
+// Resolution degrades instead of failing closed. The preferred answer is the
+// symlink-resolved, verified-executable path of this process's own binary, but
+// a gc binary that is removed or replaced out from under a live process keeps
+// its original path in os.Executable while EvalSymlinks and Stat start failing
+// (an rm-then-copy installer, an uninstall window, a container layer swap, a
+// transient unmount). Hard-failing there would cost a long-lived controller
+// every bd operation for the rest of its process lifetime, so each weaker rung
+// below is taken with a warning instead: an unverified pin is still strictly
+// better than inheriting an ambient GC_BIN, which is the hazard this pin
+// exists to close. Only when no rung yields a usable path does this error.
+func resolveBdInvokingGCBinary() (string, error) {
+	executable, err := resolveInvokingExecutable()
+	if err != nil {
+		return gcBinaryFromPATH(fmt.Errorf("resolve invoking gc executable: %w", err))
+	}
+	if !filepath.IsAbs(executable) {
+		return gcBinaryFromPATH(fmt.Errorf("invoking gc executable %q is not absolute", executable))
+	}
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return degradeToInvokingGCPath(executable, fmt.Errorf("canonicalize invoking gc executable: %w", err))
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return degradeToInvokingGCPath(executable, fmt.Errorf("stat invoking gc executable: %w", err))
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		// Inspected and definitively unusable, so the uncanonicalized path is
+		// not a rung: it names this same file. Try PATH instead.
+		return gcBinaryFromPATH(fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical))
+	}
+	return canonical, nil
+}
+
+// degradeToInvokingGCPath keeps the pin at the uncanonicalized absolute path
+// os.Executable reported when that path cannot be inspected. The file may be
+// mid-replacement rather than gone for good, in which case this is exactly the
+// path a bd hook should exec by the time it runs.
+func degradeToInvokingGCPath(executable string, reason error) (string, error) {
+	warnDegradedBdGCBinary("%v; pinning the uncanonicalized invoking path %q", reason, executable)
+	return executable, nil
+}
+
+// gcBinaryFromPATH is the last resolution rung, restoring the fallback
+// resolveProviderLifecycleGCBinary used to carry: this process cannot name a
+// usable executable of its own, so defer to whatever gc PATH resolves to. That
+// may be a different installation, which is why it is a warned last resort
+// rather than a peer of the invoking-executable rungs.
+func gcBinaryFromPATH(reason error) (string, error) {
+	path, err := exec.LookPath("gc")
+	if err != nil {
+		return "", fmt.Errorf("%w; no gc on PATH either: %w", reason, err)
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("%w; gc on PATH resolved to non-absolute %q", reason, path)
+	}
+	warnDegradedBdGCBinary("%v; pinning %q from PATH", reason, path)
+	return path, nil
+}
+
+// bdGCBinaryDegradeWarnedRungs keeps a degraded pin to one warning per rung per
+// process, keyed by the caller's format string. Resolution runs again for every
+// bd subprocess and a given condition does not change between them, so warning
+// per call would bury a controller's stderr under thousands of copies of the
+// same line. Keying by rung rather than once per process still suppresses that
+// flood while letting a changed condition speak: a process that degrades to the
+// uncanonicalized path during an upgrade window and later falls all the way to
+// PATH after an uninstall would otherwise keep reporting only the milder first
+// state for the rest of its life.
+var bdGCBinaryDegradeWarnedRungs sync.Map
+
+func warnDegradedBdGCBinary(format string, args ...any) {
+	if _, warned := bdGCBinaryDegradeWarnedRungs.LoadOrStore(format, struct{}{}); warned {
+		return
+	}
+	log.Printf("gc: warning: could not verify the invoking gc executable: "+format, args...)
+}
+
+// pinBdGCEnvironment replaces ambient GC_BIN with the physical invoking
+// executable before the beads runner merges the child environment.
+//
+// Unlike resolveProviderLifecycleGCBinary this deliberately has no isTestBinary
+// carve-out: production callers of these paths must always pin, and tests
+// reaching them stub resolveInvokingExecutable rather than injecting a fake
+// GC_BIN into the child environment.
+//
+// A test that reaches one of these paths without stubbing therefore pins the Go
+// test binary. That is inert today because the bd shims on those paths never
+// dereference $GC_BIN, but a future shim or hook fixture that execs "$GC_BIN"
+// (the shape hooks.go renders in production) would re-run the test binary as
+// gc. Teaching resolveBdInvokingGCBinary to refuse a resolved *.test path is
+// not the remedy: resolution would then fall through to the PATH rung and pin
+// whatever gc the host happens to carry, or hard-fail on a machine carrying
+// none, breaking every test on these paths. Stub resolveInvokingExecutable.
+func pinBdGCEnvironment(env map[string]string) error {
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {

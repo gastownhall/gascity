@@ -130,6 +130,162 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	}
 }
 
+// TestBdCommandRunnerForCityCompleteBindingPinsCanonicalGCBinary drives
+// bdCommandRunnerForCity's complete-binding arm, which delegates to
+// bdContextCommandRunnerForCity. The managed-retry arm is covered by
+// TestBdCommandRunnerWithManagedRetryPinsCanonicalGCBinaryOnBothEnvArms.
+func TestBdCommandRunnerForCityCompleteBindingPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+// TestBdCommandRunnerWithManagedRetryPinsCanonicalGCBinaryOnBothEnvArms covers
+// the managed-retry arm — the default path for cities without a complete
+// storage binding — which pins GC_BIN twice: once on the initial env and again
+// on the retry env rebuilt after recovery. A real bd shim records the child's
+// GC_BIN on each attempt, so deleting either pin leaves the ambient
+// GC_BIN=/tmp/stale-gc in that attempt's child and reddens this test.
+func TestBdCommandRunnerWithManagedRetryPinsCanonicalGCBinaryOnBothEnvArms(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+
+	captured := filepath.Join(t.TempDir(), "gc-bin-per-attempt")
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	// Fail the first attempt the way an unreachable managed server fails,
+	// because that is the only failure shape bdTransportRetryableError matches;
+	// anything else leaves the retry env arm unreached and its assertion vacuous.
+	shim := fmt.Sprintf("#!/bin/sh\n"+
+		"printf '%%s\\n' \"$GC_BIN\" >> %[1]q\n"+
+		"if [ \"$(wc -l < %[1]q)\" -eq 1 ]; then\n"+
+		"echo 'server unreachable at 127.0.0.1:3307' >&2\n"+
+		"exit 17\n"+
+		"fi\n"+
+		"echo ok\n", captured)
+	if err := os.WriteFile(bdPath, []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origResolve := resolveInvokingExecutable
+	origRecover := recoverManagedBDCommand
+	origSleep := bdCommandRetrySleep
+	t.Cleanup(func() {
+		resolveInvokingExecutable = origResolve
+		recoverManagedBDCommand = origRecover
+		bdCommandRetrySleep = origSleep
+	})
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	recoverCalls := 0
+	recoverManagedBDCommand = func(_ string) error {
+		recoverCalls++
+		return nil
+	}
+	bdCommandRetrySleep = func(time.Duration) {}
+
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No scope metadata is written, so scopeHasCompleteStorageBinding is false
+	// and bdCommandRunnerForCity would route here rather than to the
+	// complete-binding delegation.
+	cityPath := t.TempDir()
+	runner := bdCommandRunnerWithManagedRetryErr(cityPath, func(_ string) (map[string]string, error) {
+		return map[string]string{"BD_BIN": bdPath}, nil
+	})
+
+	out, err := runner(cityPath, "bd", "list", "--json")
+	if err != nil {
+		t.Fatalf("managed-retry runner error = %v, want nil after successful retry", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "ok" {
+		t.Fatalf("runner output = %q, want %q", got, "ok")
+	}
+	if recoverCalls != 1 {
+		t.Fatalf("recoverCalls = %d, want 1: the retry env arm must be reached", recoverCalls)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("read captured GC_BIN: %v", err)
+	}
+	attempts := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(attempts) != 2 {
+		t.Fatalf("bd attempts = %d (%q), want 2 (initial env then retry env)", len(attempts), attempts)
+	}
+	for i, got := range attempts {
+		arm := "initial env"
+		if i == 1 {
+			arm = "retry env"
+		}
+		if got != want {
+			t.Errorf("attempt %d (%s) child GC_BIN = %q, want canonical %q", i+1, arm, got, want)
+		}
+	}
+}
+
 func countBdShimInvocations(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -537,6 +693,30 @@ func TestRecoverManagedBDCommandCarriesWorkspaceBDBinaryPin(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != pinned {
 		t.Fatalf("recover BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
+func TestRecoverManagedBDCommandStopsBeforeChildWhenGCBinaryResolutionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-ran")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+capture+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	err := recoverManagedBDCommand(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("recoverManagedBDCommand() error = %v, want resolver failure", err)
+	}
+	if _, statErr := os.Stat(capture); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("recover child ran despite resolver failure; stat err = %v", statErr)
 	}
 }
 
