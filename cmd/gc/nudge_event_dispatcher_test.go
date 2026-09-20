@@ -184,7 +184,7 @@ func TestNudgeEventDispatcherDeliversOnIdleEvent(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered on idle event; state=%+v calls=%v", queueStateSnapshot(t, dir), fake.SnapshotCalls())
@@ -203,7 +203,7 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered by the aged-stamp retry; state=%+v", queueStateSnapshot(t, dir))
@@ -222,7 +222,7 @@ func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
 	// Allow the attempt plus the whole retry budget to elapse, then confirm
 	// the kick DIED: no delivery, and no further observation activity in a
@@ -259,7 +259,7 @@ func TestNudgeEventDispatcherDeliversWhenStampLagsEvent(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 	go func() {
 		// The tracker's debounced poll stamps the transition a beat later.
 		time.Sleep(60 * time.Millisecond)
@@ -316,7 +316,7 @@ func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 	// provider calls; an idle event against an EMPTY queue must add none —
 	// the pass short-circuits at the queue-state read.
 	baseline := countFakeCalls(fake, "IsRunning")
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "idle", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 	time.Sleep(300 * time.Millisecond)
 
 	if n := countFakeCalls(fake, "IsRunning"); n != baseline {
@@ -333,7 +333,7 @@ func TestNudgeEventDispatcherIgnoresNonIdleStatuses(t *testing.T) {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
 
-	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStatus, Session: info.SessionName, AgentStatus: "working", Time: time.Now()})
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentStateChanged, Session: info.SessionName, Time: time.Now()})
 	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: info.SessionName, Time: time.Now()})
 	time.Sleep(300 * time.Millisecond)
 

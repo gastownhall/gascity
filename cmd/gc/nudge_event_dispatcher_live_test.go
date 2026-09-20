@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/herdr"
+	"github.com/gastownhall/gascity/internal/runtime/herdr/herdrtest"
 )
 
 // TestNudgeEventDispatcherLiveHerdr proves the PR's end-to-end path against a
@@ -23,15 +24,10 @@ import (
 // the event dispatcher within seconds of the agent's idle transition, through
 // the provider's closed-loop paste+submit delivery, with the sidecar pollers
 // directory staying empty throughout. Production timing knobs (3s quiescence)
-// are kept so the observed latency is the deployed one. Skipped when herdr is
-// unavailable or in -short mode.
+// are kept so the observed latency is the deployed one. Opt-in: see
+// herdrtest.RequireLive.
 func TestNudgeEventDispatcherLiveHerdr(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live herdr test in -short mode")
-	}
-	if _, err := exec.LookPath("herdr"); err != nil {
-		t.Skip("herdr not installed")
-	}
+	herdrtest.RequireLive(t)
 	t.Setenv("GC_BEADS", "file")
 
 	// Unique per run: herdr persists session state (agent names included)
@@ -175,9 +171,9 @@ func screenContains(screen, needle string) bool {
 	return strings.Contains(compact(screen), compact(needle))
 }
 
-// herdrLivePaneID resolves the pane id for an agent name via the herdr CLI's
+// nudgeDispatcherHerdrLivePaneID resolves the pane id for an agent name via the herdr CLI's
 // JSON envelope output. Returns "" when the agent is not (yet) listed.
-func herdrLivePaneID(t *testing.T, herdrSession, agentName string) string {
+func nudgeDispatcherHerdrLivePaneID(t *testing.T, herdrSession, agentName string) string {
 	t.Helper()
 	out, err := exec.Command("herdr", "--session", herdrSession, "agent", "list").CombinedOutput()
 	if err != nil {
@@ -212,7 +208,7 @@ func herdrLiveReportAgent(t *testing.T, herdrSession, agentName, state string) {
 	deadline := time.Now().Add(10 * time.Second)
 	var lastErr string
 	for time.Now().Before(deadline) {
-		paneID := herdrLivePaneID(t, herdrSession, agentName)
+		paneID := nudgeDispatcherHerdrLivePaneID(t, herdrSession, agentName)
 		if paneID != "" {
 			out, err := exec.Command("herdr", "--session", herdrSession, "pane", "report-agent", paneID,
 				"--source", "gctest", "--agent", "gctest", "--state", state).CombinedOutput()
