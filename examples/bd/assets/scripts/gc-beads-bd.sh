@@ -3734,16 +3734,29 @@ provider_owned_scope_shares_city_proxy_root() {
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
-    # A scope directory that is gone has nothing left to retire. This is the
-    # half-built shape an interrupted `gc rig add` leaves: the ownership journal
-    # records a still-initializing path whose directory the operator then
-    # deleted. Every bd invocation below starts with `cd "$dir"`, so without
-    # this the whole stop fan-out failed on a scope with no processes to stop.
-    # A starting op still refuses: initializing a store in a directory that is
-    # not there is not something to do quietly.
-    if [ ! -d "$dir" ]; then
+    # A scope with no store has nothing left to retire. This is the half-built
+    # shape an interrupted `gc rig add` leaves: the ownership journal records a
+    # still-initializing path, and `bd init` then failed, so there is a journaled
+    # root with either no directory at all or a directory with no .beads.
+    #
+    # Both are already-stopped. The missing-directory arm is here because every
+    # bd invocation below starts with `cd "$dir"`. The no-.beads arm is here
+    # because bd ignores a BEADS_DIR that does not exist and walks up from the
+    # cwd instead (FindBeadsDir): for a rig that is its own repository that ends
+    # in "no active beads workspace found", which provider_owned_retire_local_dolt
+    # does not tolerate, so `gc stop` exited 1 on every run for a scope where
+    # nothing was running; and for a rig that is a subdirectory of the city the
+    # walk-up finds the CITY's store and the stop acts on the city's proxy under
+    # the rig's name, which is worse than the wrong exit code.
+    #
+    # A starting op still refuses: initializing a store for a scope that is not
+    # there is not something to do quietly.
+    if [ ! -d "$dir" ] || [ ! -d "$dir/.beads" ]; then
         case "$op" in
-            stop|shutdown) return 0 ;;
+            stop|shutdown)
+                printf 'scope %s has no beads store; nothing to retire\n' "$dir" >&2
+                return 0
+                ;;
         esac
     fi
     transport=$(provider_owned_transport "$dir")
