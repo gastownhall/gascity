@@ -243,17 +243,31 @@ func pinBdGCEnvironmentBestEffort(env map[string]string) {
 }
 
 // bestEffortInvokingGCBinary reproduces the fallback chain this branch replaced:
-// the absolute path os.Executable() reports even when it no longer resolves,
-// then a gc on PATH, then nothing at all — in which case the caller leaves
-// whatever GC_BIN the environment already carries.
+// the absolute path os.Executable() reports, then a gc on PATH, then nothing at
+// all — in which case the caller leaves whatever GC_BIN the environment already
+// carries.
+//
+// Each link has to name a binary that still runs. gc-beads-bd.sh treats any
+// non-empty GC_BIN as authoritative (resolve_gc_helper_bin) and `die`s when the
+// exec fails, so handing it the removed path the strict resolver just rejected
+// turns a recover that would have completed through the script's shell-native
+// fallbacks into one that SIGTERMs the managed Dolt and exits before restarting
+// it. An empty GC_BIN is the better answer than a dead one.
 func bestEffortInvokingGCBinary() string {
-	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) {
+	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) && runnableGCBinary(executable) {
 		return executable
 	}
-	if found, err := exec.LookPath("gc"); err == nil {
+	if found, err := exec.LookPath("gc"); err == nil && runnableGCBinary(found) {
 		return found
 	}
 	return ""
+}
+
+// runnableGCBinary reports whether path still names an executable file. Stat
+// follows symlinks, so a link whose target an upgrade removed is refused too.
+func runnableGCBinary(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
