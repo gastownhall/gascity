@@ -311,11 +311,11 @@ func isInterruptMessage(message json.RawMessage) bool {
 	return false
 }
 
-// Both native markers terminate a turn. Keep the complete bracketed forms so
-// ordinary text mentioning an interruption does not become an idle signal.
+// Both native markers terminate a turn. Preserve legacy matching and require
+// the new tool-use marker to stand alone, not appear in ordinary user prose.
 func containsInterruptMarker(text string) bool {
 	return bytes.Contains([]byte(text), []byte("[Request interrupted by user]")) ||
-		bytes.Contains([]byte(text), []byte("[Request interrupted by user for tool use]"))
+		bytes.Equal(bytes.TrimSpace([]byte(text)), []byte("[Request interrupted by user for tool use]"))
 }
 
 // unwrapJSONString handles JSONL files where the message field is stored
