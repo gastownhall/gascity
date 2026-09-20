@@ -1082,18 +1082,59 @@ func removeProviderScopeOwnershipRecord(cityPath, key string) error {
 		if err != nil || !exists {
 			return err
 		}
-		entry, ok := journal.Scopes[key]
-		if !ok {
-			return nil
+		actualKey, entry, ok, err := removableProviderScopeRecord(journal, cityPath, key)
+		if err != nil || !ok {
+			return err
 		}
 		pathKey := "path:" + entry.ScopePath
 		if existing, collision := journal.Scopes[pathKey]; collision && !samePath(existing.ScopePath, entry.ScopePath) {
 			return fmt.Errorf("scope ownership journal path collision for %q", pathKey)
 		}
-		delete(journal.Scopes, key)
+		delete(journal.Scopes, actualKey)
 		journal.Scopes[pathKey] = entry
 		return writeProviderScopeOwnershipJournal(cityPath, journal)
 	})
+}
+
+// removableProviderScopeRecord resolves the record a removal has to detach.
+// The literal key answers whenever the journal spells the rig the way city.toml
+// does. After an in-place rename with no start in between it does not: the
+// journal is still keyed on the old name, and detaching by the configured name
+// alone left that record behind at a directory city.toml no longer declares,
+// which the next `gc start` refused as path drift with no gc verb to repair it.
+// So fall back to whatever record physically sits at the rig's configured
+// directory, the way every other ownership lookup resolves a scope.
+func removableProviderScopeRecord(journal providerScopeOwnershipJournal, cityPath, key string) (string, providerScopeOwnershipEntry, bool, error) {
+	if entry, ok := journal.Scopes[key]; ok {
+		return key, entry, true, nil
+	}
+	scopeRoot := configuredRigScopeRoot(cityPath, strings.TrimPrefix(key, "rig:"))
+	if scopeRoot == "" {
+		return "", providerScopeOwnershipEntry{}, false, nil
+	}
+	actualKey, entry, recorded, err := providerScopeOwnershipRecordFromJournal(journal, cityPath, scopeRoot)
+	// Only a stale label is detachable here. A record already keyed by path is
+	// detached, and there is nothing else a rig removal is allowed to re-key.
+	if err != nil || !recorded || !strings.HasPrefix(actualKey, "rig:") {
+		return "", providerScopeOwnershipEntry{}, false, err
+	}
+	return actualKey, entry, true, nil
+}
+
+// configuredRigScopeRoot returns the directory city.toml currently gives a rig,
+// or "" when the name is not configured.
+func configuredRigScopeRoot(cityPath, rigName string) string {
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	for _, rig := range cfg.Rigs {
+		if rig.Name == rigName && strings.TrimSpace(rig.Path) != "" {
+			return rig.Path
+		}
+	}
+	return ""
 }
 
 func providerScopeOwnershipRecordFromJournal(journal providerScopeOwnershipJournal, cityPath, scopeRoot string) (string, providerScopeOwnershipEntry, bool, error) {

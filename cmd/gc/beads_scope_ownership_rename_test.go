@@ -187,3 +187,63 @@ func TestProviderScopeOwnershipLockGivesUpWithAClearMessage(t *testing.T) {
 		t.Fatalf("error = %v, want a busy message naming the wait it gave up after", err)
 	}
 }
+
+// TestRemovingAnInPlaceRenamedRigDetachesItsStaleRecord closes the other door
+// on the same rename. Only the start-time attach pass re-keys a renamed rig, so
+// an operator who renames in city.toml and then removes the rig never runs it:
+// detaching by the configured name alone left the stale `rig:<old>` record at a
+// directory city.toml no longer declares, and the next `gc start` refused the
+// whole city with the very path drift the rename fix set out to remove.
+func TestRemovingAnInPlaceRenamedRigDetachesItsStaleRecord(t *testing.T) {
+	city := t.TempDir()
+	rigDir := filepath.Join(city, "rigs", "repo")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := func(rigName string) {
+		t.Helper()
+		toml := "[workspace]\nname = \"c\"\n\n[[rigs]]\nname = \"" + rigName + "\"\npath = \"rigs/repo\"\n"
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cityToml("api")
+	if err := persistProviderScopeOwnership(city, rigDir, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(city, rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// The rename: same directory, new label, no start in between.
+	cityToml("web")
+
+	// The door every removal takes: `gc rig remove`, controllerState.DeleteRig
+	// and the path change in controllerState.UpdateRig all detach by this key.
+	if err := removeProviderScopeOwnershipRecord(city, "rig:web"); err != nil {
+		t.Fatalf("removeProviderScopeOwnershipRecord: %v", err)
+	}
+
+	data, err := os.ReadFile(providerScopeOwnershipPath(city))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"rig:`) {
+		t.Fatalf("removal left a rig-keyed record behind: %s", data)
+	}
+	key, entry, owned, err := providerScopeOwnershipRecord(city, rigDir)
+	if err != nil || !owned || !strings.HasPrefix(key, "path:") {
+		t.Fatalf("post-removal record = (%q, %+v, %t, %v), want a detached path record", key, entry, owned, err)
+	}
+	if entry.State != providerScopeReady {
+		t.Fatalf("detaching lost the record's state: %+v", entry)
+	}
+
+	// city.toml is written without the rig only after the detach succeeds.
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"c\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderScopeOwnership(city, &config.City{}); err != nil {
+		t.Fatalf("removed renamed rig refused city startup: %v", err)
+	}
+}
