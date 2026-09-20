@@ -6,7 +6,7 @@ import (
 )
 
 func TestToolUseInterruptActivity(t *testing.T) {
-	for _, marker := range []string{"[Request interrupted by user]", "[Request interrupted by user for tool use]"} {
+	for _, marker := range []string{"[Request interrupted by user]", "[Request interrupted by user for tool use]", "  [Request interrupted by user for tool use]\n"} {
 		for _, form := range []string{"string", "blocks", "wrapped"} {
 			t.Run(marker+"/"+form, func(t *testing.T) {
 				var content any = marker
@@ -36,7 +36,7 @@ func TestToolUseInterruptActivity(t *testing.T) {
 			})
 		}
 	}
-	for _, text := range []string{"Request interrupted by user for tool use", "[Request interrupted by user for tool use", "[Request interrupted by user for another reason]", "Please interrupt the tool"} {
+	for _, text := range []string{"Request interrupted by user for tool use", "[Request interrupted by user for tool use", "[Request interrupted by user for another reason]", "Please interrupt the tool", "Explain [Request interrupted by user for tool use]", "[Request interrupted by user for tool use] and continue"} {
 		message, err := json.Marshal(map[string]any{"role": "user", "content": text})
 		if err != nil {
 			t.Fatal(err)
