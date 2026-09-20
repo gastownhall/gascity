@@ -144,6 +144,11 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, sessTmpl)
 
 	running, err := sp.ListRunning(snPrefix)
+	// Deliberately fail closed on ANY error, including a runtime.PartialListError
+	// that still carries best-effort names. TestExpandAgentsUnlimitedPoolFailsClosedOnPartialListResults
+	// pins it. See the twin of this function in internal/api/handler_agents.go
+	// for the full rationale and for why the policy is worth re-deciding now that
+	// per-session probe failures produce a names-bearing partial: ga-jls1b.
 	if err != nil || len(running) == 0 {
 		return nil
 	}

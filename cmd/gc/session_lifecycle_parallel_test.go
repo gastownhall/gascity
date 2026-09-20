@@ -3350,6 +3350,7 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 }
 
 func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3410,6 +3411,7 @@ func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3468,6 +3470,7 @@ func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_StopsMatchingRuntimeForStaleSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 45, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4127,6 +4130,7 @@ func TestRollbackPendingCreateClearingClaimRunsRetiredCleanupWhenPostCloseFails(
 }
 
 func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4198,6 +4202,7 @@ func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testi
 // stale runtime still stopped; what changes is that the pending create is now
 // rolled back instead of retained.
 func TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringStartup(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 6, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4281,6 +4286,7 @@ func TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringSt
 }
 
 func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := &getErrorStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 50, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4343,6 +4349,7 @@ func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_RecoversCommitPanic(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := &panicMetadataBatchStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 3, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4391,6 +4398,7 @@ func TestCommitAsyncStartResult_RecoversCommitPanic(t *testing.T) {
 }
 
 func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4441,6 +4449,7 @@ func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
 }
 
 func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateRuntime(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 15, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4514,6 +4523,7 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 }
 
 func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4566,6 +4576,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t
 }
 
 func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 4, 17, 11, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{

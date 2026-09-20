@@ -57,6 +57,11 @@ const (
 	nativeSocketPathLimit = len(syscall.RawSockaddrUnix{}.Path) - 1
 )
 
+// socketProbeTimeout bounds one control-socket liveness probe. Exceeding it
+// means the session did not answer in time, not that it is gone — see
+// socketProbeAt.
+const socketProbeTimeout = 500 * time.Millisecond
+
 // sessionConn tracks a running child process and its control socket.
 type sessionConn struct {
 	cmd      *exec.Cmd
@@ -486,6 +491,22 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 
 // ListRunning returns the names of all running sessions whose names
 // match the given prefix, discovered via socket files.
+//
+// A session whose liveness probe could not reach a verdict is NOT silently
+// omitted. The two genuine absences are reported by simply not listing the
+// name: a session that stopped cleanly leaves no socket at all, and a socket
+// that refuses the connection is a stale file from a process that is already
+// gone. A dial or ping that times out is a different answer — the process may
+// be alive and merely too busy to reply inside socketProbeTimeout — and
+// reporting that as an absent name is the fail-open
+// [runtime.Provider.ListRunning] forbids, because callers that free identifiers
+// on absence (the pending-create rollback in cmd/gc, orphan cleanup, pool
+// on_death) then act destructively on a live session. Those names come back
+// alongside a [runtime.PartialListError], the same degraded-but-usable shape
+// herdr and the tmux adapter produce, so best-effort callers keep the names
+// that did resolve while callers that must fail closed can see the listing was
+// incomplete. The prefix filter runs before the probe, so an unrelated
+// session's blip cannot poison a narrow listing.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	euid := os.Geteuid()
 	dirs := []string{p.dir}
@@ -494,6 +515,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	}
 	seen := make(map[string]bool)
 	var names []string
+	var unobservable []error
 	for _, dir := range dirs {
 		if err := p.validateSocketDir(dir, euid); err != nil {
 			if os.IsNotExist(err) {
@@ -509,21 +531,57 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			return nil, err
 		}
 		for _, e := range entries {
-			n := e.Name()
-			if !strings.HasSuffix(n, ".sock") {
+			sn, listed, err := p.probeSocketEntry(dir, prefix, e.Name(), euid, seen)
+			if err != nil {
+				unobservable = append(unobservable, err)
 				continue
 			}
-			sn := p.socketNameForEntry(dir, strings.TrimSuffix(n, ".sock"))
-			if !strings.HasPrefix(sn, prefix) || seen[sn] {
-				continue
-			}
-			if p.socketAliveAt(sn, euid) {
-				seen[sn] = true
+			if listed {
 				names = append(names, sn)
 			}
 		}
 	}
+	if len(unobservable) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(unobservable...)}
+	}
 	return names, nil
+}
+
+// probeSocketEntry resolves one directory entry from the ListRunning walk.
+//
+// It returns the session name and listed=true when the entry names a session
+// the liveness probe positively answered for, a non-nil error when the entry
+// named a session that could not be observed, and listed=false with a nil error
+// for everything else: a non-socket file, a name outside prefix, a name already
+// resolved from an earlier directory, or a socket whose probe proved the session
+// gone. seen is updated for a name this call listed or could not observe; a name
+// the probe proved gone is left unmarked, so a socket for it in the fallback
+// directory is re-probed (same answer, since socketProbeAt keys off euid, not
+// dir).
+//
+// Split out of ListRunning so the error-vs-absence decision does not sit three
+// levels deep inside two nested loops; the caller only folds the results.
+func (p *Provider) probeSocketEntry(dir, prefix, entryName string, euid int, seen map[string]bool) (string, bool, error) {
+	if !strings.HasSuffix(entryName, ".sock") {
+		return "", false, nil
+	}
+	name := p.socketNameForEntry(dir, strings.TrimSuffix(entryName, ".sock"))
+	if !strings.HasPrefix(name, prefix) || seen[name] {
+		return "", false, nil
+	}
+	alive, err := p.socketProbeAt(name, euid)
+	if err != nil {
+		// socketProbeAt derives its own paths from euid rather than from dir,
+		// so the fallback dir would re-ask the identical question. Mark it seen
+		// to report the failure once.
+		seen[name] = true
+		return "", false, fmt.Errorf("control socket probe for %q: %w", name, err)
+	}
+	if !alive {
+		return "", false, nil
+	}
+	seen[name] = true
+	return name, true, nil
 }
 
 func (p *Provider) metaPath(name, key string) string {
@@ -745,12 +803,41 @@ func handleSessionConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 }
 
 // socketAlive checks if a session is alive by pinging its control socket.
+//
+// It folds "the session is gone" and "I could not look" into one false, which
+// is what the bare-bool IsRunning contract asks of it. Callers that must tell
+// those apart — ListRunning, whose contract forbids reporting an unobservable
+// session as an absent name — use socketProbeAt instead.
 func (p *Provider) socketAlive(name string) bool {
 	return p.socketAliveAt(name, os.Geteuid())
 }
 
 func (p *Provider) socketAliveAt(name string, euid int) bool {
-	return p.sendSocketCommandAt(name, "ping", 500*time.Millisecond, euid) == nil
+	alive, _ := p.socketProbeAt(name, euid)
+	return alive
+}
+
+// socketProbeAt reports whether the named session answers on its control socket
+// and, separately, whether the probe reached a verdict at all.
+//
+// isUnavailableSocketError is the existing split between the two: it is what
+// stopBySocketAt already trusts to declare a stop idempotently complete, so an
+// error it accepts (no socket file, or a connection the kernel refused because
+// nothing is listening) is positive proof this session is not running, and is
+// reported as a clean false. Anything else — a dial or ping that ran out its
+// timeout, a socket-directory validation failure, an unrecognized reply — left
+// the question open and is returned so the caller can decide whether it may act
+// on absence.
+func (p *Provider) socketProbeAt(name string, euid int) (bool, error) {
+	err := p.sendSocketCommandAt(name, "ping", socketProbeTimeout, euid)
+	switch {
+	case err == nil:
+		return true, nil
+	case isUnavailableSocketError(err):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // sendSocketCommand connects to the session's control socket, sends a

@@ -153,6 +153,20 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, sessTmpl)
 
 	running, err := sp.ListRunning(snPrefix)
+	// Deliberately fail closed on ANY error, including a runtime.PartialListError
+	// that still carries best-effort names. TestDiscoverUnlimitedPoolFailsClosedOnPartialListResults
+	// pins it, and the reconciler sites that DO proceed on a partial listing
+	// (cmd/gc/session_beads.go, adoption_barrier.go, controller.go,
+	// internal/doctor/checks.go) are making the opposite call knowingly.
+	//
+	// Worth re-deciding rather than copying: that policy was chosen when the only
+	// producer was the tmux adapter's whole-server shape (nil names +
+	// ServerAbsent), where there are no best-effort names to keep. Per-session
+	// probe failures now produce a names-bearing partial (herdr pane probes, ssh,
+	// acp/subprocess control sockets), and against that shape failing closed
+	// blanks a whole pool because one member blipped. Tracked in ga-jls1b; not
+	// changed here because this site and its pin pre-date the PR that introduced
+	// the new shape.
 	if err != nil || len(running) == 0 {
 		return nil
 	}

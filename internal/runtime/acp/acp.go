@@ -29,6 +29,11 @@ import (
 // rather than surfacing a spurious error before SIGKILL lands.
 const nudgePostWriteDrainTimeout = 5 * time.Second
 
+// socketProbeTimeout bounds one control-socket liveness probe (the dial and the
+// ping each get it). Exceeding it means the session did not answer in time, not
+// that it is gone — see socketProbe.
+const socketProbeTimeout = 500 * time.Millisecond
+
 // Config holds ACP provider settings.
 type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
@@ -800,6 +805,22 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 
 // ListRunning returns the names of all running sessions whose names
 // match the given prefix, discovered via socket files.
+//
+// A session whose liveness probe could not reach a verdict is NOT silently
+// omitted. The two genuine absences are reported by simply not listing the
+// name: a session that stopped cleanly leaves no socket at all (the process
+// monitor unlinks it before signaling done), and a socket that refuses the
+// connection is a stale file from a process that is already gone. A dial or
+// ping that times out is a different answer — the agent may be alive and merely
+// too busy to reply inside socketProbeTimeout — and reporting that as an absent
+// name is the fail-open [runtime.Provider.ListRunning] forbids, because callers
+// that free identifiers on absence (the pending-create rollback in cmd/gc,
+// orphan cleanup, pool on_death) then act destructively on a live session.
+// Those names come back alongside a [runtime.PartialListError], the same
+// degraded-but-usable shape herdr and the tmux adapter produce, so best-effort
+// callers keep the names that did resolve while callers that must fail closed
+// can see the listing was incomplete. The prefix filter runs before the probe,
+// so an unrelated session's blip cannot poison a narrow listing.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	entries, err := os.ReadDir(p.dir)
 	if err != nil {
@@ -809,6 +830,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		return nil, err
 	}
 	var names []string
+	var unobservable []error
 	for _, e := range entries {
 		n := e.Name()
 		if !strings.HasSuffix(n, ".sock") {
@@ -818,9 +840,17 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 		if !strings.HasPrefix(sn, prefix) {
 			continue
 		}
-		if p.socketAlive(sn) {
+		alive, err := p.socketProbe(sn)
+		if err != nil {
+			unobservable = append(unobservable, fmt.Errorf("control socket probe for %q: %w", sn, err))
+			continue
+		}
+		if alive {
 			names = append(names, sn)
 		}
+	}
+	if len(unobservable) > 0 {
+		return names, &runtime.PartialListError{Err: errors.Join(unobservable...)}
 	}
 	return names, nil
 }
@@ -926,18 +956,47 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 }
 
 // socketAlive checks if a session is alive by pinging its control socket.
+//
+// It folds "the session is gone" and "I could not look" into one false, which
+// is what the bare-bool IsRunning contract asks of it. Callers that must tell
+// those apart — ListRunning, whose contract forbids reporting an unobservable
+// session as an absent name — use socketProbe instead.
 func (p *Provider) socketAlive(name string) bool {
+	alive, _ := p.socketProbe(name)
+	return alive
+}
+
+// socketProbe reports whether the named session answers on its control socket
+// and, separately, whether the probe reached a verdict at all.
+//
+// isUnavailableSocketError is the existing split between the two: it is what
+// stopBySocket already trusts to declare a stop idempotently complete, so an
+// error it accepts (no socket file, or a connection the kernel refused because
+// nothing is listening) is positive proof this session is not running, and is
+// reported as a clean false. Anything else — a dial or ping that ran out its
+// timeout, a permission failure, an unrecognized reply — left the question open
+// and is returned so the caller can decide whether it may act on absence.
+func (p *Provider) socketProbe(name string) (bool, error) {
+	var unobservable error
+	note := func(err error) {
+		if unobservable == nil && !isUnavailableSocketError(err) {
+			unobservable = err
+		}
+	}
 	for _, sp := range []string{p.sockPath(name), p.legacySockPath(name)} {
-		conn, err := net.DialTimeout("unix", sp, 500*time.Millisecond)
+		conn, err := net.DialTimeout("unix", sp, socketProbeTimeout)
 		if err != nil {
+			note(err)
 			continue
 		}
 		_ = conn.Close()
-		if p.sendSocketCommand(name, "ping", 500*time.Millisecond) == nil {
-			return true
+		err = p.sendSocketCommand(name, "ping", socketProbeTimeout)
+		if err == nil {
+			return true, nil
 		}
+		note(err)
 	}
-	return false
+	return false, unobservable
 }
 
 // sendSocketCommand connects to the session's control socket and sends a command.

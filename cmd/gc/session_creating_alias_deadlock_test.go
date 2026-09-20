@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -99,6 +100,7 @@ func aliasFree(store beads.Store) error {
 func TestAsyncStartDriftRollsBackPendingCreate(t *testing.T) {
 	for _, state := range []string{string(sessionpkg.StateCreating), string(sessionpkg.StateStartPending)} {
 		t.Run(state, func(t *testing.T) {
+			isolatedAsyncStartFailures(t)
 			store := beads.NewMemStore()
 			bead := stuckCreatingBead(t, store, state)
 			if err := aliasFree(store); err == nil {
@@ -133,6 +135,7 @@ func TestAsyncStartDriftRollsBackPendingCreate(t *testing.T) {
 // config-drift lane owns drain-and-restart. The rollback must never close a
 // live session's bead or release a live session's alias.
 func TestAsyncStartDriftKeepsSupersededVerdictForLiveRow(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Title:  deadlockAlias,
@@ -336,6 +339,7 @@ func TestSessionNameSurvivesCommit(t *testing.T) {
 // the rename story: the rollback must surrender the placeholder session_name of
 // an explicitly-named row, so the recreated row is free to take the chair name.
 func TestRollbackReleasesSessionNameForExplicitlyNamedRow(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 
@@ -422,6 +426,7 @@ func TestSessionResetLeavesLiveRowAlone(t *testing.T) {
 // put the resolved command on the wire, which carries provider credentials in
 // argv.
 func TestAsyncStartDriftRollbackEmitsOneEvent(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 	rec := &memRecorder{}
@@ -504,6 +509,7 @@ func (p *stubbornProvider) Stop(string) error { return errors.New("tmux: server 
 // stopStaleAsyncStartRuntime correctly refuses to stop B's runtime, so a
 // rollback here would strand a live agent under a freed alias.
 func TestAsyncStartDriftRollbackRequiresIdentityMatch(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 	// The row has moved on to incarnation B.
@@ -542,6 +548,7 @@ func TestAsyncStartDriftRollbackRequiresIdentityMatch(t *testing.T) {
 // releasing the alias anyway strands a live agent holding the chair name with no
 // bead owning it, and every replacement start then hits ErrSessionExists.
 func TestAsyncStartDriftRollbackKeepsAliasWhenRuntimeSurvives(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 	result := driftedStartResult(t, bead)
@@ -566,6 +573,176 @@ func TestAsyncStartDriftRollbackKeepsAliasWhenRuntimeSurvives(t *testing.T) {
 	}
 }
 
+// postStopProvider is the identity-confirmed branch's runtime: the identity
+// probe matches (the embedded Fake carries this start's GC_SESSION_ID and
+// GC_INSTANCE_TOKEN), Stop reports success, and the two existence probes then
+// disagree about what that success proved.
+type postStopProvider struct {
+	runtime.Provider
+	name string
+	// stopErr is what Stop reports. nil models ssh, whose Stop discards the
+	// remote kill-session exit code for idempotence and returns nil whenever
+	// the transport itself worked.
+	stopErr error
+	// isRunning is the bare-bool answer. false is "gone OR I could not look".
+	isRunning bool
+	// listErr / stillListed are the error-carrying probe's two answers.
+	listErr     error
+	stillListed bool
+}
+
+func (p *postStopProvider) Stop(string) error     { return p.stopErr }
+func (p *postStopProvider) IsRunning(string) bool { return p.isRunning }
+func (p *postStopProvider) ListRunning(prefix string) ([]string, error) {
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	if p.stillListed && strings.HasPrefix(p.name, prefix) {
+		return []string{p.name}, nil
+	}
+	return nil, nil
+}
+
+// TestAsyncStartDriftRollbackPostStopConfirmation pins both halves of the
+// post-stop asymmetry.
+//
+// The unconfirmable branch was fixed to require POSITIVE absence, but the
+// identity-confirmed branch of the same function kept a bare !IsRunning as its
+// proof — one function holding two standards for one question, with the weaker
+// one guarding the branch that just tried to kill something. The fix consults
+// the error-carrying probe's ERROR here, and deliberately not its absence
+// answer; both halves need a pin because each direction has its own regression.
+func TestAsyncStartDriftRollbackPostStopConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sp   func(name string) *postStopProvider
+		// rolledBack is whether the rollback may complete: close the bead and
+		// free the alias.
+		rolledBack bool
+	}{
+		{
+			// The ssh blip. Stop returned nil because the transport worked, not
+			// because kill-session did; IsRunning then answers false because the
+			// connection blipped, not because the session is gone. Acting on
+			// that strands a live remote agent under the chair name.
+			name:       "stop_succeeded_but_listing_failed",
+			rolledBack: false,
+			sp: func(name string) *postStopProvider {
+				return &postStopProvider{name: name, listErr: errors.New("ssh box: tmux list-sessions exited 1")}
+			},
+		},
+		{
+			// The other half of that asymmetry, and the narrowing control for
+			// the row above: a PartialListError WITHOUT ServerAbsent is a failed
+			// observation and must still refuse. ssh returns exactly this shape
+			// (it cannot classify the remote stderr, so it never claims
+			// absence), which is what keeps an ssh blip fail-closed while the
+			// tmux row below is allowed through.
+			name:       "listing_partial_without_server_absent",
+			rolledBack: false,
+			sp: func(name string) *postStopProvider {
+				return &postStopProvider{name: name, listErr: &runtime.PartialListError{
+					Err: errors.New("ssh box: tmux list-sessions exited 1"),
+				}}
+			},
+		},
+		{
+			// The single-session server. This branch's OWN successful stop
+			// killed the last session on the tmux server, so the server exited
+			// with it and the very next listing reports ServerAbsent. That is
+			// positive proof of death, not a failed observation: a session
+			// cannot outlive its server, and identity, a nil Stop and IsRunning
+			// false are already established. Refusing it re-spawns and re-kills
+			// a real agent every tick until the reaper fires.
+			name:       "stop_killed_the_last_session",
+			rolledBack: true,
+			sp: func(name string) *postStopProvider {
+				return &postStopProvider{name: name, listErr: &runtime.PartialListError{
+					Err:          errors.New("tmux server unreachable: no server running"),
+					ServerAbsent: true,
+				}}
+			},
+		},
+		{
+			// The k8s termination grace window, and the reason the remedy reads
+			// only the error. Stop issues a delete with a grace period and
+			// returns immediately; a Terminating pod keeps status.phase=Running
+			// and therefore stays LISTED until it finally disappears. Requiring
+			// positive absence here would refuse every k8s rollback for that
+			// whole window and retry next tick forever.
+			name:       "k8s_terminating_still_listed",
+			rolledBack: true,
+			sp: func(name string) *postStopProvider {
+				return &postStopProvider{name: name, stillListed: true}
+			},
+		},
+		{
+			// The ordinary success: the stop worked and the listing confirms it.
+			name:       "stop_confirmed_gone",
+			rolledBack: true,
+			sp:         func(name string) *postStopProvider { return &postStopProvider{name: name} },
+		},
+		{
+			// The pre-existing guard must survive the new one: a runtime the
+			// bare probe positively reports as alive still refuses, without ever
+			// reaching the listing.
+			name:       "survived_its_stop",
+			rolledBack: false,
+			sp:         func(name string) *postStopProvider { return &postStopProvider{name: name, isRunning: true} },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedAsyncStartFailures(t)
+			store := beads.NewMemStore()
+			bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+			result := driftedStartResult(t, bead)
+			name := result.prepared.candidate.name()
+			sp := tc.sp(name)
+			sp.Provider = liveRuntimeFor(t, name, result.prepared.candidate.info)
+
+			// Capture the fence's diagnostics rather than discarding them. Four
+			// gates in pendingCreateRuntimeClearedForRollback can refuse a
+			// rollback and every refusal reaches the assertions below as the
+			// same message, so discarding stderr turns a failure here into a
+			// four-way ambiguity. Captured, each gate names itself: "stopping
+			// runtime ... before releasing its identifiers" (Stop errored),
+			// "survived its stop" (still running after Stop), "cannot confirm
+			// runtime ... stopped" (the post-stop listing gate), "cannot
+			// confirm runtime ... is gone" (the identity-mismatch arm's absence
+			// probe). Its one silent refusal — that arm finding the name still
+			// listed — is then the case where only the "rolling back pending
+			// create" preamble appears. If a row reddens in CI, re-run first;
+			// only a reproduction makes this text worth reading.
+			var fenceLog bytes.Buffer
+
+			if commitAsyncStartResultWithContext(
+				context.Background(), result, sp, store,
+				clock.Real{}, events.Discard, 0, &fenceLog, &fenceLog, nil) {
+				t.Fatalf("a drifted start must not commit; fence output: %q", fenceLog.String())
+			}
+
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading the bead: %v; fence output: %q", err, fenceLog.String())
+			}
+			closed := got.Status == "closed"
+			aliasReleased := aliasFree(store) == nil
+			if closed != tc.rolledBack {
+				if tc.rolledBack {
+					t.Fatalf("the bead is still open: a rollback that is safe to complete was refused, so the row retries forever; fence output: %q", fenceLog.String())
+				}
+				t.Fatalf("the bead was closed on an UNCONFIRMED stop; a live agent now holds the chair name with no bead owning it; fence output: %q", fenceLog.String())
+			}
+			if aliasReleased != tc.rolledBack {
+				if tc.rolledBack {
+					t.Fatalf("the alias is still held after a confirmed stop: the replacement start will fail with ErrSessionExists; fence output: %q", fenceLog.String())
+				}
+				t.Fatalf("the alias was released without confirming the stop actually took effect; fence output: %q", fenceLog.String())
+			}
+		})
+	}
+}
+
 // TestAsyncStartDriftRollbackNoEventWhenRollbackFails pins MINOR: the typed
 // event must report what actually happened. A rollback whose transaction fails
 // leaves the row holding its claim and alias, so reporting
@@ -573,6 +750,7 @@ func TestAsyncStartDriftRollbackKeepsAliasWhenRuntimeSurvives(t *testing.T) {
 // observability half of this fix exists to close — and clearing the
 // consecutive-failure counter on that path means the escalation can never fire.
 func TestAsyncStartDriftRollbackNoEventWhenRollbackFails(t *testing.T) {
+	tracker := isolatedAsyncStartFailures(t)
 	store := &txErrorStore{MemStore: beads.NewMemStore()}
 	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
 	rec := &memRecorder{}
@@ -584,10 +762,9 @@ func TestAsyncStartDriftRollbackNoEventWhenRollbackFails(t *testing.T) {
 	if rec.hasType(events.SessionAsyncStartDriftRolledBack) {
 		t.Fatal("emitted a drift-rollback event for a rollback that never landed")
 	}
-	if asyncStartFailures.count(bead.ID) == 0 {
+	if tracker.count(bead.ID) == 0 {
 		t.Fatal("the consecutive-failure counter was cleared by a rollback that failed; the escalation could never fire")
 	}
-	asyncStartFailures.clear(bead.ID)
 }
 
 // txErrorStore fails every Tx so the rollback cannot land.
@@ -769,4 +946,329 @@ func TestAsyncStartFailureTrackerEvictsAndIsBounded(t *testing.T) {
 	if n := tracker.size(); n > asyncStartFailureTrackerMaxEntries {
 		t.Fatalf("tracker holds %d entries, want at most %d", n, asyncStartFailureTrackerMaxEntries)
 	}
+}
+
+// --- Review round 3: the liveness fence must establish "no live runtime" ---
+
+// isolatedAsyncStartFailures swaps the controller-wide failure counter for one
+// this test owns, and restores it with t.Cleanup.
+//
+// asyncStartFailures is per-process controller state keyed by bead ID, and
+// beads.NewMemStore mints IDs per store, so two tests that each build a fresh
+// store can collide on one key; a bare clear() at the end of a test is also
+// skipped by any t.Fatal above it. Swapping the variable gives each test its own
+// tracker without threading one more parameter through
+// commitAsyncStartResultWithContext's already-long signature. (Package-global
+// swap: these tests must not call t.Parallel.)
+//
+// EVERY test in this package that drives commitAsyncStartResultWithContext must
+// call this, not only the ones that assert on the counter. The escalation's
+// default: arm widened the recording population from the releaseInFlight
+// disposition alone to every non-commit disposition, so unisolated tests now
+// accumulate into one process-global tracker: three of them colliding on a
+// MemStore-minted bead id reach asyncStartFailureEscalationThreshold inside the
+// third, which then emits a SessionAsyncStartRefreshStalled event and a loud
+// stderr line its own scenario never produced. That is invisible until the next
+// event-count assertion lands in that file and fails for a reason that has
+// nothing to do with it. (Carrying the tracker on the reconciler value instead
+// of a package global is the durable fix and remains open.)
+func isolatedAsyncStartFailures(t *testing.T) *asyncStartFailureTracker {
+	t.Helper()
+	previous := asyncStartFailures
+	tracker := newAsyncStartFailureTracker()
+	asyncStartFailures = tracker
+	t.Cleanup(func() { asyncStartFailures = previous })
+	return tracker
+}
+
+// unobservableRuntimeProvider is the "alive but not yet observable" runtime: a
+// k8s pod that is Running while its tmux server is still inside the startup
+// grace period, or a tmux server mid-blip. Both probes the rollback guard used
+// to consult read that one unavailable signal — GetMeta answers ("", nil) so the
+// identity probe fails, and IsRunning execs into the same unstarted tmux so it
+// reports false — which made "confirmed gone" the conjunction of two failures.
+// Only the error-carrying listing still distinguishes the two.
+type unobservableRuntimeProvider struct {
+	runtime.Provider
+	name    string
+	listErr error
+	// listNames are the best-effort names returned ALONGSIDE listErr, for the
+	// degraded-but-usable shape (runtime.PartialListError): the provider
+	// observed some sessions and is reporting that it could not observe the
+	// rest. They deliberately never include name.
+	listNames []string
+}
+
+func (p *unobservableRuntimeProvider) GetMeta(string, string) (string, error) { return "", nil }
+func (p *unobservableRuntimeProvider) IsRunning(string) bool                  { return false }
+
+func (p *unobservableRuntimeProvider) ListRunning(prefix string) ([]string, error) {
+	if p.listErr != nil {
+		return p.listNames, p.listErr
+	}
+	if strings.HasPrefix(p.name, prefix) {
+		return []string{p.name}, nil
+	}
+	return nil, nil
+}
+
+// TestAsyncStartDriftRollbackRefusesUnobservableRuntime pins Finding 1b. The
+// rollback closes the bead and frees the alias, so it needs POSITIVE proof the
+// runtime is gone. A runtime that cannot be observed is not a runtime that is
+// gone, and the two probes the guard consulted first both fail on exactly the
+// same unavailability — so the guard failed OPEN in the one window it was
+// written to close.
+func TestAsyncStartDriftRollbackRefusesUnobservableRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		listErr   error
+		listNames []string
+	}{
+		// The k8s shape: the pod is Running and still listed; only tmux is
+		// not answering yet.
+		{name: "still_listed"},
+		// The tmux shape: the server hiccups, so the listing cannot answer at
+		// all. An observation failure is not proof of absence.
+		{name: "listing_failed", listErr: errors.New("tmux server unreachable")},
+		// The ssh/herdr shape, in the form the Provider.ListRunning contract
+		// now requires them to report it: the listing could not observe THIS
+		// session and says so with the sanctioned degraded-but-usable signal,
+		// while still returning the sessions it did see. Both providers used to
+		// fold that failure into a clean list that simply lacked the name —
+		// ssh turned a non-zero remote `list-sessions` into ([], nil), herdr
+		// dropped a binding whose pane probe errored — which this guard read as
+		// positive proof of absence. The best-effort names must NOT be mistaken
+		// for a complete answer: the error is the answer.
+		{
+			name:      "partial_listing",
+			listErr:   &runtime.PartialListError{Err: errors.New("pane probe failed: herdr socket closed mid-request")},
+			listNames: []string{"some-other-live-session"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedAsyncStartFailures(t)
+			store := beads.NewMemStore()
+			bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+			result := driftedStartResult(t, bead)
+			name := result.prepared.candidate.name()
+			sp := &unobservableRuntimeProvider{
+				Provider:  liveRuntimeFor(t, name, result.prepared.candidate.info),
+				name:      name,
+				listErr:   tc.listErr,
+				listNames: tc.listNames,
+			}
+
+			if commitAsyncStartResultWithContext(
+				context.Background(), result, sp, store,
+				clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+				t.Fatal("a drifted start must not commit")
+			}
+
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading the bead: %v", err)
+			}
+			if got.Status == "closed" {
+				t.Fatal("the bead was closed on an UNCONFIRMED absence; a live agent now holds the chair name with no bead owning it")
+			}
+			if err := aliasFree(store); err == nil {
+				t.Fatal("the alias was released without confirming the runtime is gone: every replacement start now fails with ErrSessionExists")
+			}
+		})
+	}
+}
+
+// TestAsyncStartDriftRollbackDefersWhileStartDefersCommit pins Finding 1a. The
+// rollback arm is the one destructive disposition in this function and it was
+// the only one that did not consult startOutcomeDefersCommit. Both deferring
+// outcomes mean "the runtime is there but this tick could not decide about it",
+// which commitStartResultTraced already treats as not-yet-safe — so the arm that
+// closes the bead and frees the alias must not override that judgement.
+func TestAsyncStartDriftRollbackDefersWhileStartDefersCommit(t *testing.T) {
+	for _, outcome := range []TraceOutcomeCode{TraceOutcomeSessionInitializing, TraceOutcomeDeferred} {
+		t.Run(string(outcome), func(t *testing.T) {
+			isolatedAsyncStartFailures(t)
+			store := beads.NewMemStore()
+			bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+			result := driftedStartResult(t, bead)
+			result.outcome = outcome
+			name := result.prepared.candidate.name()
+			// A plain Fake: its Stop works, so nothing but the outcome gate
+			// stands between this runtime and being killed.
+			sp := liveRuntimeFor(t, name, result.prepared.candidate.info)
+
+			if commitAsyncStartResultWithContext(
+				context.Background(), result, sp, store,
+				clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+				t.Fatal("a drifted start must not commit")
+			}
+
+			if !sp.IsRunning(name) {
+				t.Error("a still-initializing runtime was stopped by the rollback arm; the pre-image deliberately let it finish booting")
+			}
+			got, err := store.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading the bead: %v", err)
+			}
+			if got.Status == "closed" {
+				t.Fatal("the bead was closed while its runtime was still initializing")
+			}
+			if err := aliasFree(store); err == nil {
+				t.Fatal("the alias was released while its runtime was still initializing")
+			}
+			// Deferring falls through to the releaseInFlight arm, so the next
+			// tick retries rather than the row sitting on a spent lease.
+			if strings.TrimSpace(got.Metadata["last_woke_at"]) != "" {
+				t.Error("the in-flight lease was not released, so the next tick will not retry the start")
+			}
+		})
+	}
+}
+
+// TestResetRefusesStoppableLiveRuntime pins Finding 2. TestResetRefusesWhenRuntimeStillAlive
+// covers only a runtime whose Stop ERRORS, so the suite stayed green while reset
+// happily stopped every runtime it could. Reset's whole contract is that a live
+// runtime is restarted in place; killing one to satisfy its own rollback gate
+// destroys the bead, alias, mail and queued-work bindings the in-place restart
+// exists to preserve, and its help text promises the opposite.
+func TestResetRefusesStoppableLiveRuntime(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	info, _, err := sessionFrontDoor(store).GetPersistedResponse(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "s-" + deadlockAlias
+	// A plain runtime.Fake, not stubbornProvider: this Stop succeeds.
+	sp := liveRuntimeFor(t, name, info)
+
+	rescued, rescueErr := rescuePendingCreateForReset(store, sp, sessionResetRescueBudget(nil), bead.ID, clock.Real{}, ioDiscard{})
+	if rescueErr != nil {
+		t.Fatalf("rescuePendingCreateForReset: %v", rescueErr)
+	}
+	if rescued {
+		t.Fatal("reset rolled back a session whose runtime is alive; its help text promises exactly the opposite")
+	}
+	if !sp.IsRunning(name) {
+		t.Error("reset STOPPED a live agent to satisfy its own rollback gate")
+	}
+	got, gErr := store.Get(bead.ID)
+	if gErr != nil {
+		t.Fatal(gErr)
+	}
+	if got.Status == "closed" {
+		t.Fatal("reset closed the bead of a live session")
+	}
+	if err := aliasFree(store); err == nil {
+		t.Fatal("reset released the alias of a live session")
+	}
+}
+
+// TestStaleAttemptDoesNotReleaseTheOwnersLease pins Finding 3. A late attempt
+// that fails the identity fence does not own the row any more: last_woke_at is
+// the in-flight lease of the incarnation that is currently spawning. The
+// still-current gate already withholds the lease clear on an identity mismatch;
+// the drift gate runs first, so it has to withhold it too. The exposure is new
+// with this PR: pending_create_started_at is no longer re-stamped per attempt,
+// so an unprotected spawn gap inside an episode older than the never-started
+// bound is reapable, and a healthy create gets rolled back.
+func TestStaleAttemptDoesNotReleaseTheOwnersLease(t *testing.T) {
+	isolatedAsyncStartFailures(t)
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	// The row has moved on to incarnation B, which is mid-spawn and owns the
+	// lease this stale attempt A must not touch.
+	if err := store.SetMetadata(bead.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatalf("advance instance_token: %v", err)
+	}
+	leaseBefore := strings.TrimSpace(mustBeadMetadata(t, store, bead.ID)["last_woke_at"])
+	if leaseBefore == "" {
+		t.Fatal("precondition: the row must carry an in-flight lease")
+	}
+
+	result := driftedStartResult(t, bead)
+	result.prepared.candidate.info.InstanceToken = "tok-1"
+	if commitAsyncStartResultWithContext(
+		context.Background(), result, nil, store,
+		clock.Real{}, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("a drifted start must not commit")
+	}
+
+	if got := strings.TrimSpace(mustBeadMetadata(t, store, bead.ID)["last_woke_at"]); got != leaseBefore {
+		t.Errorf("last_woke_at = %q, want the untouched %q: a stale attempt released the in-flight lease of the incarnation that owns the row", got, leaseBefore)
+	}
+}
+
+// TestStaleAsyncStartArmStillEscalates pins Finding 4. The escalation switch had
+// no default, so the stale_async_start disposition — the still-current reject,
+// reached by an attempt whose row was re-leased mid-start without any command
+// drift — neither recorded nor cleared the consecutive-failure counter. It is a
+// repeating non-commit arm, so a session looping on it stayed exactly as silent
+// as the 111 retries this counter was added to surface.
+func TestStaleAsyncStartArmStillEscalates(t *testing.T) {
+	tracker := isolatedAsyncStartFailures(t)
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	if err := store.SetMetadata(bead.ID, "instance_token", "tok-2"); err != nil {
+		t.Fatalf("advance instance_token: %v", err)
+	}
+	rec := &memRecorder{}
+
+	for i := 1; i <= asyncStartFailureEscalationThreshold; i++ {
+		result := driftedStartResult(t, bead)
+		// No drift: the prepared command matches the persisted one, so this
+		// reaches the still-current gate rather than the drift gate.
+		result.prepared.candidate.tp.Command = deadlockStaleCommand
+		result.prepared.candidate.info.InstanceToken = "tok-1"
+		if commitAsyncStartResultWithContext(
+			context.Background(), result, nil, store,
+			clock.Real{}, rec, 0, ioDiscard{}, ioDiscard{}, nil) {
+			t.Fatalf("attempt %d: a start whose row was re-leased must not commit", i)
+		}
+	}
+
+	if n := tracker.count(bead.ID); n != asyncStartFailureEscalationThreshold {
+		t.Errorf("consecutive-failure count = %d after %d identical stale_async_start failures, want %d: this arm is invisible to the escalation", n, asyncStartFailureEscalationThreshold, asyncStartFailureEscalationThreshold)
+	}
+	if !rec.hasType(events.SessionAsyncStartRefreshStalled) {
+		t.Fatal("no escalation event after a run of identical stale_async_start failures: the one repeating arm that never becomes visible")
+	}
+}
+
+// TestResetRefusesFreshEpisodeWithExpiredLease covers the other half of the
+// reset eligibility gate. TestResetRefusesHealthyInFlightCreate short-circuits
+// on the lease arm, so the staleness arm had no deterministic coverage — and it
+// used to read wall-clock time while the lease arm read the injected clock, so
+// pinning the clock pinned only half the decision. A row whose lease has expired
+// but whose pending-create EPISODE is younger than the stale bound is still a
+// healthy create.
+func TestResetRefusesFreshEpisodeWithExpiredLease(t *testing.T) {
+	store := beads.NewMemStore()
+	bead := stuckCreatingBead(t, store, string(sessionpkg.StateCreating))
+	now := time.Now().UTC()
+	// The episode opened a second ago; the attempt's lease is long gone.
+	if err := store.SetMetadata(bead.ID, "pending_create_started_at", pendingCreateStartedAtNow(now.Add(-time.Second))); err != nil {
+		t.Fatal(err)
+	}
+
+	rescued, err := rescuePendingCreateForReset(store, nil, sessionResetRescueBudget(nil), bead.ID, &clock.Fake{Time: now}, ioDiscard{})
+	if err != nil {
+		t.Fatalf("rescuePendingCreateForReset: %v", err)
+	}
+	if rescued {
+		t.Fatal("reset rolled back a create whose episode is younger than the stale-creating bound")
+	}
+	if err := aliasFree(store); err == nil {
+		t.Fatal("reset released the alias of a create still inside its episode bound")
+	}
+}
+
+// mustBeadMetadata re-reads a bead's metadata or fails the test.
+func mustBeadMetadata(t *testing.T, store beads.Store, id string) map[string]string {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("re-reading bead %s: %v", id, err)
+	}
+	return got.Metadata
 }

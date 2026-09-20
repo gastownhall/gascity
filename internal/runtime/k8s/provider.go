@@ -615,6 +615,25 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 }
 
 // ListRunning returns names of all running sessions with the given prefix.
+//
+// The listing is a pod query, not an exec into the pod, so a pod that is
+// Running while the tmux server inside it is still booting is still listed —
+// which is what lets callers tell "alive but not yet observable" from "gone".
+//
+// The status.phase=Running field selector is deliberate and is the orphan-
+// detection primitive's definition of running: sweeps that consume this list
+// assume listed == running, so it must not be widened to report Pending pods.
+// The cost is a window this listing reports as a genuine (non-error) absence: a
+// pod still in Pending/ContainerCreating — a slow image pull, an unschedulable
+// node — does not appear here even though it exists and may yet reach Running.
+// Callers that free identifiers on absence must know that window is theirs, not
+// this listing's; see pendingCreateRuntimeAbsenceConfirmed in
+// cmd/gc/session_async_start_drift.go, which documents the two backstops (the
+// replacement create's Start deletes a non-Running pod of the same name before
+// creating, and the orphan sweep collects one that later reaches Running) that
+// keep it self-healing. This is a phase-visibility gap, not a violation of the
+// [runtime.Provider.ListRunning] rule that a failed observation be an error: a
+// listPods call that fails is returned as an error below.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	pods, err := p.ops.listPods(ctx, "app=gc-agent", "status.phase=Running")

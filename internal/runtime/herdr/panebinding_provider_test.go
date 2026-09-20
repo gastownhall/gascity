@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -118,6 +119,10 @@ pane_run)
 pane_process-info)
   if [ -e "$STATE/pane_gone" ]; then
     printf '%s' '{"error":{"code":"pane_not_found","message":"pane not found"}}'
+  elif [ -e "$STATE/pane_probe_fails" ]; then
+    # A transport failure, NOT a not-found: probePane returns it as an error
+    # and clears nothing, because it proves nothing about the pane.
+    printf '%s' '{"error":{"code":"internal_error","message":"herdr socket closed mid-request"}}'
   elif [ -e "$STATE/rawcmd" ]; then
     printf '%s' '{"result":{"process_info":{"shell_pid":4242,"foreground_processes":[{"pid":4242,"name":"bash","argv":["/bin/sh","-c","'"$(cat "$STATE/rawcmd")"'"]}]}}}'
   elif [ -e "$STATE/busy" ]; then
@@ -479,5 +484,61 @@ func TestListRunningSkipsGonePanes(t *testing.T) {
 	got, err := p.ListRunning("gastown__")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("ListRunning = %v, %v; want empty", got, err)
+	}
+}
+
+// A bound session whose pane probe FAILS is a session this listing could not
+// observe, and runtime.Provider.ListRunning requires that be an error rather
+// than an absent name. resolveBinding already distinguishes the two — it clears
+// the binding and returns nil for a confirmed-gone pane (above) and returns the
+// error, clearing nothing, for a transport failure — so dropping the errored
+// entry here threw away a signal the callee took care to produce. The
+// pending-create rollback reads a clean list that omits the name as positive
+// proof of absence and frees the alias, stranding a live agent under the chair
+// name.
+func TestListRunningReportsPartialOnPaneProbeFailure(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "pane_probe_fails")
+	bindTestPane(t, p, "gastown__worker-1", bindModeShell)
+	if err := p.SetMeta("gastown__worker-1", metaBoundName, "gastown__worker-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := p.ListRunning("gastown__")
+	if err == nil {
+		t.Fatalf("ListRunning = %v, nil; an unobservable bound session must not read as a clean absence", got)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning err = %v, want a runtime.PartialListError so reconciler guards defer", err)
+	}
+	if !strings.Contains(err.Error(), "gastown__worker-1") {
+		t.Errorf("ListRunning err = %v, want it to name the session it could not observe", err)
+	}
+	if slices.Contains(got, "gastown__worker-1") {
+		t.Errorf("ListRunning = %v; an unobserved session must not be claimed as running", got)
+	}
+	// The binding must survive: only a CONFIRMED-gone pane is pruned, so a
+	// transport blip cannot erase the pointer to a live pane.
+	if bound, _ := p.GetMeta("gastown__worker-1", metaBoundPane); bound != "%5" {
+		t.Errorf("bound pane = %q after a failed probe; want it preserved", bound)
+	}
+}
+
+// The partial signal must stay scoped to the sessions that actually failed: a
+// listing where every binding resolved is a complete observation and must stay
+// a clean success, or every consumer would defer forever on a healthy city.
+func TestListRunningStaysCleanWhenEveryBindingResolves(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	setState(t, state, "busy")
+	bindTestPane(t, p, "gastown__worker-1", bindModeShell)
+	if err := p.SetMeta("gastown__worker-1", metaBoundName, "gastown__worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.ListRunning("gastown__")
+	if err != nil {
+		t.Fatalf("ListRunning: %v; a fully observed listing must stay a clean success", err)
+	}
+	if !slices.Contains(got, "gastown__worker-1") {
+		t.Errorf("ListRunning = %v; want gastown__worker-1", got)
 	}
 }

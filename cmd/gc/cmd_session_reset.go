@@ -16,8 +16,8 @@ func newSessionResetCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "reset <session-id-or-alias>",
-		Short: "Restart a session fresh while preserving the bead",
-		Long: `Request a fresh restart for an existing session without closing its bead.
+		Short: "Restart a session fresh (rolls back a dead unfinished create)",
+		Long: `Request a fresh restart for an existing session, normally without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued

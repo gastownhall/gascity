@@ -857,6 +857,19 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // running before it is listed. Registry agents that don't correspond to any
 // bound gc session (foreign/manual agents) are appended under their own
 // names.
+//
+// A binding whose probe FAILS is not silently omitted. resolveBinding already
+// separates "confirmed gone" (it clears the binding and returns a nil error)
+// from "the transport failed" (it returns the error and clears nothing), so
+// dropping the errored entries here was a caller-side loss of a signal the
+// callee took care to produce: an unobservable bound session came back as a
+// clean, complete list that did not contain it, and
+// [runtime.Provider.ListRunning] requires a failed observation be an error, not
+// an absent name. The names that did resolve are still returned alongside a
+// [runtime.PartialListError] — the same degraded-but-usable shape
+// [runtime.MergeBackendListResults] produces — so best-effort callers keep
+// working while callers that must fail closed (the pending-create rollback,
+// which frees an alias on absence) see that the listing is incomplete.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
@@ -866,12 +879,18 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
 	var out []string
+	var unobservable []error
 	for _, name := range p.boundSessionNames() {
 		mapped[herdrAgentName(name)] = true
 		if !strings.HasPrefix(name, prefix) || seen[name] {
 			continue
 		}
-		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
+		_, running, err := resolveBinding(p.lookupOps(ctx, name))
+		if err != nil {
+			unobservable = append(unobservable, fmt.Errorf("pane probe for %q: %w", name, err))
+			continue
+		}
+		if running {
 			seen[name] = true
 			out = append(out, name)
 		}
@@ -881,6 +900,9 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			seen[a.Name] = true
 			out = append(out, a.Name)
 		}
+	}
+	if len(unobservable) > 0 {
+		return out, &runtime.PartialListError{Err: errors.Join(unobservable...)}
 	}
 	return out, nil
 }

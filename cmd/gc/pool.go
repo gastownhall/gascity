@@ -611,6 +611,17 @@ func discoverPoolInstances(agentName, agentDir string, sp0 scaleParams, a *confi
 	// Build the session name prefix to match against running sessions.
 	snPrefix := agent.SessionNameFor(cityName, qnPrefix, st)
 	running, err := sp.ListRunning("")
+	// Deliberately fail closed on ANY error, including a runtime.PartialListError
+	// that still carries best-effort names. Same policy as the two
+	// discoverUnlimitedPool twins (internal/api/handler_agents.go,
+	// internal/agentutil/pool.go), which carry the rationale for the policy
+	// itself; keeping all four discovery sites on one policy matters more than
+	// the individual call. What the twins do NOT carry is the blast radius
+	// here: they list with snPrefix, this site lists with "" and filters below,
+	// so against a per-session probe failure ANY unobservable session in the
+	// city blanks this pool, not just one of its members. Re-decide there, not
+	// here: ga-jls1b, which records the empty-prefix surface and narrowing this
+	// call to snPrefix as an option independent of the policy itself.
 	if err != nil {
 		return nil
 	}
@@ -645,6 +656,8 @@ func discoverCanonicalSingletonPoolInstances(a *config.Agent, cityName, st strin
 	}
 	prefix := agent.SessionNameFor(cityName, canonical+"-", st)
 	running, err := sp.ListRunning("")
+	// Fail closed on any error, including a partial listing that carries names —
+	// the same deliberate policy as discoverPoolInstances above. ga-jls1b.
 	if err != nil {
 		return names
 	}

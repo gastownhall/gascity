@@ -195,6 +195,24 @@ type Provider interface {
 
 	// ListRunning returns the names of all running sessions whose names
 	// have the given prefix. Used for orphan detection.
+	//
+	// An observation failure MUST be reported as an error, never as an absent
+	// name. A returned name list is a positive claim about every session the
+	// provider could observe, so a backend that did not answer — an unreachable
+	// server, a failed per-session probe, a transport blip — has to surface that
+	// as a non-nil error rather than quietly omitting the sessions it could not
+	// look at. Omitting them makes "I could not look" indistinguishable from
+	// "it is gone", and callers that free identifiers on absence (the
+	// pending-create rollback in cmd/gc, orphan cleanup, pool on_death) then act
+	// destructively on a live session.
+	//
+	// A backend that answered only partially may still return the names it did
+	// observe alongside a [PartialListError], the sanctioned degraded-but-usable
+	// signal: callers that must fail closed test the error, and callers that can
+	// use best-effort results still get them. [MergeBackendListResults] produces
+	// that shape for composite providers, and the tmux adapter produces it for an
+	// unreachable server (see gastownhall/gascity#4082). This is the only
+	// sanctioned way to report "some of this listing is missing".
 	ListRunning(prefix string) ([]string, error)
 
 	// GetLastActivity returns the time of the last I/O activity in the

@@ -122,10 +122,16 @@ func pendingCreateRuntimeClearedForRollback(info sessionpkg.Info, name string, s
 	}
 	if !runningSessionMatchesPendingCreateInfo(info, name, sp) {
 		// Either no runtime of ours is there, or the identity probe could not
-		// confirm one. Only the first is safe to act on, so defer to the
-		// provider's own existence check and fail closed while it still sees a
-		// session under this name.
-		return !sp.IsRunning(name)
+		// confirm one. Only the first is safe to act on, and !IsRunning cannot
+		// tell them apart because it reads the SAME signal the identity probe
+		// just failed on: a k8s pod that is Running while its tmux server is
+		// still booting answers GetMeta with ("", nil) AND fails `tmux
+		// has-session`, and tmux's own IsRunning returns a bare bool that folds
+		// a server blip into "gone". Two probes failing on one unavailable
+		// runtime used to resolve to "confirmed gone" precisely when the runtime
+		// was alive but not yet observable, so require POSITIVE confirmation of
+		// absence instead.
+		return pendingCreateRuntimeAbsenceConfirmed(name, sp, stderr)
 	}
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
 		fmt.Fprintf(stderr, "session reconciler: stopping runtime %s before releasing its identifiers: %v\n", name, err) //nolint:errcheck // best-effort diagnostics
@@ -139,7 +145,150 @@ func pendingCreateRuntimeClearedForRollback(info sessionpkg.Info, name string, s
 		fmt.Fprintf(stderr, "session reconciler: runtime %s survived its stop; keeping its bead so the alias is not stranded\n", name) //nolint:errcheck // best-effort diagnostics
 		return false
 	}
+	// IsRunning answering false is a bare bool, so it carries the same "gone" /
+	// "could not look" ambiguity the unconfirmable branch above refuses to act
+	// on, and here it guards the branch that just tried to kill something: an
+	// ssh Stop returns nil whenever the transport worked (it discards the remote
+	// kill-session exit code, deliberately, for idempotence), so a connection
+	// blip landing between the identity probe and this check reads a surviving
+	// remote agent as confirmed gone. Ask the error-carrying probe as well and
+	// refuse when the OBSERVATION failed.
+	//
+	// Only its error is consulted, never its absence answer. Requiring positive
+	// absence here would regress k8s: Stop issues a delete with a grace period
+	// and returns immediately, and a Terminating pod keeps status.phase=Running,
+	// so it stays listed for the whole termination window and every k8s rollback
+	// would refuse until the pod finally disappeared. A still-listed name after
+	// a successful stop is the expected shape here, not a survivor.
+	//
+	// One error is not a failed observation but the loudest possible
+	// confirmation, and it is the one this branch produces for itself:
+	// runtime.IsRuntimeServerAbsent means the backend server is not running at
+	// all. Stopping the only session on a tmux server exits the server with it
+	// — the runtimetest conformance suite says so in as many words — so on a
+	// one-session local city, or the standard one-gc-session-per-remote-box
+	// topology, the fence's OWN successful stop produces this answer on the very
+	// next listing. Refusing it would refuse a stop already backed by an
+	// identity match, a nil Stop and IsRunning false, and would cost a spawn and
+	// a kill of a real agent process every tick until the isStaleCreating reaper
+	// collected the row. A session cannot outlive its server, so server-absent
+	// positively rules out a survivor: this is exactly the independent proof of
+	// death the carve-out at runtime.IsRuntimeServerAbsent was built for.
+	//
+	// Scoped to THIS branch on purpose. It is available here because the branch
+	// has already established that the runtime was ours and that we stopped it;
+	// pendingCreateRuntimeAbsenceConfirmed has established neither and must keep
+	// refusing every error, ServerAbsent included. IsRuntimeServerAbsent also
+	// deliberately does not unwrap, so a composite provider that merely joined
+	// an absent backend's error cannot borrow this carve-out while a healthy
+	// sibling still holds live sessions.
+	if _, err := sp.ListRunning(name); err != nil && !runtime.IsRuntimeServerAbsent(err) {
+		fmt.Fprintf(stderr, "session reconciler: cannot confirm runtime %s stopped (%v); keeping its bead so the alias is not stranded\n", name, err) //nolint:errcheck // best-effort diagnostics
+		return false
+	}
 	return true
+}
+
+// pendingCreateRuntimeAbsenceConfirmed reports whether the provider POSITIVELY
+// confirms that nothing is running under name. It is the fail-closed half of
+// every pending-create rollback gate: "I could not observe it" answers false,
+// same as "it is still there".
+//
+// It deliberately does not ask IsRunning. That method returns a bare bool, so
+// every provider folds "the session is gone" and "I could not look" into the
+// same false — which is exactly the tie the caller needs broken. ListRunning is
+// the existence probe that CAN break it, because runtime.Provider requires an
+// observation failure to be reported as an error rather than as an absent name
+// (see the ListRunning contract in internal/runtime/runtime.go). tmux reports an
+// unreachable server as an error rather than an empty list; ssh reports a failed
+// remote listing the same way; herdr surfaces a bound session whose pane probe
+// failed instead of dropping it; and the k8s listing is a pod query, so a pod
+// that is Running while its tmux server is still inside the startup grace
+// period is still LISTED. So a provider that keeps the contract answers "alive
+// but unobservable" differently from "gone".
+//
+// The contract is what this helper rests on, not a property that can be read
+// off any single provider. FOUR in-tree providers folded a failed observation
+// into a clean short list until the requirement was written down, and each was
+// fixed to return a runtime.PartialListError instead: ssh dropped a non-zero
+// remote list-sessions, herdr dropped a binding whose pane probe errored, and
+// acp and subprocess dropped a control-socket ping that ran out its timeout
+// rather than being refused.
+//
+// Read that as the result of one audit, not as a standing guarantee that the
+// current population is clean. Nothing mechanically enforces the rule: the
+// shared runtimetest suite checks what a conformant provider may answer, not
+// that an unobservable one errors, because inducing an observation failure is
+// provider-specific — so the gating lives in per-provider pins that each new
+// provider has to bring with it, and ga-0ywmv tracks the wire-catalog row that
+// would gate it generically. Two gaps are open as of that audit: out-of-tree
+// RPP wire packs were never in it, and internal/runtime/exec delegates the
+// listing to a user-supplied script, which honors the contract when the script
+// fails but not when one exits 0 with empty stdout for a box it could not
+// reach. A provider that breaks the rule makes this guard silently inert rather
+// than wrong-looking, so every provider owes ListRunning an error on each
+// listing it could not complete.
+//
+// One residual gap is known and is NOT an error-reporting failure: the k8s
+// listing filters status.phase=Running, so a pod still in Pending or
+// ContainerCreating is reported absent by a listing that genuinely succeeded. A
+// create that timed out waiting for such a pod returns TraceOutcomeDeadlineExceeded,
+// which does not defer the commit, so that window reaches this helper and can
+// confirm absence while the pod may yet reach Running. It stays a narrow,
+// self-healing exposure rather than the ga-6wkhl stranding because of two
+// backstops: the replacement create's Start deletes an existing pod in any
+// non-Running phase before creating one (internal/runtime/k8s/provider.go
+// Start), and a stale pod that does reach Running is collected by the orphan
+// sweep. Widening ListRunning to report Pending pods is not the fix — it is the
+// orphan-detection primitive and its callers assume listed == running.
+//
+// Refusing on an unreadable provider costs convergence latency, not
+// convergence: the restored isStaleCreating reaper still collects a genuinely
+// dead row once the episode bound expires. Releasing an alias out from under a
+// live agent has no such second chance — the agent holds the chair name with no
+// bead owning it and every replacement start fails with ErrSessionExists, which
+// is the ga-6wkhl stranding this guard exists to prevent.
+func pendingCreateRuntimeAbsenceConfirmed(name string, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil {
+		return true
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	running, err := sp.ListRunning(name)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: cannot confirm runtime %s is gone (%v); keeping its bead so its alias is not stranded\n", name, err) //nolint:errcheck // best-effort diagnostics
+		return false
+	}
+	for _, listed := range running {
+		if strings.TrimSpace(listed) == name {
+			return false
+		}
+	}
+	return true
+}
+
+// pendingCreateRuntimeAbsentForReset is reset's PASSIVE liveness gate.
+//
+// The drift arm may stop the runtime it is deciding about, because that runtime
+// is the one this very start just spawned. Reset may not: it is deciding about
+// a runtime somebody else started, and its contract is that a create whose
+// runtime is alive is restarted in place rather than rolled back. Stopping one
+// to satisfy the gate would destroy the bead, alias, mail and queued-work
+// bindings the in-place restart exists to preserve — the live agent would be
+// killed rather than merely orphaned.
+func pendingCreateRuntimeAbsentForReset(info sessionpkg.Info, name string, sp runtime.Provider, stderr io.Writer) bool {
+	if sp == nil {
+		return true
+	}
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	if runningSessionMatchesPendingCreateInfo(info, name, sp) || sp.IsRunning(name) {
+		return false
+	}
+	return pendingCreateRuntimeAbsenceConfirmed(name, sp, stderr)
 }
 
 // rollbackPendingCreateConfirmed performs the pending-create rollback and
@@ -254,6 +403,18 @@ func (t *asyncStartFailureTracker) size() int {
 // lives with the process rather than on the bead.
 var asyncStartFailures = newAsyncStartFailureTracker()
 
+// escalateAsyncStartRefreshFailure counts one non-commit disposition against
+// sessionID's run and escalates once when the run reaches the threshold. Every
+// repeating non-commit arm routes through here, so "which arms are counted" is
+// visible as a call rather than as a copy of the record/emit pair.
+func escalateAsyncStartRefreshFailure(rec events.Recorder, name, sessionID, template, outcome string, verdict asyncStartRefreshVerdict, stderr io.Writer) {
+	if !asyncStartFailures.record(sessionID) {
+		return
+	}
+	emitAsyncStartRefreshStalled(rec, name, sessionID, template, outcome,
+		asyncStartFailures.count(sessionID), verdict.preparedCommand, verdict.currentCommand, stderr)
+}
+
 // rescuePendingCreateForReset rolls back a session whose create never
 // committed, so `gc session reset` can free a row stuck in creating.
 //
@@ -291,14 +452,20 @@ func rescuePendingCreateForReset(store beads.Store, sp runtime.Provider, startup
 	// pendingCreateLeaseActiveInfo, not its nil-clock sweep wrapper: the wrapper
 	// reports "still leased" for ANY row carrying last_woke_at, because
 	// pendingCreateAttemptStaleInfo returns false on a nil clock.
-	if pendingCreateLeaseActiveInfo(info, clk, startupTimeout) || !isStaleCreatingInfo(info) {
+	// Both halves read clk: isStaleCreatingInfoAt rather than its wall-clock
+	// wrapper, so the whole gate is decided against ONE clock and a test that
+	// pins the clock pins both arms.
+	if pendingCreateLeaseActiveInfo(info, clk, startupTimeout) || !isStaleCreatingInfoAt(info, clk.Now()) {
 		return false, nil
 	}
 	// A live runtime means this is not an abandoned create at all — the
 	// documented post-start ApplyPatch failure leaves a serving agent with its
 	// row parked in creating for warm reuse. Closing that bead would orphan the
 	// runtime under its chair name, so leave it to the ordinary in-place reset.
-	if !pendingCreateRuntimeClearedForRollback(info, info.SessionNameMetadata, sp, stderr) {
+	//
+	// The probe is passive: see pendingCreateRuntimeAbsentForReset for why reset
+	// must not reach for the drift arm's stop-and-confirm helper here.
+	if !pendingCreateRuntimeAbsentForReset(info, info.SessionNameMetadata, sp, stderr) {
 		return false, nil
 	}
 	if !rollbackPendingCreateConfirmed(info, sessFront, clk.Now().UTC(), stderr) {
