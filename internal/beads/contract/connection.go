@@ -919,22 +919,31 @@ func ReadPersistedServerBinding(fs fsys.FS, path string) (ConfigState, bool, err
 		}
 		return ConfigState{}, false, err
 	}
+	binding, ok := persistedServerBinding(data)
+	return binding, ok, nil
+}
+
+// persistedServerBinding decodes bd's server binding out of raw metadata bytes.
+//
+// It is the single definition of what counts as a binding, shared by the read
+// path and by EnsureCanonicalMetadata's decision not to scrub one.
+func persistedServerBinding(data []byte) (ConfigState, bool) {
 	var meta struct {
 		Host   string `json:"dolt_server_host"`
 		Port   int    `json:"dolt_server_port"`
 		Socket string `json:"dolt_server_socket"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return ConfigState{}, false, nil
+		return ConfigState{}, false
 	}
 	if socket := strings.TrimSpace(meta.Socket); socket != "" {
-		return ConfigState{DoltSocket: socket}, true, nil
+		return ConfigState{DoltSocket: socket}, true
 	}
 	host := strings.TrimSpace(meta.Host)
 	if host == "" || meta.Port <= 0 {
-		return ConfigState{}, false, nil
+		return ConfigState{}, false
 	}
-	return ConfigState{DoltHost: host, DoltPort: strconv.Itoa(meta.Port)}, true, nil
+	return ConfigState{DoltHost: host, DoltPort: strconv.Itoa(meta.Port)}, true
 }
 
 // localServerTarget pins a target to a loopback server this host runs.

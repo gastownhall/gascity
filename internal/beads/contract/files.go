@@ -122,14 +122,32 @@ func (e *MetadataParseError) Error() string {
 // Unwrap exposes the typed cause for errors.Is and errors.As.
 func (e *MetadataParseError) Unwrap() error { return e.Err }
 
+// deprecatedMetadataKeys are the endpoint keys gc itself used to write into
+// metadata.json and no longer reads. Canonicalisation always removes them: gc
+// records its own endpoints in config.yaml, so a copy here is a leftover.
 var deprecatedMetadataKeys = []string{
 	"dolt_host",
 	"dolt_user",
 	"dolt_password",
+	"dolt_port",
+}
+
+// persistedServerBindingKeys are bd's record of the server a direct scope is
+// bound to, not gc's. `bd init --server --external --server-host <h>
+// --server-port <p>` writes them and nothing else on disk carries that
+// endpoint — ReadPersistedServerBinding is the reader, and for a bd-owned
+// direct scope it is the whole upstream.
+//
+// Canonicalisation removes them only when what is on disk is not a usable
+// binding, i.e. a fragment gc can scrub without destroying an endpoint it
+// cannot put back. A real binding is left alone whoever owns the scope: for a
+// scope gc owns it is inert (ResolveDoltConnectionTarget consults the binding
+// only for a scope that carries no gc endpoint keys), and for a scope bd owns
+// it is the only record of where the beads live.
+var persistedServerBindingKeys = []string{
 	"dolt_server_host",
 	"dolt_server_port",
 	"dolt_server_user",
-	"dolt_port",
 }
 
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
@@ -603,12 +621,14 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
 func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool, error) {
 	meta := map[string]any{}
+	boundToPersistedServer := false
 	data, err := fs.ReadFile(path)
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(data, &meta); err != nil {
 			meta = map[string]any{}
 		}
+		_, boundToPersistedServer = persistedServerBinding(data)
 	case os.IsNotExist(err):
 	case err != nil:
 		return false, err
@@ -634,6 +654,14 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		if _, ok := meta[key]; ok {
 			delete(meta, key)
 			changed = true
+		}
+	}
+	if !boundToPersistedServer {
+		for _, key := range persistedServerBindingKeys {
+			if _, ok := meta[key]; ok {
+				delete(meta, key)
+				changed = true
+			}
 		}
 	}
 	for _, key := range crossBackendKeysToScrub(strings.TrimSpace(state.Backend)) {
