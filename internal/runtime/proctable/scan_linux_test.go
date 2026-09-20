@@ -369,3 +369,44 @@ func TestScanWithRootExcludesLiveParentSessionDescendant(t *testing.T) {
 			"city's shared dolt sql-server", pids, paneRoot)
 	}
 }
+
+// The drain-ack escalation's kill fence is stated POSITIVELY — a candidate's
+// parent must be the provider's own server — precisely so it does not depend on
+// detecting a subreaper pid, which is derived from the CALLER's ancestry and is
+// empty whenever the caller and the target descend from different trees. That
+// fence is only worth anything if the scan actually reports the distinction, so
+// it is pinned here, at the source, and not only in the consumer's fake.
+func TestScanWithRootReportsWhetherTheParentIsProviderInfrastructure(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "ga-parentage"
+	// The tmux server, which inherits the GC_SESSION_ID of the session that
+	// founded it. Infrastructure is never a root itself.
+	buildFakeProcUnder(t, root, 400, 1, "tmux: server", map[string]string{"GC_SESSION_ID": sessionID})
+	// A pane root the server still owns: the seat's actual runtime.
+	buildFakeProcUnder(t, root, 401, 400, "claude", map[string]string{"GC_SESSION_ID": sessionID})
+	// A daemon that merely INHERITED the seat's environment and, once its
+	// spawner exited, was adopted by `systemd --user` — a large, LIVE ppid that
+	// no `ppid <= 1` test reads as an orphan.
+	buildFakeProcUnder(t, root, 402, 3117, "gc", map[string]string{"GC_SESSION_ID": sessionID})
+	buildFakeProcUnder(t, root, 3117, 1, "systemd", nil)
+
+	got, err := scanWithRoot(root, sessionID)
+	if err != nil {
+		t.Fatalf("scanWithRoot error: %v", err)
+	}
+	parentIsInfra := make(map[int]bool, len(got))
+	for _, live := range got {
+		parentIsInfra[live.PID] = live.ParentIsProviderInfrastructure
+	}
+	if len(got) != 2 {
+		t.Fatalf("scanWithRoot returned %d roots (%v), want the pane root and the inherited-env daemon", len(got), parentIsInfra)
+	}
+	if !parentIsInfra[401] {
+		t.Error("the pane root's parent is the tmux server, but the scan did not attribute it to provider infrastructure; " +
+			"a kill fence that requires this attribution would refuse the seat's own runtime and the escalation would never fire")
+	}
+	if parentIsInfra[402] {
+		t.Error("attributed a `systemd --user` parent to provider infrastructure; that is the orphaned-watchdog shape, " +
+			"and killing it signals the process group whose SIGTERM handler stops the city's shared dolt sql-server")
+	}
+}

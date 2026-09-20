@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,6 +47,28 @@ type escalationEnv struct {
 	// subreaperPID models the `systemd --user` child-subreaper pid this session
 	// runs under; 0 means a plain-init host.
 	subreaperPID int
+	// poke counts controller pokes. It is a pointer so escalationEnv stays
+	// copyable (the constructor assigns through *env).
+	poke *callCounter
+}
+
+// callCounter counts calls made from the detached termination goroutine, which
+// runs concurrently with the assertions.
+type callCounter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *callCounter) record() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+}
+
+func (c *callCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 func newEscalationEnv(t *testing.T) *escalationEnv {
@@ -112,8 +135,20 @@ func newEscalationEnv(t *testing.T) *escalationEnv {
 		t: t, sp: sp, store: store, clk: &clock.Fake{Time: now},
 		bead: bead, out: &synchronizedBuffer{}, rec: &capturingRecorder{},
 		cfg:      &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}},
-		cityPath: cityPath, name: name, now: now,
+		cityPath: cityPath, name: name, now: now, poke: &callCounter{},
 	}
+
+	// The escalation pokes the controller on its outcome arms, exactly as the
+	// ordinary async stop does. Swap the seam for every escalation test: left
+	// un-swapped it dials the HOST's controller and then its supervisor socket
+	// from inside `go test`, and it is also what lets a test assert the poke.
+	// (Tests using this env therefore must not call t.Parallel.)
+	prevPoke := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string) error {
+		env.poke.record()
+		return nil
+	}
+	t.Cleanup(func() { drainAckAsyncStopPokeController = prevPoke })
 	return env
 }
 
@@ -690,6 +725,11 @@ func (readOnlyMetadataStore) SetMetadata(string, string, string) error {
 // still in flight, or the tracker is stopping during controller shutdown — the
 // escalation must report false, or the row receives no stop of any kind that
 // tick, which is strictly worse than the pre-change behavior.
+//
+// And it must not PACE that non-attempt. The pacing marker buys a 15-minute
+// silence and increments drain_escalation_count, so writing it for an attempt
+// that never ran costs the row a full retry interval and over-reports the
+// counter. The claim therefore has to be taken before the marker is written.
 func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 	e := newEscalationEnv(t)
 	tracker := &asyncStartTracker{}
@@ -701,15 +741,27 @@ func TestEscalationReportsNotHandledWhenTerminationCannotStart(t *testing.T) {
 		t.Fatal("could not claim the escalation key; the fixture does not model an in-flight termination")
 	}
 
-	handled := queueDrainAckForcedTermination(
-		e.cityPath, e.store, e.sp, e.cfg, e.info(), e.name,
-		"agent_acked_runtime_survived", 1, nil, 0, tracker, e.rec, e.out,
+	handled := escalateWedgedDrainAckStopPending(
+		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
+		tracker, e.clk, e.rec, e.out,
 	)
 	if handled {
 		t.Error("reported handled while a termination was already in flight; the caller would skip this row's ordinary stop entirely")
 	}
 	if !strings.Contains(e.out.String(), "already in flight") {
 		t.Errorf("the refusal was silent; journal was:\n%s", e.out.String())
+	}
+	bead, err := e.store.Get(e.bead.ID)
+	if err != nil {
+		t.Fatalf("read session bead: %v", err)
+	}
+	if at := bead.Metadata[drainAckEscalationAtKey]; at != "" {
+		t.Errorf("%s = %q after an escalation that started nothing; the row now waits a full retry interval for an attempt that never ran",
+			drainAckEscalationAtKey, at)
+	}
+	if count := bead.Metadata[drainAckEscalationCountKey]; count != "" {
+		t.Errorf("%s = %q after an escalation that started nothing; the counter over-reports attempts",
+			drainAckEscalationCountKey, count)
 	}
 }
 
@@ -750,5 +802,197 @@ func TestEscalationNeverTerminatesASubreaperReparentedInheritedEnvDaemon(t *test
 	}
 	if len(e.terminatedPIDs()) == 0 {
 		t.Error("nothing was terminated at all; the pin cannot distinguish a working fence from a dead escalation")
+	}
+}
+
+// The escalation goroutine is the ordinary stop's SUPERSET, and the caller
+// proves it: a true return suppresses queueDrainAckAsyncStop for that tick. So
+// everything the ordinary stop does for the row, this path must also do —
+// including the poke. The bead is deliberately NOT closed here, so the pool slot
+// NAME stays held until a later finalize tick closes it; without the poke that
+// tick waits up to a full patrol interval, reintroducing exactly the latency
+// ga-ryhnhd removed on the rows this pass exists to rescue.
+func TestEscalationPokesTheControllerAfterTerminating(t *testing.T) {
+	e := newEscalationEnv(t)
+
+	e.finalize()
+
+	if n := len(e.escalations()); n != 1 {
+		t.Fatalf("escalation events = %d, want 1; the fixture did not escalate", n)
+	}
+	if got := e.poke.count(); got != 1 {
+		t.Errorf("controller pokes = %d, want 1: the escalation suppressed the ordinary stop for this tick, so it also owns that stop's poke", got)
+	}
+}
+
+// The same contract on the cheap arm: when the pane answers the re-issued
+// ordinary stop, no force is needed — but the row still needs its finalize tick.
+func TestEscalationPokesTheControllerWhenTheOrdinaryStopSucceeds(t *testing.T) {
+	e := newEscalationEnv(t)
+	// Not the wedge: this pane dies to the ordinary provider stop.
+	e.sp.StopLeavesRunning = nil
+
+	e.finalize()
+
+	evs := e.escalations()
+	if len(evs) != 1 {
+		t.Fatalf("escalation events = %d, want 1", len(evs))
+	}
+	if !strings.Contains(evs[0].Message, "stopped_without_force") {
+		t.Fatalf("outcome = %q, want stopped_without_force", evs[0].Message)
+	}
+	if got := e.poke.count(); got != 1 {
+		t.Errorf("controller pokes = %d, want 1 on the stopped_without_force arm", got)
+	}
+}
+
+// An unrecovered panic in a detached goroutine takes down the whole controller
+// process — every city it reconciles, not just this row. The sibling detached
+// stop recovers for exactly this reason, and this goroutine runs a strictly
+// larger body: a provider stop, a confirm-dead loop, a supervisor-wide /proc
+// walk, and raw PID signaling.
+//
+// Without the recover this test does not fail, it CRASHES the test binary.
+func TestEscalationRecoversAPanicInTheDetachedTermination(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newPanicStopProvider()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start(worker): %v", err)
+	}
+	var stderr synchronizedBuffer
+	tracker := &asyncStartTracker{}
+	done, claimed := tracker.startDrainAckStop("escalate:id:sess-1")
+	if !claimed {
+		t.Fatal("could not claim the termination slot")
+	}
+
+	queueDrainAckForcedTermination(
+		t.TempDir(), store, sp, &config.City{}, sessionpkg.Info{ID: "sess-1"}, "worker",
+		"agent_acked_runtime_survived", 1, time.Now(), nil, 0, done, nil, &stderr,
+	)
+
+	select {
+	case <-sp.stopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("the forced termination did not start")
+	}
+	if !tracker.wait(time.Second) {
+		t.Fatal("the termination slot was never released after the panic: done() must stay in the same deferred " +
+			"closure as the recover, or the escalation key is held forever and every later tick refuses this row")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "forced termination for worker panicked: stop exploded") {
+		t.Fatalf("stderr = %q, want a panic diagnostic", got)
+	}
+	if !strings.Contains(got, "goroutine ") {
+		t.Fatalf("stderr = %q, want a stack trace", got)
+	}
+}
+
+// The watchdog pin, with subreaper DETECTION FAILING.
+//
+// drainAckDetectSubreaperPID walks the CONTROLLER's own ancestry as a proxy for
+// the target's reparent destination. The two diverge whenever the controller was
+// (re)started outside the `systemd --user` tree — an ssh shell, a system unit —
+// while the tmux server and its agents descend from the user manager. Detection
+// then answers 0, the orphaned watchdog carries a large LIVE ppid that matches
+// no known subreaper, and every reparent test phrased as "is this ppid a
+// subreaper I recognize" says no.
+//
+// The fence must not depend on that detection succeeding, so it is stated
+// positively: the parent must be provider infrastructure. This daemon's is not.
+func TestEscalationNeverTerminatesAnOrphanWhoseSubreaperWentUndetected(t *testing.T) {
+	const watchdogPID = 9997
+	e := newEscalationEnv(t)
+	// Detection failed — this is the whole point of the case.
+	e.subreaperPID = 0
+	e.seedInheritedEnvDaemonWithParent(watchdogPID, fakeUserSubreaperPID, "gc")
+
+	e.finalize()
+
+	for _, pid := range e.terminatedPIDs() {
+		if pid == watchdogPID {
+			t.Fatal("force-terminated a watchdog whose subreaper was not detected. The reparent test cannot be the " +
+				"only fence: it compares ppid against a subreaper pid derived from the CONTROLLER's ancestry, which " +
+				"is empty on a split topology. Killing this signals its process group, whose SIGTERM handler stops " +
+				"the city's shared dolt sql-server")
+		}
+	}
+	if len(e.terminatedPIDs()) == 0 {
+		t.Error("nothing was terminated at all; the pin cannot distinguish a working fence from a dead escalation")
+	}
+}
+
+// assignedWorkProbeStore counts the WORK query the assigned-work fan-out makes,
+// so a test can prove which gate ran first.
+type assignedWorkProbeStore struct {
+	beads.Store
+	probes *callCounter
+}
+
+func (s assignedWorkProbeStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if strings.TrimSpace(q.Assignee) != "" {
+		s.probes.record()
+	}
+	return s.Store.List(q)
+}
+
+// Gate ordering is a cost contract, not a style preference. The quiet hold has
+// no bound — an attached operator (the documented incident response) or a
+// provider whose activity signal cannot be read refuses this row on every tick
+// for as long as it lasts — and a refused row is never paced, because pacing is
+// only written for a row about to be forced. So a fan-out that runs before the
+// hold is re-paid on every reconcile tick, indefinitely.
+func TestEscalationQuietHoldRefusesBeforeTheAssignedWorkFanOut(t *testing.T) {
+	e := newEscalationEnv(t)
+	e.sp.Attached = map[string]bool{e.name: true}
+	probes := &callCounter{}
+
+	escalated := escalateWedgedDrainAckStopPending(
+		e.cityPath, e.cfg, e.sp, assignedWorkProbeStore{Store: e.store, probes: probes}, nil,
+		e.info(), e.name, nil, &asyncStartTracker{}, e.clk, e.rec, e.out,
+	)
+
+	if escalated {
+		t.Fatal("escalated a row an operator is attached to")
+	}
+	if got := probes.count(); got != 0 {
+		t.Errorf("assigned-work probes = %d, want 0: this row is held and never paced, so paying the only expensive "+
+			"probe ahead of the hold re-pays it every reconcile tick forever", got)
+	}
+}
+
+// The hold has to survive the window it was written for. It is evaluated on the
+// reconcile tick, but force lands an ordinary stop plus a confirm-dead loop
+// later — and attaching to a wedged seat to investigate is exactly what an
+// operator does during that window.
+func TestEscalationHoldsWhenAnOperatorAttachesAfterTheOrdinaryStop(t *testing.T) {
+	e := newEscalationEnv(t)
+	// Unattached for the tick's gate, attached by the time force would land.
+	// The escalation is driven directly rather than through a full tick so the
+	// scripted sequence lines up with its two IsAttached reads exactly; the
+	// reminder pass ahead of it in a real tick has a quiet hold of its own.
+	e.sp.AttachedSequence = map[string][]bool{e.name: {false, true}}
+	tracker := &asyncStartTracker{}
+
+	if !escalateWedgedDrainAckStopPending(
+		e.cityPath, e.cfg, e.sp, e.store, nil, e.info(), e.name, nil,
+		tracker, e.clk, e.rec, e.out,
+	) {
+		t.Fatal("the escalation was refused on the tick itself; the fixture does not reach the late hold")
+	}
+	if !tracker.wait(10 * time.Second) {
+		t.Fatal("the detached termination did not finish")
+	}
+
+	if e.terminateCalls() != 0 {
+		t.Error("force-terminated a pane an operator attached to after the ordinary stop, under their cursor")
+	}
+	evs := e.escalations()
+	if len(evs) != 1 {
+		t.Fatalf("escalation events = %d, want 1: the non-kill must still be explained", len(evs))
+	}
+	if !strings.Contains(evs[0].Message, "held_late") {
+		t.Errorf("outcome = %q, want held_late so the event stream distinguishes this from a failed kill", evs[0].Message)
 	}
 }

@@ -434,6 +434,34 @@ type LiveRuntime struct {
 	// fields alone will signal the daemon's whole process group. Callers that
 	// KILL must discriminate on this.
 	PPID int
+	// ParentIsProviderInfrastructure is true when the scan POSITIVELY identified
+	// PPID as tmux infrastructure — a process whose command name is tmux's (the
+	// bare executable, or a "tmux: server" / "tmux: client" proctitle) — rather
+	// than merely failing to recognize it as a subreaper.
+	//
+	// Read that scope literally, because the name promises more than the test
+	// delivers: it is a command-name match on the parent, so it accepts ANY
+	// tmux process on this host. It is not socket-scoped to one provider
+	// instance, and it does not separate a server from a client. A caller that
+	// needs true provider-scoped attribution — this provider's own server, on
+	// this provider's socket — must add that check itself.
+	//
+	// It is the positive form of the PPID test above, and it exists because the
+	// negative form cannot be made reliable: recognizing a reparent destination
+	// means knowing which pid is the child subreaper, and under a
+	// user@UID.service that is the `systemd --user` manager, which a caller can
+	// only DETECT (see pidutil.DetectUserSubreaperPID) by walking its OWN
+	// ancestry. When the caller's ancestry and the target's diverge — a
+	// controller (re)started from an ssh shell or a system unit while the tmux
+	// server descends from the user manager — detection returns nothing and an
+	// orphan's large live ppid reads as a live owning parent.
+	//
+	// This field does not have that failure mode: it is false unless the scan
+	// read the parent and matched it, so an unreadable parent, an unreported
+	// PPID, and an unrecognized parent all refuse. A caller that KILLS should
+	// require it; a caller that only reports should not, because a runtime whose
+	// parent is not recognizable to the scan is still a live runtime.
+	ParentIsProviderInfrastructure bool
 	// Name is the process's command basename ("" when unreadable). Advisory: the
 	// agent process is often a DESCENDANT of the runtime root rather than the
 	// root itself (a pane's foreground can be a wrapper), so an empty or

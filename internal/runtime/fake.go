@@ -623,15 +623,20 @@ func (f *Fake) FindRuntimesBySessionID(id string) ([]LiveRuntime, error) {
 			city = cfg.Env["GC_CITY"]
 		}
 		// A live provider-owned pane: its root process still has the provider's
-		// server as its parent, so PPID is a real pid rather than init.
+		// server as its parent, so PPID is a real pid rather than init and the
+		// scan can positively attribute the parent to the provider. That
+		// attribution is what separates this pane from a process that merely
+		// inherited GC_SESSION_ID (modeled through ExtraRuntimes, which sets no
+		// fields of its own), so it must be part of the fixture.
 		out = append(out, LiveRuntime{
-			SessionID:    sessionID,
-			City:         city,
-			ProviderName: name,
-			IsTracked:    true,
-			PID:          fakePaneRootPID,
-			PPID:         fakeProviderServerPID,
-			Name:         cfg.Env["GC_AGENT_PROCESS"],
+			SessionID:                      sessionID,
+			City:                           city,
+			ProviderName:                   name,
+			IsTracked:                      true,
+			PID:                            fakePaneRootPID,
+			PPID:                           fakeProviderServerPID,
+			ParentIsProviderInfrastructure: true,
+			Name:                           cfg.Env["GC_AGENT_PROCESS"],
 		})
 	}
 	return out, nil

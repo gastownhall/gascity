@@ -141,11 +141,32 @@ const (
 	// See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
 	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
-	// drain-ack stop-pending session to exit on its own and terminates it: the
-	// reminder budget was spent, its answer window elapsed, the session held no
-	// assigned work, and the instance-token fence agreed the runtime was still
-	// the one we meant to stop. The runtime is then killed, confirmed dead, and
-	// the bead closed so the pool slot name is released.
+	// drain-ack stop-pending session to exit on its own and escalates to a
+	// forceful termination. Two arms authorize it, because the two populations
+	// are bounded by different evidence: an AGENT-ACKED session, whose reminder
+	// budget is structurally unspendable, is bounded by time since it entered
+	// stop-pending; every other session is bounded by a spent reminder budget
+	// plus its answer window. Either way, ON THE TICK THAT AUTHORIZED IT the
+	// session held no assigned work, nobody was attached, the pane had been
+	// quiet, and the instance-token fence did not disagree that the runtime was
+	// still the one we meant to stop.
+	//
+	// A fired event means the escalation RAN — not that force landed. It is
+	// emitted once per escalation on EVERY outcome, and the payload reason
+	// carries "<arm>/<outcome>": only the force_terminated outcome means a kill
+	// landed, termination_failed means force was attempted and every
+	// termination call failed, and every other outcome means no force was
+	// applied at all. That includes the outcomes where one of the preconditions
+	// above stopped holding in the meantime — the token fence and the quiet
+	// hold are re-evaluated immediately before the destructive act, so the
+	// tick's answer is not the event's. Alert on the outcome, never on the
+	// event's presence.
+	//
+	// The BEAD IS NOT CLOSED HERE and the pool slot name is therefore not
+	// released by this pass, even when force did land: the close belongs to a
+	// later reconcile tick's own liveness observation, deliberately, because
+	// closing from inside the kill path frees the bead while a live pane may
+	// still hold the runtime name.
 	//
 	// This is the loud half of a deliberately destructive backstop. Its whole
 	// purpose is that a terminal escalation can never silently mask a genuine

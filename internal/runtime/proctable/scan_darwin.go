@@ -56,7 +56,8 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 		if id != "" && sessionID != id {
 			continue
 		}
-		if parent, ok := records[record.ppid]; ok && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
+		parent, hasParent := records[record.ppid]
+		if hasParent && parent.env["GC_SESSION_ID"] == sessionID && !isInfrastructureCommand(parent.command) {
 			continue
 		}
 		epoch, _ := strconv.Atoi(record.env["GC_RUNTIME_EPOCH"])
@@ -70,7 +71,11 @@ func scanRecordsBySessionID(records map[int]psRecord, id string) []runtime.LiveR
 			Epoch:     epoch,
 			PID:       record.pid,
 			PPID:      record.ppid,
-			Name:      filepath.Base(strings.TrimSpace(record.command)),
+			// A parent that is not in the snapshot at all (it exited, or ps
+			// could not report it) is not provider infrastructure: this field
+			// only ever reports what the scan positively saw.
+			ParentIsProviderInfrastructure: hasParent && isInfrastructureCommand(parent.command),
+			Name:                           filepath.Base(strings.TrimSpace(record.command)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

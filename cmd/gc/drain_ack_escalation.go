@@ -88,6 +88,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -310,14 +311,23 @@ func drainAckEscalationQuietHold(sp runtime.Provider, name string, now time.Time
 // runtime is still alive has earned a terminal escalation, records it, and
 // queues the forceful termination OFF the reconcile tick.
 //
-// It returns whether an escalation was queued. That is a reporting signal only:
-// the caller must still take its ordinary remind-and-requeue path, because
-// nothing here closes the bead. The close belongs to the finalizer's own
+// A true return means THIS TICK'S STOP IS OWNED by the escalation goroutine:
+// the caller must not also queue the ordinary stop, because the escalation
+// re-issues that stop itself as its first step. The return value is control
+// flow, not a report. A false return means nothing was started, so the row
+// still needs the caller's ordinary stop or it gets no stop at all this tick.
+// Neither answer closes the bead: the close belongs to the finalizer's own
 // fresh-observation arm on a later tick.
 //
 // Every gate fails CLOSED, and they are ordered cheapest-first: one store read
-// and at most two provider GetMeta calls stand in front of the cross-store
+// and a few single-session provider probes stand in front of the cross-store
 // assigned-work fan-out, which is the only expensive probe and therefore last.
+// That order is load-bearing, not cosmetic. A row can be held indefinitely — an
+// operator attached to investigate is the documented incident response, and an
+// unreadable activity signal holds by design — and a held row is never paced,
+// because pacing is only written once a row is about to be forced. Refusing it
+// before the fan-out is what keeps that permanent hold from re-paying the
+// expensive probe on every reconcile tick forever.
 func escalateWedgedDrainAckStopPending(
 	cityPath string,
 	cfg *config.City,
@@ -378,7 +388,18 @@ func escalateWedgedDrainAckStopPending(
 		}
 	}
 
-	// Gate 4 — never terminate an agent that still owns work (7g §3.5). The only
+	// Gate 4 — the quiet hold. Two cheap single-session provider reads, and they
+	// run ahead of the fan-out below because a hold can last indefinitely: an
+	// attached operator or an unreadable activity signal refuses this row on
+	// every tick for as long as it persists, and a refused row is never paced.
+	// Paying the cross-store probe first would re-pay it forever for exactly the
+	// rows that will never pass.
+	if hold, held := drainAckEscalationQuietHold(sp, name, now); held {
+		fmt.Fprintf(stderr, "%s: %s held (%s); not escalating\n", drainAckEscalationLabel, name, hold) //nolint:errcheck
+		return false
+	}
+
+	// Gate 5 — never terminate an agent that still owns work (7g §3.5). The only
 	// expensive probe, so it runs last, and it fails closed on an unreadable
 	// store: a smaller answer presented as authoritative reads as "holds
 	// nothing", which is exactly the error that authorizes a wrongful kill.
@@ -392,17 +413,29 @@ func escalateWedgedDrainAckStopPending(
 		return false
 	}
 
-	// Gate 5 — the quiet hold. Cheap provider reads, but they belong after the
-	// correctness gates so an ineligible row never pays them.
-	if hold, held := drainAckEscalationQuietHold(sp, name, now); held {
-		fmt.Fprintf(stderr, "%s: %s held (%s); not escalating\n", drainAckEscalationLabel, name, hold) //nolint:errcheck
+	// Claim the termination slot BEFORE the pacing write. The claim can lose to
+	// a termination still in flight from an earlier tick, and that outcome
+	// starts nothing at all — so pacing it would spend a full retry interval,
+	// and a drain_escalation_count, on an attempt that never ran. Claiming first
+	// keeps the marker exactly as durable as it was (nothing is forced before it
+	// lands) while binding it to an attempt that will actually run.
+	//
+	// The "escalate:" prefix is a distinct key space from queueDrainAckAsyncStop
+	// so an in-flight ordinary stop does not dedup the escalation away (and vice
+	// versa).
+	done, queued := tracker.startDrainAckStop("escalate:" + drainAckAsyncStopKey(info.ID, name))
+	if !queued {
+		fmt.Fprintf(stderr, "%s: %s: a termination is already in flight; leaving this tick to the ordinary stop\n", drainAckEscalationLabel, name) //nolint:errcheck
 		return false
 	}
 
 	// Pacing is written BEFORE any force is applied, and a write that does not
-	// land refuses the escalation outright.
+	// land refuses the escalation outright. Releasing the claim on that path
+	// matters: an unpaced refusal must not leave the key held against the next
+	// tick's ordinary stop.
 	attempt, paced := recordDrainAckEscalationAttempt(store, bead, now)
 	if !paced {
+		done()
 		fmt.Fprintf(stderr, "%s: %s: could not persist the escalation attempt; refusing to escalate unpaced\n", drainAckEscalationLabel, name) //nolint:errcheck
 		return false
 	}
@@ -411,10 +444,9 @@ func escalateWedgedDrainAckStopPending(
 		drainAckEscalationLabel, name, attempt, reason)
 
 	// The event is emitted from the goroutine, at the point an outcome is known
-	// — see recordDrainAckEscalation. If the termination could not even be
-	// queued, report false so the caller still issues its ordinary stop rather
-	// than losing this row's stop entirely.
-	return queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, processNames, drainAckDetectSubreaperPID(), tracker, rec, stderr)
+	// — see recordDrainAckEscalation.
+	queueDrainAckForcedTermination(cityPath, store, sp, cfg, info, name, reason, attempt, now, processNames, drainAckDetectSubreaperPID(), done, rec, stderr)
+	return true
 }
 
 // queueDrainAckForcedTermination runs the forceful termination on a DETACHED
@@ -424,9 +456,10 @@ func escalateWedgedDrainAckStopPending(
 // every controller tick by N times that — starving the pool respawn, order
 // dispatch and health patrol that the wedge is already starving. The pre-existing
 // handler for these same rows is detached for exactly this reason.
-// It reports whether the termination was actually queued. A false return means
-// nothing was started — the caller must fall back to its ordinary stop rather
-// than leaving the row with no stop at all on this tick.
+//
+// done is the caller's already-claimed termination slot (see the claim in
+// escalateWedgedDrainAckStopPending, which must happen before the pacing
+// write); this function owns releasing it.
 func queueDrainAckForcedTermination(
 	cityPath string,
 	store beads.Store,
@@ -435,24 +468,36 @@ func queueDrainAckForcedTermination(
 	info sessionpkg.Info,
 	name, reason string,
 	attempt int,
+	now time.Time,
 	processNames []string,
 	subreaperPID int,
-	tracker *asyncStartTracker,
+	done func(),
 	rec events.Recorder,
 	stderr io.Writer,
-) bool {
+) {
 	sessionID := strings.TrimSpace(info.ID)
 	expectedToken := info.InstanceToken
-	// Distinct key space from queueDrainAckAsyncStop so an in-flight ordinary
-	// stop does not dedup the escalation away (and vice versa).
-	done, tracking := tracker.startDrainAckStop("escalate:" + drainAckAsyncStopKey(sessionID, name))
-	if !tracking {
-		fmt.Fprintf(stderr, "%s: %s: a termination is already in flight; leaving this tick to the ordinary stop\n", drainAckEscalationLabel, name) //nolint:errcheck
-		return false
-	}
+	// Bind the mutable package-global seams on the CALLER's goroutine, at queue
+	// time, for the reason documented on queueDrainAckAsyncStop: this goroutine
+	// outlives its reconcile invocation, so re-reading them from inside it races
+	// a test swapping them and lets one test's goroutine poke another test's
+	// counter. drainAckDetectSubreaperPID is bound the same way, by the caller.
+	poke := drainAckAsyncStopPokeController
 	confirmTimeout, confirmPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	go func() {
-		defer done()
+		// An unrecovered panic in a detached goroutine takes down the whole
+		// controller process, and this body is strictly larger and more fragile
+		// than the ordinary stop's: a provider stop, a bounded confirm-dead loop,
+		// a supervisor-wide /proc walk, and raw PID signaling. Mirrors
+		// queueDrainAckAsyncStop, including the ordering — done() stays in the
+		// same deferred closure, AFTER the recover, so the termination slot is
+		// released on the panic path too.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "%s: forced termination for %s panicked: %v\n%s", drainAckEscalationLabel, name, r, debug.Stack()) //nolint:errcheck
+			}
+			done()
+		}()
 		// Try the ordinary provider stop once more first: it is the cheap path and
 		// it is what a merely-slow pane needs.
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
@@ -460,14 +505,23 @@ func queueDrainAckForcedTermination(
 		}
 		if confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll) {
 			recordDrainAckEscalation(cfg, info, name, reason, "stopped_without_force", attempt, rec)
+			// The caller suppresses its ordinary stop on a true return, so this
+			// goroutine also owns that stop's poke: the runtime is gone but the
+			// pool session bead stays open (holding the slot NAME) until a later
+			// finalize tick closes it. Without the poke that close waits up to a
+			// full patrol interval — reintroducing exactly the latency ga-ryhnhd
+			// removed, on the rows this pass exists to rescue. Best-effort and
+			// deliberately unlogged, for the stderr-race reason documented on
+			// queueDrainAckAsyncStop's poke.
+			_ = poke(cityPath)
 			return
 		}
 		// The pane outlived the ordinary stop. This is the population the whole
 		// pass exists for, so apply the force the ordinary path does not have.
-		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, stderr)
+		outcome := terminateDrainAckRuntimeByProcessTable(cityPath, sp, sessionID, name, expectedToken, subreaperPID, now, stderr)
 		recordDrainAckEscalation(cfg, info, name, reason, outcome, attempt, rec)
+		_ = poke(cityPath)
 	}()
-	return true
 }
 
 // terminateDrainAckRuntimeByProcessTable is the escalation's actual added force:
@@ -488,6 +542,7 @@ func terminateDrainAckRuntimeByProcessTable(
 	sp runtime.Provider,
 	sessionID, name, expectedToken string,
 	subreaperPID int,
+	now time.Time,
 	stderr io.Writer,
 ) string {
 	scanner, ok := sp.(runtime.ProcessTableScanner)
@@ -504,6 +559,19 @@ func terminateDrainAckRuntimeByProcessTable(
 			fmt.Fprintf(stderr, "%s: %s force-terminate skipped: instance token mismatch (session was replaced)\n", drainAckEscalationLabel, name) //nolint:errcheck
 			return "token_mismatch"
 		}
+	}
+	// Re-check the quiet hold too, for the same reason and against the same
+	// window: the hold was last evaluated on the reconcile tick, an ordinary
+	// stop plus a confirm-dead loop ago. An operator who attaches to investigate
+	// inside that window is the documented incident response, and the hold
+	// exists precisely so they are not killed out from under the cursor. now is
+	// the tick's time rather than a fresh read, which only ever makes this MORE
+	// conservative: activity recorded during the window is compared against an
+	// older now, so it reads as even more recent. held_late is a distinct
+	// outcome so the event stream still explains the non-kill.
+	if hold, held := drainAckEscalationQuietHold(sp, name, now); held {
+		fmt.Fprintf(stderr, "%s: %s force-terminate skipped: held (%s) after the ordinary stop\n", drainAckEscalationLabel, name, hold) //nolint:errcheck
+		return "held_late"
 	}
 	found, err := scanner.FindRuntimesBySessionID(sessionID)
 	if err != nil {
@@ -558,20 +626,45 @@ func terminateDrainAckRuntimeByProcessTable(
 // five session-level fences re-authorize the SESSION; only this one re-supplies
 // the PER-PROCESS attribution.
 //
-// The discriminator is REPARENTING, in the subreaper-inclusive sense. A pane the
-// provider still owns has the provider's server as its parent; a backgrounded
-// daemon leads its own group and, once its spawner exits, is adopted by a
-// subreaper. Crucially that subreaper is NOT always pid 1: under a
+// The discriminator is PARENTAGE. A pane the provider still owns has the
+// provider's server as its parent; a backgrounded daemon leads its own group
+// and, once its spawner exits, is adopted by a subreaper.
+//
+// It is stated POSITIVELY — the parent must be provider infrastructure — rather
+// than as "the parent is not a subreaper", because the negative form cannot be
+// made to fail closed. Recognizing a reparent destination means knowing which
+// pid is the child subreaper, and that is NOT always pid 1: under a
 // user@UID.service, `systemd --user` sets PR_SET_CHILD_SUBREAPER, so orphans
-// reparent to the USER MANAGER and carry a large LIVE ppid. A plain `ppid <= 1`
-// test therefore reads the orphaned watchdog as a live, owned child of the
-// session and lets it through — on the topology this fleet actually runs. The
-// test is pidutil.IsReparentedOrphan, which the workspacesvc orphan sweep
-// already used for the same reason. Process-NAME matching is deliberately not
-// used as the test: the agent process is frequently a DESCENDANT of the runtime
-// root rather than the root itself (a pane's foreground can be a wrapper), so
-// requiring the root's name to match the agent's process hints would refuse the
-// legitimate target.
+// reparent to the USER MANAGER and carry a large LIVE ppid. The user manager's
+// pid can only be DETECTED, by walking a parent chain — and the chain available
+// here is the CONTROLLER's, used as a proxy for the target's. When the two
+// diverge (a controller restarted from an ssh shell or a system unit while the
+// tmux server descends from the user manager) detection returns nothing, every
+// `ppid <= 1` style test reads the orphaned watchdog as a live owned child, and
+// its process group — whose SIGTERM handler stops the city's shared dolt
+// sql-server — becomes a kill target. runtime.LiveRuntime.ParentIsProviderInfrastructure
+// has no such dependency: the scan sets it only where it positively read the
+// parent's command name and matched tmux infrastructure, so an unreadable
+// parent, an unreported ppid, and an unrecognized parent all REFUSE. Read that
+// for exactly what it is — a command-name match, which accepts any tmux process
+// on this host, not a socket-scoped test against this provider's own server.
+// It is still the discrimination this fence needs, because the orphan
+// topologies above reparent to pid 1 or to the user manager, and neither of
+// those names tmux.
+//
+// pidutil.IsReparentedOrphan is kept alongside it, both because it names the two
+// known orphan topologies precisely in the journal and because a fence this
+// consequential should not rest on a single predicate. Process-NAME matching is
+// deliberately not used as a test: the agent process is frequently a DESCENDANT
+// of the runtime root rather than the root itself (a pane's foreground can be a
+// wrapper), so requiring the root's name to match the agent's process hints
+// would refuse the legitimate target.
+//
+// The cost of the positive form is that a provider whose runtimes are not
+// children of infrastructure the scan recognizes gets no force at all — its rows
+// stay exactly as wedged as they are today. That is the right direction for this
+// file's whole error budget: over-refusing a kill costs a wedged row, while
+// under-refusing one costs a shared dolt server.
 func drainAckForceTerminationTargets(
 	found []runtime.LiveRuntime,
 	sessionID, cityPath, name string,
@@ -617,6 +710,17 @@ func drainAckForceTerminationTargets(
 				"%s: %s skipping pid=%d (%s): reparented to a subreaper (ppid=%d), so it only INHERITED this "+
 					"session's environment — it is not the seat's runtime, and killing it would signal its whole "+
 					"process group\n",
+				drainAckEscalationLabel, name, live.PID, live.Name, live.PPID)
+		case !live.ParentIsProviderInfrastructure:
+			// The positive half, and the one that does not depend on detecting
+			// the subreaper: an orphan adopted by an UNDETECTED user manager
+			// clears the arm above (its ppid is a large live pid that matches no
+			// known subreaper) and is refused here instead.
+			skipped++
+			fmt.Fprintf(stderr, //nolint:errcheck
+				"%s: %s skipping pid=%d (%s): its parent (ppid=%d) is not this provider's infrastructure, so the "+
+					"scan could not attribute it to the seat's runtime — it may only have INHERITED this session's "+
+					"environment, and killing it would signal its whole process group\n",
 				drainAckEscalationLabel, name, live.PID, live.Name, live.PPID)
 		default:
 			targets = append(targets, live)
