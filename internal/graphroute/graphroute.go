@@ -240,6 +240,16 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// Durable session back-reference for single-session agents (#2843).
 		// Pool agents resolve MetadataOnly above and bind a concrete session
 		// only when a slot claims the step — out of scope for route-time.
+		//
+		// This value is a PREDICTION, not a fact: callers resolve it through
+		// agentutil.LookupSessionName, which computes agent.SessionNameFor(...)
+		// when no session bead exists yet. With Assignee now left empty below,
+		// nothing corroborates it at route time, so the two keys can disagree
+		// until the step is claimed and a reader that prefers gc.session_name
+		// (runproj.sessionNameFromBead, behind the dashboard run-detail view)
+		// can name a session that does not exist yet. That window is bounded to
+		// pre-claim: hookClaimIdentityPatch overwrites the key with the
+		// claiming session's own identity when the claim carries one.
 		step.Metadata[beadmeta.SessionNameMetadataKey] = binding.SessionName
 	}
 	// Config-agent work is routed by alias; a concrete session binds on claim.

@@ -3,6 +3,7 @@ package graphroute
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -31,6 +32,39 @@ func TestApplyGraphRouteBinding_StampsSessionName(t *testing.T) {
 	}
 	if step.Metadata["gc.routed_to"] != "worker" {
 		t.Errorf("gc.routed_to = %q, want worker", step.Metadata["gc.routed_to"])
+	}
+}
+
+// TestGraphRouteBindingForAgent_SingleSessionRoutesToQualifiedName pins the
+// stamping half of the delivery identity: with Assignee left empty, the only
+// thing that reaches a single-session config agent is gc.routed_to, and the
+// value stamped here must be the agent's bare QualifiedName() — exactly the
+// probe target its own generated work query bakes in (pinned from the consuming
+// side by internal/config's
+// TestSingleSessionConfigAgentProbesItsOwnQualifiedName). Change either side's
+// identity and these steps stop being claimable, so both sides are pinned.
+func TestGraphRouteBindingForAgent_SingleSessionRoutesToQualifiedName(t *testing.T) {
+	one := 1
+	// max_active_sessions = 1, no min_active_sessions/scale_check/namepool:
+	// the non-MetadataOnly lane this route change targets.
+	agentCfg := config.Agent{Name: "run-operator", Dir: "gascity", MaxActiveSessions: &one}
+
+	binding := GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
+		t.Fatalf("MetadataOnly = true; fixture must stay the single-session (non-pool) shape")
+	}
+	binding.SessionName = "gascity--run-operator"
+
+	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
+	if err := ApplyGraphRouteBinding(step, binding); err != nil {
+		t.Fatalf("ApplyGraphRouteBinding: unexpected error: %v", err)
+	}
+
+	if got, want := step.Metadata["gc.routed_to"], agentCfg.QualifiedName(); got != want {
+		t.Errorf("gc.routed_to = %q, want %q (the identity the agent's own routed work-query tier probes)", got, want)
+	}
+	if step.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
 	}
 }
 
