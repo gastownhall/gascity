@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 694
+baseline_calls = 693
 baseline_files = 198
 reported_calls = 495
 reported_files = 135
