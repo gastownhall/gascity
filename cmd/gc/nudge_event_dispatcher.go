@@ -221,8 +221,8 @@ func (d *nudgeEventDispatcher) forward(ctx context.Context, gen int64, events <-
 				return
 			}
 			switch ev.Kind {
-			case runtime.SessionEventAgentStatus:
-				if ev.Session == "" || ev.AgentStatus != "idle" {
+			case runtime.SessionEventAgentIdle:
+				if ev.Session == "" {
 					continue
 				}
 				d.kickSessionAfter(ev.Session, 0, nudgeEventRetryBudget)

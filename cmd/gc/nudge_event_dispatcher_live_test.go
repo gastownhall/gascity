@@ -175,9 +175,9 @@ func screenContains(screen, needle string) bool {
 	return strings.Contains(compact(screen), compact(needle))
 }
 
-// herdrLivePaneID resolves the pane id for an agent name via the herdr CLI's
+// herdrLiveAgentPaneID resolves the pane id for an agent name via the herdr CLI's
 // JSON envelope output. Returns "" when the agent is not (yet) listed.
-func herdrLivePaneID(t *testing.T, herdrSession, agentName string) string {
+func herdrLiveAgentPaneID(t *testing.T, herdrSession, agentName string) string {
 	t.Helper()
 	out, err := exec.Command("herdr", "--session", herdrSession, "agent", "list").CombinedOutput()
 	if err != nil {
@@ -212,7 +212,7 @@ func herdrLiveReportAgent(t *testing.T, herdrSession, agentName, state string) {
 	deadline := time.Now().Add(10 * time.Second)
 	var lastErr string
 	for time.Now().Before(deadline) {
-		paneID := herdrLivePaneID(t, herdrSession, agentName)
+		paneID := herdrLiveAgentPaneID(t, herdrSession, agentName)
 		if paneID != "" {
 			out, err := exec.Command("herdr", "--session", herdrSession, "pane", "report-agent", paneID,
 				"--source", "gctest", "--agent", "gctest", "--state", state).CombinedOutput()
