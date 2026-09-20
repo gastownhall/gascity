@@ -977,12 +977,15 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 	if !slices.Equal(sp.removeKeys, wantRemove) {
 		t.Fatalf("removed keys = %v, want %v", sp.removeKeys, wantRemove)
 	}
-	// GC_DRAIN_ACK lands LAST: the effect boundary refuses until that key is
-	// "1", so no reader can observe an admissible acknowledgement whose
-	// incarnation stamp has not landed yet.
+	// The stamp lands BEFORE the source, so the source is never admissible ahead
+	// of its own binding: drainReminderAckPin admits an acknowledgement on the
+	// source alone and reads the stamp in a separate round-trip, so written the
+	// other way round it would pair this ack's fresh source with the previous
+	// occupant's stamp and mint "proven stale" about an ack microseconds old.
+	// GC_DRAIN_ACK still lands last, which is what the effect boundary gates on.
 	wantSet := []string{
-		reconcilerDrainAckSourceKey,
 		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckSourceKey,
 		"GC_DRAIN_ACK",
 	}
 	if !slices.Equal(sp.setKeys, wantSet) {

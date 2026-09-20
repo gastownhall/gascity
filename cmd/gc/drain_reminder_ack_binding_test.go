@@ -2,6 +2,16 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"maps"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -37,7 +47,8 @@ func (p *ackBindingUnreadableProvider) GetMeta(name, key string) (string, error)
 func TestDrainReminderFiresThroughPriorIncarnationAckResidue(t *testing.T) {
 	e := newDrainReminderEnv(t)
 	mustSetMeta(t, e.sp, e.name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
-	mustSetMeta(t, e.sp, e.name, drainAckRequesterInstanceTokenKey, "stale-prior-incarnation-token")
+	mustSetMeta(t, e.sp, e.name, drainAckRequesterInstanceTokenKey,
+		drainAckInstanceTokenDigest("stale-prior-incarnation-token"))
 
 	if got := e.remind(); got != drainReminderDelivered {
 		t.Fatalf("outcome = %v, want delivered: residue from a dead incarnation is not an answer", got)
@@ -50,10 +61,14 @@ func TestDrainReminderFiresThroughPriorIncarnationAckResidue(t *testing.T) {
 // Control: a GENUINE acknowledgement by the CURRENT incarnation still skips, and
 // still writes nothing. Without this the pin above would pass for a reminder
 // that simply ignores every agent ack.
+//
+// The row holds the token in the clear and the pane holds only its digest, so
+// this is also where the two halves of the encoding have to meet: the reader
+// digests the row token before comparing.
 func TestDrainReminderStillSkipsCurrentIncarnationAck(t *testing.T) {
 	e := newDrainReminderEnv(t)
 	mustSetMeta(t, e.sp, e.name, reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
-	mustSetMeta(t, e.sp, e.name, drainAckRequesterInstanceTokenKey, "tok-a")
+	mustSetMeta(t, e.sp, e.name, drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest("tok-a"))
 	before := e.beadSnapshot()
 
 	if got := e.remind(); got != drainReminderSkipped {
@@ -63,6 +78,33 @@ func TestDrainReminderStillSkipsCurrentIncarnationAck(t *testing.T) {
 		t.Errorf("nudges = %d, want 0", got)
 	}
 	e.assertBeadUnchanged(before)
+}
+
+// The two halves of the stamp's encoding meet here rather than by assumption.
+// setDrainAck digests the PANE's GC_INSTANCE_TOKEN; the reminder digests the
+// ROW's instance_token and compares. Digesting on one side only would make every
+// genuine self-ack read as another incarnation's residue — and neither fixture
+// above would notice, because each writes the value it expects the other side to
+// produce. This one lets the writer produce it.
+func TestDrainAckStampRoundTripsFromSetDrainAckToTheReminder(t *testing.T) {
+	e := newDrainReminderEnv(t)
+	// The pane IS the incarnation the row describes: same session name, same
+	// token the fixture bead carries.
+	t.Setenv("GC_INSTANCE_TOKEN", "tok-a")
+	t.Setenv("GC_TMUX_SESSION", e.name)
+	t.Setenv("GC_SESSION_NAME", "")
+	ops := &providerDrainOps{sp: e.sp}
+
+	if err := ops.setDrainAck(e.name); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	if got := e.remind(); got != drainReminderSkipped {
+		t.Fatalf("outcome = %v, want skipped: this incarnation acked for itself", got)
+	}
+	if got := len(e.nudges()); got != 0 {
+		t.Errorf("nudges = %d, want 0", got)
+	}
 }
 
 // The arm that cannot tell. `gc runtime drain-ack` stamps the requester from the
@@ -118,8 +160,16 @@ func TestSetDrainAckStampsTheAcknowledgingIncarnation(t *testing.T) {
 				t.Fatalf("setDrainAck: %v", err)
 			}
 
-			if got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey); got != "tok-a" {
-				t.Errorf("%s = %q, want %q", drainAckRequesterInstanceTokenKey, got, "tok-a")
+			got, _ := sp.GetMeta("gc-city-worker-1", drainAckRequesterInstanceTokenKey)
+			if want := drainAckInstanceTokenDigest("tok-a"); got != want {
+				t.Errorf("%s = %q, want %q", drainAckRequesterInstanceTokenKey, got, want)
+			}
+			// The security half of the stamp, and the reason the digest exists:
+			// SetMeta is an argv channel on the tmux provider, and
+			// GC_INSTANCE_TOKEN is a capability this codebase keeps off every
+			// command line. The pane must never carry the token itself.
+			if got == "tok-a" {
+				t.Errorf("%s stamped the raw instance token; the pane must carry only its digest", drainAckRequesterInstanceTokenKey)
 			}
 			if got, _ := sp.GetMeta("gc-city-worker-1", reconcilerDrainAckSourceKey); got != drainAckSourceAgentValue {
 				t.Errorf("ack source = %q, want %q", got, drainAckSourceAgentValue)
@@ -155,8 +205,8 @@ func TestSetDrainAckLeavesStampUnprovableWhenAckingAnotherSession(t *testing.T) 
 	}
 }
 
-// The stamp has the acknowledgement's lifetime, so both erasers must take it.
-// A requester token left on the pane outlives every drain it described and
+// The stamp has the acknowledgement's lifetime, so the erasers must take it.
+// A requester stamp left on the pane outlives every drain it described and
 // waits to be paired with some later ack's source — and that pairing is exactly
 // the "proven stale" evidence class, manufactured out of two unrelated writes.
 func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
@@ -170,7 +220,7 @@ func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
 			sp := runtime.NewFake()
 			ops := &providerDrainOps{sp: sp}
 			mustSetMeta(t, sp, "worker", reconcilerDrainAckSourceKey, drainAckSourceAgentValue)
-			mustSetMeta(t, sp, "worker", drainAckRequesterInstanceTokenKey, "tok-a")
+			mustSetMeta(t, sp, "worker", drainAckRequesterInstanceTokenKey, drainAckInstanceTokenDigest("tok-a"))
 
 			if err := clear(ops, "worker"); err != nil {
 				t.Fatalf("%s: %v", name, err)
@@ -181,6 +231,189 @@ func TestDrainAckClearPathsRemoveTheIncarnationStamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The behavioral pin above can only reach the erasers it happens to name, and
+// that is how this bug survived its own fix: the tree had a THIRD eraser
+// (t3bridge.clearBridgeMeta) which cleared GC_DRAIN_ACK while leaving both
+// halves of its provenance behind, so a re-drain of a still-live incarnation
+// still read a dead drain's ack as current and skipped in silence. An eraser in
+// another package cannot be called from here, and the next one may not exist
+// yet — so this census reads the tree instead of enumerating erasers.
+//
+// The rule it enforces: erasing GC_DRAIN_ACK erases its provenance in the same
+// breath. A source with no stamp is merely unprovable and reminds again; a
+// source paired with a stale stamp is the wedge.
+func TestEveryDrainAckEraserAlsoRemovesItsProvenance(t *testing.T) {
+	const (
+		ackKey    = "GC_DRAIN_ACK"
+		sourceKey = reconcilerDrainAckSourceKey
+		stampKey  = drainAckRequesterInstanceTokenKey
+	)
+	erasers := drainAckEraserCensus(t, ackKey)
+	// Non-vacuity: a census that matched nothing would pass in silence, which
+	// is the failure mode it exists to replace.
+	if len(erasers) < 3 {
+		t.Fatalf("census found %d %s erasers (%v), want at least the three known ones — did the scan roots or the key name move?",
+			len(erasers), ackKey, slices.Sorted(maps.Keys(erasers)))
+	}
+	for _, where := range slices.Sorted(maps.Keys(erasers)) {
+		removed := erasers[where]
+		for _, key := range []string{sourceKey, stampKey} {
+			if !removed[key] {
+				t.Errorf("%s erases %s but not %s: an acknowledgement's provenance must not outlive the acknowledgement", where, ackKey, key)
+			}
+		}
+	}
+}
+
+// drainAckEraserCensus finds every function in the tree that removes ackKey from
+// a session, and reports the full set of keys each one removes. "Removes" is any
+// call whose name starts with Remove/remove and whose arguments name the key, so
+// a new eraser is caught whatever it calls the underlying primitive.
+func drainAckEraserCensus(t *testing.T, ackKey string) map[string]map[string]bool {
+	t.Helper()
+	root := repoRootForLint(t)
+	found := map[string]map[string]bool{}
+	for _, dir := range []string{"cmd", "internal"} {
+		scanRoot := filepath.Join(root, dir)
+		err := filepath.WalkDir(scanRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			// testdata holds fixtures that are not required to be valid Go, and
+			// nothing there is a live eraser.
+			if d.IsDir() {
+				if d.Name() == "testdata" {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+			if parseErr != nil {
+				return fmt.Errorf("parsing %s: %w", path, parseErr)
+			}
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				removed := removedMetaKeys(fn.Body)
+				if !removed[ackKey] {
+					continue
+				}
+				rel, relErr := filepath.Rel(root, path)
+				if relErr != nil {
+					rel = path
+				}
+				found[rel+":"+fn.Name.Name] = removed
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scanning %s: %v", scanRoot, err)
+		}
+	}
+	return found
+}
+
+// removedMetaKeys collects the metadata keys a function body removes. An eraser
+// spells its keys one of two ways — inline as removal arguments, or as a slice
+// of names the body ranges over — so both shapes are read. Constant identifiers
+// resolve against the ones this package defines, because that is how the
+// in-package erasers spell them; out-of-package erasers spell them as literals.
+func removedMetaKeys(body *ast.BlockStmt) map[string]bool {
+	removed := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			if !isMetaRemovalCall(node) {
+				return true
+			}
+			for _, arg := range node.Args {
+				if key, ok := drainAckCensusKey(arg); ok {
+					removed[key] = true
+				}
+			}
+		case *ast.RangeStmt:
+			// `for _, key := range []string{...} { ...Remove...(name, key) }`:
+			// the keys are never call arguments, so read the ranged slice — but
+			// only when the loop body actually removes something.
+			if !containsMetaRemovalCall(node.Body) {
+				return true
+			}
+			for _, elt := range stringSliceElements(node.X) {
+				if key, ok := drainAckCensusKey(elt); ok {
+					removed[key] = true
+				}
+			}
+		}
+		return true
+	})
+	return removed
+}
+
+// isMetaRemovalCall reports whether a call erases a metadata key. Matching on
+// the Remove/remove prefix rather than a fixed list of primitives is what lets
+// the census see an eraser that reaches the provider through a new wrapper.
+func isMetaRemovalCall(call *ast.CallExpr) bool {
+	name := ""
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		name = fn.Name
+	case *ast.SelectorExpr:
+		name = fn.Sel.Name
+	}
+	return strings.HasPrefix(strings.ToLower(name), "remove")
+}
+
+func containsMetaRemovalCall(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && isMetaRemovalCall(call) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+func stringSliceElements(expr ast.Expr) []ast.Expr {
+	composite, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return nil
+	}
+	arrayType, ok := composite.Type.(*ast.ArrayType)
+	if !ok {
+		return nil
+	}
+	if ident, ok := arrayType.Elt.(*ast.Ident); !ok || ident.Name != "string" {
+		return nil
+	}
+	return composite.Elts
+}
+
+func drainAckCensusKey(expr ast.Expr) (string, bool) {
+	switch node := expr.(type) {
+	case *ast.BasicLit:
+		if node.Kind != token.STRING {
+			return "", false
+		}
+		value, err := strconv.Unquote(node.Value)
+		return value, err == nil
+	case *ast.Ident:
+		value, ok := map[string]string{
+			"reconcilerDrainAckSourceKey":       reconcilerDrainAckSourceKey,
+			"drainAckRequesterInstanceTokenKey": drainAckRequesterInstanceTokenKey,
+			"reconcilerDrainAckReasonKey":       reconcilerDrainAckReasonKey,
+			"reconcilerDrainAckGenerationKey":   reconcilerDrainAckGenerationKey,
+		}[node.Name]
+		return value, ok
+	}
+	return "", false
 }
 
 // The write side of the degraded-pane arm. A pane whose GC_INSTANCE_TOKEN did
@@ -198,7 +431,8 @@ func TestSetDrainAckOverwritesPriorStampWhenIncarnationUnknown(t *testing.T) {
 	t.Setenv("GC_TMUX_SESSION", "gc-city-worker-1")
 	sp := runtime.NewFake()
 	ops := &providerDrainOps{sp: sp}
-	mustSetMeta(t, sp, "gc-city-worker-1", drainAckRequesterInstanceTokenKey, "stale-prior-incarnation-token")
+	mustSetMeta(t, sp, "gc-city-worker-1", drainAckRequesterInstanceTokenKey,
+		drainAckInstanceTokenDigest("stale-prior-incarnation-token"))
 
 	if err := ops.setDrainAck("gc-city-worker-1"); err != nil {
 		t.Fatalf("setDrainAck: %v", err)

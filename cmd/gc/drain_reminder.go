@@ -206,7 +206,12 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 type drainReminderDue struct {
 	drainID string
 	// token is the incarnation the budget is scoped to. The ack pin binds
-	// against the SAME token, so the binding and the budget cannot disagree.
+	// against the same incarnation, but the two scopes are not the same scope:
+	// the budget is keyed on token + "/" + drain_at (drainReminderIdentity),
+	// while the binding is keyed on the token alone. They agree within a single
+	// drain and can disagree across a re-drain of one incarnation, where a fresh
+	// budget meets an acknowledgement the previous drain left bound to the same
+	// still-live token.
 	// Non-empty by construction: drainID is only non-empty when this is.
 	token     string
 	attempts  int
@@ -323,9 +328,15 @@ const (
 )
 
 // classifyAgentDrainAckBinding binds an agent-sourced acknowledgement to the
-// incarnation the row describes. `gc runtime drain-ack` stamps the requester's
-// own instance token beside the source (setDrainAck), so the comparison is
-// against evidence the acknowledging agent wrote about itself.
+// incarnation the row describes. `gc runtime drain-ack` stamps a digest of the
+// requester's own instance token beside the source (setDrainAck), so the
+// comparison is against evidence the acknowledging agent wrote about itself.
+//
+// The row carries the token in the clear, so the digest is taken here — AFTER
+// the empty check, so an absent stamp or an unknown row token still lands on the
+// unprovable arm instead of comparing two digests of "". Digesting rather than
+// comparing raw keeps the capability off the pane; see
+// drainAckInstanceTokenDigest.
 //
 // A read ERROR is distinct from an absent value and is returned as such, so a
 // caller can tell "no stamp" from "could not look".
@@ -339,7 +350,7 @@ func classifyAgentDrainAckBinding(sp runtime.Provider, name, rowToken string) (a
 	if requester == "" || rowToken == "" {
 		return agentAckBindingUnprovable, nil
 	}
-	if requester == rowToken {
+	if requester == drainAckInstanceTokenDigest(rowToken) {
 		return agentAckBindingCurrent, nil
 	}
 	return agentAckBindingStale, nil
@@ -428,6 +439,15 @@ func drainReminderIdentity(bead beads.Bead) string {
 // once inside the command so the agent runs the explicit-argument ack, which
 // binds the requester from the store rather than from a pane environment that
 // may not have survived adoption.
+//
+// "Requester" above is the ROW the ack lands on, and that is all the explicit
+// argument promises: it resolves the target through the store, so the ack
+// reaches the right session even from a pane whose own identity env is
+// degraded. The incarnation binding riding under the same word — the stamp
+// drainAckRequesterInstanceToken supplies — is a separate thing, taken from
+// pane environment on BOTH ack forms, so it is absent on exactly that degraded
+// pane. Such an ack reads agentAckBindingUnprovable and keeps being reminded,
+// which is the direction this reader is meant to fail in.
 func drainReminderContent(info sessions.Info) string {
 	id := strings.TrimSpace(info.ID)
 	return fmt.Sprintf(

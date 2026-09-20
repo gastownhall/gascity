@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -103,22 +105,32 @@ func (o *providerDrainOps) setDrainAck(sessionName string) error {
 	// The acknowledging agent records which incarnation it was. Readers bind
 	// against this rather than trusting a bare source value that a recycled
 	// chair carries over from whoever sat there last.
+	//
+	// The stamp lands BEFORE the source, and that order is load-bearing. The one
+	// reader of this pairing (drainReminderAckPin) admits an acknowledgement on
+	// the source alone, then reads the stamp in a SECOND provider round-trip.
+	// Source-first, a reader landing between the two writes sees this ack's fresh
+	// source beside the PREVIOUS occupant's stamp and mints agentAckBindingStale
+	// — positive proof of residue about an acknowledgement that landed
+	// microseconds ago, which is the one verdict that must never be minted by
+	// accident. Stamp-first, the only stamp state a source-keyed reader can
+	// observe is this ack's own: its digest, or empty and therefore unprovable.
 	requesterInstanceToken := drainAckRequesterInstanceToken(sessionName)
 	return joinDrainAckMutationErrors(
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckReasonKey),
 		o.sp.RemoveMeta(sessionName, reconcilerDrainAckGenerationKey),
-		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
 		o.sp.SetMeta(sessionName, drainAckRequesterInstanceTokenKey, requesterInstanceToken),
+		o.sp.SetMeta(sessionName, reconcilerDrainAckSourceKey, drainAckSourceAgentValue),
 		o.sp.SetMeta(sessionName, "GC_DRAIN_ACK", "1"),
 	)
 }
 
-// drainAckRequesterInstanceToken returns the acking pane's own incarnation
-// token, and ONLY when this pane is the session being acked. `gc runtime
-// drain-ack <other>` is a cross-session ack: the caller's token is evidence
-// about the CALLER, not about the target, and stamping it on the target's row
-// reads back as agentAckBindingStale — positive proof of residue for an
-// acknowledgement that landed seconds ago. An empty stamp degrades to
+// drainAckRequesterInstanceToken returns the binding stamp for the acking pane's
+// own incarnation, and ONLY when this pane is the session being acked. `gc
+// runtime drain-ack <other>` is a cross-session ack: the caller's token is
+// evidence about the CALLER, not about the target, and stamping it on the
+// target's row reads back as agentAckBindingStale — positive proof of residue
+// for an acknowledgement that landed seconds ago. An empty stamp degrades to
 // agentAckBindingUnprovable instead, which is the direction this reader is
 // meant to fail in.
 //
@@ -136,7 +148,30 @@ func drainAckRequesterInstanceToken(sessionName string) string {
 	if target == "" || self == "" || self != target {
 		return ""
 	}
-	return strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
+	return drainAckInstanceTokenDigest(os.Getenv("GC_INSTANCE_TOKEN"))
+}
+
+// drainAckInstanceTokenDigest maps an incarnation token onto the value that is
+// safe to leave on a pane. GC_INSTANCE_TOKEN is a capability rather than an
+// identifier — it fences drain and stop against stale incarnations — and this
+// codebase keeps that value class off every command line for it: envArgvSafe
+// excludes the key, and session start stages it through a private 0600 file
+// instead of argv. A provider SetMeta is an argv channel on tmux
+// (`set-environment -t <name> <key> <value>`), whose argument vector is
+// world-readable in /proc/<pid>/cmdline, so stamping the token itself would
+// reopen that exposure on every self-ack.
+//
+// The binding only ever needs an equality compare, which a digest answers
+// without carrying the capability: equal tokens digest equal, and the digest
+// grants nothing. Empty stays empty, so a degraded pane that has no token stamps
+// nothing rather than the digest of "" — the unprovable arm is unchanged.
+func drainAckInstanceTokenDigest(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func (o *providerDrainOps) isDrainAcked(sessionName string) (bool, error) {
