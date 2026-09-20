@@ -26,7 +26,15 @@ const (
 	// --proxied-server, so each test skipped and a suite that ran nothing
 	// reported green. The new job builds bd from BD_CURRENT_REF and sets
 	// GC_REQUIRE_ACCEPTANCE_TOOLING so a runner without that bd fails instead.
-	expectedCIExecutionHash      = "928e64138e15e811cafdf13dd3c033d39d0649b3db915e9332fc07afcbe6c936"
+	//
+	// Bumped again to widen that job's beads_topology path filter. The curated
+	// cmd/gc globs matched none of the files the proxied lifecycle actually lives
+	// in — the ownership journal, the provider lifecycle, the bd env plumbing,
+	// the `gc init` transport flags — so a change to the feature skipped its own
+	// acceptance job and ci-required still went green on the allowed skip. The
+	// filter is now cmd/gc/**, internal/beads/**, internal/doctor/**,
+	// examples/bd/**, test/acceptance/** plus the pins and the workflow.
+	expectedCIExecutionHash      = "0e5c923913a2288cb29fc40e4cc2982354a39bde1960e83b61b9005ec8add9f7"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "dfe3e40bf2fb461e2f7422ea93b7f9ea769f0e8bf35eb6060690af6f2f361877"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
