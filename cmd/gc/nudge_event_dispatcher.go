@@ -53,9 +53,12 @@ const (
 // reconciler loop, and a single worker means supervisor-side deliveries to
 // the same pane cannot interleave.
 //
-// Providers without an event stream (tmux) leave the dispatcher inactive and
-// every existing path byte-identical: the supervisor tick keeps its inline
-// pass, and legacy mode keeps its sidecar pollers.
+// Providers without an event stream (tmux) leave the dispatcher inactive
+// (active() false), and the CLI-side sidecar-poller call sites gate on the
+// live wake socket (nudgeDispatcherIsHosting), not on provider capability —
+// capability alone cannot tell a healthy stream from a subscribe failure or
+// a dead supervisor, and mistaking one for the other would suppress the only
+// deliverer for a queued item.
 type nudgeEventDispatcher struct {
 	parent    context.Context
 	cityPath  string
@@ -81,6 +84,16 @@ type nudgeEventDispatcher struct {
 	// when none. Forward goroutines clear only their own generation, so a
 	// late close from a replaced subscription cannot mask a live one.
 	streamGen atomic.Int64
+
+	// fullPassesQueued counts every kickAll (a full pass becoming due),
+	// including the leading resync every subscription sends. streaming()
+	// alone cannot tell a caller whether that leading resync has actually
+	// been forwarded yet — forward() starts as its own goroutine after
+	// streamGen is stamped, so a check racing its startup would otherwise
+	// see the dispatcher's untouched zero state and mistake "never ran" for
+	// "already settled". Tests poll this to know the leading pass has been
+	// scheduled before checking pending/fullPassDue for it having drained.
+	fullPassesQueued atomic.Int64
 
 	workerDone chan struct{}
 }
@@ -169,6 +182,7 @@ func (d *nudgeEventDispatcher) kickAll() {
 	d.mu.Lock()
 	d.fullPassDue = true
 	d.mu.Unlock()
+	d.fullPassesQueued.Add(1)
 	d.wakeWorker()
 }
 
@@ -321,8 +335,9 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if cfg == nil || sp == nil {
 		return
 	}
-	store := openNudgeBeadStore(d.cityPath)
-	if store.Store == nil {
+	store, err := openNudgeBeadStoreErr(d.cityPath)
+	if err != nil {
+		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening nudge bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
 	// Session-class reads route through the session store (identity today);

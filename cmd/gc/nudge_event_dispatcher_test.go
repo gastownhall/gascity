@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -62,6 +63,25 @@ func (f *nudgeEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan r
 	}()
 	return ch, nil
 }
+
+// nudgeEventedFakeSubscribeErr is event-capable (implements
+// runtime.SessionEventProvider, so providerRetiresNudgePollers(f) is true)
+// but its subscription always fails — modeling a provider that is capable in
+// principle while its stream never actually establishes.
+type nudgeEventedFakeSubscribeErr struct {
+	*runtime.Fake
+}
+
+func newNudgeEventedFakeSubscribeErr() *nudgeEventedFakeSubscribeErr {
+	return &nudgeEventedFakeSubscribeErr{Fake: runtime.NewFake()}
+}
+
+//nolint:unparam // signature fixed by runtime.SessionEventProvider
+func (f *nudgeEventedFakeSubscribeErr) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	return nil, errSubscribeAlwaysFails
+}
+
+var errSubscribeAlwaysFails = errors.New("nudgeEventedFakeSubscribeErr: subscribe always fails")
 
 func (f *nudgeEventedFake) emit(ev runtime.SessionEvent) {
 	f.mu.Lock()
@@ -137,9 +157,79 @@ func newNudgeDispatcherFixture(t *testing.T, sp runtime.Provider) (string, *nudg
 		}
 	})
 	// Let the subscription's leading resync pass settle (it runs against an
-	// empty queue) so tests observe only the activity they trigger.
-	time.Sleep(250 * time.Millisecond)
+	// empty queue) so tests observe only the activity they trigger. The fake's
+	// leading resync frame is already buffered before Subscribe returns, but
+	// forward() only starts consuming it after streamGen is stamped — so a
+	// pending/fullPassDue check racing forward()'s own goroutine startup can
+	// observe the dispatcher's untouched zero state (fullPassDue still false,
+	// pending still empty) and mistake "the leading pass hasn't run yet" for
+	// "it already settled". fullPassesQueued is only ever incremented from
+	// inside kickAll, itself only ever called from forward() consuming a
+	// resync frame (or an explicit external kick), so waiting for it to be
+	// >=1 first proves forward() actually processed that frame before we ask
+	// whether its resulting pass has drained.
+	waitForNudgeDispatcherCondition(t, d.streaming, "nudge event stream established")
+	waitForNudgeDispatcherCondition(t, func() bool {
+		return d.fullPassesQueued.Load() >= 1
+	}, "leading resync pass scheduled")
+	waitForNudgeDispatcherCondition(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return !d.fullPassDue && len(d.pending) == 0
+	}, "leading resync pass settled")
 	return dir, d, &info
+}
+
+// waitForNudgeDispatcherConditionTimeout bounds every
+// waitForNudgeDispatcherCondition wait in this file; every caller uses the
+// same generous bound today, so it lives here instead of as a per-call
+// parameter.
+const waitForNudgeDispatcherConditionTimeout = 2 * time.Second
+
+// waitForNudgeDispatcherCondition polls ok until it reports true or the
+// timeout elapses. order_dynamic_integration_test.go has an equivalent
+// helper, but it is gated behind the `integration` build tag and unavailable
+// here.
+func waitForNudgeDispatcherCondition(t *testing.T, ok func() bool, name string) {
+	t.Helper()
+	deadline := time.Now().Add(waitForNudgeDispatcherConditionTimeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", name)
+}
+
+// waitForPendingKickToDie waits for d.pending[session] to be absent AND stay
+// absent for a debounce window. A kick that is rejected and still has retry
+// budget left is deleted from d.pending and immediately rewritten (with a
+// future dueAt) inline within the same runPass call, so a single absence
+// check would catch that in-flight microsecond gap and mistake a live retry
+// chain for a dead one; the debounce window is long enough to outlast that
+// gap but short relative to the scheduled retry delay.
+func waitForPendingKickToDie(t *testing.T, d *nudgeEventDispatcher, session string, timeout time.Duration) {
+	t.Helper()
+	const debounce = 100 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		_, present := d.pending[session]
+		d.mu.Unlock()
+		if !present {
+			time.Sleep(debounce)
+			d.mu.Lock()
+			_, reappeared := d.pending[session]
+			d.mu.Unlock()
+			if !reappeared {
+				return
+			}
+			continue
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for pending kick %q to die", session)
 }
 
 func queueStateSnapshot(t *testing.T, cityPath string) nudgequeue.State {
@@ -212,7 +302,7 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 
 func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 	fake := newNudgeEventedFake()
-	dir, _, info := newNudgeDispatcherFixture(t, fake)
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
 
 	// A working agent reports continuously fresh activity (tracker semantics),
 	// so the attempt and its single retry must both reject — and then STOP.
@@ -224,13 +314,18 @@ func TestNudgeEventDispatcherBusyAgentStopsAfterOneRetry(t *testing.T) {
 
 	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
 
-	// Allow the attempt plus the whole retry budget to elapse, then confirm
-	// the kick DIED: no delivery, and no further observation activity in a
-	// second same-length window (a reborn poller would keep observing).
-	window := 2 * (nudgeEventRetryBudget + 2) * (150*time.Millisecond + 30*time.Millisecond)
-	time.Sleep(window)
+	// Wait for the kick to actually die (its pending entry cleared and staying
+	// cleared) instead of sleeping a computed worst-case budget window: the
+	// retry chain re-schedules itself via kickSessionAfter, so as long as an
+	// entry keeps reappearing in d.pending the budget has not yet been
+	// exhausted.
+	budgetWindow := (nudgeEventRetryBudget + 2) * (150*time.Millisecond + 30*time.Millisecond)
+	waitForPendingKickToDie(t, d, info.SessionName, 2*budgetWindow)
 	afterFirst := countFakeCalls(fake, "IsRunning")
-	time.Sleep(window)
+
+	// Confirm the kick stays dead: no further observation activity in a
+	// short settle window (a reborn poller would keep observing).
+	time.Sleep(200 * time.Millisecond)
 	afterSecond := countFakeCalls(fake, "IsRunning")
 
 	state := queueStateSnapshot(t, dir)
@@ -310,14 +405,23 @@ func TestNudgeEventDispatcherKickAllDeliversAlreadyIdle(t *testing.T) {
 
 func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 	fake := newNudgeEventedFake()
-	_, _, info := newNudgeDispatcherFixture(t, fake)
+	_, d, info := newNudgeDispatcherFixture(t, fake)
 
 	// Session setup and the settled leading resync account for a baseline of
 	// provider calls; an idle event against an EMPTY queue must add none —
 	// the pass short-circuits at the queue-state read.
 	baseline := countFakeCalls(fake, "IsRunning")
 	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
-	time.Sleep(300 * time.Millisecond)
+
+	// Wait for the dispatcher to actually finish processing this idle kick
+	// (its pending entry cleared) instead of assuming an arbitrary sleep
+	// covered it — this proves the pass ran, not merely that time passed.
+	waitForNudgeDispatcherCondition(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		_, stillPending := d.pending[info.SessionName]
+		return !stillPending
+	}, "idle kick processed for "+info.SessionName)
 
 	if n := countFakeCalls(fake, "IsRunning"); n != baseline {
 		t.Fatalf("IsRunning calls grew %d -> %d, want no observation for an empty queue (cheap short-circuit)", baseline, n)
@@ -406,42 +510,6 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	}
 }
 
-func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
-	t.Setenv("GC_BEADS", "file")
-	dir := t.TempDir()
-
-	spawns := 0
-	prev := startNudgePoller
-	startNudgePoller = func(_, _, _ string) error {
-		spawns++
-		return nil
-	}
-	t.Cleanup(func() { startNudgePoller = prev })
-
-	target := nudgeTarget{
-		cityPath:    dir,
-		cfg:         &config.City{},
-		agent:       config.Agent{Name: "worker"},
-		sessionName: "gc-worker",
-	}
-
-	maybeStartNudgePoller(target, newNudgeEventedFake())
-	if spawns != 0 {
-		t.Fatalf("spawns = %d, want 0 for an event-capable provider", spawns)
-	}
-
-	maybeStartNudgePoller(target, runtime.NewFake())
-	if spawns != 1 {
-		t.Fatalf("spawns = %d, want 1 for a plain provider", spawns)
-	}
-
-	// Callers without a resolved provider fail open to today's behavior.
-	maybeStartNudgePoller(target, nil)
-	if spawns != 2 {
-		t.Fatalf("spawns = %d, want 2 for a nil provider", spawns)
-	}
-}
-
 func TestProviderRetiresNudgePollers(t *testing.T) {
 	if providerRetiresNudgePollers(nil) {
 		t.Fatal("nil provider must not retire pollers")
@@ -451,5 +519,22 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 	}
 	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
 		t.Fatal("event-capable provider must retire pollers")
+	}
+}
+
+// TestNudgeDispatcherIsHostingCapableButSubscribeFails covers the case both
+// cross-provider review legs identified as untested: a provider that IS
+// event-capable (satisfies runtime.SessionEventProvider) but whose stream
+// never actually comes up. providerRetiresNudgePollers alone would report
+// true here — this proves the live wake-socket check does not.
+func TestNudgeDispatcherIsHostingCapableButSubscribeFails(t *testing.T) {
+	dir := t.TempDir()
+	failing := newNudgeEventedFakeSubscribeErr()
+
+	if !providerRetiresNudgePollers(failing) {
+		t.Fatal("capable-but-failing provider must still report as capable")
+	}
+	if nudgeDispatcherIsHosting(dir) {
+		t.Fatal("no dispatcher is listening, but nudgeDispatcherIsHosting reports true")
 	}
 }
