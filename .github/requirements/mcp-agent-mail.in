@@ -14,6 +14,13 @@ gitpython>=3.1.59
 # until mcp-agent-mail's transitive requirements carry the fixed release.
 aiohttp>=3.14.3
 
+# Security floor: CVE-2026-63374 (CRITICAL, TLSStream IDNA 2003 host name
+# encoding enables host name confusion) in anyio < 4.14.2. anyio arrives
+# transitively via httpx, mcp, openai, py-key-value-aio, sse-starlette,
+# starlette and watchfiles; pin the floor until one of them carries the
+# patched release itself.
+anyio>=4.14.2
+
 # Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
 # vulnerabilities reported by the image gate. Drop this line once transitive
 # constraints carry the patched version themselves.
