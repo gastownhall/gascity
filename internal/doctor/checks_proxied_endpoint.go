@@ -1,0 +1,295 @@
+package doctor
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
+)
+
+// BeadsStorePayload is the machine-readable half of the `beads-store` result.
+//
+// The message stays the operator's line. This is for the readers that have to
+// branch on the answer — the acceptance matrix, the perf gate, an operator's
+// jq — and that would otherwise be parsing prose. The one thing it must never
+// become is a second, disagreeing account of the same run: every field here is
+// projected from the same diagnostic and the same endpoint read the message is
+// built from.
+type BeadsStorePayload struct {
+	// Store is the store gc actually opened, e.g. "BdStore" or
+	// "NativeDoltStore".
+	Store string `json:"store"`
+	// PreflightGate and PreflightReason name why, when the store is not the
+	// native one.
+	PreflightGate   string `json:"preflight_gate,omitempty"`
+	PreflightReason string `json:"preflight_reason,omitempty"`
+	// Endpoint is present only for a bd-owned proxied scope: it is what gc
+	// could establish about bd's proxy without starting, stopping or writing
+	// anything.
+	Endpoint *ProxiedEndpointPayload `json:"endpoint,omitempty"`
+}
+
+// ProxiedEndpointPayload is gc's read-only account of one bd proxy.
+type ProxiedEndpointPayload struct {
+	// Root is the proxy root gc resolved with bd's own precedence.
+	Root string `json:"root"`
+	// Host and Port are where bd published the proxy's data listener. Both are
+	// zero when there is no valid record.
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
+	// PID and ControlPort come from the record as written.
+	PID         int `json:"pid,omitempty"`
+	ControlPort int `json:"control_port,omitempty"`
+	// Generation identifies the proxy process without printing its birth
+	// token, which embeds the host's boot id.
+	Generation string `json:"generation,omitempty"`
+	// Verdict is the typed classification: live, dead, foreign_process,
+	// birth_mismatch, no_record, undetermined and the rest.
+	Verdict string `json:"verdict"`
+	// Evidence is how strong the liveness proof was: "argv+birth", "argv", or
+	// "none". A live verdict on "argv" alone is correct and weaker.
+	Evidence string `json:"evidence"`
+	// BirthEvidence separates "the token matched" from "this host cannot
+	// compute one", which the Evidence field alone cannot express.
+	BirthEvidence string `json:"birth_evidence"`
+	// IdlePolicy is "never", "finite" or "unknown"; IdleTimeout is the window
+	// for a finite policy; IdlePolicySource is which evidence decided.
+	IdlePolicy       string `json:"idle_policy"`
+	IdleTimeout      string `json:"idle_timeout,omitempty"`
+	IdlePolicySource string `json:"idle_policy_source"`
+	// Probe is the data port's observed state: served, refused,
+	// accepted_no_greeting, unknown, or absent when no probe was attempted.
+	Probe string `json:"probe,omitempty"`
+	// Cursors are the database's two schema-migration cursors, read over the
+	// probe session. Absent unless the probe was served.
+	Cursors *proxyendpoint.Cursors `json:"cursors,omitempty"`
+	// ExpectedCursors are the linked library's. They are reported next to the
+	// observed pair because the comparison, not either number, is what decides
+	// whether a native open would be safe.
+	ExpectedCursors proxyendpoint.Cursors `json:"expected_cursors"`
+	// Detail is the failure behind a non-live verdict or an unserved probe.
+	Detail string `json:"detail,omitempty"`
+}
+
+// beadsStoreDiagnostic is the subset of a store-open diagnostic the payload
+// projects. It keeps this file from depending on the whole beads open result.
+type beadsStoreDiagnostic struct {
+	Store           string
+	PreflightGate   string
+	PreflightReason string
+}
+
+// proxiedEndpointProcessTable and probeProxiedEndpoint are the two pieces of
+// the endpoint account that touch something outside this process. Both are
+// injectable so the payload's shape can be driven from a fabricated proxy: a
+// test that had to start a real bd proxy to assert a JSON field would be a test
+// nobody runs.
+var (
+	proxiedEndpointProcessTable = proxyendpoint.DefaultProcessTable
+	probeProxiedEndpoint        = proxyendpoint.ProbeEndpoint
+)
+
+// newBeadsStorePayload builds the structured half of a `beads-store` result.
+//
+// For a scope that is not a bd-owned proxied one it is just the store selection,
+// which is what every other topology has to say. For a proxied scope it adds
+// the endpoint account below.
+func newBeadsStorePayload(scopeRoot string, target contract.DoltConnectionTarget, diag beadsStoreDiagnostic) *BeadsStorePayload {
+	payload := &BeadsStorePayload{
+		Store:           diag.Store,
+		PreflightGate:   diag.PreflightGate,
+		PreflightReason: diag.PreflightReason,
+	}
+	if targetIsProviderOwnedProxied(target) || scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		payload.Endpoint = inspectProxiedEndpoint(scopeRoot, target.Database)
+	}
+	return payload
+}
+
+// inspectProxiedEndpoint reads and classifies a proxied scope's endpoint, and
+// probes its data port when — and only when — the record proves a live proxy.
+//
+// The order is what keeps this read-only and cheap. Reading the record and
+// checking the process table costs two small files and no connection at all; a
+// probe costs bd's Dolt child one session, so it is spent only on an endpoint
+// gc has already established is bd's live proxy for this root. Dialing a port
+// named by a dead, foreign or unparseable record would be talking to whatever
+// happens to be listening there.
+//
+// Nothing here starts, stops, adopts or writes anything. The cursors are read
+// with two read-only point queries; the library store is never opened, which is
+// the whole reason this can run against a proxied scope at all — opening it
+// would run initSchema against a database bd owns.
+func inspectProxiedEndpoint(scopeRoot, database string) *ProxiedEndpointPayload {
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		return &ProxiedEndpointPayload{
+			Verdict:          proxyendpoint.VerdictUndetermined.String(),
+			Evidence:         proxyendpoint.EvidenceNone.String(),
+			BirthEvidence:    proxyendpoint.BirthUnchecked.String(),
+			IdlePolicy:       proxyendpoint.IdleUnknown.String(),
+			IdlePolicySource: proxyendpoint.IdleSourceNone.String(),
+			ExpectedCursors:  expectedCursors(),
+			Detail:           fmt.Sprintf("resolve proxy root: %v", err),
+		}
+	}
+
+	ep := proxyendpoint.Inspect(root, proxiedEndpointProcessTable())
+	sidecar, sidecarErr := proxyendpoint.ReadSidecar(scopeBeadsDir(scopeRoot))
+	idle := proxyendpoint.ResolveIdlePolicy(sidecar, ep.Liveness.IdlePolicy)
+
+	payload := &ProxiedEndpointPayload{
+		Root:             root,
+		Port:             ep.Record.Port,
+		PID:              ep.Record.PID,
+		ControlPort:      ep.Record.ControlPort,
+		Verdict:          ep.Verdict.String(),
+		Evidence:         ep.Liveness.Evidence.String(),
+		BirthEvidence:    ep.Liveness.Birth.String(),
+		IdlePolicy:       idle.Kind.String(),
+		IdlePolicySource: idle.Source.String(),
+		ExpectedCursors:  expectedCursors(),
+	}
+	if idle.Kind == proxyendpoint.IdleFinite {
+		payload.IdleTimeout = idle.Timeout.String()
+	}
+	if ep.Record.Port > 0 {
+		payload.Host = proxyendpoint.Host
+	}
+	if ep.Record.Birth != "" {
+		payload.Generation = proxyendpoint.NewPoolKey(ep.Record, database).Generation()
+	}
+	switch {
+	case ep.Err != nil:
+		payload.Detail = ep.Err.Error()
+	case sidecarErr != nil:
+		payload.Detail = sidecarErr.Error()
+	}
+	if !ep.Verdict.Live() {
+		return payload
+	}
+
+	probe := probeProxiedEndpoint(context.Background(), ep, database)
+	payload.Probe = probe.Outcome.String()
+	if probe.Outcome == proxyendpoint.ProbeServed {
+		cursors := probe.Cursors
+		payload.Cursors = &cursors
+		return payload
+	}
+	if probe.Err != nil {
+		payload.Detail = probe.Err.Error()
+	}
+	return payload
+}
+
+// expectedCursors is the linked library's schema pair.
+func expectedCursors() proxyendpoint.Cursors {
+	main, ignored := beads.PinnedSchemaCursors()
+	return proxyendpoint.Cursors{Main: main, Ignored: ignored}
+}
+
+// scopeBeadsDir is a scope's .beads directory, normalized the way every other
+// scope-file read in this package normalizes it.
+func scopeBeadsDir(scopeRoot string) string {
+	return filepath.Join(pathutil.NormalizePathForCompare(scopeRoot), ".beads")
+}
+
+// ProxiedIdleTimeoutCheck reports a gc-owned proxied scope whose sidecar does
+// not state, in writing, that its proxy has no idle timeout.
+//
+// bd tags the sidecar's idle_timeout `omitempty`, so an absent key is what a
+// scope initialized without the flag looks like — and bd's provider substitutes
+// a 30s window for it. On such a scope bd retires the proxy AND its Dolt child
+// after every quiet period, and the next gc command pays a cold start: about a
+// second of proxy adoption plus the Dolt child's own startup, per scope, on a
+// city that may have a dozen.
+//
+// gc's own provider script passes `--proxied-server-idle-timeout 0` at init,
+// which bd maps to IdleTimeoutNever before persisting, so a scope gc created
+// carries `-1`. An absent or non-negative value on a gc-owned scope therefore
+// means something rewrote the sidecar, or the scope was initialized by
+// something other than gc's front door — which is an ordinary thing for an
+// operator to have done and NOT a broken city. That is why it warns rather than
+// fails: the scope works, it is just slower than gc's topology intends, and gc
+// must not repair it by writing to a file bd owns.
+type ProxiedIdleTimeoutCheck struct {
+	cityPath   string
+	scopeRoots []string
+}
+
+// NewProxiedIdleTimeoutCheckForConfig returns the check for a city with at
+// least one gc-owned proxied scope, and nil for a city with none.
+//
+// "gc-owned" is the ownership journal, not the proxied binding. A proxied
+// workspace gc merely found — an operator's, a clone's — is nobody's to hold an
+// opinion about here, and a doctor line telling an operator their own scope is
+// misconfigured would be gc asserting a preference as a defect.
+func NewProxiedIdleTimeoutCheckForConfig(cityPath string, cfg *config.City, cfgErr error) *ProxiedIdleTimeoutCheck {
+	var roots []string
+	for _, scopeRoot := range managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr) {
+		if !scopeBindingIsProviderOwnedProxied(scopeRoot) || !scopeJournaledToProvider(cityPath, scopeRoot) {
+			continue
+		}
+		roots = append(roots, scopeRoot)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	return &ProxiedIdleTimeoutCheck{cityPath: cityPath, scopeRoots: roots}
+}
+
+// Name returns the check identifier.
+func (c *ProxiedIdleTimeoutCheck) Name() string { return "proxied-idle-timeout" }
+
+// Run reads each gc-owned proxied scope's sidecar and reports the ones that do
+// not pin their proxy resident.
+func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name(), Severity: SeverityAdvisory}
+
+	var offenders, unreadable []string
+	for _, scopeRoot := range c.scopeRoots {
+		label := proxiedScopeLabel(c.cityPath, scopeRoot)
+		sidecar, err := proxyendpoint.ReadSidecar(scopeBeadsDir(scopeRoot))
+		switch {
+		case err != nil:
+			unreadable = append(unreadable, fmt.Sprintf("%s: %v", label, err))
+		case sidecar.ExplicitIdleNever():
+			continue
+		default:
+			offenders = append(offenders, fmt.Sprintf("%s (%s)", label, sidecar.IdlePolicy()))
+		}
+	}
+
+	if len(offenders) == 0 && len(unreadable) == 0 {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) pin their proxy resident (idle_timeout < 0)", len(c.scopeRoots))
+		return r
+	}
+
+	r.Status = StatusWarning
+	switch {
+	case len(offenders) > 0:
+		r.Message = fmt.Sprintf(
+			"%d gc-owned proxied scope(s) do not pin their proxy resident: %s — bd retires the proxy and its Dolt child after each quiet period, so every later command pays a cold start",
+			len(offenders), strings.Join(offenders, ", "))
+		r.FixHint = "re-initialize the scope through gc (`gc rig add` / `gc init`), which passes --proxied-server-idle-timeout 0 and makes bd persist idle_timeout -1; gc will not edit the sidecar, which is bd's file"
+	default:
+		r.Message = fmt.Sprintf("could not read the proxied sidecar of %d gc-owned scope(s)", len(unreadable))
+		r.FixHint = "inspect <scope>/.beads/proxied_server_client_info.json; bd rewrites it on the next `bd init` for that scope"
+	}
+	r.Details = append(offenders, unreadable...) //nolint:gocritic // one detail list, offenders first
+	return r
+}
+
+// CanFix returns false: the sidecar is bd's file, and the repair is a bd init
+// gc drives through its own front door rather than an edit gc makes here.
+func (c *ProxiedIdleTimeoutCheck) CanFix() bool { return false }
+
+// Fix is a no-op. See CanFix.
+func (c *ProxiedIdleTimeoutCheck) Fix(_ *CheckContext) error { return nil }

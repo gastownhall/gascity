@@ -195,6 +195,11 @@ func beadsTopologyCheck(name string) bool {
 	switch name {
 	case "beads-store", "bead-store-preflight", "bd-split-store", "dolt-topology", "dolt-drift",
 		"dolt-server", "dolt-backup", "dolt-local-only-remote", "beads",
+		// Whether a gc-owned proxied scope pins its proxy resident is a
+		// statement about this feature's own topology: every scope gc
+		// initialises here is asserted to carry idle_timeout -1, so a warning
+		// means gc's init stopped producing the topology it intends.
+		"proxied-idle-timeout",
 		// dolt-config is a statement about who runs the scope's Dolt: on a
 		// bd-owned scope gc retires its own managed config on purpose, so a
 		// warning here means doctor classified the scope as gc-managed. Its
