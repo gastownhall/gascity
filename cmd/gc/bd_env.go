@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -738,35 +739,64 @@ func projectCredentialProviderEnv(env map[string]string) {
 var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 
 // hostedCredentialProbeBuilds counts how many times
-// citySelectsHostedBeadsCredentialProvider has actually loaded city.toml
-// (as opposed to serving a memoized answer). It exists so tests can pin the
-// stat-signature-keyed memoization required by ga-v0agbz.1; the counter is
-// not yet incremented below — wiring it into the load path, and the actual
-// memoization it measures, is GREEN's job, not RED's.
+// citySelectsHostedBeadsCredentialProvider has actually loaded city.toml (as
+// opposed to serving a memoized answer) — i.e. how many times a new entry was
+// stored in hostedCredentialProbeCache. It exists so tests can pin the
+// stat-signature-keyed memoization required by ga-v0agbz.1.
 var hostedCredentialProbeBuilds atomic.Int64
+
+// hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
+// per city, keyed by a stamp over city.toml's own size and mtime — the same
+// stat-signature approach as proxiedScopeRuntimeEnvCache in
+// bd_env_proxied.go, the sibling cache this one is modeled on. Only a
+// successful load is ever stored: an error must never be cached, so a
+// transient failure (or a city.toml the caller is mid-rewrite of) keeps
+// surfacing on every call instead of latching a stale answer.
+var hostedCredentialProbeCache sync.Map // string(normalized cityPath) → hostedCredentialProbeEntry
+
+type hostedCredentialProbeEntry struct {
+	stamp  string
+	hosted bool
+}
 
 // forgetCitySelectsHostedBeadsCredentialProvider drops any memoized answer
 // citySelectsHostedBeadsCredentialProvider has cached for cityPath. It is a
 // test-only invalidation hook (see t.Cleanup in
 // bd_env_hosted_credential_probe_cache_test.go) so repeated test runs never
-// observe a previous run's cache entry. No-op until GREEN adds the cache
-// this is meant to clear.
+// observe a previous run's cache entry.
 func forgetCitySelectsHostedBeadsCredentialProvider(cityPath string) {
-	_ = cityPath
+	hostedCredentialProbeCache.Delete(normalizePathForCompare(cityPath))
 }
 
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
-	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+	info, err := os.Stat(cityConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	} else if err != nil {
 		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 	}
+
+	// Stamped from the SAME stat already paid for above, before the load — a
+	// stat taken only after a slow load would let a rewrite landing mid-load
+	// be recorded as already-observed (see rememberProxiedScopeRuntimeEnv's
+	// own note on why the pre-build stamp is the one that must be stored).
+	stamp := fmt.Sprintf("%d.%d", info.Size(), info.ModTime().UnixNano())
+	key := normalizePathForCompare(cityPath)
+	if cached, ok := hostedCredentialProbeCache.Load(key); ok {
+		if entry, ok := cached.(hostedCredentialProbeEntry); ok && entry.stamp == stamp {
+			return entry.hosted, nil
+		}
+	}
+
 	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
-	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+	hosted := configSelectsHostedBeadsCredentialProvider(cfg)
+	hostedCredentialProbeCache.Store(key, hostedCredentialProbeEntry{stamp: stamp, hosted: hosted})
+	hostedCredentialProbeBuilds.Add(1)
+	return hosted, nil
 }
 
 func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
