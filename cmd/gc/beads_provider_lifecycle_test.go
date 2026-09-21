@@ -3667,6 +3667,13 @@ func TestInitBeadsForDir_fileLegacyRigPreservesSharedCityStore(t *testing.T) {
 	}
 }
 
+// A sqlite city is not a bd-contract city, so its default rig store is created
+// with `--server`: the proxied path is provider-owned end to end, and the only
+// provider shape a provider-owned lifecycle op accepts is `exec:`. A rig
+// initialized proxied under `provider = "sqlite"` classified as provider-owned
+// by its binding and then failed every `gc start`, health tick and `gc stop`
+// with "requires an exec beads provider" (council R4-F1, same defect the
+// doltlite fixture below carries).
 func TestInitBeadsForDirSqliteCityInitializesRigBdStore(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "tincan")
@@ -3732,7 +3739,7 @@ esac
 	for _, want := range []string{
 		"pwd=" + realRigDir,
 		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
-		"init --proxied-server --proxied-server-idle-timeout 0 -p tc --skip-hooks --database tc",
+		"init --server -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("bd log missing %q:\n%s", want, log)
@@ -3766,7 +3773,7 @@ esac
 	for key, want := range map[string]string{
 		"database":      "dolt",
 		"backend":       "dolt",
-		"dolt_mode":     "proxied-server",
+		"dolt_mode":     "server",
 		"dolt_database": "tc",
 	} {
 		if got := strings.TrimSpace(fmt.Sprint(meta[key])); got != want {

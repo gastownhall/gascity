@@ -1854,17 +1854,24 @@ func scopeInitUsesProxiedDoltMode(cityPath, dir string) bool {
 }
 
 // postInitScopeDoltMode reports the dolt_mode to record for a scope whose store
-// was just initialized. It is preInitScopeDoltMode's counterpart, and rests on
+// was just initialized. It is preInitScopeDoltMode's counterpart and rests on
 // the same rule: the marker must be a true statement about the store that now
 // exists. A proxied marker over a store bd created with `--server` is the trap
-// preInitScopeDoltMode documents, reached from the other side — the marker
-// itself makes the scope provider-owned, and every later lifecycle op then
+// preInitScopeDoltMode documents, reached from the other side — that marker is
+// itself what makes a scope provider-owned, and every later lifecycle op then
 // demands a proxy nobody ever started.
-func postInitScopeDoltMode(cityPath, dir string) string {
-	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
-		return defaultFreshScopeDoltMode
+//
+// The question is settled by the city's provider rather than by re-reading the
+// scope: on a city that is not bd-contract the proxied path is unavailable end
+// to end, so initDefaultRigBdStore created this store with `--server`. Every
+// other scope keeps the fresh proxied default — including one whose provider
+// just wrote metadata naming some other backend, which this same pass is in the
+// middle of canonicalising.
+func postInitScopeDoltMode(cityPath string) string {
+	if !providerUsesBdStoreContract(beadsProvider(cityPath)) {
+		return "server"
 	}
-	return "server"
+	return defaultFreshScopeDoltMode
 }
 
 func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
@@ -1920,7 +1927,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = defaultScopeDoltDatabase(cityPath, dir, prefix)
 	}
-	freshDoltMode := postInitScopeDoltMode(cityPath, dir)
+	freshDoltMode := postInitScopeDoltMode(cityPath)
 	if isReservedManagedDoltDatabase(doltDatabase) {
 		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, freshDoltMode); err != nil {
 			return err
