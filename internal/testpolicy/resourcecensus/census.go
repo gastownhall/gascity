@@ -151,7 +151,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   58,
+			BaselineCalls:   60,
 			BaselineFiles:   23,
 			ReportedCalls:   58,
 			ReportedFiles:   23,
@@ -244,7 +244,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   40,
 			BaselineFiles:   13,
 			ReportedCalls:   38,
 			ReportedFiles:   13,
@@ -257,8 +257,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   98,
-			BaselineFiles:   38,
+			BaselineCalls:   99,
+			BaselineFiles:   39,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -610,7 +610,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   40,
 			BaselineFiles:   13,
 			ReportedCalls:   38,
 			ReportedFiles:   13,
@@ -623,8 +623,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   96,
-			BaselineFiles:   37,
+			BaselineCalls:   97,
+			BaselineFiles:   38,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
