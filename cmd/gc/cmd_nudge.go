@@ -1937,7 +1937,7 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
 	// it. Callers without a resolved provider pass nil and keep today's
 	// spawn behavior.
-	if providerRetiresNudgePollers(sp) {
+	if providerRetiresNudgePollers(target, sp) {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning

@@ -284,3 +284,16 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
 	}
 }
+
+// EventCapableRoute reports whether the backend routed for name implements
+// runtime.SessionEventProvider. SubscribeSessionEvents above only ever
+// forwards the local backend's stream (the only such implementation today),
+// so the top-level SessionEventProvider type assertion in a caller such as
+// maybeStartNudgePoller is true for hybrid whenever the LOCAL side is
+// event-capable — even for a session this hybrid routes to remote. A caller
+// deciding whether a per-session sidecar poller is redundant must check the
+// backend actually serving that session, not the composite's capability.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
+}

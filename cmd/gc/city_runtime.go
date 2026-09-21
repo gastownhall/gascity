@@ -1143,14 +1143,14 @@ func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now 
 }
 
 // sessionPhaseStretchActive reports whether the stretched session-phase
-// patrol is in effect: configured longer than the patrol interval AND a
-// session-event stream currently established. Without a live stream
-// (tmux, subscribe failure) the stretch is ignored so session liveness
-// never degrades below the patrol cadence.
+// patrol is in effect: configured longer than the patrol interval AND the
+// current session-event stream has delivered at least one event. Merely
+// starting a subscription goroutine is not proof that its backend is
+// connected; without observed flow, liveness stays at the normal cadence.
 func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
 	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
-		cr.sessionEvents != nil && cr.sessionEvents.streaming()
+		cr.sessionEvents != nil && cr.sessionEvents.flowing()
 }
 
 // tick performs one reconciliation tick: pool death detection, config
