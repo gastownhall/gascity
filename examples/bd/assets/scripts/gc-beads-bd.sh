@@ -100,9 +100,27 @@ die() {
 # Best-effort in both directions: an unwritable path is ignored rather than
 # failing the operation it was only observing.
 trace_bd_argv() {
+    # The JSONL trace claims tracing when it is set, exactly as the in-process
+    # writer does (internal/beads/bdstore.go newBDExecTrace): that file is where
+    # the fork-count gate counts, and a run that also substitutes a recording
+    # BD_BIN shim would otherwise have every fork twice, once from the shim and
+    # once from here. Two formats sharing one file is the other half of the same
+    # hazard. The implementer's claim that the formats never interleave rests on
+    # this guard, so the script has to honour it too.
+    [ -z "${GC_BD_TRACE_JSON:-}" ] || return 0
     [ -n "${GC_BD_TRACE:-}" ] || return 0
+    trace_args=$*
+    # One fork, one line. An argv can carry a newline — a bead title, a JSON
+    # payload on `bd create` — and a raw one here splits the breadcrumb into two
+    # lines, the second with no source= prefix, which any reader counts as a
+    # record it cannot attribute. The fold costs a subshell only when there is
+    # actually a newline to fold, which no gc-built argv has.
+    case $trace_args in
+    *"
+"*) trace_args=$(printf '%s' "$trace_args" | tr '\n\r' '  ') ;;
+    esac
     printf '%s source=provider-script subcommand=%s pid=%s dir=%s args=%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-unknown}" "$$" "$(pwd)" "$*" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-unknown}" "$$" "$(pwd)" "$trace_args" \
         >>"$GC_BD_TRACE" 2>/dev/null || true
 }
 

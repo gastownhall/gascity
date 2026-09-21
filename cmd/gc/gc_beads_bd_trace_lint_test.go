@@ -109,8 +109,14 @@ func TestGCBeadsBDScriptTracesEveryBDFork(t *testing.T) {
 	if !strings.Contains(script, `[ -n "${GC_BD_TRACE:-}" ] || return 0`) {
 		t.Error("trace_bd_argv is not gated on GC_BD_TRACE; an ordinary run must write nothing")
 	}
-	if strings.Contains(script, `"$GC_BD_TRACE_JSON"`) {
+	if strings.Contains(script, `>>"$GC_BD_TRACE_JSON"`) {
 		t.Error("gc-beads-bd.sh writes the JSONL trace, which double-counts every fork a recording BD_BIN shim already records")
+	}
+	// The other half of that rule, and the one the in-process writer already
+	// honors (bdstore.go newBDExecTrace): when the JSONL trace is claimed, this
+	// one stands down, so the two formats can never share a file.
+	if !strings.Contains(script, `[ -z "${GC_BD_TRACE_JSON:-}" ] || return 0`) {
+		t.Error("trace_bd_argv is not suppressed when GC_BD_TRACE_JSON is set; two trace formats would interleave in one file")
 	}
 }
 
@@ -169,12 +175,19 @@ func TestGCBeadsBDTraceHelperIsOffByDefault(t *testing.T) {
 
 	dir := t.TempDir()
 	tracePath := filepath.Join(dir, "trace.log")
+	jsonPath := filepath.Join(dir, "trace.jsonl")
 	harness := filepath.Join(dir, "harness.sh")
 	body := "#!/bin/sh\nset -e\n" + helper + "\n" +
 		"trace_bd_argv ping --json\n" +
 		"GC_BD_TRACE=" + tracePath + "\nexport GC_BD_TRACE\n" +
 		"trace_bd_argv create 'a title with spaces' --json\n" +
-		"trace_bd_argv ping --json\n"
+		"trace_bd_argv ping --json\n" +
+		// An argv carrying a newline: one fork must still be one line, or a
+		// reader sees a record with no source= prefix.
+		"trace_bd_argv create 'two\nlines' --json\n" +
+		// And once the JSONL trace claims tracing, this one writes nothing.
+		"GC_BD_TRACE_JSON=" + jsonPath + "\nexport GC_BD_TRACE_JSON\n" +
+		"trace_bd_argv list --json\n"
 	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil { //nolint:gosec // the harness must be executable
 		t.Fatal(err)
 	}
@@ -191,8 +204,8 @@ func TestGCBeadsBDTraceHelperIsOffByDefault(t *testing.T) {
 		t.Fatalf("the helper wrote no trace with GC_BD_TRACE set: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("recorded %d line(s), want 2 (the call before GC_BD_TRACE was set must write nothing):\n%s", len(lines), recorded)
+	if len(lines) != 3 {
+		t.Fatalf("recorded %d line(s), want 3 (the call before GC_BD_TRACE was set and the one after GC_BD_TRACE_JSON was set must write nothing):\n%s", len(lines), recorded)
 	}
 	for _, want := range []string{"source=provider-script", "subcommand=create", "a title with spaces"} {
 		if !strings.Contains(lines[0], want) {
@@ -201,5 +214,15 @@ func TestGCBeadsBDTraceHelperIsOffByDefault(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "subcommand=ping") {
 		t.Errorf("record %q does not name the ping subcommand", lines[1])
+	}
+	// The newline in the third fork's argv is folded, so the record stays one
+	// line and still carries both words.
+	for _, want := range []string{"source=provider-script", "two lines"} {
+		if !strings.Contains(lines[2], want) {
+			t.Errorf("record %q does not carry %q; an argv newline must not split the breadcrumb", lines[2], want)
+		}
+	}
+	if _, err := os.Stat(jsonPath); !os.IsNotExist(err) {
+		t.Errorf("the helper wrote %s (%v); the JSONL trace is the fork census's file, and writing both formats double-counts every fork", jsonPath, err)
 	}
 }
