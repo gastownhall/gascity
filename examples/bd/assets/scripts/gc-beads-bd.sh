@@ -3690,19 +3690,73 @@ provider_owned_retire_local_dolt() {
     return "$status"
 }
 
+# provider_owned_proxy_root prints the physical Dolt root a proxied scope's
+# lifecycle commands act on, or nothing when the scope has no proxied binding
+# yet. bd resolves that root from the client-info sidecar's root_path (see
+# internal/doltserver physical-root resolution: env, then sidecar, then the
+# scope's own data dir), and `bd dolt stop` shuts down whatever is serving it.
+provider_owned_proxy_root() {
+    local dir="$1" sidecar root
+    sidecar="$dir/.beads/proxied_server_client_info.json"
+    [ -f "$sidecar" ] || return 0
+    root=$(sed -n 's/.*"root_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$sidecar" | head -n 1)
+    [ -n "$root" ] || return 0
+    case "$root" in
+        /*) ;;
+        *) root="$dir/$root" ;;
+    esac
+    # Physical resolution so two spellings of one directory compare equal: a
+    # migrated rig's root_path is the city's, reached through `..` segments.
+    (cd "$root" 2>/dev/null && pwd -P) || printf '%s\n' "$root"
+}
+
+# provider_owned_scope_shares_city_proxy_root reports whether this scope's proxy
+# root is the city's rather than its own.
+#
+# `gc beads city migrate-proxied` points every rig's Dolt data dir at the city's
+# .beads/dolt, so one proxy and one Dolt child serve hq and every rig. bd is
+# given only BEADS_DIR, and it resolves the root to stop from the sidecar, so a
+# rig-scoped `bd dolt stop` in that shape is a city-wide one.
+provider_owned_scope_shares_city_proxy_root() {
+    local dir="$1" scope_dir city_dir scope_root city_root
+    [ -n "${GC_CITY_PATH:-}" ] || return 1
+    scope_dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    city_dir=$(cd "$GC_CITY_PATH" 2>/dev/null && pwd -P) || return 1
+    # The city scope owns the shared root; it is the one scope allowed to cycle it.
+    [ "$scope_dir" != "$city_dir" ] || return 1
+    scope_root=$(provider_owned_proxy_root "$dir")
+    [ -n "$scope_root" ] || return 1
+    city_root=$(provider_owned_proxy_root "$GC_CITY_PATH")
+    [ -n "$city_root" ] || return 1
+    [ "$scope_root" = "$city_root" ]
+}
+
 op_provider_owned_lifecycle() {
     local op="$1" dir transport local_scope=false
     dir=$(provider_owned_scope_dir)
-    # A scope directory that is gone has nothing left to retire. This is the
-    # half-built shape an interrupted `gc rig add` leaves: the ownership journal
-    # records a still-initializing path whose directory the operator then
-    # deleted. Every bd invocation below starts with `cd "$dir"`, so without
-    # this the whole stop fan-out failed on a scope with no processes to stop.
-    # A starting op still refuses: initializing a store in a directory that is
-    # not there is not something to do quietly.
-    if [ ! -d "$dir" ]; then
+    # A scope with no store has nothing left to retire. This is the half-built
+    # shape an interrupted `gc rig add` leaves: the ownership journal records a
+    # still-initializing path, and `bd init` then failed, so there is a journaled
+    # root with either no directory at all or a directory with no .beads.
+    #
+    # Both are already-stopped. The missing-directory arm is here because every
+    # bd invocation below starts with `cd "$dir"`. The no-.beads arm is here
+    # because bd ignores a BEADS_DIR that does not exist and walks up from the
+    # cwd instead (FindBeadsDir): for a rig that is its own repository that ends
+    # in "no active beads workspace found", which provider_owned_retire_local_dolt
+    # does not tolerate, so `gc stop` exited 1 on every run for a scope where
+    # nothing was running; and for a rig that is a subdirectory of the city the
+    # walk-up finds the CITY's store and the stop acts on the city's proxy under
+    # the rig's name, which is worse than the wrong exit code.
+    #
+    # A starting op still refuses: initializing a store for a scope that is not
+    # there is not something to do quietly.
+    if [ ! -d "$dir" ] || [ ! -d "$dir/.beads" ]; then
         case "$op" in
-            stop|shutdown) return 0 ;;
+            stop|shutdown)
+                printf 'scope %s has no beads store; nothing to retire\n' "$dir" >&2
+                return 0
+                ;;
         esac
     fi
     transport=$(provider_owned_transport "$dir")
@@ -3731,7 +3785,24 @@ op_provider_owned_lifecycle() {
                 # A proxied external scope still owns its local proxy child.
                 # bd dolt stop retires that proxy without issuing a lifecycle
                 # command to the upstream external Dolt server.
-                recover) provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                #
+                # A scope whose proxy root is the CITY's does not own that pair
+                # and must not retire it. `bd dolt stop` resolves the root from
+                # the sidecar, not from BEADS_DIR, so for a migrated rig the
+                # stop takes down the one proxy and Dolt child serving hq and
+                # every other rig, under live agents, to recover one rig — and
+                # the ping that follows cold-starts it while the rig-local cause
+                # is still there, so each health pass does it again. Recovery
+                # for such a rig is a ping; cycling the shared pair belongs to
+                # the city scope, whose own recover op does exactly that.
+                recover)
+                    if provider_owned_scope_shares_city_proxy_root "$dir"; then
+                        printf 'scope %s shares the city proxy root; recovering by ping only\n' "$dir" >&2
+                    else
+                        provider_owned_retire_local_dolt "$dir"
+                    fi
+                    run_provider_owned_bd "$dir" ping
+                    ;;
                 stop|shutdown) provider_owned_retire_local_dolt "$dir" ;;
                 *) exit 2 ;;
             esac

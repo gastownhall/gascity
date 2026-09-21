@@ -6,7 +6,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,41 +20,63 @@ import (
 // This drives the real script with the environment Go passes it, not a Go
 // stand-in: the `cd` is in the shell, so only the shell can prove it.
 func TestProviderScriptStopIsANoOpForAMissingScopeDirectory(t *testing.T) {
-	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
-	if _, err := os.Stat(script); err != nil {
-		t.Skipf("provider script not available: %v", err)
-	}
 	city := t.TempDir()
 	missing := filepath.Join(city, "rigs", "deleted")
 
-	env := append(os.Environ(),
-		"GC_CITY_PATH="+city,
-		"GC_BEADS_PROVIDER_OWNED=1",
-		"GC_BEADS_TRANSPORT=proxied",
-		"GC_BEADS_TARGET=local",
-		"BEADS_DOLT_PROXIED_SERVER=1",
-		"GC_DOLT=",
-		"BEADS_DIR="+filepath.Join(missing, ".beads"),
-		// A bd that would fail loudly if it were ever reached.
-		"BD_BIN="+writeFailingBd(t, city),
-	)
+	// A bd that would fail loudly if it were ever reached.
+	env := providerOwnedScriptEnv(city, missing, writeFailingBd(t, city))
 	for _, op := range []string{"stop", "shutdown"} {
-		cmd := exec.Command("bash", script, op) //nolint:gosec // repository script under test
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
+		out, err := runProviderOwnedScriptOp(t, env, op)
 		if err != nil {
 			t.Fatalf("%s on a deleted scope directory: %v\n%s", op, err, out)
 		}
 	}
 
-	cmd := exec.Command("bash", script, "start") //nolint:gosec // repository script under test
-	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	out, err := runProviderOwnedScriptOp(t, env, "start")
 	if err == nil {
 		t.Fatalf("start succeeded for a deleted scope directory:\n%s", out)
 	}
-	if strings.Contains(string(out), "BD MUST NOT RUN") {
+	if strings.Contains(out, "BD MUST NOT RUN") {
 		t.Fatalf("start invoked bd for a deleted scope directory:\n%s", out)
+	}
+}
+
+// TestProviderScriptStopIsANoOpForAScopeWithNoBeadsStore covers the other half of
+// the interrupted-`gc rig add` shape: the journal records a still-initializing
+// path, `bd init` failed, and removePartialBeadsStore deleted the partial .beads
+// it had created — so the directory is still there and the store is not.
+//
+// The script used to short-circuit only on a missing directory, so this shape ran
+// `bd dolt stop` with a BEADS_DIR that does not exist. bd ignores such a
+// BEADS_DIR and walks up from the cwd, which for a rig that is its own repository
+// is "no active beads workspace found" — a message provider_owned_retire_local_dolt
+// does not tolerate — so `gc stop` returned a per-scope failure on every run for a
+// scope where nothing was running.
+func TestProviderScriptStopIsANoOpForAScopeWithNoBeadsStore(t *testing.T) {
+	city := t.TempDir()
+	scope := filepath.Join(city, "rigs", "half-built")
+	if err := os.MkdirAll(scope, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := providerOwnedScriptEnv(city, scope, writeFailingBd(t, city))
+
+	for _, op := range []string{"stop", "shutdown"} {
+		out, err := runProviderOwnedScriptOp(t, env, op)
+		if err != nil {
+			t.Fatalf("%s on a scope with no .beads: %v\n%s", op, err, out)
+		}
+		if strings.Contains(out, "BD MUST NOT RUN") {
+			t.Fatalf("%s invoked bd for a scope with no .beads:\n%s", op, out)
+		}
+		if !strings.Contains(out, "nothing to retire") {
+			t.Fatalf("%s did not say why it was a no-op:\n%s", op, out)
+		}
+	}
+
+	// Control: the same shape must not become quietly startable.
+	out, err := runProviderOwnedScriptOp(t, env, "start")
+	if err == nil {
+		t.Fatalf("start succeeded for a scope with no .beads:\n%s", out)
 	}
 }
 

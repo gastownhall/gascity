@@ -100,16 +100,28 @@ jobs:
             # Separate from `beads` on purpose: this gates the one job that runs
             # the bd/dolt-backed topology shapes for real, and those shapes turn
             # on gc's own Dolt lifecycle code as much as on the beads adapter.
+            #
+            # Deliberately broad. A curated list of cmd/gc files was tried and
+            # was wrong within one commit: the ownership journal, the provider
+            # lifecycle, the bd env plumbing and the `gc init` transport flags
+            # all live in cmd/gc files that matched none of the globs, so a
+            # change to the feature skipped its own acceptance job and
+            # ci-required still went green (the skip is in allow_skipped). The
+            # matrix builds gc from ./cmd/gc and drives it through the bd script
+            # in examples/bd, so anything under either can change what the
+            # shapes do. Over-running this job is cheap next to a silent gate.
             beads_topology:
               - 'go.mod'
+              - 'go.sum'
               - 'deps.env'
+              - '.github/scripts/install-bd-archive.sh'
+              - '.github/scripts/install-dolt-archive.sh'
+              - '.github/actions/setup-gascity-ubuntu/**'
+              - 'cmd/gc/**'
               - 'internal/beads/**'
               - 'internal/doctor/**'
-              - 'cmd/gc/init_provider_readiness.go'
-              - 'cmd/gc/dolt_*'
-              - 'cmd/gc/cmd_beads_*'
-              - 'test/acceptance/beads_*'
-              - 'test/acceptance/helpers/**'
+              - 'examples/bd/**'
+              - 'test/acceptance/**'
               - '.github/workflows/ci.yml'
             packs:
               - 'examples/gastown/**'

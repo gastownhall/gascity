@@ -610,21 +610,37 @@ ACCEPTANCE_TIMEOUT ?= 15m
 ## ACCEPTANCE_GO_TEST_FLAGS passes extra `go test` flags through, which is how
 ## you narrow a run: ACCEPTANCE_GO_TEST_FLAGS='-run TestBeadsInitTopologyMatrix'
 ACCEPTANCE_GO_TEST_FLAGS ?=
+## TEST_ENV is `env -i` with a fixed allowlist, so every variable the acceptance
+## tests read has to be named on the recipe line below or it is dropped and the
+## test binary skips on it. That is how `make test-beads-topology-matrix` came
+## to print `ok` in seconds having stood up zero shapes: the matrix opt-in never
+## reached `go test`. Each of these defaults to the ambient value, so exporting
+## it still works, and a target or the make line can override it.
+ACCEPTANCE_TOPOLOGY_MATRIX ?= $(GC_ACCEPTANCE_TOPOLOGY_MATRIX)
+ACCEPTANCE_REQUIRE_TOOLING ?= $(GC_REQUIRE_ACCEPTANCE_TOOLING)
+ACCEPTANCE_REQUIRE_LEGACY_GC ?= $(GC_REQUIRE_ACCEPTANCE_LEGACY_GC)
 test-acceptance:
-	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_LEGACY_GC_BIN="$${GC_ACCEPTANCE_LEGACY_GC_BIN-}" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) $(ACCEPTANCE_GO_TEST_FLAGS) ./test/acceptance/...
+	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off GC_ACCEPTANCE_BEADS_PROVIDER="$${GC_ACCEPTANCE_BEADS_PROVIDER-}" GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_ACCEPTANCE_LEGACY_GC_BIN="$${GC_ACCEPTANCE_LEGACY_GC_BIN-}" GC_ACCEPTANCE_TOPOLOGY_MATRIX="$(ACCEPTANCE_TOPOLOGY_MATRIX)" GC_REQUIRE_ACCEPTANCE_TOOLING="$(ACCEPTANCE_REQUIRE_TOOLING)" GC_REQUIRE_ACCEPTANCE_LEGACY_GC="$(ACCEPTANCE_REQUIRE_LEGACY_GC)" go test -tags acceptance_a -timeout $(ACCEPTANCE_TIMEOUT) $(ACCEPTANCE_GO_TEST_FLAGS) ./test/acceptance/...
 
 ## test-beads-topology-matrix: run the init topology matrix on its own.
 ## Every supported way to initialise a beads scope — proxied-local, direct-local,
 ## direct- and proxied-external, the pre-journal GC-managed shape, doltlite, and
 ## a deferred GC_DOLT=skip init — walked through the same command list against a
 ## real bd and a real dolt. Needs a bd >= 1.3.0 in GC_ACCEPTANCE_BD_BIN and, for
-## the legacy shape, a pre-journal gc in GC_ACCEPTANCE_LEGACY_GC_BIN; it skips
-## typed without them. Eight shapes of real Dolt lifecycle take about an hour,
-## hence the separate timeout.
+## the legacy shape, a pre-journal gc in GC_ACCEPTANCE_LEGACY_GC_BIN. Eight
+## shapes of real Dolt lifecycle take about an hour, hence the separate timeout.
+##
+## This target opts itself in to the matrix and turns a missing bd or dolt into
+## a failure: a target that exists only to run the shapes has no honest way to
+## report ok having run none of them. Pass BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING=
+## to get the old skip-on-missing-tooling behaviour back.
 BEADS_TOPOLOGY_MATRIX_TIMEOUT ?= 90m
+BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING ?= 1
 test-beads-topology-matrix:
 	$(MAKE) test-acceptance ACCEPTANCE_TIMEOUT=$(BEADS_TOPOLOGY_MATRIX_TIMEOUT) \
-		ACCEPTANCE_GO_TEST_FLAGS='-count=1 -run TestBeadsInitTopologyMatrix'
+		ACCEPTANCE_GO_TEST_FLAGS='-count=1 -run TestBeadsInitTopologyMatrix' \
+		ACCEPTANCE_TOPOLOGY_MATRIX=1 \
+		ACCEPTANCE_REQUIRE_TOOLING='$(BEADS_TOPOLOGY_MATRIX_REQUIRE_TOOLING)'
 
 ## test-bd-cli-contract: run only Gas City's external bd CLI compatibility contract.
 ## Keep this separate from hermetic Tier A so each supported bd version can run
