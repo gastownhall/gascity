@@ -595,6 +595,59 @@ func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
 	}
 }
 
+// TestEnqueueDeferredSubmitLockedTrustsPassedDispatcherHosting is the
+// regression test for finding 2 of PR #4967 gate report gc-75w2t8:
+// enqueueDeferredSubmitLocked used to call nudgequeue.DispatcherIsHosting
+// itself (a net.DialTimeout("unix", ..., 200ms)) from inside
+// withSessionMutationLock, stalling every other mutation on the same
+// session for up to 200ms against a half-dead wake socket. The fix hoists
+// that dial into submit() before the lock is acquired and threads the
+// result in as the dispatcherHosting parameter. No wake socket is stood up
+// in this test at all — if enqueueDeferredSubmitLocked ever re-introduced
+// its own dial, DispatcherIsHosting would report false regardless of the
+// argument, and the dispatcherHosting=true case below would fail because
+// the poller would start despite the caller asserting a dispatcher is
+// hosting.
+func TestEnqueueDeferredSubmitLockedTrustsPassedDispatcherHosting(t *testing.T) {
+	for _, hosting := range []bool{true, false} {
+		t.Run(fmt.Sprintf("hosting=%v", hosting), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			cityPath := t.TempDir()
+			mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			b, err := store.Get(info.ID)
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+
+			var pollerCalls int
+			origPoller := startSessionSubmitPoller
+			startSessionSubmitPoller = func(_, _, _ string) error {
+				pollerCalls++
+				return nil
+			}
+			defer func() { startSessionSubmitPoller = origPoller }()
+
+			if err := mgr.enqueueDeferredSubmitLocked(b, info.SessionName, "follow up later", hosting); err != nil {
+				t.Fatalf("enqueueDeferredSubmitLocked: %v", err)
+			}
+
+			wantPollerCalls := 0
+			if !hosting {
+				wantPollerCalls = 1
+			}
+			if pollerCalls != wantPollerCalls {
+				t.Fatalf("pollerCalls = %d, want %d for dispatcherHosting=%v; the passed-in value must gate the poller directly, with no independent dial inside enqueueDeferredSubmitLocked", pollerCalls, wantPollerCalls, hosting)
+			}
+		})
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")
