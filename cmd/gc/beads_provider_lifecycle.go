@@ -872,7 +872,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		if err := syncManagedDoltPortMirrors(cityPath); err != nil {
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
-		if err := initAndHookDirWaitForScopeReady(dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
+		if err := initAndHookDirWaitForScopeReady(context.Background(), dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
 			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
 		}
 		// Strong post-init validation: confirm the canonical database
@@ -1973,10 +1973,10 @@ type healthyManagedRuntimePublicationDeps struct {
 	currentPort     func(string) string
 	lifecycleOwned  func(string) (bool, error)
 	publishIfOwned  func(string) error
-	waitScopesReady func(string, time.Duration) error
+	waitScopesReady func(context.Context, string, time.Duration) error
 }
 
-func reconcileHealthyManagedRuntimePublication(cityPath string, waitForScopes bool, deps healthyManagedRuntimePublicationDeps) error {
+func reconcileHealthyManagedRuntimePublication(ctx context.Context, cityPath string, waitForScopes bool, deps healthyManagedRuntimePublicationDeps) error {
 	if deps.currentPort(cityPath) != "" {
 		return nil
 	}
@@ -1991,7 +1991,7 @@ func reconcileHealthyManagedRuntimePublication(cityPath string, waitForScopes bo
 		return fmt.Errorf("healthy but failed to publish managed dolt runtime state: %w", err)
 	}
 	if waitForScopes {
-		if err := deps.waitScopesReady(cityPath, 10*time.Second); err != nil {
+		if err := deps.waitScopesReady(ctx, cityPath, 10*time.Second); err != nil {
 			return fmt.Errorf("healthy but store not ready after publishing managed dolt runtime state: %w", err)
 		}
 	}
@@ -2062,6 +2062,9 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 			return err
 		}
 		defer release()
+		// The readiness waits below re-check any provider-owned scope, which takes
+		// this same slot. Tell them it is already held.
+		ctx = withHeldProviderSemaphore(ctx, cityPath)
 
 		script := strings.TrimPrefix(provider, "exec:")
 		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
@@ -2104,7 +2107,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				return fmt.Errorf("recovered but failed to publish managed dolt runtime state: %w", pubErr)
 			}
 			if waitForScopes {
-				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(cityPath, 10*time.Second); waitErr != nil {
+				if waitErr := waitForAllBeadsScopesReadyAfterRecovery(ctx, cityPath, 10*time.Second); waitErr != nil {
 					return fmt.Errorf("recovered but store not ready: %w", waitErr)
 				}
 			}
@@ -2115,7 +2118,7 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				publishIfOwned:  publishManagedDoltRuntimeStateIfOwned,
 				waitScopesReady: waitForAllBeadsScopesReadyAfterRecovery,
 			}
-			if err := reconcileHealthyManagedRuntimePublication(cityPath, waitForScopes, deps); err != nil {
+			if err := reconcileHealthyManagedRuntimePublication(ctx, cityPath, waitForScopes, deps); err != nil {
 				return err
 			}
 		}
@@ -2124,9 +2127,9 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	return nil // file: always healthy
 }
 
-func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Duration) error {
+func waitForAllBeadsScopesReadyAfterRecovery(ctx context.Context, cityPath string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	if err := waitForBeadsScopeReadyAfterRecovery(cityPath, cityPath, deadline); err != nil {
+	if err := waitForBeadsScopeReadyAfterRecovery(ctx, cityPath, cityPath, deadline); err != nil {
 		return err
 	}
 	// Use the full config load (site-binding overlay applied) so
@@ -2142,18 +2145,21 @@ func waitForAllBeadsScopesReadyAfterRecovery(cityPath string, timeout time.Durat
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		if err := waitForBeadsScopeReadyAfterRecovery(resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
+		if err := waitForBeadsScopeReadyAfterRecovery(ctx, resolveStoreScopeRoot(cityPath, rig.Path), cityPath, deadline); err != nil {
 			return fmt.Errorf("rig %q store not ready: %w", rig.Name, err)
 		}
 	}
 	return nil
 }
 
-func waitForBeadsScopeReadyAfterRecovery(scopeRoot, cityPath string, deadline time.Time) error {
+// waitForBeadsScopeReadyAfterRecovery confirms one scope is serving again. It
+// takes the caller's context so a provider-owned scope's readiness op can see
+// that the city's lifecycle slot is already held by the recovery it belongs to.
+func waitForBeadsScopeReadyAfterRecovery(ctx context.Context, scopeRoot, cityPath string, deadline time.Time) error {
 	if owned, err := scopeProviderOwned(cityPath, scopeRoot); err != nil {
 		return err
 	} else if owned {
-		return runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, scopeRoot, "health")
+		return runProviderOwnedScopeLifecycleOpContext(ctx, cityPath, scopeRoot, "health")
 	}
 	if scopeUsesProxiedDoltMode(cityPath, scopeRoot) || (!scopeOverridesCityBackend(cityPath, scopeRoot) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
 		return nil
@@ -3612,6 +3618,29 @@ func runtimeEnvEntriesToMap(environ []string) map[string]string {
 	return out
 }
 
+// providerSemaphoreHolder marks a context as already holding one city's
+// lifecycle slot. The slot is a cap-1 channel with no reentrancy of its own, so
+// a nested acquire for the same city cannot be granted: it blocks until its own
+// budget expires and then reports a queueing failure for work its own holder is
+// in the middle of. A legacy city's health ran into exactly that when one of its
+// rigs was provider-owned — the post-recover readiness re-check takes the slot
+// health is holding — and reported the store not ready 60s after the managed
+// server had come back.
+type providerSemaphoreHolder struct{ city string }
+
+// withHeldProviderSemaphore records the slot the caller just took, for the
+// lifetime of the release it is deferring.
+func withHeldProviderSemaphore(ctx context.Context, cityPath string) context.Context {
+	return context.WithValue(ctx, providerSemaphoreHolder{normalizePathForCompare(cityPath)}, struct{}{})
+}
+
+func holdsProviderSemaphore(ctx context.Context, cityPath string) bool {
+	if ctx == nil {
+		return false
+	}
+	return ctx.Value(providerSemaphoreHolder{normalizePathForCompare(cityPath)}) != nil
+}
+
 // acquireProviderSemaphore returns a per-city semaphore channel and waits
 // until a slot is available or ctx is canceled. Call the returned function to
 // release. Semaphore entries intentionally live for the process lifetime:
@@ -3624,6 +3653,12 @@ func runtimeEnvEntriesToMap(environ []string) map[string]string {
 // dolt on restart.
 func acquireProviderSemaphore(ctx context.Context, cityPath string) (func(), error) {
 	cityPath = normalizePathForCompare(cityPath)
+	if holdsProviderSemaphore(ctx, cityPath) {
+		// The slot is already this caller's. Queueing behind itself can only end
+		// at the deadline, and releasing on the way out would hand the slot to a
+		// waiter while the outer operation is still running.
+		return func() {}, nil
+	}
 	v, _ := providerOpSemaphores.LoadOrStore(cityPath, make(chan struct{}, 1))
 	sem := v.(chan struct{})
 	select {

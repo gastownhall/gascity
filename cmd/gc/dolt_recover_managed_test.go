@@ -3,11 +3,15 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestRecoverManagedDoltExistingObserveTimeout(t *testing.T) {
@@ -142,6 +146,50 @@ func TestManagedDoltLifecycleOwnedDefersToProviderScopeOwnership(t *testing.T) {
 	}
 	if _, err := managedDoltLifecycleOwned(city); err == nil || !strings.Contains(err.Error(), "provider scope ownership") {
 		t.Fatalf("corrupt provider ownership journal error = %v, want fail-closed ownership error", err)
+	}
+}
+
+// TestManagedDoltLifecycleOwnedDefersToAnUnjournaledProxiedBinding covers the
+// shape `gc beads city migrate-proxied` leaves behind: bd's proxied binding and
+// no journal record, because the migration deliberately journals nothing. Asking
+// the journal alone called that city gc-managed, so the controller forked a
+// provider health op for the city and every rig on every reconcile tick while a
+// freshly journaled proxied city — the default topology — got none.
+func TestManagedDoltLifecycleOwnedDefersToAnUnjournaledProxiedBinding(t *testing.T) {
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"migrated\"\n\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(city, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contract.EnsureCanonicalMetadata(fsys.OSFS{}, filepath.Join(city, ".beads", "metadata.json"), contract.MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "proxied-server",
+		DoltDatabase: "hq",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(providerScopeOwnershipPath(city)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture journaled ownership: %v", err)
+	}
+	if owned, err := cityScopeProviderOwned(city); err != nil || !owned {
+		t.Fatalf("cityScopeProviderOwned = (%t, %v), want the binding classified as provider-owned", owned, err)
+	}
+	if owned, err := managedDoltLifecycleOwned(city); err != nil || owned {
+		t.Fatalf("managedDoltLifecycleOwned = (%t, %v), want (false, nil)", owned, err)
+	}
+
+	// The tick consequence: no provider health fan-out for a city gc does not
+	// own the Dolt runtime of.
+	var health int
+	ensureManagedDoltPublishedForRuntime(city, io.Discard, "test", func(string) error {
+		health++
+		return nil
+	}, managedDoltLifecycleOwned, func(string) string { return "" })
+	if health != 0 {
+		t.Fatalf("controller ran %d provider health ops for a bd-owned proxied city, want 0", health)
 	}
 }
 

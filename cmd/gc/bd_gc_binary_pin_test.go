@@ -31,16 +31,39 @@ func stubRemovedGCExecutable(t *testing.T) string {
 // managed Dolt server unstopped — until the process restarts.
 func TestLegacyBdRunnersSurviveARemovedGCExecutable(t *testing.T) {
 	removed := stubRemovedGCExecutable(t)
+	ambientPath := os.Getenv("PATH")
 	if _, err := resolveBdInvokingGCBinary(); err == nil {
 		t.Fatal("fixture did not make the strict resolver fail")
 	}
 
+	// With no gc left to run, the fallback must decline rather than hand the bd
+	// script the path the strict resolver just proved gone: gc-beads-bd.sh takes
+	// any non-empty GC_BIN as authoritative and dies when the exec fails, so a
+	// dead pin turns recover into a stop that never restarts the managed Dolt.
+	// Only an empty GC_BIN reaches the script's shell-native fallbacks.
+	t.Setenv("PATH", t.TempDir())
+	if fallback := bestEffortInvokingGCBinary(); fallback != "" {
+		t.Fatalf("bestEffortInvokingGCBinary = %q, want no pin at all (removed %q)", fallback, removed)
+	}
 	env := map[string]string{"BEADS_DIR": "/tmp/x/.beads"}
 	pinBdGCEnvironmentBestEffort(env)
-	if env["GC_BIN"] != removed {
-		t.Fatalf("GC_BIN = %q, want the un-canonicalized absolute path %q", env["GC_BIN"], removed)
+	if got, pinned := env["GC_BIN"]; pinned {
+		t.Fatalf("GC_BIN = %q, want it left for the environment to answer", got)
 	}
 
+	// A gc that does still exist is worth pinning.
+	onPath := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(onPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(onPath))
+	env = map[string]string{}
+	pinBdGCEnvironmentBestEffort(env)
+	if env["GC_BIN"] != onPath {
+		t.Fatalf("GC_BIN = %q, want the gc still installed on PATH %q", env["GC_BIN"], onPath)
+	}
+
+	t.Setenv("PATH", ambientPath)
 	city := t.TempDir()
 	runner := bdCommandRunnerWithManagedRetryErr(city, func(dir string) (map[string]string, error) {
 		return map[string]string{"BEADS_DIR": filepath.Join(dir, ".beads")}, nil

@@ -12053,6 +12053,69 @@ func TestAcquireProviderSemaphoreHonorsContextDeadline(t *testing.T) {
 	}
 }
 
+// TestOwnedScopeReadinessDoesNotQueueBehindItsOwnHealthSlot pins the lock
+// discipline of the composition healthBeadsProviderContext runs for a legacy
+// city: it takes the city's single lifecycle slot for the whole health
+// operation, then re-checks every scope's readiness under it. A provider-owned
+// scope's readiness op takes the same slot, so it used to queue behind its own
+// caller and only give up at the 60s proxied budget — reporting the store not
+// ready for a server that had just come back.
+func TestOwnedScopeReadinessDoesNotQueueBehindItsOwnHealthSlot(t *testing.T) {
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "repo")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "provider-ops")
+	script := filepath.Join(city, "provider.sh")
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s:%%s\\n' \"$1\" \"$BEADS_DIR\" >> %q\n", logPath)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"held-slot\"\n[beads]\nprovider = \"exec:" + script + "\"\n" +
+		"[[rigs]]\nname = \"repo\"\npath = \"rigs/repo\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{city, rig} {
+		if err := persistProviderScopeOwnership(city, scope, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := markProviderScopeOwnershipReady(city, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	release, err := acquireProviderSemaphoreForOpContext(context.Background(), city, "health")
+	if err != nil {
+		t.Fatalf("acquireProviderSemaphoreForOpContext: %v", err)
+	}
+	defer release()
+	ctx := withHeldProviderSemaphore(context.Background(), city)
+
+	done := make(chan error, 1)
+	go func() { done <- waitForAllBeadsScopesReadyAfterRecovery(ctx, city, 10*time.Second) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitForAllBeadsScopesReadyAfterRecovery: %v", err)
+		}
+	case <-time.After(providerOwnedProxiedOpMinTimeout / 2):
+		t.Fatal("scope readiness queued behind the lifecycle slot its own caller holds")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"health:" + filepath.Join(city, ".beads"),
+		"health:" + filepath.Join(rig, ".beads"),
+	}
+	if got := strings.Fields(string(data)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("readiness ops = %#v, want %#v", got, want)
+	}
+}
+
 func TestEnsureBeadsProviderSerializesConcurrentExecStarts(t *testing.T) {
 	cityPath := t.TempDir()
 	script := filepath.Join(cityPath, "provider.sh")
