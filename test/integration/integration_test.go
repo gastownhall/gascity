@@ -41,6 +41,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"golang.org/x/mod/modfile"
 )
 
 // gcBinary is the path to the built gc binary, set by TestMain.
@@ -449,14 +450,66 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	return version, nil
 }
 
+// declaredBeadsModuleVersion returns the version go.mod's own require
+// directive declares for github.com/steveyegge/beads, independent of
+// pinnedIntegrationBeadsModuleVersion's `go list -m` resolution. Comparing
+// the two catches the declared pin drifting from the version the module
+// graph actually selects — e.g. an MVS upgrade pulled in by another
+// dependency — while a reviewed go.mod pin bump stays in sync automatically
+// instead of leaving this test stale. It cannot see a replace directive;
+// beadsModuleReplacement below covers that.
+func declaredBeadsModuleVersion() (string, error) {
+	path := filepath.Join(findModuleRoot(), "go.mod")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	modFile, err := modfile.Parse(path, data, nil)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	for _, req := range modFile.Require {
+		if req.Mod.Path == "github.com/steveyegge/beads" {
+			return req.Mod.Version, nil
+		}
+	}
+	return "", fmt.Errorf("github.com/steveyegge/beads not found in %s require directives", path)
+}
+
+// beadsModuleReplacement returns the replacement `go list -m` resolves for
+// github.com/steveyegge/beads, or "" when none is in effect. This has to be
+// read from .Replace: `go list -m -f '{{.Version}}'` reports the
+// require-directive version even when the module is replaced, so a replace
+// is invisible to the declared-vs-resolved comparison above.
+func beadsModuleReplacement() (string, error) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{with .Replace}}{{.Path}}@{{.Version}}{{end}}", "github.com/steveyegge/beads")
+	cmd.Dir = findModuleRoot()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve github.com/steveyegge/beads replacement: %w\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.3.0-rc.2"
+	want, err := declaredBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("declaredBeadsModuleVersion() error = %v", err)
+	}
 	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q (declared in go.mod)", version, want)
+	}
+
+	replacement, err := beadsModuleReplacement()
+	if err != nil {
+		t.Fatalf("beadsModuleReplacement() error = %v", err)
+	}
+	if replacement != "" {
+		t.Errorf("github.com/steveyegge/beads is replaced by %q; the integration suite builds bd with `go install ...@version`, which ignores replace directives", replacement)
 	}
 }
 
