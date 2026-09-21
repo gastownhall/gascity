@@ -1,6 +1,8 @@
 package contract
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,5 +124,73 @@ func TestResolveDoltConnectionTargetPrefersLiveLocalServerOverExternalMarker(t *
 	}
 	if target.Port != port || target.External {
 		t.Fatalf("target = %+v, want the live local server on %s", target, port)
+	}
+}
+
+// closedLoopbackPort returns a loopback port nothing listens on: the port bd
+// recorded for a server on the day a scope was initialized, after gc has
+// since restarted that server somewhere else.
+func closedLoopbackPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+// bd 1.3.0's `init --server` records whichever server it was pointed at in the
+// scope's metadata, including the one gc manages, so a gc-managed rig carries
+// a binding naming the port gc's server had on the day the rig was
+// initialized. gc brings that server back on a fresh port every start and the
+// record does not follow. gc's own canonical `gc.endpoint_origin:
+// inherited_city` marker says the endpoint is gc's to resolve: the city's live
+// runtime outranks the stale record, exactly as a gc-canonical managed city
+// keeps its runtime over a binding.
+func TestResolveDoltConnectionTargetInheritedManagedRigIgnoresStaleBdBinding(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	rig := filepath.Join(t.TempDir(), "frontend")
+	writeCanonicalConfig(t, fs, rig, ConfigState{
+		IssuePrefix:    "fe",
+		EndpointOrigin: EndpointOriginInheritedCity,
+		EndpointStatus: EndpointStatusVerified,
+	})
+	stalePort := closedLoopbackPort(t)
+	writeRawMetadata(t, fs, rig, fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+		`"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"fe"}`, stalePort))
+	port := writeReachableRuntimeState(t, fs, city)
+
+	target, err := ResolveDoltConnectionTarget(fs, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() on a gc-canonical inherited rig: %v", err)
+	}
+	if target.External || target.Host != "127.0.0.1" || target.Port != port || target.Database != "fe" {
+		t.Fatalf("target = %+v, want the city's live managed runtime on 127.0.0.1:%s, not bd's stale record on %d", target, port, stalePort)
+	}
+}
+
+// The mirror image: a rig gc never canonicalised is bd's, and its own binding
+// is the whole record of where its beads live. It outranks the city's managed
+// server, where that rig's database does not exist.
+func TestResolveDoltConnectionTargetBdOwnedRigBindingOutranksCityRuntime(t *testing.T) {
+	fs := fsys.OSFS{}
+	city := t.TempDir()
+	rig := filepath.Join(t.TempDir(), "frontend")
+	writeBdTemplateConfig(t, fs, rig, "fe")
+	writeRawMetadata(t, fs, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+		`"dolt_server_host":"db.example","dolt_server_port":4406,"dolt_database":"fe"}`)
+	writeReachableRuntimeState(t, fs, city)
+
+	target, err := ResolveDoltConnectionTarget(fs, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget() on a bd-owned rig: %v", err)
+	}
+	if !target.External || target.Host != "db.example" || target.Port != "4406" || target.Database != "fe" {
+		t.Fatalf("target = %+v, want the rig's own binding db.example:4406", target)
 	}
 }

@@ -139,6 +139,11 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	// scope bd owns — so it is the discriminator the bd-owned fallbacks below
 	// need. See the EndpointOriginManagedCity arm below.
 	gcCanonicalManagedCity := ok && cfg.EndpointOrigin == EndpointOriginManagedCity
+	// The same discriminator for a rig. gc writes `gc.endpoint_origin:
+	// inherited_city` only into a rig whose endpoint it resolves from the city
+	// it manages; a rig bd owns keeps bd's own config.yaml. See
+	// resolveInheritedCityConnectionTarget for what it decides.
+	gcCanonicalInheritedRig := ok && cfg.EndpointOrigin == EndpointOriginInheritedCity
 	cfg = deriveLegacyConnectionConfig(fs, cityRoot, scopeRoot, cfg)
 	if err := ValidateConnectionConfigState(fs, cityRoot, scopeRoot, cfg); err != nil {
 		return DoltConnectionTarget{}, err
@@ -222,7 +227,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
 		return populateExternalTarget(target, cfg)
 	case EndpointOriginInheritedCity:
-		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg)
+		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg, gcCanonicalInheritedRig)
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
@@ -672,17 +677,26 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return derived
 }
 
-func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState) (DoltConnectionTarget, error) {
+func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState, gcCanonicalRig bool) (DoltConnectionTarget, error) {
 	// A rig whose store bd owns carries its own binding, so that binding
 	// outranks anything inherited. Without this a bd-owned direct rig resolves
 	// to the city's server, where its database does not exist.
 	if port, ok := readProviderOwnedServerPort(fs, scopeRoot); ok {
 		return localServerTarget(target, port), nil
 	}
-	if resolved, ok, err := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); err != nil {
-		return DoltConnectionTarget{}, err
-	} else if ok {
-		return resolved, nil
+	// bd's persisted binding is the whole upstream for a rig bd owns and a
+	// stale copy of gc's own server for a rig gc canonicalised: bd 1.3.0's
+	// `init --server` records whichever server it was pointed at, gc's managed
+	// server included, and gc brings that server back on a fresh port every
+	// start. Only gc writes the inherited_city marker, so a rig carrying it
+	// resolves through the city's live runtime and fails closed without one,
+	// exactly as a gc-canonical managed city keeps its runtime over a binding.
+	if !gcCanonicalRig {
+		if resolved, ok, err := bdExternalBindingTarget(fs, cityRoot, scopeRoot, target); err != nil {
+			return DoltConnectionTarget{}, err
+		} else if ok {
+			return resolved, nil
+		}
 	}
 	cityState, err := resolveCityTopologyState(fs, cityRoot)
 	if err != nil {
