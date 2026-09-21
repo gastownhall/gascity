@@ -337,6 +337,29 @@ func ArgvNamesRoot(argv []string, root string) bool {
 	return pathutil.SamePath(value, root)
 }
 
+// ArgvMentionsRoot reports whether ANY --root occurrence in argv resolves to
+// this root, comparing symlink-resolved as ArgvNamesRoot does.
+//
+// It is the protection question's spelling of the same test, and it is
+// deliberately wider than the admission one. ArgvNamesRoot answers "which root
+// is this process serving", so it takes the value a flag parser would take — the
+// last occurrence. Protection asks "could killing this process kill bd's proxy
+// for this root", and for that any mention is enough: a repeated flag is a shape
+// bd 1.3.0 does not emit, so a process carrying one is a process gc cannot
+// explain, and an unexplained process that names this root must not be reaped.
+func ArgvMentionsRoot(argv []string, root string) bool {
+	root = pathutil.NormalizePathForCompare(root)
+	if root == "" {
+		return false
+	}
+	for _, value := range argvFlagValues(argv, RootFlag) {
+		if value != "" && pathutil.SamePath(value, root) {
+			return true
+		}
+	}
+	return false
+}
+
 // ArgvIdlePolicy extracts the supervisor's effective idle window from its argv.
 //
 // This is the authoritative value for a live proxy: bd resolves the sidecar and
@@ -360,14 +383,25 @@ func ArgvIdlePolicy(argv []string) IdlePolicy {
 // value` and `--flag=value`. The last occurrence wins, which is what a flag
 // parser does with a repeated flag.
 func argvFlagValue(argv []string, flag string) (string, bool) {
-	value, found := "", false
+	values := argvFlagValues(argv, flag)
+	if len(values) == 0 {
+		return "", false
+	}
+	return values[len(values)-1], true
+}
+
+// argvFlagValues returns every value flag carries in argv, in order, accepting
+// both `--flag value` and `--flag=value`. A trailing bare flag with no value is
+// not an occurrence: there is nothing to compare.
+func argvFlagValues(argv []string, flag string) []string {
+	var values []string
 	for i, arg := range argv {
 		switch {
 		case arg == flag && i+1 < len(argv):
-			value, found = argv[i+1], true
+			values = append(values, argv[i+1])
 		case strings.HasPrefix(arg, flag+"="):
-			value, found = strings.TrimPrefix(arg, flag+"="), true
+			values = append(values, strings.TrimPrefix(arg, flag+"="))
 		}
 	}
-	return value, found
+	return values
 }

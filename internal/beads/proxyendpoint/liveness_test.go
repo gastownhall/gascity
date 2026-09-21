@@ -414,3 +414,71 @@ func TestCheckLivenessWithoutAProcessTable(t *testing.T) {
 		t.Fatalf("Inspect with no process table = %v, want undetermined", ep.Verdict)
 	}
 }
+
+// TestArgvMentionsRootAcceptsAnyOccurrence pins the one place the protection
+// question is deliberately wider than the admission one.
+//
+// A flag parser takes the last occurrence, and ArgvNamesRoot must agree with the
+// parser because it answers which root a process is serving. Protection answers
+// whether killing this process could kill bd's proxy for this root, and a
+// repeated --root is a shape bd does not emit — so it describes a process gc
+// cannot explain, and an unexplained process naming this root must survive.
+func TestArgvMentionsRootAcceptsAnyOccurrence(t *testing.T) {
+	const root = "/srv/city/.beads/dolt"
+	cases := []struct {
+		name        string
+		argv        []string
+		wantMention bool
+		wantNames   bool
+	}{
+		{
+			name:        "the single --root bd writes",
+			argv:        []string{"bd", ChildVerb, RootFlag, root},
+			wantMention: true,
+			wantNames:   true,
+		},
+		{
+			name:        "the joined spelling",
+			argv:        []string{"bd", ChildVerb, RootFlag + "=" + root},
+			wantMention: true,
+			wantNames:   true,
+		},
+		{
+			name:        "our root, then an empty override",
+			argv:        []string{"bd", ChildVerb, RootFlag, root, RootFlag + "="},
+			wantMention: true,
+		},
+		{
+			name:        "our root, then somebody else's",
+			argv:        []string{"bd", ChildVerb, RootFlag, root, RootFlag, "/srv/other/.beads/dolt"},
+			wantMention: true,
+		},
+		{
+			name:        "somebody else's root, then ours",
+			argv:        []string{"bd", ChildVerb, RootFlag, "/srv/other/.beads/dolt", RootFlag, root},
+			wantMention: true,
+			wantNames:   true,
+		},
+		{
+			name: "no mention of this root at all",
+			argv: []string{"bd", ChildVerb, RootFlag, "/srv/other/.beads/dolt"},
+		},
+		{
+			name: "a trailing bare --root names nothing",
+			argv: []string{"bd", ChildVerb, RootFlag},
+		},
+		{
+			name: "no argv at all",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ArgvMentionsRoot(tc.argv, root); got != tc.wantMention {
+				t.Errorf("ArgvMentionsRoot = %v, want %v", got, tc.wantMention)
+			}
+			if got := ArgvNamesRoot(tc.argv, root); got != tc.wantNames {
+				t.Errorf("ArgvNamesRoot = %v, want %v", got, tc.wantNames)
+			}
+		})
+	}
+}

@@ -24,8 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -276,6 +278,87 @@ func Read(root string) (Record, error) {
 		return rec, fmt.Errorf("%w at %s: %w", ErrMalformed, PIDPath(root), err)
 	}
 	return rec, nil
+}
+
+// Ownership is the narrow subset of a record that answers a different question
+// from Read's: not "may gc dial this endpoint" but "is this process bd's, so
+// that killing it would kill bd's proxy".
+//
+// It carries two fields because two fields are all that question needs. The
+// proof of ownership is the recorded PID's argv naming bd's supervisor verb and
+// this root, not anything else in the document, so every other field is
+// something a reader can afford not to understand.
+type Ownership struct {
+	// PID is the process the record names.
+	PID int
+	// Kind separates the proxy's own record from the dolt-backend record bd
+	// writes beside it.
+	Kind string
+}
+
+// ReadOwnership decodes only pid and kind, tolerating everything else the
+// document contains.
+//
+// Leniency here is a safety property, not convenience. encoding/json fails a
+// whole decode on a type mismatch in ANY tagged field, so a proxy.pid from a
+// newer bd — birth promoted to an object, schema written as a string, a field
+// nobody here has heard of — would make a strict reader report "no record" and
+// the reaper would then kill a live bd proxy's Dolt child. Killing a proxy is
+// irreversible and dialing one is not, which is why the two questions fail in
+// opposite directions: admission refuses whatever it cannot prove (Read and
+// Validate stay strict), and protection protects whatever it cannot rule out.
+//
+// What it will NOT do is invent a pid or a kind. Without a pid there is no
+// process to check an argv against, and without a readable kind gc cannot tell
+// the proxy's record from its Dolt child's, so both must be present and
+// readable; a numeric pid written as a string is read, because a process that is
+// bd's proxy does not stop being it when its record changes spelling.
+func ReadOwnership(root string) (Ownership, error) {
+	var own Ownership
+	data, err := os.ReadFile(PIDPath(root)) // #nosec G304 -- root is a resolved bd proxy root
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return own, fmt.Errorf("%w at %s", ErrNoProxy, PIDPath(root))
+		}
+		return own, fmt.Errorf("read %s: %w", PIDPath(root), err)
+	}
+	// A map, not a struct: an unknown or retyped field lands in it instead of
+	// failing the decode.
+	fields := map[string]any{}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return own, fmt.Errorf("%w at %s: %w", ErrMalformed, PIDPath(root), err)
+	}
+	kind, ok := fields["kind"].(string)
+	if !ok {
+		return own, &FieldError{Field: "kind", Class: ErrMalformed, Want: "a string"}
+	}
+	own.Kind = kind
+	pid, ok := ownershipPID(fields["pid"])
+	if !ok {
+		return own, &FieldError{Field: "pid", Class: ErrMalformed, Want: "a process id"}
+	}
+	own.PID = pid
+	return own, nil
+}
+
+// ownershipPID reads a pid out of a decoded JSON value, accepting the number bd
+// writes today and a numeric string a later version might.
+func ownershipPID(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		if v != math.Trunc(v) || v < math.MinInt32 || v > math.MaxInt32 {
+			return 0, false
+		}
+		return int(v), true
+	case string:
+		pid, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0, false
+		}
+		return pid, true
+	default:
+		return 0, false
+	}
 }
 
 // RootID is bd's workspace identity for a proxy root: the SHA-256 of the root's

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,77 @@ func TestBdOwnedProxyDoltConfigDecisionTable(t *testing.T) {
 			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
 			want:   true,
 		},
+		// The next block is one input class: a record from a bd newer than this
+		// gc. encoding/json fails a whole decode on a type mismatch in ANY
+		// tagged field, so reading this record through the strict decoder would
+		// report "no record" and unprotect a live proxy over a field the
+		// ownership question never consults — the classifier then falls through
+		// to the test-config-path allowlist and reaps bd's own Dolt child out
+		// from under a real-bd lifecycle test in t.TempDir().
+		{
+			name:   "birth promoted to an object by a newer bd",
+			record: `{"pid":7701,"port":35425,"schema":3,"kind":"db-proxy","birth":{"boot_id":"b","starttime":1}}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+			want:   true,
+		},
+		{
+			name:   "schema written as a string",
+			record: `{"pid":7701,"port":35425,"schema":"2","kind":"db-proxy"}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+			want:   true,
+		},
+		{
+			name:   "control_port written as a string",
+			record: `{"pid":7701,"port":35425,"schema":2,"kind":"db-proxy","control_port":"46445"}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+			want:   true,
+		},
+		{
+			name:   "upstream_id written as a number",
+			record: `{"pid":7701,"port":35425,"schema":2,"kind":"db-proxy","upstream_id":42}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+			want:   true,
+		},
+		{
+			name:   "fields this gc has never heard of",
+			record: `{"pid":7701,"schema":4,"kind":"db-proxy","lease":{"epoch":3},"tags":["a","b"]}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+			want:   true,
+		},
+		{
+			// A pid gc cannot read is no process to check an argv against, so
+			// there is nothing here to protect and nothing to guess.
+			name:   "a pid gc cannot read at all",
+			record: `{"pid":{"value":7701},"schema":2,"kind":"db-proxy"}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+		},
+		{
+			// And without a readable kind gc cannot tell the proxy's own record
+			// from the dolt-backend record bd writes beside it.
+			name:   "a kind gc cannot read at all",
+			record: `{"pid":7701,"schema":2,"kind":{"name":"db-proxy"}}`,
+			argv:   func(root string) []string { return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root} },
+		},
+		// A repeated --root is a shape bd 1.3.0 does not emit, so a process
+		// carrying one is a process gc cannot explain. Protection takes any
+		// occurrence; the admission reader still takes the one a flag parser
+		// would take.
+		{
+			name:   "our root, then an empty --root override",
+			record: `{"pid":7701,"schema":2,"kind":"db-proxy"}`,
+			argv: func(root string) []string {
+				return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root, "--root="}
+			},
+			want: true,
+		},
+		{
+			name:   "our root, then somebody else's",
+			record: `{"pid":7701,"schema":2,"kind":"db-proxy"}`,
+			argv: func(root string) []string {
+				return []string{"/usr/local/bin/bd", "db-proxy-child", "--root", root, "--root", "/somewhere/else"}
+			},
+			want: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -191,5 +263,19 @@ func TestReaperProofIsNarrowerThanEndpointAdmission(t *testing.T) {
 	}
 	if _, ok := bdOwnedProxyDoltConfig(configPath); !ok {
 		t.Fatal("the reaper stopped protecting a live bd proxy whose record admission refuses; an unreapable-process guard must not inherit a dial gate's strictness")
+	}
+
+	// The same boundary for the record a NEWER bd could publish: the strict
+	// decoder cannot read it at all, and the reaper still must not kill the
+	// process it names.
+	newer := fmt.Sprintf(`{"pid":%d,"port":35425,"schema":3,"kind":"db-proxy","birth":{"boot_id":"b","starttime":1}}`, pid)
+	if err := os.WriteFile(filepath.Join(root, "proxy.pid"), []byte(newer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := proxyendpoint.Read(root); !errors.Is(err, proxyendpoint.ErrMalformed) {
+		t.Fatalf("the strict reader accepted a retyped birth (%v); this test's premise is gone", err)
+	}
+	if _, ok := bdOwnedProxyDoltConfig(configPath); !ok {
+		t.Fatal("the reaper unprotected a live bd proxy because a field it never reads changed type; a process gc cannot identify well enough to talk to is still a process gc must not kill")
 	}
 }

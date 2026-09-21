@@ -278,6 +278,125 @@ func TestValidateAcceptsASymlinkedRootSpelling(t *testing.T) {
 	}
 }
 
+// TestReadOwnershipToleratesFieldsItDoesNotRead pins the protect-side read
+// against the shapes a later bd could publish.
+//
+// Every row here is a document the strict reader refuses, and the point of each
+// is that refusing it would unprotect a live proxy over a field the ownership
+// question never consults. encoding/json fails the whole decode on a type
+// mismatch in any tagged field, so this is not a hypothetical: bd documents its
+// birth token as platform-specific, and promoting it to an object is an ordinary
+// thing for a minor release to do.
+func TestReadOwnershipToleratesFieldsItDoesNotRead(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		wantID int
+		// strictRefuses says the strict reader must reject this same document,
+		// which is what makes the two questions genuinely different.
+		strictRefuses bool
+	}{
+		{
+			name:   "the record bd 1.3.0 writes",
+			body:   `{"pid":7701,"port":35425,"upstream_id":"u","schema":2,"kind":"db-proxy","birth":"linux-v1:boot:1","root_id":"abc","control_port":46445}`,
+			wantID: 7701,
+		},
+		{
+			name:          "birth promoted to an object",
+			body:          `{"pid":7701,"port":35425,"schema":3,"kind":"db-proxy","birth":{"boot_id":"b","starttime":1}}`,
+			wantID:        7701,
+			strictRefuses: true,
+		},
+		{
+			name:          "schema written as a string",
+			body:          `{"pid":7701,"port":35425,"schema":"2","kind":"db-proxy"}`,
+			wantID:        7701,
+			strictRefuses: true,
+		},
+		{
+			name:          "control_port written as a string",
+			body:          `{"pid":7701,"port":35425,"schema":2,"kind":"db-proxy","control_port":"46445"}`,
+			wantID:        7701,
+			strictRefuses: true,
+		},
+		{
+			name:          "upstream_id written as a number",
+			body:          `{"pid":7701,"port":35425,"schema":2,"kind":"db-proxy","upstream_id":42}`,
+			wantID:        7701,
+			strictRefuses: true,
+		},
+		{
+			name:   "fields this version has never heard of",
+			body:   `{"pid":7701,"schema":4,"kind":"db-proxy","lease":{"epoch":3},"tags":["a","b"]}`,
+			wantID: 7701,
+		},
+		{
+			name:          "a pid written as a string still names a process",
+			body:          `{"pid":"7701","schema":2,"kind":"db-proxy"}`,
+			wantID:        7701,
+			strictRefuses: true,
+		},
+		{
+			// No pid is no process to check an argv against, so there is
+			// nothing to protect and nothing to guess.
+			name:          "a pid gc cannot read at all",
+			body:          `{"pid":{"value":7701},"schema":2,"kind":"db-proxy"}`,
+			strictRefuses: true,
+		},
+		{
+			// Without a readable kind gc cannot tell the proxy's own record
+			// from its Dolt child's.
+			name:          "a kind gc cannot read at all",
+			body:          `{"pid":7701,"schema":2,"kind":{"name":"db-proxy"}}`,
+			strictRefuses: true,
+		},
+		{
+			name:          "not JSON at all",
+			body:          "not json",
+			strictRefuses: true,
+		},
+		{
+			name:          "a JSON document that is not an object",
+			body:          `[{"pid":7701,"kind":"db-proxy"}]`,
+			strictRefuses: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(PIDPath(dir), []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			own, err := ReadOwnership(dir)
+			switch {
+			case tc.wantID == 0 && err == nil:
+				t.Fatalf("ReadOwnership accepted %s", tc.body)
+			case tc.wantID == 0:
+				// Nothing more to assert: the reaper protects nothing here.
+			case err != nil:
+				t.Fatalf("ReadOwnership(%s) = %v; a field the ownership question never reads must not unprotect a live proxy", tc.body, err)
+			case own.PID != tc.wantID || own.Kind != RecordKind:
+				t.Fatalf("ReadOwnership = %+v, want pid %d kind %s", own, tc.wantID, RecordKind)
+			}
+			_, strictErr := Read(dir)
+			if tc.strictRefuses && strictErr == nil {
+				t.Fatalf("the strict reader accepted %s; this row's premise is gone", tc.body)
+			}
+			if !tc.strictRefuses && strictErr != nil {
+				t.Fatalf("the strict reader refused %s: %v", tc.body, strictErr)
+			}
+		})
+	}
+
+	t.Run("an absent record is still ErrNoProxy", func(t *testing.T) {
+		_, err := ReadOwnership(t.TempDir())
+		if !errors.Is(err, ErrNoProxy) {
+			t.Fatalf("ReadOwnership with no record = %v, want ErrNoProxy", err)
+		}
+	})
+}
+
 // TestProviderRootMirrorsBdDoltDirResolution states the whole resolution as one
 // table, because every arm of it is a directory gc would look for proxy.pid in.
 //

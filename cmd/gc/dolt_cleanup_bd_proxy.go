@@ -25,6 +25,12 @@ import (
 // reap bd's proxy" — and that answer has to stay yes for a record too old or
 // too sparse to dial, because a process gc cannot identify well enough to talk
 // to is still a process gc must not kill.
+//
+// That is also why it reads the record through proxyendpoint.ReadOwnership
+// rather than Read: encoding/json fails a whole decode on a type mismatch in
+// ANY field, so a proxy.pid from a newer bd — birth promoted to an object,
+// schema written as a string — would read as "no record" through the strict
+// decoder and unprotect a live proxy over a field the reaper never consults.
 const bdProxyConfigFileName = proxyendpoint.ConfigFileName
 
 // bdProxyPIDAlive and bdProxyProcessArgv are the process-table reads that
@@ -86,7 +92,7 @@ func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 		return 0, false
 	}
 	root := filepath.Dir(filepath.Clean(configPath))
-	record, err := proxyendpoint.Read(root)
+	record, err := proxyendpoint.ReadOwnership(root)
 	if err != nil {
 		return 0, false
 	}
@@ -97,7 +103,7 @@ func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 		return 0, false
 	}
 	argv, err := bdProxyProcessArgv(record.PID)
-	if err != nil || !proxyendpoint.ArgvRunsChild(argv) || !proxyendpoint.ArgvNamesRoot(argv, root) {
+	if err != nil || !proxyendpoint.ArgvRunsChild(argv) || !proxyendpoint.ArgvMentionsRoot(argv, root) {
 		return 0, false
 	}
 	return record.PID, true
