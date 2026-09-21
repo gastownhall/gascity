@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -1036,5 +1037,215 @@ func TestGcBeadsBdScriptDocumentsSchemaSettleTimeoutOverride(t *testing.T) {
 	}
 	if !strings.Contains(waitForSchema, "120000") {
 		t.Fatalf("wait_for_bd_runtime_schema does not default the hard cap to >=120s (120000ms), the minimum the exit contract requires:\n%s", waitForSchema)
+	}
+}
+
+// TestGcBeadsBdInitConcurrentInvocationsDoNotBothForceReinit drives two real
+// op_init invocations against the same target Dolt database concurrently, as
+// separate OS processes, rather than the single-process call-counter
+// sequencing every other test in this file uses (including
+// TestGcBeadsBdInitRefusesForcedReinitWhenCursorAdvancesBetweenClassificationAndForce
+// above, which closes the gap between op_init's OWN revalidation and its OWN
+// force call within one process). That single-process fix does nothing for
+// this shape of race: nothing today serializes two SEPARATE op_init
+// processes against each other. Each classifies the same, still genuinely
+// empty database as absent, each revalidates against that same still-empty
+// database immediately before forcing, and each proceeds to force — because
+// neither process's revalidation can observe the other process's in-flight
+// force until that force has actually completed and mutated visible state.
+// Two concurrent `bd init --force` calls against one live database is the
+// corruption this whole guard exists to prevent (gastownhall/beads#4566).
+//
+// The two processes' fake dolt binaries share one on-disk "has anything
+// forced yet" marker, so a force by either process becomes visible, as
+// "present", to whichever process next queries after that force lands — the
+// same signal a real Dolt server would give a second initializer once the
+// first's `bd init` has actually created the schema. Pre-fix, both processes
+// still race past that signal: revalidation only re-checks currently visible
+// state, so if neither process's revalidation query happens to land after
+// the other's force, both see "still empty" and both force anyway. Post-fix,
+// a lock around the revalidate-through-force critical section should
+// serialize the two processes so the second one's revalidation cannot run
+// until the first one's force has already landed and mutated the shared
+// marker — at which point the second correctly reads "present" and refuses,
+// and exactly one of the two ever forces.
+//
+// The 150ms sleep in the fake dolt's schema_migrations-existence handler
+// (hit twice per process: once during classification, once during
+// revalidation) is deliberate. Without it, two freshly started OS processes
+// racing through a handful of stubbed, near-instant queries would overlap
+// only by luck, making the test flaky in either direction — including
+// "passing" pre-fix for the wrong reason, if process B never gets far enough
+// to query anything until after process A has already finished and forced.
+// The sleep widens every dolt round trip enough that both processes are
+// reliably still in-flight, concurrently, through their own classification
+// and revalidation, regardless of OS scheduling jitter — turning a
+// probabilistic race into a deterministic one.
+func TestGcBeadsBdInitConcurrentInvocationsDoNotBothForceReinit(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	sharedDir := t.TempDir()
+	forcedMarker := filepath.Join(sharedDir, "forced")
+	markerA := filepath.Join(sharedDir, "bd-init-ran-a")
+	markerB := filepath.Join(sharedDir, "bd-init-ran-b")
+
+	binDir := filepath.Join(sharedDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every bd init call records its own process's argv (via $INIT_MARKER,
+	// set differently per process below) and marks the shared database as
+	// forced, so a query landing after this point reads "present" no matter
+	// which of the two processes' dolt stub invocations answers it.
+	fakeBd := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1:-}" = "init" ]; then
+  printf '%%s\n' "$@" > "$INIT_MARKER"
+  : > %q
+fi
+exit 0
+`, forcedMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dispatches on the query text following -q, exactly like the other
+	// fakes in this file. Answers reflect "empty" until forcedMarker exists,
+	// then "present" (four tables, a migrations row, a readable config
+	// table) from then on — regardless of which process's stub is asked.
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *"'issues'"*)
+    if [ -e %q ]; then
+      printf 'cnt\n4\n'
+    else
+      printf 'cnt\n0\n'
+    fi
+    exit 0
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    sleep 0.15
+    if [ -e %q ]; then
+      printf 'cnt\n1\n'
+    else
+      printf 'cnt\n0\n'
+    fi
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    printf 'cur\n6\n'
+    exit 0
+    ;;
+  *"FROM config"*)
+    if [ -e %q ]; then
+      exit 0
+    fi
+    echo "table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, forcedMarker, forcedMarker, forcedMarker)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	newCity := func() string {
+		t.Helper()
+		cityPath := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+			[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		materializeBuiltinPacksForTest(t, cityPath)
+		return cityPath
+	}
+	// Separate cities (as two worktrees of the same checkout would have),
+	// but the same target dolt_database ("hq") — the shape that actually
+	// bit the failing job: independent initializers, one shared backing
+	// store.
+	cityA := newCity()
+	cityB := newCity()
+	scriptA := gcBeadsBdScriptPath(cityA)
+	scriptB := gcBeadsBdScriptPath(cityB)
+
+	pathEnv := "PATH=" + strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator))
+
+	newCmd := func(script, cityPath, initMarker string) *exec.Cmd {
+		cmd := exec.Command(script, "init", cityPath, "gc", "hq")
+		cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+			"GC_CITY_PATH="+cityPath,
+			pathEnv,
+			"INIT_MARKER="+initMarker,
+		)...)
+		return cmd
+	}
+
+	cmdA := newCmd(scriptA, cityA, markerA)
+	cmdB := newCmd(scriptB, cityB, markerB)
+	var outA, errA, outB, errB bytes.Buffer
+	cmdA.Stdout, cmdA.Stderr = &outA, &errA
+	cmdB.Stdout, cmdB.Stderr = &outB, &errB
+
+	// Started back-to-back, not sequenced: the sleep inside the dolt stub
+	// (not any coordination here) is what guarantees the overlap this test
+	// depends on.
+	if err := cmdA.Start(); err != nil {
+		t.Fatalf("start process A: %v", err)
+	}
+	if err := cmdB.Start(); err != nil {
+		t.Fatalf("start process B: %v", err)
+	}
+	waitErrA := cmdA.Wait()
+	waitErrB := cmdB.Wait()
+
+	forcedCount := 0
+	var forcedBy []string
+	if _, statErr := os.Stat(markerA); statErr == nil {
+		forcedCount++
+		forcedBy = append(forcedBy, "A")
+	}
+	if _, statErr := os.Stat(markerB); statErr == nil {
+		forcedCount++
+		forcedBy = append(forcedBy, "B")
+	}
+
+	if forcedCount > 1 {
+		t.Fatalf("both concurrent op_init processes force-reinitialized the same database (forced by: %v); "+
+			"only one process's revalidation should ever be allowed to observe \"still empty\" immediately before forcing — "+
+			"the other must see the first process's force and refuse\n"+
+			"process A (err=%v):\nstdout:\n%s\nstderr:\n%s\n"+
+			"process B (err=%v):\nstdout:\n%s\nstderr:\n%s",
+			forcedBy,
+			waitErrA, outA.String(), errA.String(),
+			waitErrB, outB.String(), errB.String())
+	}
+	if forcedCount == 0 {
+		t.Fatalf("neither concurrent op_init process force-reinitialized the database; the test's fakes did not exercise the force path at all\n"+
+			"process A (err=%v):\nstdout:\n%s\nstderr:\n%s\n"+
+			"process B (err=%v):\nstdout:\n%s\nstderr:\n%s",
+			waitErrA, outA.String(), errA.String(),
+			waitErrB, outB.String(), errB.String())
 	}
 }
