@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +23,24 @@ import (
 // platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
 // the controllerSocketPathLimit pattern in cmd/gc/controller.go.
 const wakeSocketPathLimit = 100
+
+const wakeSocketDialTimeout = 200 * time.Millisecond
+
+// DispatcherIsHosting reports whether a supervisor dispatcher is actually
+// accepting wake-socket connections. Callers use this only to suppress a
+// fallback poller: a false negative creates a harmless duplicate contender,
+// while a false positive could leave queued work without any deliverer.
+func DispatcherIsHosting(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", WakeSocketPath(cityPath), wakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
 
 // Reference links a queued nudge back to the object that produced it.
 type Reference struct {

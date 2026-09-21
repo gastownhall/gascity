@@ -492,7 +492,7 @@ func (f sessionEventedFake) SubscribeSessionEvents(ctx context.Context) (<-chan 
 	return ch, nil
 }
 
-func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
+func TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutDispatcher(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := sessionEventedFake{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
@@ -525,8 +525,37 @@ func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
 	if len(state.Pending) != 1 {
 		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
 	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1: provider capability does not prove a supervisor dispatcher is hosting", pollerCalls)
+	}
+}
+
+func TestSubmitFollowUpSkipsPollerWhenDispatcherIsHosting(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sessionEventedFake{Fake: runtime.NewFake()}, WithCityPath(cityPath))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	origHosting := deferredSubmitDispatcherIsHosting
+	deferredSubmitDispatcherIsHosting = func(path string) bool { return path == cityPath }
+	t.Cleanup(func() { deferredSubmitDispatcherIsHosting = origHosting })
+	origPoller := startSessionSubmitPoller
+	pollerCalls := 0
+	startSessionSubmitPoller = func(_, _, _ string) error { pollerCalls++; return nil }
+	t.Cleanup(func() { startSessionSubmitPoller = origPoller })
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
 	if pollerCalls != 0 {
-		t.Fatalf("pollerCalls = %d, want 0 for an event-capable provider (supervisor event dispatcher owns delivery)", pollerCalls)
+		t.Fatalf("pollerCalls = %d, want 0 with a live dispatcher", pollerCalls)
 	}
 }
 
