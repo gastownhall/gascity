@@ -355,9 +355,19 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// in active/awake/creating/start-pending state; a bare non-empty
 	// GC_SESSION_ID is not enough, since ambient/inherited env leaks a value
 	// without a live session bead ever having existed.
-	if hookMode && primeHookSessionStart(hookContext) && !primeHookHasLiveManagedSession(cityPath) {
-		writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-		return 0, nil
+	if hookMode && primeHookSessionStart(hookContext) {
+		if strings.TrimSpace(os.Getenv("GC_SESSION_ID")) == "" {
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0, nil
+		}
+		if !primeHookHasLiveManagedSession(cityPath) {
+			// An identity is present but does not resolve to a live session
+			// bead: never safe to inject the startup prompt from it, but the
+			// beacon and stale-epoch redelivery check below still need to
+			// run (see the comment above), so force suppression here instead
+			// of returning early.
+			suppressHookPrompt = true
+		}
 	}
 	if !strictMode && primeHookSessionStart(hookContext) {
 		runHookSideEffects()

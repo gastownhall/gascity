@@ -627,6 +627,13 @@ prompt_template = "prompts/worker.md"
 		Metadata: map[string]string{
 			"session_name":       "gastown--worker",
 			"continuation_epoch": "3",
+			// A real worker pane that can still receive a stale-epoch
+			// redelivery is a live session (#4010's gate requires this
+			// state, and a matching template, to inject hook context at
+			// all); a bead with neither set is not what this scenario
+			// represents.
+			"state":    string(session.StateActive),
+			"template": "worker",
 		},
 	})
 	if err != nil {
