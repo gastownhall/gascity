@@ -1126,13 +1126,24 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 }
 
 // sessionPhasesDue reports whether this tick must run the session-management
-// phases (pool death detection, corpse sweeps, demand/desired state, bead
-// reconcile) and stamps the last-run time when it does. Always true except
-// on patrol ticks in stretched mode: with [daemon].session_patrol_interval
-// longer than patrol_interval and the provider's session-event stream live,
-// patrol-driven session scans run at the stretched cadence — event pokes
-// carry the real-time work and the patrol scan is the safety net. A pending
-// config change always runs the phases (a reload must reconcile fully).
+// phases and stamps the last-run time when it does. Always true except on
+// patrol ticks in stretched mode: with [daemon].session_patrol_interval
+// longer than patrol_interval and the provider's session-event stream having
+// actually delivered an event (see sessionPhaseStretchActive), patrol-driven
+// session scans run at the stretched cadence instead — event pokes carry the
+// real-time work and the patrol scan is the safety net. A pending config
+// change always runs the phases (a reload must reconcile fully).
+//
+// This is a wider gate than "pool death detection, corpse sweeps" alone: when
+// runSessionPhases is false, the whole block below skips, including orphaned
+// pool-assignment release (recoverUnroutedWorkRoutesDelta runs outside this
+// gate, but the session-bead sync/reconcile beneath it does not), session
+// start/stop reconciliation (demand/desired-state refresh, syncBeadsAndUpdateIndex,
+// beadReconcileTick), and beadReconcileTick's own nudgeDispatchTick call —
+// the ready-wait nudge dispatch fallback. An operator who reads this comment
+// and expects only corpse sweeps to lag during the stretched window is
+// underinformed about how much reconciliation defers to the next patrol tick
+// or event poke.
 func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now time.Time) bool {
 	due := trigger != "patrol" || configPending || !cr.sessionPhaseStretchActive() ||
 		!now.Before(cr.sessionPhasesLast.Add(cr.cfg.Daemon.SessionPatrolIntervalDuration()))
@@ -1143,14 +1154,14 @@ func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now 
 }
 
 // sessionPhaseStretchActive reports whether the stretched session-phase
-// patrol is in effect: configured longer than the patrol interval AND a
-// session-event stream currently established. Without a live stream
-// (tmux, subscribe failure) the stretch is ignored so session liveness
-// never degrades below the patrol cadence.
+// patrol is in effect: configured longer than the patrol interval AND the
+// current session-event stream has delivered at least one event. Merely
+// starting a subscription goroutine is not proof that its backend is
+// connected; without observed flow, liveness stays at the normal cadence.
 func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
 	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
-		cr.sessionEvents != nil && cr.sessionEvents.streaming()
+		cr.sessionEvents != nil && cr.sessionEvents.flowing()
 }
 
 // tick performs one reconciliation tick: pool death detection, config
