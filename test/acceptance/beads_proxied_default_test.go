@@ -265,6 +265,41 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 // directions are asserted: present with the scopes named for a proxied city,
 // absent for a city with no proxied scope, so the registration gate is real
 // rather than an unconditional line.
+// assertDoctorReportsBdOwnedProxiedStore pins WHICH store a real `gc init`
+// proxied city opens, which assertDoctorGreen cannot see: internal/doctor
+// reports ok both for BdStore behind the proxied_provider gate and for a
+// native open ("store accessible"), so a regression that opened the linked
+// native store on a fresh proxied city stayed green through the whole gate.
+// The unit pins are synthetic — factory_test.go hand-writes the metadata and
+// checks_topology_matrix_test.go builds its rig from templates — so nothing
+// else asserts this on a city gc actually initialized.
+//
+// The message is the assertion because it is the only place the pair surfaces:
+// `gc doctor --json` emits name/status/message per check, not the diagnostic's
+// Store and PreflightGate fields, and internal/doctor writes this exact string
+// only from the BeadsStoreNameBdStore + BeadsGateProxiedProvider branch.
+func assertDoctorReportsBdOwnedProxiedStore(t *testing.T, city *helpers.City, label string) {
+	t.Helper()
+	const proxiedProviderStoreMessage = "bd-owned proxied store (bd CLI front door)"
+	out, err := city.GC("doctor", "--json")
+	if err != nil {
+		t.Fatalf("gc doctor --json exited non-zero on %s: %v\n%s", label, err, out)
+	}
+	var report doctorReport
+	lastJSONLine(t, out, &report)
+	for _, r := range report.Results {
+		if r.Name != "beads-store" {
+			continue
+		}
+		if !strings.Contains(r.Message, proxiedProviderStoreMessage) {
+			t.Fatalf("beads-store on %s = %q (%s), want %q — the store gc opens on a proxied city is bd's front door, not the native one",
+				label, r.Message, r.Status, proxiedProviderStoreMessage)
+		}
+		return
+	}
+	t.Fatalf("gc doctor --json on %s reported no beads-store check: %+v", label, report.Results)
+}
+
 // assertCheckOK requires one named doctor check to report ok, so a regression
 // says which check regressed instead of only how many did.
 func assertCheckOK(t *testing.T, city *helpers.City, name, label string) {
@@ -475,6 +510,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 
 	t.Run("doctor-green", func(t *testing.T) {
 		assertDoctorGreen(t, city, "a fresh proxied city")
+		assertDoctorReportsBdOwnedProxiedStore(t, city, "a fresh proxied city")
 	})
 
 	var createdBead string
