@@ -825,18 +825,40 @@ func (p *Provider) filterMessagesForRecipients(recipients []string, includeRead 
 	}
 	var msgs []mail.Message
 	for _, b := range candidates {
+		// Defense-in-depth: messageCandidatesAll already queries Type=message,
+		// but an AllowScan fallback (empty routes) can surface non-message
+		// beads (e.g. session beads) depending on store implementation. Reject
+		// them here so a session bead never reaches beadToMessage.
+		if b.Type != messageBeadType {
+			continue
+		}
 		if b.Status != "open" {
 			continue
 		}
 		if len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee) {
 			continue
 		}
-		if !includeRead && hasLabel(b.Labels, "read") {
+		if !includeRead && isMessageRead(b) {
 			continue
 		}
 		msgs = append(msgs, beadToMessage(b))
 	}
 	return msgs, nil
+}
+
+// isMessageRead reports whether a message bead is read. The "read" label is
+// the base signal; mail.ReadMetadataKey, when set, is authoritative and
+// overrides it. filterMessagesForRecipients and beadToMessage both call this
+// so a bead's read state never diverges between listing and conversion.
+func isMessageRead(b beads.Bead) bool {
+	read := hasLabel(b.Labels, "read")
+	switch b.Metadata[mail.ReadMetadataKey] {
+	case "true":
+		read = true
+	case "false":
+		read = false
+	}
+	return read
 }
 
 // IsMessageBead reports whether b is a mail message bead. It is the exported
@@ -1230,13 +1252,7 @@ func beadToMessage(b beads.Bead) mail.Message {
 	if display := strings.TrimSpace(b.Metadata[toDisplayMetadataKey]); display != "" {
 		to = display
 	}
-	read := hasLabel(b.Labels, "read")
-	switch b.Metadata["mail.read"] {
-	case "true":
-		read = true
-	case "false":
-		read = false
-	}
+	read := isMessageRead(b)
 	return mail.Message{
 		ID:        b.ID,
 		From:      from,
