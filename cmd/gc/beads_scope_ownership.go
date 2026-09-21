@@ -345,7 +345,34 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 	if !cityUsesBdStoreContract(cityPath) {
 		return false, nil
 	}
+	if cityCarriesGCDoltRuntimePublication(cityPath) {
+		return false, nil
+	}
 	return contract.ScopeCarriesBdOwnedDirectBinding(fsys.OSFS{}, cityPath, scopeRoot, "")
+}
+
+// cityCarriesGCDoltRuntimePublication reports whether gc has published a
+// managed Dolt runtime for this city.
+//
+// It is the same evidence rule scopeUsesProxiedDoltMode already applies: a
+// runtime publication under `.gc/runtime/packs/dolt` exists only because gc
+// itself raised the city's Dolt, so the direct managed lifecycle is gc's
+// whatever the scope's own files say. The binding predicate needs it because
+// its only discriminator is the recorded host, and a gc-managed city that was
+// initialized under a non-loopback GC_DOLT_HOST records that host verbatim —
+// so a later boot with GC_DOLT_HOST unset or pointing elsewhere compares
+// unequal and would read gc's own server as bd's foreign upstream. That
+// misread needs a non-authoritative config.yaml too (a city last booted before
+// `gc.endpoint_origin` existed, or one whose config was restored to bd's
+// template), which is exactly the legacy shape most likely to carry a
+// non-loopback host.
+func cityCarriesGCDoltRuntimePublication(cityPath string) bool {
+	for _, statePath := range []string{managedDoltStatePath(cityPath), providerManagedDoltStatePath(cityPath)} {
+		if _, err := os.Stat(statePath); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // providerOwnedOpRetires reports whether a lifecycle operation only retires

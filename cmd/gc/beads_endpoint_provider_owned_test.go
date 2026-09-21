@@ -398,3 +398,74 @@ func writeCityTOMLForBdProvider(t *testing.T, cityPath string) {
 		t.Fatal(err)
 	}
 }
+
+// TestScopeIsBdOwnedDirectExternal pins the predicate's evidence order. Its
+// only discriminator between "bd's upstream" and "gc's own managed server" is
+// the host recorded in bd's binding, and a gc-managed city initialized under a
+// non-loopback GC_DOLT_HOST records that host verbatim — so a later boot with
+// GC_DOLT_HOST unset compares unequal and the city reads as bd-owned. gc then
+// stops canonicalising it and stops raising its Dolt, and the beads stay
+// unavailable until an operator restores the variable by hand. A published
+// managed Dolt runtime under .gc/runtime/packs/dolt settles that ambiguity the
+// same way scopeUsesProxiedDoltMode already does: gc raised this city's Dolt,
+// so the direct managed lifecycle is gc's whatever host the scope recorded.
+func TestScopeIsBdOwnedDirectExternal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(t *testing.T, cityPath string)
+		want  bool
+	}{
+		// The M3b shape the predicate exists for: bd's own template config,
+		// bd's binding naming a host that is not gc's, and no sign gc ever ran
+		// a Dolt here.
+		"bd's binding on a city gc never published a runtime for": {
+			setup: func(t *testing.T, cityPath string) {
+				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+			},
+			want: true,
+		},
+		"a published managed dolt runtime outranks the recorded host": {
+			setup: func(t *testing.T, cityPath string) {
+				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
+			},
+			want: false,
+		},
+		"a published provider dolt runtime outranks it too": {
+			setup: func(t *testing.T, cityPath string) {
+				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+				writeDoltRuntimePublicationFixture(t, cityPath, providerManagedDoltStatePath(cityPath))
+			},
+			want: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			writeCityTOMLForBdProvider(t, city)
+			tc.setup(t, city)
+
+			got, err := scopeIsBdOwnedDirectExternal(city, city)
+			if err != nil {
+				t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("scopeIsBdOwnedDirectExternal() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// writeDoltRuntimePublicationFixture writes a runtime state file at path. Only
+// its existence is evidence — the predicate never reads the record, because a
+// state file left behind by a Dolt that died uncleanly is still proof that gc,
+// not bd, owns this city's direct lifecycle.
+func writeDoltRuntimePublicationFixture(t *testing.T, cityPath, statePath string) {
+	t.Helper()
+	if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{
+		Running: true,
+		PID:     os.Getpid(),
+		Port:    3307,
+		DataDir: filepath.Join(cityPath, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(%s): %v", statePath, err)
+	}
+}
