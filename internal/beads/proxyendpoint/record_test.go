@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // writeRecord writes rec into root the way bd does.
@@ -272,6 +275,161 @@ func TestValidateAcceptsASymlinkedRootSpelling(t *testing.T) {
 
 	if err := Validate(rec, link); err != nil {
 		t.Fatalf("Validate through a symlinked spelling = %v, want nil", err)
+	}
+}
+
+// TestProviderRootMirrorsBdDoltDirResolution states the whole resolution as one
+// table, because every arm of it is a directory gc would look for proxy.pid in.
+//
+// The rows that matter most are the metadata ones. `<scope>/.beads/dolt` is not
+// merely a default with exotic overrides: bd resolves a scope's Dolt data
+// directory through BEADS_DOLT_DATA_DIR and metadata.json's dolt_data_dir first
+// (internal/doltserver/physical_root.go), and gc's own `gc beads city migrate
+// proxied` WRITES dolt_data_dir on every rig so the rig's proxy roots at the
+// city's data dir. A reader that hardcoded the default answered a directory bd
+// never publishes into for exactly the scopes gc created.
+func TestProviderRootMirrorsBdDoltDirResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		// metadata and sidecar are written into the scope's .beads directory
+		// when non-empty.
+		metadata string
+		sidecar  string
+		// env is applied for the duration of the case.
+		env map[string]string
+		// want is the root, given the scope and its .beads directory.
+		want func(scope, beadsDir string) string
+	}{
+		{
+			name: "nothing overrides: the scope's own dolt directory",
+			want: func(_, beadsDir string) string { return filepath.Join(beadsDir, DefaultRootDirName) },
+		},
+		{
+			name:     "metadata with no dolt_data_dir is still the default",
+			metadata: `{"database":"beads.db","dolt_mode":"proxied-server"}`,
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, DefaultRootDirName) },
+		},
+		{
+			name:     "malformed metadata is not a root claim",
+			metadata: "not json",
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, DefaultRootDirName) },
+		},
+		{
+			name:     "a relative dolt_data_dir joins .beads, as bd joins it",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"elsewhere/dolt"}`,
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, "elsewhere", "dolt") },
+		},
+		{
+			name:     "an absolute dolt_data_dir stands as written",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"/srv/dolt-data"}`,
+			want:     func(_, _ string) string { return filepath.FromSlash("/srv/dolt-data") },
+		},
+		{
+			name:     "BEADS_DOLT_DATA_DIR wins over metadata",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"elsewhere/dolt"}`,
+			env:      map[string]string{DoltDataDirEnv: "env-data"},
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, "env-data") },
+		},
+		{
+			name:     "the sidecar's root_path wins over metadata",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"elsewhere/dolt"}`,
+			sidecar:  `{"root_path":"sidecar/dolt"}`,
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, "sidecar", "dolt") },
+		},
+		{
+			// R1-F3: bd joins a relative BEADS_PROXIED_SERVER_ROOT_PATH to the
+			// scope's .beads directory. Resolving it against the reader's
+			// working directory would name a path that depends on where gc was
+			// invoked from.
+			name:    "a relative BEADS_PROXIED_SERVER_ROOT_PATH joins .beads, not the working directory",
+			sidecar: `{"root_path":"sidecar/dolt"}`,
+			env:     map[string]string{RootPathEnv: "proxyroot"},
+			want:    func(_, beadsDir string) string { return filepath.Join(beadsDir, "proxyroot") },
+		},
+		{
+			name:     "shared-server mode roots at the shared dolt directory",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"elsewhere/dolt"}`,
+			env:      map[string]string{SharedServerModeEnv: "1", SharedServerDirEnv: "/srv/shared-server"},
+			want:     func(_, _ string) string { return filepath.FromSlash("/srv/shared-server/dolt") },
+		},
+		{
+			name:    "an explicit sidecar root_path still wins over shared-server mode",
+			sidecar: `{"root_path":"/srv/pinned/dolt"}`,
+			env:     map[string]string{SharedServerModeEnv: "true", SharedServerDirEnv: "/srv/shared-server"},
+			want:    func(_, _ string) string { return filepath.FromSlash("/srv/pinned/dolt") },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			beadsDir := filepath.Join(scope, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.metadata != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, MetadataFileName), []byte(tc.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.sidecar != "" {
+				writeSidecar(t, beadsDir, tc.sidecar)
+			}
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+			got, err := ProviderRoot(scope)
+			if err != nil {
+				t.Fatalf("ProviderRoot: %v", err)
+			}
+			if want := tc.want(scope, beadsDir); got != want {
+				t.Fatalf("ProviderRoot = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestProviderRootFollowsARigOntoItsCitysRoot is the shape gc's own migration
+// creates, spelled out end to end.
+//
+// `gc beads city migrate proxied` records a RELATIVE dolt_data_dir on each rig
+// pointing at the city's Dolt root, because beads drops an absolute one on save.
+// bd then roots that rig's proxy in the city's directory, where exactly one
+// proxy.pid lives for both scopes, and the pool key distinguishes them by
+// database alone. Resolving the rig to its own .beads/dolt would report
+// no_record for every rig in a migrated city.
+func TestProviderRootFollowsARigOntoItsCitysRoot(t *testing.T) {
+	base := t.TempDir()
+	cityBeads := filepath.Join(base, "city", ".beads")
+	rig := filepath.Join(base, "city", "rigs", "alpha")
+	rigBeads := filepath.Join(rig, ".beads")
+	cityRoot := filepath.Join(cityBeads, DefaultRootDirName)
+	if err := os.MkdirAll(cityRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(rigBeads, cityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.SetMetadataDoltDataDir(fsys.OSFS{}, filepath.Join(rigBeads, MetadataFileName), relative); err == nil {
+		t.Fatal("SetMetadataDoltDataDir wrote into a scope with no metadata.json")
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, MetadataFileName), []byte(`{"database":"beads.db","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.SetMetadataDoltDataDir(fsys.OSFS{}, filepath.Join(rigBeads, MetadataFileName), relative); err != nil {
+		t.Fatalf("record the shared root on the rig: %v", err)
+	}
+
+	got, err := ProviderRoot(rig)
+	if err != nil {
+		t.Fatalf("ProviderRoot: %v", err)
+	}
+	if got != cityRoot {
+		t.Fatalf("ProviderRoot(rig) = %q, want the city's root %q — a shared-root rig's proxy.pid lives in the city's directory", got, cityRoot)
 	}
 }
 
