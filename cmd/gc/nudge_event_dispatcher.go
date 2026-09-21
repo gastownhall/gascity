@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -345,7 +346,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, sessStore, sp, d.quiescence, obs)
+		ok, err := nudgePollDeliverQueued(target, store.Store, sessStore, sp, d.quiescence, obs)
 		if ok || err != nil {
 			return ok, err
 		}
@@ -362,12 +363,40 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 			// agent burns the bounded budget on cheap rejects and the kick
 			// dies until its next idle event.
 			d.kickSessionAfter(target.sessionName, remaining+d.retryEpsilon, retriesLeft-1)
+		} else if remaining, requeued := queuedNudgeRetryRemaining(d.cityPath, target, time.Now()); requeued {
+			// A provider failure is recorded by the canonical delivery path as a
+			// future-due pending item. It needs its own wake: an already-idle
+			// target emits no second idle transition after that retry becomes due.
+			d.kickSessionAfter(target.sessionName, remaining+d.retryEpsilon, retriesLeft-1)
 		}
 		return false, nil
 	}
 	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// queuedNudgeRetryRemaining finds the earliest future-due item for target.
+// Its presence distinguishes a delivery failure that was deliberately
+// requeued from ordinary no-delivery outcomes such as a lost claim race.
+func queuedNudgeRetryRemaining(cityPath string, target nudgeTarget, now time.Time) (time.Duration, bool) {
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return 0, false
+	}
+	var earliest time.Time
+	for _, item := range state.Pending {
+		if !target.matchesQueueAgent(item.Agent) || item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now) {
+			continue
+		}
+		if earliest.IsZero() || item.DeliverAfter.Before(earliest) {
+			earliest = item.DeliverAfter
+		}
+	}
+	if earliest.IsZero() {
+		return 0, false
+	}
+	return earliest.Sub(now), true
 }
 
 // nudgeQuiescenceRemaining reports how much of the quiescence window is left

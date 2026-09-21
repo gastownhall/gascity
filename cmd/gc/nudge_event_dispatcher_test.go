@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // testWriter adapts t.Logf into an io.Writer so dispatcher stderr lines land
@@ -210,6 +211,48 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered by the aged-stamp retry; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
+func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "retry me", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	origDeliver := nudgePollDeliverQueued
+	calls := 0
+	requeueErr := make(chan error, 1)
+	nudgePollDeliverQueued = func(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+		calls++
+		if calls == 1 {
+			if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+				state.Pending[0].DeliverAfter = time.Now().Add(40 * time.Millisecond)
+				return nil
+			}); err != nil {
+				requeueErr <- err
+				return false, err
+			}
+			return false, nil
+		}
+		return origDeliver(target, store, sessStore, sp, quiescence, obs)
+	}
+	t.Cleanup(func() { nudgePollDeliverQueued = origDeliver })
+
+	// Only the initial kick is supplied. The requeued future-due item must
+	// arrange its own retry even though the target was already idle: without
+	// queuedNudgeRetryRemaining's wake, no second idle transition ever
+	// arrives to trigger another attempt.
+	d.kickSessionAfter(info.SessionName, 0, nudgeEventRetryBudget)
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("requeued failure was not retried without another event; calls=%d state=%+v", calls, queueStateSnapshot(t, dir))
+	}
+	select {
+	case err := <-requeueErr:
+		t.Fatalf("requeueing simulated failure: %v", err)
+	default:
 	}
 }
 
@@ -498,5 +541,57 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 	}
 	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
 		t.Fatal("event-capable provider must retire pollers")
+	}
+}
+
+// TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload proves finding #8:
+// wake-listener ownership must be re-established when a later call (modeling
+// a config reload) newly satisfies the activation gate, not fixed forever at
+// whatever the first call observed. A city that starts legacy-mode on a
+// non-event provider has no listener; once the provider swaps to one that
+// implements SessionEventProvider (the nudge-event dispatcher goes active),
+// the very next ensureNudgeWakeListener call -- which reloadConfigTraced now
+// makes after every cr.nudgeEvents.update -- must start it.
+func TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	_ = openNudgeBeadStore(dir) // materializes an empty, queryable bead store
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cr := &CityRuntime{
+		cfg:         &config.City{}, // legacy dispatcher mode (nudgeDispatcherIsSupervisor == false)
+		cityPath:    dir,
+		stderr:      testWriter(t),
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, dir, cr.stderr, cr.logPrefix)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+
+	// Startup: a plain (non-event) provider under legacy mode satisfies
+	// neither half of the gate. No listener should start.
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+	}
+
+	// Simulate a config reload that swaps in an event-capable provider,
+	// exactly what reloadConfigTraced does: update() first (which the
+	// dispatcher uses to decide active()), then ensureNudgeWakeListener.
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	if !cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must report active() after swapping to an event-capable provider")
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("wake listener was not started after a reload made the provider event-capable")
 	}
 }
