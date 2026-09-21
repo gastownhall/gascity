@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -118,20 +119,24 @@ func newNudgeEventDispatcher(parent context.Context, cityPath string, stderr io.
 // run on the reconciler goroutine).
 func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City, resubscribe bool) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.cfg = cfg
 	d.sp = sp
 	_, capable := sp.(runtime.SessionEventProvider)
 	d.eventCapable = capable
 	if !resubscribe {
+		d.mu.Unlock()
 		return
 	}
-	if d.cancel != nil {
-		d.cancel()
-		d.cancel = nil
-	}
+	previousCancel := d.cancel
+	d.cancel = nil
 	d.gen++
+	gen := d.gen
 	d.streamGen.Store(0)
+	d.mu.Unlock()
+
+	if previousCancel != nil {
+		previousCancel()
+	}
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		return
@@ -143,10 +148,17 @@ func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City, res
 		fmt.Fprintf(d.stderr, "%s: nudge event subscribe: %v (queued delivery falls back to wake pings and patrol passes)\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	d.mu.Lock()
+	if d.gen != gen {
+		d.mu.Unlock()
+		cancel()
+		return
+	}
 	d.cancel = cancel
-	d.streamGen.Store(d.gen)
+	d.streamGen.Store(gen)
+	d.mu.Unlock()
 	fmt.Fprintf(d.stderr, "%s: nudge event stream active: idle events deliver queued nudges\n", d.logPrefix) //nolint:errcheck // best-effort stderr
-	go d.forward(ctx, d.gen, events)
+	go d.forward(ctx, gen, events)
 }
 
 // active reports whether the current provider has an event stream — the
@@ -325,6 +337,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
+	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort close of the per-pass handle
 	// Session-class reads route through the session store (identity today);
 	// the nudge queue stays on its own store.
 	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)
@@ -334,7 +347,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store.Store, sessStore, sp, d.quiescence, obs)
+		ok, err := nudgePollDeliverQueued(target, store.Store, sessStore, sp, d.quiescence, obs)
 		if ok || err != nil {
 			return ok, err
 		}
@@ -351,12 +364,40 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 			// agent burns the bounded budget on cheap rejects and the kick
 			// dies until its next idle event.
 			d.kickSessionAfter(target.sessionName, remaining+d.retryEpsilon, retriesLeft-1)
+		} else if remaining, requeued := queuedNudgeRetryRemaining(d.cityPath, target, time.Now()); requeued {
+			// A provider failure is recorded by the canonical delivery path as a
+			// future-due pending item. It needs its own wake: an already-idle
+			// target emits no second idle transition after that retry becomes due.
+			d.kickSessionAfter(target.sessionName, remaining+d.retryEpsilon, retriesLeft-1)
 		}
 		return false, nil
 	}
 	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// queuedNudgeRetryRemaining finds the earliest future-due item for target.
+// Its presence distinguishes a delivery failure that was deliberately
+// requeued from ordinary no-delivery outcomes such as a lost claim race.
+func queuedNudgeRetryRemaining(cityPath string, target nudgeTarget, now time.Time) (time.Duration, bool) {
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		return 0, false
+	}
+	var earliest time.Time
+	for _, item := range state.Pending {
+		if !target.matchesQueueAgent(item.Agent) || item.DeliverAfter.IsZero() || !item.DeliverAfter.After(now) {
+			continue
+		}
+		if earliest.IsZero() || item.DeliverAfter.Before(earliest) {
+			earliest = item.DeliverAfter
+		}
+	}
+	if earliest.IsZero() {
+		return 0, false
+	}
+	return earliest.Sub(now), true
 }
 
 // nudgeQuiescenceRemaining reports how much of the quiescence window is left
@@ -375,17 +416,4 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 		return 0, false
 	}
 	return quiescence - since, true
-}
-
-// providerRetiresNudgePollers reports whether sp's event stream retires the
-// sidecar poller class: the supervisor-hosted event dispatcher owns queued
-// delivery for such providers (in both nudge_dispatcher modes), so a spawned
-// poller would only race it. A nil provider fails open — callers without a
-// resolved provider keep today's spawn behavior.
-func providerRetiresNudgePollers(sp runtime.Provider) bool {
-	if sp == nil {
-		return false
-	}
-	_, ok := sp.(runtime.SessionEventProvider)
-	return ok
 }

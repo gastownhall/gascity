@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,24 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+const wakeSocketDialTimeout = 200 * time.Millisecond
+
+// DispatcherIsHosting reports whether a supervisor dispatcher is actually
+// accepting wake-socket connections. Callers use this only to suppress a
+// fallback poller: a false negative creates a harmless duplicate contender,
+// while a false positive could leave queued work without any deliverer.
+func DispatcherIsHosting(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("unix", WakeSocketPath(cityPath), wakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
 
 // wakeSocketPathLimit caps the canonical socket path length below the
 // platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches

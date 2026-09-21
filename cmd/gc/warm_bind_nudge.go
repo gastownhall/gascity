@@ -24,6 +24,12 @@ import (
 // nudge fires again: exactly once per binding.
 const warmBindNudgedForTriggerKey = beadmeta.NudgedForTriggerMetadataKey
 
+// legacyWarmBindNudgedForTriggerKey was written before the marker moved into
+// beadmeta. Keep it as a read-only fallback so an upgraded controller does not
+// replay an already-delivered claim nudge. New-key presence is authoritative,
+// including an intentionally empty value.
+const legacyWarmBindNudgedForTriggerKey = "warm_bind_nudged_for_trigger"
+
 // warmBindNudgeIdleTimeout bounds how long the warm-bind claim nudge waits for
 // the slot to reach an idle input prompt before delivering, so it never injects
 // mid-turn. A warm slot with unclaimed bound work is normally already idle, so
@@ -152,7 +158,11 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	// Once-per-binding: the marker records the trigger we last nudged for. A match
 	// means this binding was already handled (this tick, a prior tick, or before a
 	// restart) — skip. A new/different binding mismatches and fires again.
-	if strings.TrimSpace(session.Metadata[warmBindNudgedForTriggerKey]) == triggerID {
+	marker, canonicalMarkerPresent := session.Metadata[warmBindNudgedForTriggerKey]
+	if !canonicalMarkerPresent {
+		marker = session.Metadata[legacyWarmBindNudgedForTriggerKey]
+	}
+	if strings.TrimSpace(marker) == triggerID {
 		return
 	}
 	// Churn invariant: only nudge while the trigger is genuinely unclaimed.

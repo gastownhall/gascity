@@ -1928,16 +1928,14 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 	return sleeper.SleepCapability(target.sessionName) == runtime.SessionSleepCapabilityTimedOnly
 }
 
-func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
+func maybeStartNudgePoller(target nudgeTarget, _ runtime.Provider) {
 	if target.sessionName == "" {
 		return
 	}
-	// Event-capable providers retire the sidecar class entirely: the
-	// supervisor-hosted nudge event dispatcher owns queued delivery for them
-	// in BOTH nudge_dispatcher modes, and a spawned poller would only race
-	// it. Callers without a resolved provider pass nil and keep today's
-	// spawn behavior.
-	if providerRetiresNudgePollers(sp) {
+	// Capability and configuration only prove a dispatcher could exist. The
+	// live socket proves one is present; failure stays on the safe side and
+	// starts a duplicate contender rather than stranding queued work.
+	if nudgeDispatcherIsHosting(target.cityPath) {
 		return
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
@@ -1948,12 +1946,6 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	// races concurrent acquirers — see reapStaleNudgePoller). Best-effort:
 	// never block a spawn.
 	_ = reapStaleNudgePollers(target.cityPath)
-	// Supervisor-hosted dispatcher owns delivery in supervisor mode; the
-	// per-session poller would race with it and reintroduce the bd-shellout
-	// load it was designed to eliminate.
-	if nudgeDispatcherIsSupervisor(target.cfg) {
-		return
-	}
 	// ACP session/prompt delivery requires the process that owns the
 	// in-memory ACP connection. A sidecar `gc nudge poll` process can
 	// observe the control socket but cannot safely deliver prompts. In

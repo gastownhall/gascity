@@ -23,6 +23,10 @@ import (
 // dial to fail fast.
 const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 
+// nudgeDispatcherIsHosting is a seam for the conservative live wake-socket
+// probe used when deciding whether a fallback poller may be suppressed.
+var nudgeDispatcherIsHosting = nudgequeue.DispatcherIsHosting
+
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
 // the supervisor delivers within sub-second latency instead of waiting for

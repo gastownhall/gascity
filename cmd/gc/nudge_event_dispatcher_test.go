@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // testWriter adapts t.Logf into an io.Writer so dispatcher stderr lines land
@@ -35,6 +37,27 @@ type nudgeEventedFake struct {
 	subs         []chan runtime.SessionEvent
 	busySessions map[string]bool
 	stamps       map[string]time.Time
+}
+
+type blockingNudgeSubscriptionProvider struct {
+	*runtime.Fake
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingNudgeSubscriptionProvider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	close(p.entered)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	ch := make(chan runtime.SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
 }
 
 func newNudgeEventedFake() *nudgeEventedFake {
@@ -207,6 +230,46 @@ func TestNudgeEventDispatcherRetriesFreshIdleStamp(t *testing.T) {
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered by the aged-stamp retry; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
+func TestNudgeEventDispatcherWakesFutureDueFailureWithoutAnotherEvent(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "retry me", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	origDeliver := nudgePollDeliverQueued
+	calls := 0
+	requeueErr := make(chan error, 1)
+	nudgePollDeliverQueued = func(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
+		calls++
+		if calls == 1 {
+			if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+				state.Pending[0].DeliverAfter = time.Now().Add(40 * time.Millisecond)
+				return nil
+			}); err != nil {
+				requeueErr <- err
+				return false, err
+			}
+			return false, nil
+		}
+		return origDeliver(target, store, sessStore, sp, quiescence, obs)
+	}
+	t.Cleanup(func() { nudgePollDeliverQueued = origDeliver })
+
+	// Only the initial kick is supplied. The requeued future-due item must
+	// arrange its own retry even though the target was already idle.
+	d.kickSessionAfter(info.SessionName, 0, nudgeEventRetryBudget)
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("requeued failure was not retried without another event; calls=%d state=%+v", calls, queueStateSnapshot(t, dir))
+	}
+	select {
+	case err := <-requeueErr:
+		t.Fatalf("requeueing simulated failure: %v", err)
+	default:
 	}
 }
 
@@ -406,6 +469,60 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	}
 }
 
+func TestNudgeEventDispatcherUpdateDoesNotHoldLockWhileSubscribing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newNudgeEventDispatcher(ctx, t.TempDir(), testWriter(t), "test")
+	t.Cleanup(func() {
+		cancel()
+		<-d.workerDone
+	})
+
+	blocking := &blockingNudgeSubscriptionProvider{Fake: runtime.NewFake(), entered: make(chan struct{}), release: make(chan struct{})}
+	firstDone := make(chan struct{})
+	go func() {
+		d.update(blocking, &config.City{}, true)
+		close(firstDone)
+	}()
+	select {
+	case <-blocking.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscription did not start")
+	}
+
+	replacementDone := make(chan struct{})
+	go func() {
+		d.update(runtime.NewFake(), &config.City{}, true)
+		close(replacementDone)
+	}()
+	select {
+	case <-replacementDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("provider replacement blocked behind SubscribeSessionEvents while dispatcher mutex was held")
+	}
+	close(blocking.release)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked subscription did not return")
+	}
+	if d.active() || d.streaming() {
+		t.Fatal("stale subscription replaced the current non-event provider")
+	}
+}
+
+func TestNudgeEventDispatcherClosesPerPassStore(t *testing.T) {
+	spy := &closeStoreSpy{Store: beads.NewMemStore()}
+	origOpen := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{Store: spy} }
+	t.Cleanup(func() { openNudgeBeadStore = origOpen })
+
+	d := &nudgeEventDispatcher{cityPath: t.TempDir(), stderr: testWriter(t), logPrefix: "test", cfg: &config.City{}, sp: runtime.NewFake()}
+	d.runPass("", 0)
+	if got := spy.closeCount(); got != 1 {
+		t.Fatalf("CloseStore calls = %d, want 1 per dispatcher pass", got)
+	}
+}
+
 func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
@@ -417,6 +534,9 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { startNudgePoller = prev })
+	prevHosting := nudgeDispatcherIsHosting
+	nudgeDispatcherIsHosting = func(string) bool { return true }
+	t.Cleanup(func() { nudgeDispatcherIsHosting = prevHosting })
 
 	target := nudgeTarget{
 		cityPath:    dir,
@@ -431,25 +551,25 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 	}
 
 	maybeStartNudgePoller(target, runtime.NewFake())
-	if spawns != 1 {
-		t.Fatalf("spawns = %d, want 1 for a plain provider", spawns)
-	}
-
-	// Callers without a resolved provider fail open to today's behavior.
 	maybeStartNudgePoller(target, nil)
-	if spawns != 2 {
-		t.Fatalf("spawns = %d, want 2 for a nil provider", spawns)
+	if spawns != 0 {
+		t.Fatalf("spawns = %d, want 0 while a dispatcher is hosting", spawns)
 	}
 }
 
-func TestProviderRetiresNudgePollers(t *testing.T) {
-	if providerRetiresNudgePollers(nil) {
-		t.Fatal("nil provider must not retire pollers")
-	}
-	if providerRetiresNudgePollers(runtime.NewFake()) {
-		t.Fatal("plain provider must not retire pollers")
-	}
-	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
-		t.Fatal("event-capable provider must retire pollers")
+func TestMaybeStartNudgePollerStartsWithoutHostingDispatcher(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	spawns := 0
+	prevPoller := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { spawns++; return nil }
+	t.Cleanup(func() { startNudgePoller = prevPoller })
+	prevHosting := nudgeDispatcherIsHosting
+	nudgeDispatcherIsHosting = func(string) bool { return false }
+	t.Cleanup(func() { nudgeDispatcherIsHosting = prevHosting })
+
+	target := nudgeTarget{cityPath: t.TempDir(), cfg: &config.City{}, agent: config.Agent{Name: "worker"}, sessionName: "gc-worker"}
+	maybeStartNudgePoller(target, newNudgeEventedFake())
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1 when no dispatcher is hosting despite event capability", spawns)
 	}
 }

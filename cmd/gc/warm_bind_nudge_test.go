@@ -89,6 +89,43 @@ func TestDeliverWarmBindClaimNudge_FiresOncePerBinding(t *testing.T) {
 	}
 }
 
+// Sessions stamped before the metadata-key migration must keep their
+// once-per-binding guarantee after upgrade. The legacy marker is read-only:
+// new deliveries continue to write the canonical beadmeta key.
+func TestDeliverWarmBindClaimNudge_LegacyMarkerPreventsRenudge(t *testing.T) {
+	sp := runtime.NewFake()
+	session := warmBindPoolSession()
+	session.Metadata["warm_bind_nudged_for_trigger"] = "w-1"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
+
+	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+
+	if n, _ := countNudges(sp); n != 0 {
+		t.Fatalf("legacy marker: got %d nudges, want 0", n)
+	}
+}
+
+func TestDeliverWarmBindClaimNudge_CanonicalMarkerTakesPrecedence(t *testing.T) {
+	sp := runtime.NewFake()
+	session := warmBindPoolSession()
+	session.Metadata[legacyWarmBindNudgedForTriggerKey] = "w-1"
+	session.Metadata[warmBindNudgedForTriggerKey] = "different-binding"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
+
+	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+
+	if n, _ := countNudges(sp); n != 1 {
+		t.Fatalf("canonical marker: got %d nudges, want 1", n)
+	}
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[warmBindNudgedForTriggerKey] != "w-1" {
+		t.Fatalf("canonical marker = %q, want w-1", got.Metadata[warmBindNudgedForTriggerKey])
+	}
+}
+
 // The idle-ready gate runs before delivery so the nudge never lands mid-turn.
 func TestDeliverWarmBindClaimNudge_WaitsForIdleBeforeDelivering(t *testing.T) {
 	sp := runtime.NewFake()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -412,11 +413,39 @@ func streamingPump(t *testing.T) (*sessionEventPump, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
-	pump.restart(&eventedFake{Fake: runtime.NewFake()})
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp)
 	if !pump.streaming() {
 		t.Fatal("test pump failed to stream")
 	}
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
 	return pump, cancel
+}
+
+func TestSessionPhasesDueDoesNotStretchBeforeEventFlow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	pump.restart(&eventedFake{Fake: runtime.NewFake()})
+	if !pump.streaming() {
+		t.Fatal("precondition: subscription should be established")
+	}
+	if pump.flowing() {
+		t.Fatal("non-emitting subscription must not count as event flow")
+	}
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now
+	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+		t.Fatal("patrol was stretched before the event backend proved it could deliver")
+	}
 }
 
 func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {

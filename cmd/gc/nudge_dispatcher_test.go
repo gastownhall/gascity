@@ -557,9 +557,11 @@ func TestMaybeStartNudgePollerSkipsACPSessionInLegacyMode(t *testing.T) {
 	}
 }
 
-func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
+func TestMaybeStartNudgePollerSkipsOnlyForHostingSupervisor(t *testing.T) {
 	prev := startNudgePoller
 	t.Cleanup(func() { startNudgePoller = prev })
+	prevHosting := nudgeDispatcherIsHosting
+	t.Cleanup(func() { nudgeDispatcherIsHosting = prevHosting })
 
 	called := false
 	startNudgePoller = func(_, _, _ string) error {
@@ -567,22 +569,25 @@ func TestMaybeStartNudgePollerSkipsInSupervisorMode(t *testing.T) {
 		return nil
 	}
 
+	dir := t.TempDir()
+	nudgeDispatcherIsHosting = func(path string) bool { return path == dir }
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    dir,
+		sessionName: "worker-session",
+		cfg:         supervisorCfg(),
+	}, nil)
+	if called {
+		t.Fatal("startNudgePoller invoked while the supervisor dispatcher was hosting")
+	}
+
+	nudgeDispatcherIsHosting = func(string) bool { return false }
 	maybeStartNudgePoller(nudgeTarget{
 		cityPath:    t.TempDir(),
 		sessionName: "worker-session",
 		cfg:         supervisorCfg(),
 	}, nil)
-	if called {
-		t.Fatal("startNudgePoller invoked in supervisor mode; supervisor dispatcher would race with the per-session poller")
-	}
-
-	maybeStartNudgePoller(nudgeTarget{
-		cityPath:    t.TempDir(),
-		sessionName: "worker-session",
-		cfg:         &config.City{},
-	}, nil)
 	if !called {
-		t.Fatal("startNudgePoller not invoked in legacy mode")
+		t.Fatal("startNudgePoller not invoked when supervisor mode was configured but no dispatcher was hosting")
 	}
 }
 
