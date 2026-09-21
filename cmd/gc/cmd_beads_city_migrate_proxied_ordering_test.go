@@ -95,3 +95,94 @@ func TestMigrateProxiedStopsSharedRootRigsWhenTheCityScopeFails(t *testing.T) {
 		t.Errorf("rig dolt_mode after rerun = %q (ok=%v, err=%v)", mode, ok, err)
 	}
 }
+
+// The residue rerun the ordering stop missed. A rig whose previous run already
+// wrote dolt_data_dir — the key points at the city's root, which is exactly what
+// makes it a shared-root rig — gets SharedRootRel "" from sharedCityRootForRig
+// ("already pointed somewhere deliberate"), so the skip keyed on that field let
+// it through. classify then reads the recorded dir, finds the repository the
+// city's first run made there, asks for no dolt init, and bd commits the rig's
+// flip against a root the city still legacy-manages: the same C11 outcome, one
+// rerun later.
+func TestMigrateProxiedStopsRigsRecordingTheCityRootWhenTheCityScopeFails(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "spike")
+	rig := rigs["spike"]
+	seedCityDatabaseDir(t, city, "sp")
+	initDoltRootMarker(t, filepath.Join(city, ".beads", "dolt"))
+	// Run 1's residue: the rig's turn recorded the city's root before the city
+	// itself was proxied.
+	rel, err := filepath.Rel(filepath.Join(rig, ".beads"), filepath.Join(city, ".beads", "dolt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.SetMetadataDoltDataDir(fsys.OSFS{}, scopeMetadataJSONPath(rig), filepath.ToSlash(rel)); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := &[]migrateProxiedBdCall{}
+	stubMigrateProxiedBd(t, func(_, scopeRoot string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "migrate" && args[len(args)-1] == "--help" {
+			return []byte("--json  emit JSON"), nil
+		}
+		*calls = append(*calls, migrateProxiedBdCall{scope: scopeRoot, args: args})
+		switch args[0] {
+		case "migrate":
+			if normalizePathForCompare(scopeRoot) == normalizePathForCompare(city) {
+				return []byte("migrate.lock held by another workspace"), errors.New("exit status 1")
+			}
+			return migrateProxiedFlipMetadata(t, scopeRoot)
+		case "ping":
+			return []byte(`{"status":"ok"}`), nil
+		}
+		return nil, fmt.Errorf("unexpected bd command %v", args)
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doBeadsCityMigrateProxied(city, migrateProxiedOptions{JSON: true}, &stdout, &stderr); code == 0 {
+		t.Fatalf("a failing city migration reported success\nstdout=%s", stdout.String())
+	}
+	report := decodeMigrateProxiedReport(t, stdout.String())
+	if status := migrateProxiedScopeResultFor(t, report, "city").Status; status != migrateProxiedStatusFailed {
+		t.Fatalf("city status = %q, want failed; this test no longer reproduces the residue case", status)
+	}
+	for _, call := range *calls {
+		if normalizePathForCompare(call.scope) == normalizePathForCompare(rig) {
+			t.Fatalf("bd ran against a rig standing on the failed city's root: %+v", call)
+		}
+	}
+	if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, scopeMetadataJSONPath(rig)); err != nil || !ok || mode != "server" {
+		t.Errorf("skipped rig dolt_mode = %q (ok=%v, err=%v), want server", mode, ok, err)
+	}
+	if rigResult := migrateProxiedScopeResultFor(t, report, "rig:spike"); rigResult.Status != migrateProxiedStatusSkipped {
+		t.Errorf("rig status = %q, want %q", rigResult.Status, migrateProxiedStatusSkipped)
+	}
+}
+
+// The same refusal without the loop's help: a rig that migrates against the
+// city's Dolt root is never handed to bd while the city is still direct, no
+// matter how its turn was reached.
+func TestMigrateProxiedScopeNowRefusesASharedRootRigWhileTheCityIsDirect(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "spike")
+	rig := rigs["spike"]
+	seedCityDatabaseDir(t, city, "sp")
+	initDoltRootMarker(t, filepath.Join(city, ".beads", "dolt"))
+	rel, err := filepath.Rel(filepath.Join(rig, ".beads"), filepath.Join(city, ".beads", "dolt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.SetMetadataDoltDataDir(fsys.OSFS{}, scopeMetadataJSONPath(rig), filepath.ToSlash(rel)); err != nil {
+		t.Fatal(err)
+	}
+	stubMigrateProxiedBd(t, func(_, scopeRoot string, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("bd must not run for %s: %v", scopeRoot, args)
+	})
+
+	scope := migrateProxiedScope{Label: "rig:spike", Name: "spike", Path: normalizePathForCompare(rig), Prefix: "sp"}
+	err = migrateProxiedScopeNow(city, scope, migrateProxiedClassification{})
+	if err == nil {
+		t.Fatalf("migrateProxiedScopeNow migrated a rig onto the city's still-direct root")
+	}
+	if !strings.Contains(err.Error(), "still direct") {
+		t.Fatalf("error = %v, want a refusal naming the city's direct mode", err)
+	}
+}
