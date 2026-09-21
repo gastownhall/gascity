@@ -139,13 +139,18 @@ func TestProbeSessionLeavesNoSocketOpenOnARealListener(t *testing.T) {
 // opens and closes, so the lifecycle can be asserted without a listener, a
 // database or a byte of MySQL wire protocol.
 type fakeProbeConnector struct {
-	cursors  map[string]int64
-	queryErr error
-	opened   atomic.Int64
-	closed   atomic.Int64
+	cursors    map[string]int64
+	connectErr error
+	pingErr    error
+	queryErr   error
+	opened     atomic.Int64
+	closed     atomic.Int64
 }
 
 func (c *fakeProbeConnector) Connect(context.Context) (driver.Conn, error) {
+	if c.connectErr != nil {
+		return nil, c.connectErr
+	}
 	c.opened.Add(1)
 	return &fakeProbeConn{connector: c}, nil
 }
@@ -178,7 +183,7 @@ func (c *fakeProbeConn) Begin() (driver.Tx, error) {
 }
 
 // Ping answers the probe's handshake check.
-func (c *fakeProbeConn) Ping(context.Context) error { return nil }
+func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr }
 
 // QueryContext answers the existence probe and both cursor reads, which is the
 // whole statement surface readCursors uses.

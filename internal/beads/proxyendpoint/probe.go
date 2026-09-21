@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"syscall"
 	"time"
@@ -51,16 +52,18 @@ type ProbeOutcome int
 
 // Probe outcomes.
 const (
-	// ProbeUnknown is the zero value, and also the honest answer when the
-	// session failed for a reason that is not about the connection at all —
-	// a missing database, a denied login, a caller's canceled context. It is
-	// never a conclusion about the proxy.
+	// ProbeUnknown is the zero value, and also the honest answer whenever the
+	// session failed for a reason that is not the proxy's — a missing database,
+	// a denied login, a caller's canceled context, and above all the probe's OWN
+	// expired budget. It is never a conclusion about the proxy, and it is the
+	// only outcome a reader may reach by running out of time.
 	ProbeUnknown ProbeOutcome = iota
-	// ProbeRefused means nothing accepted the connection. On a record whose
-	// process is gone this is the ordinary stopped state; on a live
-	// same-generation record it is bd's teardown window, where the listener is
-	// already closed and the record is removed only after the backend's
-	// shutdown GC finishes.
+	// ProbeRefused means the kernel refused the connection: ECONNREFUSED, and
+	// nothing else. On a record whose process is gone this is the ordinary
+	// stopped state; on a live same-generation record it is bd's teardown
+	// window, where the listener is already closed and the record is removed
+	// only after the backend's shutdown GC finishes. A dial that merely ran out
+	// of time proves nothing about a listener and is ProbeUnknown.
 	ProbeRefused
 	// ProbeAcceptedNoGreeting means the proxy accepted the connection and then
 	// closed it without a MySQL greeting. That is the signature of a live proxy
@@ -153,22 +156,68 @@ func Probe(ctx context.Context, probeIO ProbeIO) ProbeResult {
 // ClassifyProbe maps a session error and the confirming dial's result onto an
 // outcome. It is pure, and it is where the three-way split lives.
 //
+// The FIRST question is whether the probe ran out of its own time, because that
+// error is the one the probe manufactures itself and the only one that says
+// nothing whatever about the endpoint. context.DeadlineExceeded implements
+// net.Error — Timeout() and Temporary() are on it — so a classifier that reached
+// for net.Error first read the probe's own two-second budget as a wire failure
+// and then, with the confirming dial succeeding against a perfectly healthy
+// proxy, reported accepted_no_greeting: the zombie signature, on a proxy that is
+// serving bd fine. Under load, an information_schema scan across a city root's
+// databases passes two seconds without anything being wrong. The escalation that
+// reads it is `bd dolt stop` on a live proxy, which is why the order of these
+// arms is a correctness property and not a style.
+//
 // A session error that is not connection-level — an unknown database, a denied
-// login, a canceled caller — is deliberately ProbeUnknown rather than being
-// forced into one of the proxy states. Those errors say something about the
-// database or the caller, and a probe that reported them as "the proxy is fine"
-// or "the proxy is gone" would be wrong in both directions.
+// login, a canceled caller — is ProbeUnknown for the same reason: those errors
+// say something about the database or the caller, and a probe that reported them
+// as "the proxy is fine" or "the proxy is gone" would be wrong in both
+// directions.
+//
+// The two proxy verdicts are both positive claims and both need positive
+// evidence. accepted_no_greeting requires a real wire failure (an io.EOF, a
+// driver ErrInvalidConn, a net.OpError) AND a dial that something accepted;
+// refused requires the kernel's ECONNREFUSED. A confirming dial that timed out
+// is neither: it is a busy accept queue, and on a live same-generation record
+// calling that "refused" would name a healthy proxy as draining.
 func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
 	switch {
 	case sessionErr == nil:
 		return ProbeServed
+	case IsIndeterminate(sessionErr):
+		return ProbeUnknown
 	case !IsConnectionLevel(sessionErr):
 		return ProbeUnknown
-	case dialErr != nil:
+	case dialErr == nil:
+		return ProbeAcceptedNoGreeting
+	case errors.Is(dialErr, syscall.ECONNREFUSED):
 		return ProbeRefused
 	default:
-		return ProbeAcceptedNoGreeting
+		return ProbeUnknown
 	}
+}
+
+// IsIndeterminate reports whether err is the probe's own clock or its caller's
+// cancellation rather than anything the endpoint did.
+//
+// It is the guard in front of every other classification arm. The probe imposes
+// its own deadlines (ProbeSessionTimeout, ProbeDialTimeout) and its caller can
+// cancel at any moment; both surface as errors that satisfy net.Error, and
+// neither is evidence about a proxy. Every one of these maps to ProbeUnknown,
+// which is the only outcome that carries no claim.
+func IsIndeterminate(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, sentinel := range []error{context.DeadlineExceeded, context.Canceled, os.ErrDeadlineExceeded} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	// A driver or a listener may report its own timeout type rather than one of
+	// the sentinels above; a timeout is a timeout however it is spelled.
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // IsConnectionLevel reports whether err is about the connection rather than
@@ -179,8 +228,18 @@ func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
 // depending on how far the handshake got, and database/sql retries and rewraps
 // on top of that. A text match over that surface is a guess that goes stale on
 // a driver bump; errors.Is over exported sentinels does not.
+//
+// "About the connection" means the peer did something, so a timeout is excluded:
+// see IsIndeterminate.
 func IsConnectionLevel(err error) bool {
 	if err == nil {
+		return false
+	}
+	// The probe's own deadline and its caller's cancellation are not the wire.
+	// This arm is FIRST because context.DeadlineExceeded satisfies both the
+	// net.Error and the timeout checks below, so any later placement would let
+	// the probe's own clock be read as a proxy state.
+	if IsIndeterminate(err) {
 		return false
 	}
 	for _, sentinel := range []error{
