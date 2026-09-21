@@ -1069,6 +1069,10 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(b beads.Bead) string { return b.Metadata[session.CurrentBeadIDKey] },
 			func(i session.Info) string { return i.CurrentlyProcessingBeadID },
 		},
+		"sessionCurrentlyProcessingWorkflowRoot": {
+			func(b beads.Bead) string { return b.Metadata[session.CurrentWorkflowRootKey] },
+			func(i session.Info) string { return i.CurrentlyProcessingWorkflowRoot },
+		},
 		"sessionCoreHashBreakdown": {
 			func(b beads.Bead) string { return b.Metadata["core_hash_breakdown"] },
 			func(i session.Info) string { return i.CoreHashBreakdown },
