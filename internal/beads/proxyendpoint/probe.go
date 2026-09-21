@@ -13,8 +13,6 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
-
-	"github.com/gastownhall/gascity/internal/doltpool"
 )
 
 // Probe budgets. A probe is a diagnostic, not a retry loop: it either answers
@@ -27,6 +25,11 @@ const (
 	// ProbeSessionTimeout bounds the MySQL handshake and both cursor reads.
 	ProbeSessionTimeout = 2 * time.Second
 )
+
+// probeUser is the login the probe uses. bd's own proxied CLI speaks to the
+// proxy as `root` with no password, so this is the account that exists rather
+// than one gc chose.
+const probeUser = "root"
 
 // Cursor table names. bd has kept these stable across the whole 1.x line
 // (beads internal/storage/schema/schema.go), which is what makes two read-only
@@ -203,17 +206,21 @@ func IsConnectionLevel(err error) bool {
 	return errors.As(err, &opErr)
 }
 
-// DefaultProbeIO builds the real IO for one endpoint: a pooled MySQL session
+// DefaultProbeIO builds the real IO for one endpoint: a private MySQL session
 // against the proxy's loopback port as `root` with no password — the same
 // credentials bd's own CLI uses over the same proxy — and a bare TCP dial.
 //
-// It borrows one connection from the shared pool and returns it before it
-// returns. That matters for more than tidiness: any open TCP connection, pooled
-// or not, keeps bd's idle watcher from arming, so a reader that held one could
-// defeat a finite idle timeout the operator asked for. The borrowed connection
-// goes back to a pool whose own idle bound (doltpool's connMaxIdleTime) is
-// strictly below bd's default 30s window, so a probe can delay a retirement by
-// that bound at worst and can never prevent one.
+// "Private" is the load-bearing word, and it is why this does not reach for
+// internal/doltpool. That registry is a process-lifetime cache: its handles must
+// never be closed, it retains up to maxIdleConns connections per endpoint, and a
+// returned connection stays open for the registry's idle bound (20s) or until
+// the process exits. bd's idle watcher counts every accepted TCP connection,
+// pooled-idle or not, and cannot arm while one is open, so a probe that parked a
+// connection there would defer the very retirement the diagnostic reports —
+// through the rest of a ~40-check doctor run, and even after a check doctor has
+// already given up on. The probe therefore opens its own unregistered handle
+// with no idle slot at all and closes it before it returns: no connection to bd
+// survives the check that made it.
 func DefaultProbeIO(port int, database string) ProbeIO {
 	addr := net.JoinHostPort(Host, strconv.Itoa(port))
 	return ProbeIO{
@@ -236,7 +243,7 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 	return Probe(ctx, DefaultProbeIO(ep.Record.Port, database))
 }
 
-// readCursors reads both schema cursors over one pinned connection.
+// readCursors reads both schema cursors over one pinned private connection.
 //
 // One connection, not two: Dolt pins a session to the catalog snapshot it had
 // when a statement failed, so an existence probe and a read that disagreed
@@ -246,16 +253,55 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
 func readCursors(ctx context.Context, port int, database string) (Cursors, error) {
-	var cursors Cursors
-	db, err := doltpool.Open(Host, strconv.Itoa(port), "root", "", database)
+	connector, err := probeConnector(port, database)
 	if err != nil {
-		return cursors, err
+		return Cursors{}, err
 	}
+	return readCursorsOver(ctx, connector)
+}
+
+// probeConnector builds the driver connector for one probe session.
+//
+// It is a connector rather than a DSN because sql.OpenDB over a connector is the
+// one way to get a *sql.DB no registry owns, which is the whole point of it. The
+// timeouts are the probe's own budget rather than the pool's minutes: a
+// diagnostic that could outlive its own deadline through a driver-level read
+// timeout would be a diagnostic with no bound at all.
+func probeConnector(port int, database string) (driver.Connector, error) {
+	cfg := mysql.NewConfig()
+	cfg.User = probeUser
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(Host, strconv.Itoa(port))
+	cfg.DBName = database
+	cfg.Timeout = ProbeSessionTimeout
+	cfg.ReadTimeout = ProbeSessionTimeout
+	cfg.WriteTimeout = ProbeSessionTimeout
+	cfg.AllowNativePasswords = true
+	return mysql.NewConnector(cfg)
+}
+
+// readCursorsOver runs one probe session over connector and closes everything it
+// opened before it returns.
+//
+// The closes are the contract rather than housekeeping, so they are
+// deterministic and they are ordered: the pinned connection goes first — with no
+// idle slot to go back to, that closes the socket — and then the handle itself,
+// which nothing else holds and so cannot outlive this call. A caller's canceled
+// or expired context reaches the same returns through db.Conn and the queries,
+// so a probe the caller has already abandoned still closes its session here.
+func readCursorsOver(ctx context.Context, connector driver.Connector) (Cursors, error) {
+	var cursors Cursors
+	db := sql.OpenDB(connector)
+	// One connection, never idle: the probe needs exactly one session, and it
+	// must leave nothing behind for anything to reuse.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close() //nolint:errcheck // the probe's own handle, closed on every path
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return cursors, err
 	}
-	defer conn.Close() //nolint:errcheck // returning a borrowed connection to the pool
+	defer conn.Close() //nolint:errcheck // closes the socket: this handle retains no idle connection
 	if err := conn.PingContext(ctx); err != nil {
 		return cursors, err
 	}
