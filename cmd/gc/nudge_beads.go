@@ -40,7 +40,7 @@ var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 // database from a storage refusal. Call sites that surface a failure to a human
 // use this form and print the reason; the seam above stays for the poll/drain
 // helpers whose contract is already "a nil store means do nothing".
-func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
+var openNudgeBeadStoreErr = func(cityPath string) (beads.NudgesStore, error) {
 	store, err := openStoreAtForCity(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)

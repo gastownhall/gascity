@@ -340,6 +340,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening nudge bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort close
 	// Session-class reads route through the session store (identity today);
 	// the nudge queue stays on its own store.
 	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -426,6 +428,85 @@ func TestNudgeEventDispatcherEmptyQueueSkipsObservation(t *testing.T) {
 	if n := countFakeCalls(fake, "IsRunning"); n != baseline {
 		t.Fatalf("IsRunning calls grew %d -> %d, want no observation for an empty queue (cheap short-circuit)", baseline, n)
 	}
+}
+
+// TestNudgeEventDispatcherRunPassClosesEveryStoreItOpens pins the connection-leak
+// fix in runPass: every targeted-event, resync, wake and patrol pass opens a bead
+// store via openNudgeBeadStoreErr but never released it via closeBeadStoreHandle,
+// so a long-lived dispatcher accumulated open store handles across passes (PR
+// #4967 ship-gate finding 5). Each pass here must close what it opened.
+func TestNudgeEventDispatcherRunPassClosesEveryStoreItOpens(t *testing.T) {
+	// Install the seam before fixture setup: newNudgeDispatcherFixture's dispatcher
+	// starts a worker goroutine immediately, so swapping the package-level
+	// openNudgeBeadStoreErr var after that point races against its reads. Instead,
+	// snapshot opens/closes right after the fixture returns and assert only on the
+	// delta accrued afterward — newNudgeDispatcherFixture opens its own long-lived
+	// session-manager store via openNudgeBeadStore (which calls openNudgeBeadStoreErr),
+	// and that store is legitimately never closed mid-test, so it must not count
+	// toward the runPass-specific open/close balance this test checks.
+	var opens, closes atomic.Int64
+	prev := openNudgeBeadStoreErr
+	openNudgeBeadStoreErr = func(path string) (beads.NudgesStore, error) {
+		opens.Add(1)
+		store, err := prev(path)
+		if err != nil {
+			return store, err
+		}
+		return beads.NudgesStore{Store: &runPassCloseCountingStore{Store: store.Store, closes: &closes}}, nil
+	}
+	t.Cleanup(func() { openNudgeBeadStoreErr = prev })
+
+	fake := newNudgeEventedFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
+
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("queued nudge not delivered; state=%+v", queueStateSnapshot(t, dir))
+	}
+
+	// Drain quiescence: wait for every in-flight/scheduled pass (including any
+	// retry the delivery may have earned) to finish before comparing counts,
+	// so the assertion below reflects settled state rather than a pass still
+	// mid-flight on the dispatcher's worker goroutine.
+	waitForNudgeDispatcherCondition(t, func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.pending) == 0 && !d.fullPassDue
+	}, "dispatcher settled")
+
+	// One store stays open for the whole test: newNudgeDispatcherFixture's own
+	// session-manager store, opened once via openNudgeBeadStore and never closed
+	// mid-test. So once the dispatcher has settled, exactly that one open should
+	// remain outstanding — every store runPass itself opened must have been closed.
+	gotOpens, gotCloses := opens.Load(), closes.Load()
+	if gotOpens == 0 {
+		t.Fatal("expected the nudge bead store to be opened at least once")
+	}
+	if outstanding := gotOpens - gotCloses; outstanding != 1 {
+		t.Fatalf("nudge bead store leak: opens=%d closes=%d outstanding=%d (want exactly 1: the fixture's own long-lived store)", gotOpens, gotCloses, outstanding)
+	}
+}
+
+// closeCountingStore wraps a beads.Store and counts CloseStore calls so a test
+// can assert every open is released. closeBeadStoreHandle type-asserts against
+// interface{ CloseStore() error }.
+type runPassCloseCountingStore struct {
+	beads.Store
+	closes *atomic.Int64
+}
+
+//nolint:unparam // error return mandated by the CloseStore interface
+func (s *runPassCloseCountingStore) CloseStore() error {
+	s.closes.Add(1)
+	if c, ok := s.Store.(interface{ CloseStore() error }); ok {
+		return c.CloseStore()
+	}
+	return nil
 }
 
 func TestNudgeEventDispatcherIgnoresNonIdleStatuses(t *testing.T) {
