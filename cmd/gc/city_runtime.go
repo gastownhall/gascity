@@ -2839,7 +2839,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	}
 	phaseStart = time.Now()
 	if err == nil {
-		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), cr.sp, time.Now(), dispatchSessionBeads); nudgeErr != nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, sessionpkg.NewStore(sessStore), cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
 			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
 		}
 	}

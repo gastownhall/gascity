@@ -1251,7 +1251,7 @@ func lookupSessionBeadByIDInfo(sessFront *sessionpkg.Store, id string) (sessionp
 	return info, true, nil
 }
 
-func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Provider, now time.Time) error {
+func dispatchReadyWaitNudges(cityPath string, store beads.Store, _ runtime.Provider, now time.Time) error {
 	// Single-store wrapper: fan the one work store into the session and nudges
 	// class params so existing test call sites stay untouched. Both arms route
 	// through their coordination-class store (cliSessionFrontDoor, cliNudgesStore)
@@ -1261,10 +1261,10 @@ func dispatchReadyWaitNudges(cityPath string, store beads.Store, sp runtime.Prov
 	if strings.TrimSpace(cityPath) != "" {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	}
-	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), sp, now, nil)
+	return dispatchReadyWaitNudgesWithSnapshot(cityPath, cliSessionFrontDoor(store, cfg, cityPath), cliNudgesStore(store, cfg, cityPath), now, nil)
 }
 
-func dispatchReadyWaitNudgesWithSnapshot(cityPath string, _ *config.City, sessFront *sessionpkg.Store, nudges beads.NudgesStore, _ runtime.Provider, now time.Time, sessionBeads *sessionBeadSnapshot) error {
+func dispatchReadyWaitNudgesWithSnapshot(cityPath string, sessFront *sessionpkg.Store, nudges beads.NudgesStore, now time.Time, sessionBeads *sessionBeadSnapshot) error {
 	if sessionBeads == nil {
 		var err error
 		sessionBeads, err = loadSessionBeadSnapshot(sessFront.Store().Store)
