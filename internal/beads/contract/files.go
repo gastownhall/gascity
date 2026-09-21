@@ -428,7 +428,7 @@ func SetMetadataDoltDataDir(fs fsys.FS, path, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	return fs.WriteFile(path, append(encoded, '\n'), 0o644)
+	return fsys.WriteFileAtomic(fs, path, append(encoded, '\n'), 0o644)
 }
 
 // ReadMetadataBackend reports the non-empty backend marker in metadata.json.
@@ -615,7 +615,7 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	if err != nil {
 		return false, err
 	}
-	return true, fs.WriteFile(path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, 0o644)
 }
 
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
@@ -687,7 +687,7 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		return false, err
 	}
 	encoded = append(encoded, '\n')
-	return true, fs.WriteFile(path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, 0o644)
 }
 
 func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (bool, error) {
@@ -840,7 +840,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) != "" {
 		out = append(out, "")
 	}
-	return true, fs.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, []byte(strings.Join(out, "\n")), 0o644)
 }
 
 // parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
