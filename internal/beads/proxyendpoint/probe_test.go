@@ -10,6 +10,9 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // TestClassifyProbeOutcomeTable pins the three-way split the whole error
@@ -302,6 +305,55 @@ func TestProbeNeverConcludesFromItsOwnDeadline(t *testing.T) {
 				t.Fatalf("a deadline on %s opened %d connection(s) and closed %d", tc.name, opened, closed)
 			}
 		})
+	}
+}
+
+// TestProbeReadsItsOwnBudgetRatherThanTheDriversSpelling is the deterministic
+// twin of the real-socket fence, and the one a reviewer can read in one sitting.
+//
+// go-sql-driver's readPacket erases a socket read deadline into
+// mysql.ErrInvalidConn whenever its context watcher has not fired yet, so "the
+// session ended because the probe ran out of time" arrives wearing the spelling
+// of a wire failure. The session below does exactly that: it waits for the
+// budget and then returns the driver's sentinel. Before this fix the sentinel won
+// — connection-level, confirming dial succeeds, accepted_no_greeting, which is
+// the token §3.4 escalates to `bd dolt stop` — and a live proxy that had not
+// answered in two seconds was reported as a zombie.
+func TestProbeReadsItsOwnBudgetRatherThanTheDriversSpelling(t *testing.T) {
+	for _, spelling := range []error{mysql.ErrInvalidConn, io.EOF, syscall.ECONNRESET} {
+		dials := 0
+		got := probeWithBudget(context.Background(), ProbeIO{
+			Session: func(ctx context.Context) (Cursors, error) {
+				<-ctx.Done()
+				return Cursors{}, spelling
+			},
+			Dial: func(context.Context) error { dials++; return nil },
+		}, 20*time.Millisecond)
+		if got.Outcome != ProbeUnknown {
+			t.Errorf("a session that spent the whole budget and returned %v reported %v, want unknown", spelling, got.Outcome)
+		}
+		if dials != 0 {
+			t.Errorf("a session that spent the whole budget and returned %v spent %d confirming dial(s), want 0", spelling, dials)
+		}
+		if !errors.Is(got.Err, spelling) {
+			t.Errorf("the probe dropped the session error %v: %v", spelling, got.Err)
+		}
+	}
+}
+
+// TestProbeDriverTimeoutsSitAboveTheSessionBudget pins the margin that keeps the
+// driver's own deadlines out of the classification.
+//
+// Equal deadlines are not a tuning choice: with them the socket deadline usually
+// ends a slow session first, and the driver spells that ErrInvalidConn. The
+// context guard above catches it either way, but the margin is what makes the
+// error the probe reports say what actually happened.
+func TestProbeDriverTimeoutsSitAboveTheSessionBudget(t *testing.T) {
+	if got := probeDriverTimeout(ProbeSessionTimeout); got <= ProbeSessionTimeout {
+		t.Fatalf("the driver timeout is %v for a %v session budget; it must be strictly above the budget so the context watcher ends a slow session", got, ProbeSessionTimeout)
+	}
+	if ProbeDriverTimeoutSlack <= 0 {
+		t.Fatalf("ProbeDriverTimeoutSlack is %v; a non-positive slack is an equal deadline", ProbeDriverTimeoutSlack)
 	}
 }
 

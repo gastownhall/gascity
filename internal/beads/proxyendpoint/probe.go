@@ -26,6 +26,30 @@ const (
 	ProbeDialTimeout = 500 * time.Millisecond
 	// ProbeSessionTimeout bounds the MySQL handshake and both cursor reads.
 	ProbeSessionTimeout = 2 * time.Second
+	// ProbeDriverTimeoutSlack is how far the driver's own socket deadlines sit
+	// ABOVE the session budget, and it is a correctness margin rather than a
+	// tuning knob.
+	//
+	// go-sql-driver arms SetReadDeadline(now+ReadTimeout) before every read
+	// (connection.go readWithTimeout) and, on ANY read error, readPacket closes
+	// the connection and returns mc.canceled — the context error — only if the
+	// context watcher has ALREADY fired; otherwise it logs the real error and
+	// returns the sentinel mysql.ErrInvalidConn (packets.go readPacket). The
+	// context path is two scheduling hops longer (timer -> AfterFunc closes
+	// Done() -> watcher goroutine -> mc.cancel), so with the two deadlines set
+	// equal the socket deadline usually wins and a slow proxy's session comes
+	// back spelled as a connection-level failure. The confirming dial then
+	// succeeds, and the verdict is accepted_no_greeting: the zombie signature
+	// §3.4 escalates to `bd ping` -> `recover` (`bd dolt stop`), on a proxy that
+	// is merely slow. Measured 5 of 8 probes against a silent listener at
+	// production budgets.
+	//
+	// Keeping the driver's deadlines strictly above the session budget makes the
+	// context watcher the thing that ends a slow session, so the error carries
+	// the fact the probe owns — its own clock ran out. The driver deadlines stay
+	// in place as a backstop for the case the watcher cannot cover: a read that
+	// blocks with no context deadline at all.
+	ProbeDriverTimeoutSlack = 1 * time.Second
 )
 
 // probeUser is the login the probe uses. bd's own proxied CLI speaks to the
@@ -148,14 +172,41 @@ type ProbeIO struct {
 // spelling of the day, while "did anything accept me" is a property of the
 // proxy.
 func Probe(ctx context.Context, probeIO ProbeIO) ProbeResult {
+	return probeWithBudget(ctx, probeIO, ProbeSessionTimeout)
+}
+
+// probeWithBudget is Probe with the session budget injected, so a test can pin
+// the classification on a real socket without paying the production budget once
+// per probe. Production has exactly one budget: ProbeSessionTimeout.
+func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration) ProbeResult {
 	if probeIO.Session == nil {
 		return ProbeResult{Err: errors.New("proxyendpoint: probe has no session to run")}
 	}
-	sessionCtx, cancel := context.WithTimeout(ctx, ProbeSessionTimeout)
+	sessionCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
+	started := time.Now()
 	cursors, sessionErr := probeIO.Session(sessionCtx)
+	spent := time.Since(started)
 	if sessionErr == nil {
 		return ProbeResult{Outcome: ProbeServed, Cursors: cursors}
+	}
+	// The budget expiring is a fact this function owns, and it outranks every
+	// spelling the driver may have put on the error. go-sql-driver turns a socket
+	// read deadline into mysql.ErrInvalidConn (see ProbeDriverTimeoutSlack), and
+	// a classifier that believed that spelling reported the zombie signature for
+	// a proxy that had merely not answered yet. Asking the clock instead is
+	// unfalsifiable: if this budget is gone, nothing about the session can be
+	// evidence about the endpoint, and no confirming dial is worth spending on it.
+	//
+	// The budget is read two ways because the two readings can disagree by a
+	// scheduling hop. sessionCtx.Err() is the context's own verdict, but it is set
+	// by a time.AfterFunc goroutine, and on a loaded box the netpoller can hand a
+	// socket deadline to the reader before that callback runs — measured 1 in 8
+	// with the deadlines equal, which is how this arrives wearing the driver's
+	// spelling. A session that consumed the whole budget is the same fact read
+	// off the clock, and it cannot lose that race.
+	if sessionCtx.Err() != nil || spent >= budget {
+		return ProbeResult{Outcome: ProbeUnknown, Err: sessionErr}
 	}
 	var dialErr error
 	if IsConnectionLevel(sessionErr) && probeIO.Dial != nil {
@@ -294,10 +345,19 @@ func IsConnectionLevel(err error) bool {
 // with no idle slot at all and closes it before it returns: no connection to bd
 // survives the check that made it.
 func DefaultProbeIO(port int, database string) ProbeIO {
+	return probeIOWithDriverTimeout(port, database, probeDriverTimeout(ProbeSessionTimeout))
+}
+
+// probeIOWithDriverTimeout is DefaultProbeIO with the driver's socket deadlines
+// injected, so a test can drive the real driver over a real socket with the
+// deadlines it wants — including the equal-budget configuration this package
+// used to ship, which must classify as ProbeUnknown through the context guard in
+// probeWithBudget rather than through this margin.
+func probeIOWithDriverTimeout(port int, database string, driverTimeout time.Duration) ProbeIO {
 	addr := net.JoinHostPort(Host, strconv.Itoa(port))
 	return ProbeIO{
 		Session: func(ctx context.Context) (Cursors, error) {
-			return readCursors(ctx, port, database)
+			return readCursors(ctx, port, database, driverTimeout)
 		},
 		Dial: func(ctx context.Context) error {
 			var dialer net.Dialer
@@ -330,34 +390,43 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // (internal/storage/schema/schema.go) and exists for the harsher version of the
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
-func readCursors(ctx context.Context, port int, database string) (Cursors, error) {
+func readCursors(ctx context.Context, port int, database string, driverTimeout time.Duration) (Cursors, error) {
 	if strings.TrimSpace(database) == "" {
 		// Cursors read against no database are zeros, not evidence.
 		return Cursors{}, ErrNoDatabase
 	}
-	connector, err := probeConnector(port, database)
+	connector, err := probeConnector(port, database, driverTimeout)
 	if err != nil {
 		return Cursors{}, err
 	}
 	return readCursorsOver(ctx, connector)
 }
 
+// probeDriverTimeout is the driver-level socket deadline for a session budget:
+// strictly above it, so the context watcher is what ends a slow session and the
+// driver's deadlines are only the backstop. See ProbeDriverTimeoutSlack.
+func probeDriverTimeout(budget time.Duration) time.Duration {
+	return budget + ProbeDriverTimeoutSlack
+}
+
 // probeConnector builds the driver connector for one probe session.
 //
 // It is a connector rather than a DSN because sql.OpenDB over a connector is the
 // one way to get a *sql.DB no registry owns, which is the whole point of it. The
-// timeouts are the probe's own budget rather than the pool's minutes: a
-// diagnostic that could outlive its own deadline through a driver-level read
-// timeout would be a diagnostic with no bound at all.
-func probeConnector(port int, database string) (driver.Connector, error) {
+// timeouts are minutes below the pool's: a diagnostic that could outlive its own
+// deadline through a driver-level read timeout would be a diagnostic with no
+// bound at all. They are also strictly ABOVE the session budget the context
+// carries, which is the F1 fix — see ProbeDriverTimeoutSlack for why an equal
+// deadline made a slow proxy read as a dead one.
+func probeConnector(port int, database string, driverTimeout time.Duration) (driver.Connector, error) {
 	cfg := mysql.NewConfig()
 	cfg.User = probeUser
 	cfg.Net = "tcp"
 	cfg.Addr = net.JoinHostPort(Host, strconv.Itoa(port))
 	cfg.DBName = database
-	cfg.Timeout = ProbeSessionTimeout
-	cfg.ReadTimeout = ProbeSessionTimeout
-	cfg.WriteTimeout = ProbeSessionTimeout
+	cfg.Timeout = driverTimeout
+	cfg.ReadTimeout = driverTimeout
+	cfg.WriteTimeout = driverTimeout
 	cfg.AllowNativePasswords = true
 	return mysql.NewConnector(cfg)
 }
