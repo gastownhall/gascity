@@ -29,6 +29,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -251,9 +252,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 		select {
 		case sig := <-signals:
 			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
-			<-done
-			return 0
+			terminateErr := terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
+			return finishManagedDoltScopeWatchdogTermination(done, terminateErr, logFile, cmd.Process.Pid)
 		case <-ticker.C:
 			if !managedDoltScopeGone(configFile) {
 				goneStreak = 0
@@ -265,9 +265,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			}
 			fmt.Fprintf(logFile, "gc scope watchdog: config %s gone for %d consecutive checks; terminating dolt sql-server pid %d\n", //nolint:errcheck
 				configFile, goneStreak, cmd.Process.Pid)
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
-			<-done
-			return 0
+			terminateErr := terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
+			return finishManagedDoltScopeWatchdogTermination(done, terminateErr, logFile, cmd.Process.Pid)
 		case err := <-done:
 			if err != nil {
 				fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exited with error: %v\n", cmd.Process.Pid, err) //nolint:errcheck
@@ -277,6 +276,19 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			return 0
 		}
 	}
+}
+
+// finishManagedDoltScopeWatchdogTermination waits for the child only after the
+// termination path succeeded. A failed lock-ownership gate can leave the child
+// alive indefinitely; waiting for cmd.Wait in that state wedges the watchdog
+// and hides the termination failure behind its earlier "terminating" log line.
+func finishManagedDoltScopeWatchdogTermination(done <-chan error, terminateErr error, logFile io.Writer, pid int) int {
+	if terminateErr != nil {
+		fmt.Fprintf(logFile, "gc scope watchdog: failed to terminate dolt sql-server pid %d: %v\n", pid, terminateErr) //nolint:errcheck
+		return 1
+	}
+	<-done
+	return 0
 }
 
 // terminateManagedDoltScopeWatchdogChild terminates the watchdog's own dolt
