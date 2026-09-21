@@ -846,7 +846,11 @@ func planMigrateProxiedScopes(cityPath string, selected []string) ([]migrateProx
 // beads' configfile.Config.Save silently strips an absolute dolt_data_dir, and
 // bd saves the config mid-migration.
 func sharedCityRootForRig(cityPath, rigPath string) (string, error) {
-	cityDataDir := filepath.Join(normalizePathForCompare(cityPath), ".beads", "dolt")
+	// The city's RESOLVED data dir, not the default one. A city whose metadata
+	// records a dolt_data_dir serves its rigs' databases from there, and probing
+	// <city>/.beads/dolt instead found nothing, classified every such rig as
+	// owning its own empty root and refused the migration it was asked for.
+	cityDataDir := scopeDoltDataDir(cityPath)
 	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, scopeMetadataJSONPath(rigPath))
 	if err != nil {
 		return "", err
@@ -906,7 +910,7 @@ func requireNoManagedDoltServer(cityPath string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("probe managed dolt runtime state %s: %w", statePath, err)
 	}
-	dataDir := filepath.Join(normalizePathForCompare(cityPath), ".beads", "dolt")
+	dataDir := scopeDoltDataDir(cityPath)
 	if _, bdOwned := bdOwnedProxyDoltConfig(filepath.Join(dataDir, bdProxyConfigFileName)); bdOwned {
 		return nil
 	}
