@@ -328,6 +328,26 @@ func scopeProviderOwned(cityPath, scopeRoot string) (bool, error) {
 	return owned, err
 }
 
+// scopeIsBdOwnedDirectExternal names the shape providerOwnedScopeState's three
+// arms cannot classify: bd initialized the scope in direct (`dolt_mode:
+// server`) mode against a server it was pointed at, gc never journaled it (or
+// the journal is gone with a regenerated `.gc/`), and the only record of the
+// upstream is the persisted binding in bd's metadata.json.
+//
+// It is deliberately NOT a fourth arm of providerOwnedScopeState. A
+// provider-owned scope runs its whole lifecycle through the exec provider's
+// script; this scope has no proxy and no process for gc or the script to
+// manage, so promoting it would only turn every start, health and stop into a
+// refusal. What it does decide is narrower and is all the shape needs: gc
+// neither canonicalises the scope's files nor raises a managed Dolt for it, and
+// the resolver keeps reaching the upstream bd recorded.
+func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
+	if !cityUsesBdStoreContract(cityPath) {
+		return false, nil
+	}
+	return contract.ScopeCarriesBdOwnedDirectBinding(fsys.OSFS{}, cityPath, scopeRoot, "")
+}
+
 // providerOwnedOpRetires reports whether a lifecycle operation only retires
 // provider processes. Retiring operations reach further than starting ones —
 // see providerOwnedLifecycleScopeRoots.

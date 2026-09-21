@@ -93,6 +93,18 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if completeBinding {
 			return false, nil
 		}
+		// Same reason, one shape further out: a bd-owned direct-external city
+		// names its server in bd's legacy binding keys rather than in the
+		// opaque storage binding. Answering "gc-managed" for it starts gc's own
+		// Dolt over the city's empty `.beads/dolt` on the first `gc start`,
+		// which is the store every later command then reads.
+		bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if bdOwnedDirect {
+			return false, nil
+		}
 		// A city whose metadata gc cannot read is not a city gc owns a Dolt
 		// runtime for, and the refusal has to reach the operator rather than
 		// being answered as "not owned".

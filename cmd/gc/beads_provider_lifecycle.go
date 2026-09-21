@@ -909,6 +909,20 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 	if !cityUsesBdStoreContract(cityPath) {
 		return false, nil
 	}
+	// The opaque storage binding above is not the only way a scope names a
+	// store gc does not serve. bd's own direct-external shape records the
+	// server in the legacy dolt_server_host/dolt_server_port keys, and the
+	// ownership classifier cannot see it: the journal is runtime state under
+	// `.gc/`, so a clone or a regenerated runtime dir leaves a bd-owned scope
+	// looking legacy-managed. Canonicalising it stamps gc's endpoint origin
+	// over bd's template, which is exactly the marker that stops the resolver
+	// from ever consulting the binding again — the scope is then re-homed onto
+	// an empty gc-managed store with no verb that repairs it.
+	if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, dir); err != nil {
+		return false, err
+	} else if bdOwnedDirect {
+		return true, nil
+	}
 	state, ok, err := contract.LoadMetadataState(fsys.OSFS{}, path)
 	if err != nil {
 		if allowLegacyDoltMetadataRepair(fsys.OSFS{}, path, err) {
