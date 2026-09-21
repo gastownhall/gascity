@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -593,5 +595,78 @@ func TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload(t *testing.T) {
 	cr.ensureNudgeWakeListener(ctx)
 	if cr.nudgeWakeListener == nil {
 		t.Fatal("wake listener was not started after a reload made the provider event-capable")
+	}
+}
+
+// TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener drives
+// reloadConfigTraced itself, not a hand-rolled stand-in for it. The unit
+// test above asserts the gate logic in ensureNudgeWakeListener is correct;
+// this one asserts reloadConfigTraced actually calls it. A prior version of
+// reloadConfigTraced dropped that call, and the unit test above kept passing
+// because it invokes cr.ensureNudgeWakeListener directly rather than going
+// through reloadConfigTraced -- exactly the gap this test closes.
+func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: testWriter(t),
+	})
+	cr.sessionDrains = newDrainTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cr.nudgeWakeCh = make(chan struct{}, 1)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
+	// Startup: legacy dispatcher mode on a non-event provider satisfies
+	// neither half of the gate. No listener should start.
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+	}
+
+	// Swap in an event-capable provider directly (the config's session
+	// provider name is unchanged, so reloadConfigTraced will not rebuild
+	// it from the registry -- it carries this cr.sp forward as nextSp).
+	// This is the reload reloadConfigTraced itself must wire up correctly;
+	// unlike the unit test above, nothing here calls
+	// cr.ensureNudgeWakeListener directly.
+	cr.sp = newNudgeEventedFake()
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
+	}
+	if !cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must report active() after reloadConfigTraced observes the event-capable provider")
+	}
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")
 	}
 }
