@@ -98,11 +98,6 @@ vulnerabilities:
   # not clear, and the GitPython findings sit in a requirements file the
   # rebuilds do not touch. TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools
   # holds the rebuilt-path entries to exactly this set.
-  - id: CVE-2026-43871
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-21
-    statement: github.com/apache/thrift CVE, fixed in 0.24.0. The Dolt rebuild still pins thrift 0.23.0 (THRIFT_VERSION in contrib/k8s/Dockerfile.base); the bd rebuild now forces thrift 0.24.0 forward in contrib/k8s/Dockerfile.agent's bd-builder stage the same way it forces grpc. Remove this path once Dolt's own THRIFT_VERSION pin moves to 0.24.0 or later.
   - id: CVE-2026-78676
     purls:
       - "pkg:pypi/gitpython"

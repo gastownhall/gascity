@@ -249,7 +249,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"ARG XNET_VERSION=0.58.0",
 		"ARG XTEXT_VERSION=0.41.0",
 		"ARG XMOD_VERSION=0.40.0",
-		"ARG THRIFT_VERSION=0.23.0",
+		"ARG THRIFT_VERSION=0.24.0",
 	} {
 		if !strings.Contains(base, arg) {
 			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
@@ -313,18 +313,14 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 }
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no waiver beyond the reviewed set below. They are
-// rebuilt with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, and
-// Dockerfile.base now forces x/crypto, x/net, x/text and thrift forward in the gh and
-// Dolt builds the same way it forces grpc, so a waiver on those paths would let the
-// scan gate mask a regressed rebuild instead of proving the fix holds. The reviewed
-// set is the two surviving CVEs -- CVE-2026-56852 for kubectl and CVE-2026-43871,
-// published against the thrift 0.23.0 the Dolt build still pins -- carried over from
-// main's time-boxed bridge and held to exactly the paths the scan reported;
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and statements.
-// kubectl keeps the x/text waiver because it is an upstream-signed prebuilt this
-// repo installs rather than builds. gc's module waivers are enforced
-// separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
+// 1.26.5 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
+// it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
+// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
+// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
+// rather than builds, so nothing here can move its dependencies. gc's module waivers
+// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -357,15 +353,15 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// cannot grow without one either. The bd and gc paths of the grpc pair were removed
 	// after both moved to 1.83.2; the gh and Dolt grpc paths (CVE-2026-84304,
 	// CVE-2026-84445) were removed once Dockerfile.base's own GRPC_VERSION also reached
-	// 1.83.2, clearing both CVEs for both binaries. The bd path of the thrift entry was
-	// removed once Dockerfile.agent forced thrift forward to 0.24.0.
+	// 1.83.2, clearing both CVEs for both binaries. The thrift entry (CVE-2026-43871)
+	// is gone entirely: Dockerfile.agent forced bd's thrift to 0.24.0 first, and
+	// Dockerfile.base's own THRIFT_VERSION has now followed for the Dolt rebuild, so
+	// no rebuilt path is waived for it and a regression below 0.24.0 fails the scan.
+	// Nothing rebuilt from source is waived here any more; only kubectl is, and
+	// kubectl is a prebuilt.
 	reviewedWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
 			"usr/local/bin/kubectl": true,
-		},
-		// thrift, fixed in 0.24.0; the Dolt rebuild still pins 0.23.0.
-		"CVE-2026-43871": {
-			"usr/local/bin/dolt": true,
 		},
 	}
 	foundReviewed := map[string]map[string]bool{}
@@ -539,15 +535,15 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins the four entries carried over from
-// main's time-boxed waiver bridge: the findings the rebuilds do not fully clear, because
-// each was published against a version some pin still sits on (thrift 0.23.0 on the Dolt
-// rebuild) or sits in the mail image's requirements. Each is held to the exact paths or
-// purls the scan reported, to the bridge's own 2026-09-21 horizon rather than this
-// file's 2026-11-07, and to a statement naming the fixed version and the pin that has to
-// move. The bridge's other entries — including both grpc CVEs, cleared once
-// Dockerfile.base's own GRPC_VERSION reached 1.83.2 — are what the rebuilds cleared, and
-// the rebuilt-path guard above is what keeps them from coming back.
+// TestTrivyIgnoreKeepsReviewedBridgeEntries pins what is left of main's time-boxed
+// waiver bridge: the GitPython findings, which sit in the mail image's requirements
+// rather than in anything the rebuilds touch. Each is held to the exact purls the scan
+// reported, to the bridge's own 2026-09-21 horizon rather than this file's 2026-11-07,
+// and to a statement naming the fixed version and the pin that has to move. The
+// bridge's other entries are what fixes cleared — both grpc CVEs once
+// Dockerfile.base's own GRPC_VERSION reached 1.83.2, and the thrift CVE once its
+// THRIFT_VERSION reached 0.24.0 — and the rebuilt-path guard above is what keeps them
+// from coming back.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
@@ -581,11 +577,6 @@ func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 		substrings []string
 	}
 	wantEntries := []wantEntry{
-		{
-			id:         "CVE-2026-43871",
-			paths:      toSet("usr/local/bin/dolt"),
-			substrings: []string{"thrift", "0.24.0", "THRIFT_VERSION"},
-		},
 		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
 		{id: "CVE-2026-78675", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
 		{id: "CVE-2026-78677", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
