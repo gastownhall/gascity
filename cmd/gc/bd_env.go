@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -735,6 +736,24 @@ func projectCredentialProviderEnv(env map[string]string) {
 // to that file and left the other Provenance-discarding call sites — this one
 // among them — for later.
 var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+
+// hostedCredentialProbeBuilds counts how many times
+// citySelectsHostedBeadsCredentialProvider has actually loaded city.toml
+// (as opposed to serving a memoized answer). It exists so tests can pin the
+// stat-signature-keyed memoization required by ga-v0agbz.1; the counter is
+// not yet incremented below — wiring it into the load path, and the actual
+// memoization it measures, is GREEN's job, not RED's.
+var hostedCredentialProbeBuilds atomic.Int64
+
+// forgetCitySelectsHostedBeadsCredentialProvider drops any memoized answer
+// citySelectsHostedBeadsCredentialProvider has cached for cityPath. It is a
+// test-only invalidation hook (see t.Cleanup in
+// bd_env_hosted_credential_probe_cache_test.go) so repeated test runs never
+// observe a previous run's cache entry. No-op until GREEN adds the cache
+// this is meant to clear.
+func forgetCitySelectsHostedBeadsCredentialProvider(cityPath string) {
+	_ = cityPath
+}
 
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
