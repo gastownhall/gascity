@@ -3033,7 +3033,21 @@ op_init() {
         # BD_BIN here just as run_bd_init_proxied does; tests and pinned
         # deployments must not silently invoke an unrelated PATH binary.
         bd_bin="${BD_BIN:-bd}"
-        if [ ! -f "$metadata_path" ] || ! (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+        # The context probe is a bd fork like any other and has to be recorded
+        # like one: a fork census with a hole in it is worse than none, because
+        # the budget it informs reads as met. The condition is split rather than
+        # traced in place because the original `[ ! -f metadata ] || ! (… bd
+        # context …)` short-circuits — a trace above it would count a fork that
+        # never happened on a scope with no metadata.json, which is the common
+        # case on a first init.
+        proxied_needs_init=true
+        if [ -f "$metadata_path" ]; then
+            trace_bd_argv context
+            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+                proxied_needs_init=false
+            fi
+        fi
+        if [ "$proxied_needs_init" = true ]; then
             run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
         fi
         ensure_beads_dir_permissions "$dir"
