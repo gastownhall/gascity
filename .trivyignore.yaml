@@ -1,7 +1,9 @@
 vulnerabilities:
   # Expiry horizon moved 2026-08-17: 2026-08-07 -> 2026-11-07, on a set trimmed
-  # from 45 entries to 12. Four reviewed entries at the end of this file are
-  # carried over from main's time-boxed bridge on its own 2026-09-21 horizon.
+  # from 45 entries to 12. Every entry is now a kubectl entry on that horizon:
+  # the four reviewed entries main's time-boxed bridge carried on its own
+  # 2026-09-21 horizon were all fixed rather than re-dated, so the bridge is
+  # retired and nothing in this file expires before 2026-11-07.
   #
   # Every binary this image rebuilds from source now carries patched modules,
   # so none of them is waived for a finding the rebuild clears.
@@ -12,14 +14,14 @@ vulnerabilities:
   # rebuilds bd from a source ref whose go.mod already pins the x/* set, and
   # forces grpc and thrift forward itself (GRPC_VERSION and THRIFT_VERSION in
   # that file), asserting both embedded versions. The rule the previous horizon
-  # established still holds and now covers every rebuilt path: if a rebuilt
-  # bd/dolt/gh re-triggers one of these the scan must fail, so the regression
-  # stays visible instead of being waived. The reviewed set at the end of this
-  # file is the one exception, and each of its rebuilt-path entries is listed
-  # in TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools's reviewedWaivers, so
-  # that set cannot grow without a deliberate edit there.
+  # established still holds and now covers every rebuilt path without
+  # exception: no rebuilt bd/dolt/gh path is waived for anything, so if a
+  # rebuild re-triggers one of these the scan fails and the regression stays
+  # visible instead of being absorbed. TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools
+  # enforces that, and its reviewedWaivers now names only the kubectl prebuilt,
+  # so a rebuilt path cannot be waived without a deliberate edit there.
   #
-  # kubectl is what is left. It is an upstream-signed prebuilt that
+  # kubectl is all that is left. It is an upstream-signed prebuilt that
   # contrib/k8s/Dockerfile.controller installs rather than builds, so nothing in
   # this repo can move its dependencies. Bumping the pin from v1.36.0 to v1.36.3
   # takes its Go stdlib from 1.26.2 to 1.26.5 and clears eight of its findings;
@@ -93,23 +95,8 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-11-07
     statement: Reached through Go stdlib (kubectl v1.36.3 ships 1.26.5; fixed in 1.25.13, 1.26.6, 1.27.0-rc.3). kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; drop this entry once one ships that clears it.
-  # Reviewed bridge entries carried over from main's time-boxed waiver bridge
-  # (#5885) on its 2026-09-21 horizon, for the findings the rebuilds above do
-  # not clear, and the GitPython findings sit in a requirements file the
-  # rebuilds do not touch. TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools
-  # holds the rebuilt-path entries to exactly this set.
-  - id: CVE-2026-78676
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CRITICAL remote-code-execution CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
-  - id: CVE-2026-78675
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
-  - id: CVE-2026-78677
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  # main's time-boxed waiver bridge (#5885) is fully retired: its thrift entry
+  # went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached 0.24.0 and
+  # its GitPython entries went when .github/requirements/mcp-agent-mail.txt
+  # reached 3.1.59, so nothing here carries the bridge's 2026-09-21 horizon any
+  # more. TestTrivyIgnoreKeepsReviewedBridgeEntries holds it retired.

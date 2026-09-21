@@ -152,7 +152,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.57",
+		"gitpython>=3.1.59",
 		"aiohttp>=3.14.3",
 		"pillow>=12.3.0",
 	} {
@@ -167,7 +167,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.58 \\",
+		"gitpython==3.1.59 \\",
 		"aiohttp==3.14.3 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
@@ -535,115 +535,46 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins what is left of main's time-boxed
-// waiver bridge: the GitPython findings, which sit in the mail image's requirements
-// rather than in anything the rebuilds touch. Each is held to the exact purls the scan
-// reported, to the bridge's own 2026-09-21 horizon rather than this file's 2026-11-07,
-// and to a statement naming the fixed version and the pin that has to move. The
-// bridge's other entries are what fixes cleared — both grpc CVEs once
-// Dockerfile.base's own GRPC_VERSION reached 1.83.2, and the thrift CVE once its
-// THRIFT_VERSION reached 0.24.0 — and the rebuilt-path guard above is what keeps them
-// from coming back.
+// TestTrivyIgnoreKeepsReviewedBridgeEntries holds main's time-boxed waiver bridge
+// (#5885) retired. The bridge carried four reviewed entries on its own 2026-09-21
+// horizon rather than this file's, for findings no rebuild cleared at the time; every
+// one of them was closed by moving the pin its statement named, not by re-dating it.
+// CVE-2026-43871 went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached
+// 0.24.0 (TestRebuiltToolsForcePatchedXModules pins that), and the three GitPython
+// CVEs went when .github/requirements/mcp-agent-mail.txt reached 3.1.59
+// (TestMCPMailImagePinsPatchedPythonDependencies pins that).
+//
+// So the guard is now the absence of the bridge: no entry may carry a horizon at or
+// behind the bridge's, because such an entry is either the bridge coming back under a
+// new statement or a waiver Trivy already treats as expired, and an expired waiver
+// fails the scan gate at the next run rather than at review time. Re-dating one of
+// these forward is a deliberate decision that belongs in this file's own horizon with
+// a statement to match, which is exactly the edit this test forces.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
 	var doc struct {
 		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			Purls     []string `yaml:"purls"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
+			ID        string `yaml:"id"`
+			ExpiredAt string `yaml:"expired_at"`
 		} `yaml:"vulnerabilities"`
 	}
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
 	}
+	if len(doc.Vulnerabilities) == 0 {
+		t.Fatal(".trivyignore.yaml parsed to no entries; the guard below would pass vacuously")
+	}
 
+	// ISO-8601 dates compare correctly as strings, so <= is "at or behind".
 	const bridgeHorizon = "2026-09-21"
-
-	toSet := func(vals ...string) map[string]bool {
-		m := make(map[string]bool, len(vals))
-		for _, v := range vals {
-			m[v] = true
-		}
-		return m
-	}
-
-	type wantEntry struct {
-		id         string
-		paths      map[string]bool
-		purls      map[string]bool
-		substrings []string
-	}
-	wantEntries := []wantEntry{
-		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
-		{id: "CVE-2026-78675", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-		{id: "CVE-2026-78677", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-	}
-
-	byID := map[string][]int{}
-	for i, v := range doc.Vulnerabilities {
-		byID[v.ID] = append(byID[v.ID], i)
-	}
-
-	reviewed := map[string]bool{}
-	for _, want := range wantEntries {
-		reviewed[want.id] = true
-		idxs := byID[want.id]
-		if len(idxs) != 1 {
-			t.Errorf("%s appears in %d entries, want exactly 1", want.id, len(idxs))
+	for _, v := range doc.Vulnerabilities {
+		if v.ExpiredAt == "" {
+			t.Errorf("%s has no expired_at; every waiver in this file is time-boxed", v.ID)
 			continue
 		}
-		v := doc.Vulnerabilities[idxs[0]]
-		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the bridge horizon %q it was carried over on", v.ID, v.ExpiredAt, bridgeHorizon)
-		}
-		if want.paths != nil {
-			gotPaths := toSet(v.Paths...)
-			for p := range want.paths {
-				if !gotPaths[p] {
-					t.Errorf("%s missing required path %q", v.ID, p)
-				}
-			}
-			for p := range gotPaths {
-				if !want.paths[p] {
-					t.Errorf("%s waives unexpected path %q", v.ID, p)
-				}
-			}
-			if len(v.Purls) != 0 {
-				t.Errorf("%s sets purls %v on a path-scoped binary finding; want no purls", v.ID, v.Purls)
-			}
-		}
-		if want.purls != nil {
-			gotPurls := toSet(v.Purls...)
-			for p := range want.purls {
-				if !gotPurls[p] {
-					t.Errorf("%s missing required purl %q", v.ID, p)
-				}
-			}
-			for p := range gotPurls {
-				if !want.purls[p] {
-					t.Errorf("%s waives unexpected purl %q", v.ID, p)
-				}
-			}
-			if len(v.Paths) != 0 {
-				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths, so the purl match alone confines it to gc-mcp-mail", v.ID, v.Paths)
-			}
-		}
-		statement := strings.ToLower(v.Statement)
-		for _, sub := range want.substrings {
-			if !strings.Contains(statement, strings.ToLower(sub)) {
-				t.Errorf("%s statement %q does not name %q", v.ID, v.Statement, sub)
-			}
-		}
-	}
-
-	// Every other entry is the kubectl set on this file's own horizon, so an entry
-	// that borrows the bridge's date without being listed above skipped this review.
-	for _, v := range doc.Vulnerabilities {
-		if !reviewed[v.ID] && v.ExpiredAt == bridgeHorizon {
-			t.Errorf("%s expires on the bridge horizon %s but is not a reviewed bridge entry; list it above or give it this file's own horizon", v.ID, bridgeHorizon)
+		if v.ExpiredAt <= bridgeHorizon {
+			t.Errorf("%s expires %s, at or behind the retired bridge horizon %s; fix the finding as the bridge's own entries were, or move it to this file's horizon with a statement saying why", v.ID, v.ExpiredAt, bridgeHorizon)
 		}
 	}
 }
