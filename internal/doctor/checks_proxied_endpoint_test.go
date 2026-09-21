@@ -472,8 +472,16 @@ func TestBeadsStorePayloadMarshalsTheShapeAutomationReads(t *testing.T) {
 
 // --- proxied-idle-timeout ---
 
-// writeScopeOwnership records scopeRoot as gc-owned in the city's journal.
+// writeScopeOwnership records scopeRoot as gc-owned and settled in the city's
+// journal.
 func writeScopeOwnership(t *testing.T, cityPath string, scopes map[string]string) {
+	t.Helper()
+	writeScopeOwnershipInState(t, cityPath, scopes, "ready")
+}
+
+// writeScopeOwnershipInState records gc ownership in a chosen journal state, so
+// a test can drive the pending-initialisation lens.
+func writeScopeOwnershipInState(t *testing.T, cityPath string, scopes map[string]string, state string) {
 	t.Helper()
 	gcDir := filepath.Join(cityPath, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
@@ -481,7 +489,7 @@ func writeScopeOwnership(t *testing.T, cityPath string, scopes map[string]string
 	}
 	entries := make([]string, 0, len(scopes))
 	for key, path := range scopes {
-		entries = append(entries, fmt.Sprintf(`%q:{"scope_path":%q,"lifecycle_owner":"provider","state":"ready"}`, key, path))
+		entries = append(entries, fmt.Sprintf(`%q:{"scope_path":%q,"lifecycle_owner":"provider","state":%q}`, key, path, state))
 	}
 	body := fmt.Sprintf(`{"version":1,"scopes":{%s}}`, strings.Join(entries, ","))
 	if err := os.WriteFile(filepath.Join(gcDir, "scope-ownership.json"), []byte(body), 0o600); err != nil {
@@ -561,6 +569,55 @@ func TestProxiedIdleTimeoutCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProxiedIdleTimeoutCheckUsesThePendingInitLens pins that a scope the
+// journal records as still initializing is not reported as a misconfigured one.
+//
+// The crashed-init state is the one that persists: bd writes metadata.json and
+// the sidecar in one batch, so what is left behind is a proxied scope with no
+// sidecar — indistinguishable here from an operator who initialized without the
+// flag, and reported with a hint to re-initialize a scope that is already
+// mid-initialization.
+func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
+	t.Run("a scope mid-initialisation is not an offender", func(t *testing.T) {
+		city := t.TempDir()
+		// No sidecar at all: the shape a crashed `bd init` leaves behind.
+		writeProxiedScope(t, city, "", 0, 0)
+		writeScopeOwnershipInState(t, city, map[string]string{"city": city}, "provider_initializing")
+
+		check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{}, nil)
+		if check == nil {
+			t.Fatal("the check was not registered for a journaled proxied scope")
+		}
+		got := check.Run(&CheckContext{CityPath: city})
+		if got.Message != pendingScopeInitMessage {
+			t.Fatalf("message = %q, want the pending-initialisation message %q", got.Message, pendingScopeInitMessage)
+		}
+		if strings.Contains(got.Message, "do not pin") || containsAny(got.Details, "bd-default") {
+			t.Fatalf("a scope mid-initialisation was reported as a sidecar misconfiguration: %q %v", got.Message, got.Details)
+		}
+		if got.Severity != SeverityAdvisory {
+			t.Errorf("severity = %v, want advisory", got.Severity)
+		}
+	})
+
+	t.Run("a settled offender is still reported beside a pending scope", func(t *testing.T) {
+		city := t.TempDir()
+		rig := filepath.Join(city, "rigs", "alpha")
+		writeProxiedScope(t, city, `{"root_path":"dolt"}`, 0, 0)
+		writeProxiedScope(t, rig, "", 0, 0)
+		writeScopeOwnershipInState(t, city, map[string]string{"city": city}, "ready")
+
+		check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{}, nil)
+		if check == nil {
+			t.Fatal("the check was not registered for a journaled proxied scope")
+		}
+		got := check.Run(&CheckContext{CityPath: city})
+		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not pin their proxy resident") {
+			t.Fatalf("status/message = %v / %q, want the settled scope reported", got.Status, got.Message)
+		}
+	})
 }
 
 // TestProxiedIdleTimeoutCheckRegistration pins that the check appears exactly

@@ -247,14 +247,29 @@ func NewProxiedIdleTimeoutCheckForConfig(cityPath string, cfg *config.City, cfgE
 // Name returns the check identifier.
 func (c *ProxiedIdleTimeoutCheck) Name() string { return "proxied-idle-timeout" }
 
-// Run reads each gc-owned proxied scope's sidecar and reports the ones that do
-// not pin their proxy resident.
+// Run reads each settled gc-owned proxied scope's sidecar and reports the ones
+// that do not pin their proxy resident.
+//
+// A scope the journal records as still initializing is not an offender, and this
+// is the one check that could have said otherwise. bd writes metadata.json and
+// the sidecar in one batch, so the state that persists after a crashed `bd init`
+// is a scope with NO sidecar — which reads here as "absent idle_timeout", the
+// operator-misconfiguration message, with a hint to re-initialize a scope that is
+// mid-initialization. Every other proxied check names that state as pending
+// initialisation (see BeadsStoreCheck.Run's pendingScopeInitResult), and the lens
+// has to agree across checks or the operator is told to fix the wrong thing.
 func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name(), Severity: SeverityAdvisory}
 
-	var offenders, unreadable []string
+	var offenders, unreadable, pending []string
+	settled := 0
 	for _, scopeRoot := range c.scopeRoots {
 		label := proxiedScopeLabel(c.cityPath, scopeRoot)
+		if scopeInitializationPending(c.cityPath, scopeRoot) {
+			pending = append(pending, label)
+			continue
+		}
+		settled++
 		sidecar, err := proxyendpoint.ReadSidecar(scopeBeadsDir(scopeRoot))
 		switch {
 		case err != nil:
@@ -267,8 +282,21 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	if len(offenders) == 0 && len(unreadable) == 0 {
+		if settled == 0 {
+			// Nothing to have an opinion about yet: every scope this check
+			// covers is still being initialized.
+			r.Status = StatusWarning
+			r.Message = pendingScopeInitMessage
+			r.FixHint = "run `gc start` to finish provider-owned beads initialisation"
+			r.Details = pending
+			return r
+		}
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) pin their proxy resident (idle_timeout < 0)", len(c.scopeRoots))
+		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) pin their proxy resident (idle_timeout < 0)", settled)
+		if len(pending) > 0 {
+			r.Message += fmt.Sprintf("; %d still initializing", len(pending))
+			r.Details = pending
+		}
 		return r
 	}
 
@@ -283,7 +311,7 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("could not read the proxied sidecar of %d gc-owned scope(s)", len(unreadable))
 		r.FixHint = "inspect <scope>/.beads/proxied_server_client_info.json; bd rewrites it on the next `bd init` for that scope"
 	}
-	r.Details = append(offenders, unreadable...) //nolint:gocritic // one detail list, offenders first
+	r.Details = append(append(offenders, unreadable...), pending...) //nolint:gocritic // one detail list, offenders first
 	return r
 }
 
