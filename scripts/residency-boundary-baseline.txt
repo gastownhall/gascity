@@ -160,9 +160,9 @@ cmd/gc/city_runtime.go	rigBeadStores	a:BeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	a:rigBeadStores	1
 cmd/gc/city_runtime.go	rigBeadStores	ast:returns-store-list	1
 cmd/gc/city_runtime.go	run	a:rigBeadStores	1
+cmd/gc/city_runtime.go	runSessionManagementPhases	a:rigBeadStores	4
 cmd/gc/city_runtime.go	sweepOrphanedOrderTrackingAtBoot	c:beads.Store-literal	1
 cmd/gc/city_runtime.go	syncBeadsAndUpdateIndex	a:rigBeadStores	1
-cmd/gc/city_runtime.go	tick	a:rigBeadStores	4
 cmd/gc/claim_class_route.go	hookClaimClassRouteForCity	b:cliSoleClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:graphClassBinding	1
 cmd/gc/class_store.go	graphClassBinding	b:routes.storeFor	1
