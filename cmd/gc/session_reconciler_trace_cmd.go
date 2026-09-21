@@ -55,6 +55,7 @@ type traceStatusResultJSON struct {
 	ControllerRunning bool       `json:"controller_running"`
 	ControllerPID     int        `json:"controller_pid,omitempty"`
 	HeadSeq           uint64     `json:"head_seq"`
+	HeadUpdatedAt     *time.Time `json:"head_updated_at,omitempty"`
 	ActiveArms        []TraceArm `json:"active_arms"`
 }
 
@@ -344,6 +345,11 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	if activeArms == nil {
 		activeArms = []TraceArm{}
 	}
+	headUpdatedAt := traceHeadWrittenAt(traceCityRuntimeDir(cityPath))
+	var headUpdatedAtJSON *time.Time
+	if !headUpdatedAt.IsZero() {
+		headUpdatedAtJSON = &headUpdatedAt
+	}
 	result := traceStatusResultJSON{
 		SchemaVersion:     "1",
 		CityPath:          cityPath,
@@ -351,6 +357,7 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		ControllerRunning: status.ControllerRunning,
 		ControllerPID:     status.ControllerPID,
 		HeadSeq:           head,
+		HeadUpdatedAt:     headUpdatedAtJSON,
 		ActiveArms:        activeArms,
 	}
 	if jsonOut {
@@ -366,7 +373,16 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 	if status.ControllerPID > 0 {
 		fmt.Fprintf(stdout, "Controller PID: %d\n", status.ControllerPID) //nolint:errcheck
 	}
-	fmt.Fprintf(stdout, "Head seq: %d\n", head)                     //nolint:errcheck
+	fmt.Fprintf(stdout, "Head seq: %d\n", head) //nolint:errcheck
+	if !headUpdatedAt.IsZero() {
+		asOf := result.AsOf
+		if asOf.IsZero() {
+			asOf = time.Now().UTC()
+		}
+		_, _ = fmt.Fprintf(stdout, "Head updated: %s (%s ago)\n",
+			headUpdatedAt.Format(time.RFC3339),
+			asOf.Sub(headUpdatedAt).Round(time.Second))
+	}
 	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(activeArms)) //nolint:errcheck
 	for _, arm := range activeArms {
 		_, _ = fmt.Fprintf(stdout, "- %s %s %s until %s\n",
@@ -582,6 +598,24 @@ func traceHeadSeq(rootDir string) (uint64, error) {
 		return 0, err
 	}
 	return head.Seq, nil
+}
+
+// traceHeadWrittenAt reports when the trace head was last written, or the zero
+// time when no readable head file exists yet.
+//
+// The reconciler writes the head once per flushed batch and is silent between
+// cycles, so this is what distinguishes a head that is quiet from one that is
+// wedged. The sequence number alone cannot: it is identical in both cases.
+func traceHeadWrittenAt(rootDir string) time.Time {
+	data, err := os.ReadFile(filepath.Join(rootDir, sessionReconcilerTraceHeadFile))
+	if err != nil {
+		return time.Time{}
+	}
+	var head sessionReconcilerTraceHead
+	if err := json.Unmarshal(data, &head); err != nil {
+		return time.Time{}
+	}
+	return head.UpdatedAt
 }
 
 func applyTraceControlMaybeRemote(cityPath string, req traceControlRequest) (*traceStatusJSON, string, error) {
