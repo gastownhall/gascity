@@ -535,6 +535,7 @@ func TestTraceStatusSurfacesHeadWriteTime(t *testing.T) {
 		t.Fatalf("head_updated_at = %v, want %v; without it a frozen head seq is indistinguishable from a live one",
 			statusJSON.HeadUpdatedAt, written)
 	}
+	validateJSONResultSchema(t, []string{"trace", "status"}, stdout.Bytes())
 
 	stdout.Reset()
 	stderr.Reset()
@@ -575,7 +576,7 @@ func TestTraceStatusOmitsHeadWriteTimeWithoutHead(t *testing.T) {
 	if code := cmdTraceStatusWithJSON(false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdTraceStatusWithJSON(text) = %d; stderr=%s", code, stderr.String())
 	}
-	if got := stdout.String(); strings.Contains(got, "1970") {
-		t.Fatalf("status output = %q, want no epoch-zero head write time", got)
+	if got := stdout.String(); strings.Contains(got, "Head updated:") {
+		t.Fatalf("status output = %q, want no head write line for a city with no head file", got)
 	}
 }

@@ -379,9 +379,13 @@ func cmdTraceStatusWithJSON(jsonOut bool, stdout, stderr io.Writer) int {
 		if asOf.IsZero() {
 			asOf = time.Now().UTC()
 		}
+		age := asOf.Sub(headUpdatedAt)
+		if age < 0 {
+			age = 0
+		}
 		_, _ = fmt.Fprintf(stdout, "Head updated: %s (%s ago)\n",
 			headUpdatedAt.Format(time.RFC3339),
-			asOf.Sub(headUpdatedAt).Round(time.Second))
+			age.Round(time.Second))
 	}
 	fmt.Fprintf(stdout, "Active trace arms: %d\n", len(activeArms)) //nolint:errcheck
 	for _, arm := range activeArms {
