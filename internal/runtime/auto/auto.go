@@ -64,6 +64,20 @@ func (p *Provider) Unroute(name string) {
 	p.mu.Unlock()
 }
 
+// EventCapableRoute reports whether the backend routed for name implements
+// runtime.SessionEventProvider. SubscribeSessionEvents above only ever
+// forwards whichever backend (default or ACP) implements the interface, so
+// the top-level SessionEventProvider type assertion in a caller such as
+// cmd/gc's providerRetiresNudgePollers is true for auto whenever EITHER
+// backend is event-capable, even for a session routed to the other one. A
+// caller deciding whether a per-session sidecar poller is redundant must
+// check the backend actually serving that session, not auto's composite
+// capability.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
+}
+
 func (p *Provider) route(name string) runtime.Provider {
 	p.mu.RLock()
 	isACP := p.routes[name]

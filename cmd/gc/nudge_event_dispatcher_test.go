@@ -9,6 +9,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -491,5 +492,28 @@ func TestProviderRetiresNudgePollersChecksPerTargetRoute(t *testing.T) {
 	}
 	if providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-remote"}, sp) {
 		t.Fatal("session routed to a non-event-capable backend must NOT have its poller suppressed")
+	}
+}
+
+// TestProviderRetiresNudgePollersChecksPerTargetRoute_Auto is the production
+// counterpart to the routedFake case above: it proves the REAL
+// internal/runtime/auto.Provider (not a hand-rolled test double) is asked
+// per-session too. Before EventCapableRoute existed on auto.Provider, its
+// SubscribeSessionEvents method made the bare runtime.SessionEventProvider
+// type assertion in providerRetiresNudgePollers true unconditionally
+// (auto.Provider always implements the method, even when neither backend
+// does), so an ACP-routed session behind an event-capable default backend
+// had its sidecar poller suppressed even though the ACP backend cannot
+// deliver its events.
+func TestProviderRetiresNudgePollersChecksPerTargetRoute_Auto(t *testing.T) {
+	acp := runtime.NewFake()
+	sp := sessionauto.New(newNudgeEventedFake(), acp)
+	sp.RouteACP("gc-acp")
+
+	if !providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-default"}, sp) {
+		t.Fatal("session routed to the event-capable default backend must retire its poller")
+	}
+	if providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-acp"}, sp) {
+		t.Fatal("session routed to the non-event-capable ACP backend must NOT have its poller suppressed")
 	}
 }
