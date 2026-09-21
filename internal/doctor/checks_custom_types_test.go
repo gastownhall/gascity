@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -491,7 +492,13 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		if env != nil {
 			cmd.Env = env
 		}
-		out, err := cmd.CombinedOutput()
+		// Successful stderr diagnostics are not part of a JSON response.
+		// Output still retains stderr on ExitError for useful failure reports.
+		out, err := cmd.Output()
+		exitErr := &exec.ExitError{}
+		if errors.As(err, &exitErr) {
+			out = append(out, exitErr.Stderr...)
+		}
 		return string(out), err
 	}
 	mustRunBD := func(dir string, env []string, args ...string) string {
