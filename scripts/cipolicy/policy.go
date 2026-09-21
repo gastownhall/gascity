@@ -34,9 +34,13 @@ const (
 	// acceptance job and ci-required still went green on the allowed skip. The
 	// filter is now cmd/gc/**, internal/beads/**, internal/doctor/**,
 	// examples/bd/**, test/acceptance/** plus the pins and the workflow.
-	expectedCIExecutionHash      = "0e5c923913a2288cb29fc40e4cc2982354a39bde1960e83b61b9005ec8add9f7"
+	//
+	// Bumped again on the merge with main, which carried its own reviewed delta
+	// (Beads v1.3.0-rc.2 -> v1.3.0): the merged workflow holds both changes, so
+	// neither side's digest describes it.
+	expectedCIExecutionHash      = "85464ce04729488bb388cf0651f7a76d595fb42476177f4f278642f7cd90b104"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "dfe3e40bf2fb461e2f7422ea93b7f9ea769f0e8bf35eb6060690af6f2f361877"
+	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

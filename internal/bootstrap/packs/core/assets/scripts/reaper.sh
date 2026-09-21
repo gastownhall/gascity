@@ -1399,6 +1399,17 @@ EOF
             _TYPE_GUARD_LIKE=$(printf '%s' "$SESSION_BEAD_PATTERN" | sed 's/\*/%/g; s/?/_/g')
             _TYPE_GUARD_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
             case "$_TYPE_GUARD_AGE_H" in ''|*[!0-9]*) _TYPE_GUARD_AGE_H=0 ;; esac
+            # get_sql_count zeroes SQL_COUNT_RESULT and returns 0 on every
+            # failure path (mktemp, dolt_sql nonzero, non-numeric output), so
+            # a transient Dolt fault is indistinguishable from "scope is
+            # clear" -- which would let the forced prune through unguarded.
+            # It does record an anomaly on each of those paths, so snapshot
+            # the anomaly log across the call and treat any growth as "count
+            # could not be computed": fail closed, like every other gate
+            # here. Done inline rather than by changing get_sql_count's
+            # contract -- its other call sites legitimately treat a failed
+            # count as benign-zero.
+            _TYPE_GUARD_ANOMALIES_BEFORE="${ANOMALIES:-}"
             get_sql_count "$CITY_DB" "type scope guard" "
                 SELECT COUNT(*) FROM \`$CITY_DB\`.issues
                 WHERE id LIKE '$_TYPE_GUARD_LIKE'
@@ -1406,8 +1417,11 @@ EOF
                 AND closed_at < DATE_SUB(NOW(), INTERVAL $_TYPE_GUARD_AGE_H HOUR)
                 AND issue_type != 'session'
             "
-            if [ "$SQL_COUNT_RESULT" -gt 0 ]; then
-                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: $SQL_COUNT_RESULT non-session bead(s) matching pattern=$SESSION_BEAD_PATTERN would be caught by prune (type scope guard)"
+            if [ "${ANOMALIES:-}" != "$_TYPE_GUARD_ANOMALIES_BEFORE" ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: type-scope guard count could not be computed (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
+                _PRUNE_SKIP=1
+            elif [ "$SQL_COUNT_RESULT" -gt 0 ]; then
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: $SQL_COUNT_RESULT non-session bead(s) matching pattern=$SESSION_BEAD_PATTERN would be caught by prune (type scope guard); set GC_REAPER_SESSION_BEAD_PATTERN=\"\" to use the type-safe session-only path"
                 _PRUNE_SKIP=1
             fi
         elif [ "$_PRUNE_SKIP" -eq 0 ] && [ -z "$CITY_DB" ] && [ "${CITY_DB_ANOMALY_RECORDED:-0}" -eq 0 ]; then

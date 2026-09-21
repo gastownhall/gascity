@@ -217,6 +217,7 @@
               "worktree-ensure",
               "worktree-verify",
               "storage-preflight",
+              "nudge-drop",
               "beads-city-migrate-proxied"
             ]
           },

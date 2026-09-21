@@ -125,7 +125,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   693,
+			BaselineCalls:   694,
 			BaselineFiles:   198,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   485,
+			BaselineCalls:   482,
 			BaselineFiles:   174,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   469,
+			BaselineCalls:   470,
 			BaselineFiles:   132,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -179,8 +179,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
-			BaselineFiles:   121,
+			BaselineCalls:   317,
+			BaselineFiles:   120,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -476,6 +476,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
+			PackageDir:      "internal/doctor",
+			PackageName:     "doctor",
+			Owner:           "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "doctor custom-types configured-store targeting regression proof is a checked Medium owner",
+			ResourceOwner:   "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
 			Owner:           "TestAddTestenvImportSkipsNestedGitWorktrees",
@@ -534,8 +545,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
-			BaselineFiles:   121,
+			BaselineCalls:   317,
+			BaselineFiles:   120,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",

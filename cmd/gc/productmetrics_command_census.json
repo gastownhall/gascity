@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 208,
+  "next_id": 209,
   "permanent_ids": [
     {
       "name": "help",
@@ -252,7 +252,7 @@
       "notice_policy": "eligible",
       "classification": "beads-city-migrate-proxied",
       "owner": "immediate",
-      "id": 207
+      "id": 208
     },
     {
       "path": "gc beads city use-external",
@@ -2612,6 +2612,21 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc nudge drop",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "nudge-drop",
+      "owner": "immediate",
+      "id": 207
     },
     {
       "path": "gc nudge poll",

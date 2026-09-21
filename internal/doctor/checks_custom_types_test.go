@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,6 +65,213 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	}
 	if !c.CanFix() {
 		t.Fatal("CanFix should return true")
+	}
+}
+
+func customTypesTestEnv(base []string, host, port string) []string {
+	overrides := map[string]string{
+		"GC_DOLT_HOST":                  host,
+		"GC_DOLT_PORT":                  port,
+		"GC_DOLT_USER":                  "",
+		"GC_DOLT_PASSWORD":              "",
+		"BEADS_DOLT_SERVER_HOST":        host,
+		"BEADS_DOLT_SERVER_PORT":        port,
+		"BEADS_DOLT_SERVER_USER":        "",
+		"BEADS_DOLT_PASSWORD":           "",
+		"BEADS_DOLT_SERVER_TLS":         "",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "",
+		"BEADS_DOLT_AUTO_START":         "0",
+		"BD_BACKUP_ENABLED":             "false",
+		"BEADS_BACKUP_ENABLED":          "false",
+		"BD_DOLT_SYNC_CLI_REMOTES":      "false",
+		"BEADS_DOLT_SYNC_CLI_REMOTES":   "false",
+	}
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, replaced := overrides[key]; !replaced {
+			out = append(out, entry)
+		}
+	}
+	for key, value := range overrides {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func customTypesTestServerPort(t testing.TB, initOutput string) string {
+	t.Helper()
+	for _, line := range strings.Split(initOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Server:") {
+			continue
+		}
+		_, port, ok := strings.Cut(line, "127.0.0.1:")
+		if !ok {
+			continue
+		}
+		port = strings.TrimSpace(port)
+		if n, err := strconv.Atoi(port); err == nil && n > 0 && n <= 65535 {
+			return port
+		}
+	}
+	t.Fatalf("bd init output has no loopback server port:\n%s", initOutput)
+	return ""
+}
+
+// unsetEnvForTest removes key from the process environment for the duration of
+// the test, restoring whatever was there on cleanup. t.Setenv cannot express
+// this: setting a selector to the empty string still hands the child an
+// explicitly-empty value, which bd reads as a deliberate choice rather than as
+// an absent one.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	prev, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			if err := os.Setenv(key, prev); err != nil {
+				t.Errorf("restore %s: %v", key, err)
+			}
+			return
+		}
+		if err := os.Unsetenv(key); err != nil {
+			t.Errorf("unset %s: %v", key, err)
+		}
+	})
+}
+
+func setCustomTypesTestEndpoint(t *testing.T, host, port string) {
+	t.Helper()
+	t.Setenv("GC_DOLT_HOST", host)
+	t.Setenv("GC_DOLT_PORT", port)
+	t.Setenv("BEADS_DOLT_SERVER_HOST", host)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", port)
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+}
+
+func TestCustomTypesStoreEnvClearsAmbientAuthorityAndPreservesCredentials(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	authority := map[string]string{
+		"BEADS_BACKEND":              "sqlite",
+		"BEADS_DB":                   "/poison/beads.db",
+		"BEADS_DB_PATH":              "/poison/beads.db",
+		"BEADS_DOLT_DATABASE":        "wrong-db",
+		"BEADS_DOLT_DATA_DIR":        "/poison/dolt",
+		"BEADS_DOLT_PORT":            "9999",
+		"BEADS_DOLT_SERVER_DATABASE": "wrong-db",
+		"BEADS_DOLT_SERVER_MODE":     "1",
+		"BEADS_DOLT_SERVER_SOCKET":   "/poison/dolt.sock",
+		"BEADS_DOLT_SHARED_SERVER":   "1",
+		"BEADS_SHARED_SERVER_DIR":    "/poison/shared",
+		"DOLT_ROOT_PATH":             "/poison/root",
+		"GC_BEADS":                   "file",
+		"GC_BEADS_BACKEND":           "doltlite",
+		"GC_BEADS_PREFIX":            "poison",
+		"GC_DOLT_DATABASE":           "wrong-db",
+	}
+	for key, value := range authority {
+		t.Setenv(key, value)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+
+	credentials := map[string]string{
+		"BEADS_CREDENTIALS_FILE":        "/secure/credentials.json",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "credential-helper",
+		"BEADS_DOLT_PASSWORD":           "beads-password",
+		"GC_DOLT_CRED_CMD":              "gc-credential-helper",
+		"GC_DOLT_PASSWORD":              "gc-password",
+	}
+	for key, value := range credentials {
+		t.Setenv(key, value)
+	}
+
+	environ, err := customTypesStoreEnv(&CheckContext{CityPath: dir}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		key, value, _ := strings.Cut(entry, "=")
+		got[key] = value
+	}
+
+	if got["BEADS_DIR"] != filepath.Join(dir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want scoped store", got["BEADS_DIR"])
+	}
+	for key := range authority {
+		if got[key] != "" {
+			t.Errorf("%s was not cleared", key)
+		}
+	}
+	if got["BEADS_DOLT_SERVER_TLS"] != "" {
+		t.Error("BEADS_DOLT_SERVER_TLS was not cleared for an embedded store")
+	}
+	for key, want := range credentials {
+		if got[key] != want {
+			t.Errorf("%s was not preserved", key)
+		}
+	}
+}
+
+// TestCustomTypesStoreEnvProjectsDoltliteBackend pins the doltlite arm of the
+// store-environment projection. A doltlite scope records no dolt_mode — the
+// metadata contract scrubs it as a cross-backend key — so the server arm never
+// fires there. Without its own arm the projection would clear both backend
+// hints and supply no replacement, leaving bd to guess the backend from the
+// ambient environment this projection exists to ignore.
+func TestCustomTypesStoreEnvProjectsDoltliteBackend(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"doltlite","database":"doltlite"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for key, value := range map[string]string{
+		"BEADS_BACKEND":          "sqlite",
+		"GC_BEADS_BACKEND":       "sqlite",
+		"BEADS_DOLT_SERVER_HOST": "poison.example",
+		"BEADS_DOLT_SERVER_PORT": "9999",
+		"BEADS_DOLT_SERVER_USER": "poison",
+		"GC_DOLT_HOST":           "poison.example",
+		"GC_DOLT_PORT":           "9999",
+		"GC_DOLT_USER":           "poison",
+	} {
+		t.Setenv(key, value)
+	}
+
+	environ, err := customTypesStoreEnv(&CheckContext{CityPath: dir}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		key, value, _ := strings.Cut(entry, "=")
+		got[key] = value
+	}
+
+	for _, key := range []string{"BEADS_BACKEND", "GC_BEADS_BACKEND"} {
+		if got[key] != "doltlite" {
+			t.Errorf("%s = %q, want %q", key, got[key], "doltlite")
+		}
+	}
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_USER",
+		"GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER",
+	} {
+		if got[key] != "" {
+			t.Errorf("%s = %q, want cleared for a doltlite scope", key, got[key])
+		}
 	}
 }
 
@@ -243,6 +451,141 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 		if strings.Contains(out, "shared-server mode is enabled") {
 			t.Fatalf("bd output leaked shared-server mode: %s", out)
 		}
+	}
+}
+
+// TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint protects the
+// store-selection boundary for gc doctor. The intended scope records a real
+// loopback Dolt server, while the process environment points bd at a second,
+// unrelated server. Run and Fix must use the recorded target: repair only the
+// intended store, preserve its user-defined type, and leave the ambient store
+// unchanged.
+func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd binary not on PATH")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt binary not on PATH")
+	}
+
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT", "GC_BEADS",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_TLS",
+		"BEADS_DOLT_PASSWORD", "BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE",
+		"BEADS_SHARED_SERVER_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD",
+	} {
+		unsetEnvForTest(t, key)
+	}
+	testOwnedHome(t)
+	t.Setenv("BD_BACKUP_ENABLED", "false")
+	t.Setenv("BEADS_BACKUP_ENABLED", "false")
+
+	runBD := func(dir string, env []string, args ...string) (string, error) {
+		t.Helper()
+		cmd := exec.Command("bd", args...)
+		cmd.Dir = dir
+		if env != nil {
+			cmd.Env = env
+		}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	mustRunBD := func(dir string, env []string, args ...string) string {
+		t.Helper()
+		out, err := runBD(dir, env, args...)
+		if err != nil {
+			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return out
+	}
+
+	targetDir := guardedTempDir(t)
+	decoyDir := guardedTempDir(t)
+	var targetPort, decoyPort string
+	t.Cleanup(func() {
+		for _, store := range []struct {
+			dir  string
+			port string
+		}{
+			{targetDir, targetPort},
+			{decoyDir, decoyPort},
+		} {
+			env := os.Environ()
+			if store.port != "" {
+				env = customTypesTestEnv(env, "127.0.0.1", store.port)
+			}
+			_, _ = runBD(store.dir, env, "dolt", "stop")
+		}
+	})
+
+	targetInit := mustRunBD(targetDir, nil,
+		"init", "--server", "--non-interactive",
+		"-p", "target", "--skip-hooks", "--skip-agents")
+	targetPort = customTypesTestServerPort(t, targetInit)
+	if _, err := contract.EnsureCanonicalConfig(fsys.OSFS{}, filepath.Join(targetDir, ".beads", "config.yaml"), contract.ConfigState{
+		IssuePrefix:    "target",
+		EndpointOrigin: contract.EndpointOriginCityCanonical,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "127.0.0.1",
+		DoltPort:       targetPort,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targetEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", targetPort)
+	mustRunBD(targetDir, targetEnv, "config", "set", "types.custom", "user-defined")
+
+	decoyInit := mustRunBD(decoyDir, nil,
+		"init", "--server", "--non-interactive",
+		"-p", "decoy", "--skip-hooks", "--skip-agents")
+	decoyPort = customTypesTestServerPort(t, decoyInit)
+	decoyEnv := customTypesTestEnv(os.Environ(), "127.0.0.1", decoyPort)
+	mustRunBD(decoyDir, decoyEnv, "config", "set", "types.custom", "decoy-only")
+
+	setCustomTypesTestEndpoint(t, "127.0.0.1", decoyPort)
+	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
+	t.Setenv("BEADS_BACKEND", "doltlite")
+	t.Setenv("BEADS_DB", filepath.Join(decoyDir, "poison.db"))
+	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(decoyDir, "poison-dolt"))
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "wrong-db")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("GC_BEADS_BACKEND", "doltlite")
+	t.Setenv("GC_DOLT_DATABASE", "wrong-db")
+	c := NewCustomTypesCheck(targetDir, "target", "")
+	ctx := &CheckContext{CityPath: targetDir}
+	if result := c.Run(ctx); result.Status != StatusError {
+		t.Fatalf("Run status = %v, want StatusError for missing required target types; message=%q", result.Status, result.Message)
+	}
+	if err := c.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if result := NewCustomTypesCheck(targetDir, "target", "").Run(ctx); result.Status != StatusOK {
+		t.Fatalf("Run after Fix status = %v, want StatusOK; message=%q", result.Status, result.Message)
+	}
+
+	targetOut := mustRunBD(targetDir, targetEnv, "config", "get", "--json", "types.custom")
+	targetTypes, err := parseCustomTypesJSON([]byte(targetOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(targetTypes, "user-defined") {
+		t.Fatalf("target types = %v, want preserved user-defined type", targetTypes)
+	}
+	if missing := typesNotIn(RequiredCustomTypes, targetTypes); len(missing) != 0 {
+		t.Fatalf("target types still missing required entries: %v", missing)
+	}
+
+	decoyOut := mustRunBD(decoyDir, decoyEnv, "config", "get", "--json", "types.custom")
+	decoyTypes, err := parseCustomTypesJSON([]byte(decoyOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(decoyTypes, []string{"decoy-only"}) {
+		t.Fatalf("ambient decoy types = %v, want unchanged [decoy-only]", decoyTypes)
 	}
 }
 

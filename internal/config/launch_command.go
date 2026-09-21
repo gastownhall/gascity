@@ -155,6 +155,10 @@ func hasSchemaOptionOverrides(optionOverrides map[string]string) bool {
 
 func replaceResumeSchemaFlags(command, resumeFlag, resumeStyle string, schema []ProviderOption, overrideArgs []string) string {
 	stripped := StripFlags(command, CollectAllSchemaFlags(schema))
+	// Same gap as ReplaceSchemaFlags: exact matching misses a value rendered
+	// through an open option's FlagTemplate, which would then be re-emitted
+	// alongside the override instead of replaced (ga-fyh).
+	stripped = stripShapes(stripped, CollectOpenOptionShapes(schema))
 	if len(overrideArgs) == 0 {
 		return unquoteSessionKeyTemplate(stripped)
 	}

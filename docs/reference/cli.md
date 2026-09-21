@@ -292,7 +292,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
@@ -1941,23 +1946,24 @@ gc graph gc-42 --mermaid     # Mermaid.js diagram
 Convenience command for context handoff.
 
 Self-handoff (default): sends mail to self. If the current session is
-controller-restartable, requests a restart and blocks until the controller
-stops the session. For on-demand configured named sessions, sends mail and
-returns without requesting restart: handoff intentionally leaves the
-user-attended session running instead of restarting it out from under the
-user. The controller can restart such a session via
-gc runtime request-restart; handoff deliberately does not.
+controller-restartable, requests a restart, pokes the controller for an
+immediate reconcile tick, and returns without waiting for the controller to
+act. For on-demand configured named sessions, sends mail and returns without
+requesting restart: handoff intentionally leaves the user-attended session
+running instead of restarting it out from under the user. The controller can
+restart such a session via gc runtime request-restart; handoff deliberately
+does not.
 
 For controller-restartable sessions, equivalent to:
 
   gc mail send $GC_ALIAS &lt;subject&gt; [message]
   gc runtime request-restart
 
-Under normal operation the controller stops controller-restartable
-self-handoff sessions before this command returns. If the controller does not
-act within a bounded timeout, gc handoff exits 1 with a diagnostic instead of
-blocking indefinitely. If interrupted, the restart request remains set for the
-controller to process on its next reconcile tick.
+The command exits 0 once the restart request is durably persisted and the
+controller has been signaled, even if the controller has not yet acted. If
+the controller cannot be signaled, gc handoff exits 1 with a diagnostic — the
+restart request itself remains durably set, so the controller still picks it
+up on its next periodic reconcile tick regardless.
 
 Auto handoff (--auto): sends mail to self and returns without requesting a
 restart. This is for PreCompact hooks, where the provider is already managing
@@ -1984,6 +1990,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--force` | bool |  | destroy a target even when it has live background subagents |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
@@ -2606,6 +2613,16 @@ Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
+Use --dedup &lt;key&gt; for repeating notifications (patrol and cooldown orders
+that re-detect the same condition every run): the send is suppressed while
+a previous message with the same key is still live (un-archived) in the same
+mailbox, and an alias and the session behind it count as one mailbox.
+Suppression exits 0. Once the recipient archives the message the stream may
+alert again; senders that want a longer re-alert cadence keep their own
+last-sent state. Dedup needs a provider that can query its own message
+history. The built-in provider can; one that cannot sends normally and says
+so on stderr, because a duplicate notification beats a dropped one.
+
 ```
 gc mail send [<to>] [<body>] [flags]
 ```
@@ -2615,16 +2632,18 @@ gc mail send [<to>] [<body>] [flags]
 ```
 gc mail send mayor "Build is green"
 gc mail send mayor -s "Build is green"
-gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send myrig/reviewer -s "Need investigation" -m "Attach logs from the last failed run"
 gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
-gc mail send polecat "Priority task" --notify
+gc mail send worker "Priority task" --notify
 gc mail send --all "Status update: tests passing"
+gc mail send worker -s "disk warning" --dedup "disk-warn:hq"
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--dedup` | string |  | suppress the send while a live message with this dedup key is in the same mailbox (provider permitting) |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
@@ -2784,7 +2803,30 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc nudge drop](#gc-nudge-drop) | Dead-letter one or more pending or in-flight nudges |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
+
+## gc nudge drop
+
+Dead-letter one or more pending or in-flight nudges by ID.
+
+Each dropped nudge is terminalized through the same dead-letter path a
+failed delivery attempt uses, so it lands in "gc nudge status" as dead
+rather than disappearing silently. Find IDs with "gc nudge status".
+
+Dropping an in-flight nudge dead-letters it even if it was already
+injected into the session but not yet acked.
+
+This only accepts explicit nudge IDs; it does not do bulk or age-based
+selection.
+
+```
+gc nudge drop <id>... [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc nudge status
 
@@ -2935,7 +2977,7 @@ gc order sweep-nudge-mail [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | log what would be closed; make no changes |
-| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else 1h0m0s) |
 | `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
 | `--quiet` | bool |  | suppress success output |
 
@@ -3799,7 +3841,7 @@ gc runtime
 | [gc runtime drain-ack](#gc-runtime-drain-ack) | Acknowledge drain — signal the controller to stop this session |
 | [gc runtime drain-check](#gc-runtime-drain-check) | Check if a session is draining (exit 0 = draining) |
 | [gc runtime heartbeat](#gc-runtime-heartbeat) | Extend idle-timeout window during a long operation |
-| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (waits to be killed) |
+| [gc runtime request-restart](#gc-runtime-request-restart) | Request controller restart this session (returns immediately) |
 | [gc runtime undrain](#gc-runtime-undrain) | Cancel drain on a session |
 
 ## gc runtime check
@@ -3941,20 +3983,20 @@ gc runtime heartbeat [flags]
 
 Signal the controller to stop and restart this session.
 
-Sets GC_RESTART_REQUESTED metadata on the session, then waits while the
-controller stops the session on its next reconcile tick and restarts it
-fresh. The wait keeps the agent idle so it does not consume more context
-in the interim.
+Sets GC_RESTART_REQUESTED metadata on the session, pokes the controller for
+an immediate reconcile tick, and returns without waiting. Control-plane
+authority over the actual stop/start stays with the controller's reconcile
+loop; this command only signals it so the request need not wait for the next
+periodic patrol tick.
 
-Under normal operation the controller SIGKILLs the process tree before
-this command returns. If the controller accepts the stop handoff, the
-runtime is already gone, or a SIGINT/SIGTERM is received, the command
-exits 0 cleanly. If the controller has not acted within a bounded
-timeout (max(5*PatrolInterval, 5min), capped at 30min) the command exits
-1 with a diagnostic pointing at controller health.
+The command exits 0 once the restart request is durably persisted and the
+controller has been signaled, even if the controller has not yet acted. If
+the controller cannot be signaled, the command exits 1 with a diagnostic —
+the restart request itself remains durably set, so the controller still
+picks it up on its next periodic reconcile tick regardless.
 
 This command is designed to be called from within a session context.
-It emits a session.draining event before waiting.
+It emits a session.draining event before signaling the controller.
 
 ```
 gc runtime request-restart
@@ -4108,6 +4150,7 @@ gc session kill <session-id-or-alias> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | destroy a session even when it has live background subagents |
 | `--json` | bool |  | emit JSONL |
 
 ## gc session list

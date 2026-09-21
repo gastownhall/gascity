@@ -2890,6 +2890,7 @@ func setupManagedDoltCity(t *testing.T) string {
 	t.Helper()
 	t.Setenv("GC_DOLT_DATA_DIR", "")
 	t.Setenv("GC_DOLT_CONFIG_FILE", "")
+	t.Setenv("GC_DOLT_LOG_FILE", "")
 	const db = "hq"
 	dir := t.TempDir()
 	fs := fsys.OSFS{}

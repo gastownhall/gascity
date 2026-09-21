@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 693
+baseline_calls = 694
 baseline_files = 198
 reported_calls = 495
 reported_files = 135
@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 485
+baseline_calls = 482
 baseline_files = 174
 reported_calls = 447
 reported_files = 157
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 469
+baseline_calls = 470
 baseline_files = 132
 reported_calls = 380
 reported_files = 98
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
+baseline_calls = 317
+baseline_files = 120
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -363,6 +363,17 @@ migration_target = "P0.4b"
 expires = "2026-10-01"
 
 [[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types configured-store targeting regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestAddTestenvImportSkipsNestedGitWorktrees"
@@ -423,8 +434,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
+baseline_calls = 317
+baseline_files = 120
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
