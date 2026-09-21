@@ -1,0 +1,99 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "packman",
+    srcs = [
+        "cache.go",
+        "check.go",
+        "install.go",
+        "lockfile.go",
+        "networkgit_group_unix.go",
+        "networkgit_group_windows.go",
+        "prune.go",
+        "resolve.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/packman",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/builtinpacks",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/gitcred",
+        "//internal/remotesource",
+        "@com_github_burntsushi_toml//:toml",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/processgroup",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "packman_test",
+    srcs = [
+        "bundled_test.go",
+        "cache_compat_test.go",
+        "cache_test.go",
+        "check_test.go",
+        "install_test.go",
+        "lockfile_test.go",
+        "network_git_args_test.go",
+        "network_git_group_unix_test.go",
+        "network_git_test.go",
+        "network_git_timeout_test.go",
+        "prune_test.go",
+        "resolve_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":packman"],
+    deps = [
+        "//internal/builtinpacks",
+        "//internal/fsys",
+        "//internal/gitcred",
+        "//internal/processgroup/processgrouptest",
+        "//internal/testenv",
+    ],
+)

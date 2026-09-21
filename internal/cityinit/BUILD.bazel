@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cityinit",
+    srcs = [
+        "cityinit.go",
+        "config.go",
+        "layout.go",
+        "ports.go",
+        "rollback.go",
+        "service.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/cityinit",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/citylayout",
+        "//internal/fsys",
+    ],
+)
+
+go_test(
+    name = "cityinit_test",
+    srcs = [
+        "layout_test.go",
+        "no_io_boundary_test.go",
+        "scaffold_fs_test.go",
+        "service_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":cityinit"],
+    deps = [
+        "//internal/citylayout",
+        "//internal/fsys",
+        "//internal/testenv",
+    ],
+)

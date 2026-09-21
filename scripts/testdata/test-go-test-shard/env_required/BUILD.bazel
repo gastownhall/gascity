@@ -1,0 +1,10 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "env_required_test",
+    srcs = [
+        "env_required_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = ["//internal/testenv"],
+)

@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "git",
+    srcs = glob(["*.go"]),
+    importpath = "github.com/gastownhall/gascity/internal/git",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/gitcred"],
+)
+
+go_test(
+    name = "git_test",
+    srcs = [
+        "clone_hardening_test.go",
+        "clone_scrub_test.go",
+        "clone_test.go",
+        "git_test.go",
+        "revision_test.go",
+        "testenv_import_test.go",
+        "unreachable_commits_test.go",
+        "worktree_ops_test.go",
+    ],
+    embed = [":git"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)

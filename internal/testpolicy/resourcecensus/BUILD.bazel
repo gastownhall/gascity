@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "resourcecensus",
+    srcs = [
+        "census.go",
+        "hermetic.go",
+        "medium.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/resourcecensus",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/testpolicy/waiverclock",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "resourcecensus_test",
+    srcs = [
+        "census_test.go",
+        "hermetic_test.go",
+        "medium_test.go",
+        "testenv_import_test.go",
+        "waiver_clock_test.go",
+    ],
+    embed = [":resourcecensus"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testpolicy/waiverclock",
+    ],
+)

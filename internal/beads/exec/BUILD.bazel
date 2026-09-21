@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "exec",
+    srcs = [
+        "exec.go",
+        "json.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/exec",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/beads"],
+)
+
+go_test(
+    name = "exec_test",
+    srcs = [
+        "br_script_test.go",
+        "exec_test.go",
+        "idprefix_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":exec"],
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/testenv",
+    ],
+)

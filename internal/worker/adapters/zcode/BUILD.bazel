@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "zcode",
+    srcs = ["adapter.go"],
+    embedsrcs = ["zcode-repl"],
+    importpath = "github.com/gastownhall/gascity/internal/worker/adapters/zcode",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "zcode_test",
+    srcs = [
+        "adapter_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        ":zcode",
+        "//internal/pathutil",
+        "//internal/testenv",
+    ],
+)
