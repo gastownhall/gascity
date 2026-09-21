@@ -3703,7 +3703,14 @@ provider_owned_proxy_root() {
     [ -n "$root" ] || return 0
     case "$root" in
         /*) ;;
-        *) root="$dir/$root" ;;
+        # bd resolves a relative root_path against BEADS_DIR, not the scope
+        # root (internal/configfile resolveSidecarPath -> Join(beadsDir, p)),
+        # and cmd/gc/beads_scope_ownership.go does the same. Joining to the
+        # scope root instead put the answer one directory too high, so a rig
+        # whose sidecar names the city's shared root compared unequal and its
+        # recover ran `bd dolt stop` — which bd resolves the sidecar's way,
+        # retiring the proxy and Dolt child serving hq and every rig.
+        *) root="$dir/.beads/$root" ;;
     esac
     # Physical resolution so two spellings of one directory compare equal: a
     # migrated rig's root_path is the city's, reached through `..` segments.
