@@ -16,12 +16,12 @@ import (
 // bd-backup-freshness skips a scope with no backup_state.json and delegates
 // the "no backup at all" signal to the dolt-backup check by name. Between them
 // a default-topology city reads as fully covered while nothing — not gc, not
-// bd, not the backup dog — can produce a recovery point: bd v1.3.0-rc.2
+// bd, not the backup dog — can produce a recovery point: bd v1.3.0
 // refuses `backup` on the proxied path, and mol-dog-backup talks to the
 // managed server, which a proxied scope does not have.
 //
 // It is an advisory, not a warning: a proxied city is a healthy city on this
-// branch and there is no action the operator can take on rc.2, so a warning
+// branch and there is no action the operator can take on v1.3.0, so a warning
 // would be a permanent red line nobody can clear. The honest thing is one
 // line that names the exposure and what will close it.
 type ProxiedBackupCoverageCheck struct {
@@ -72,7 +72,7 @@ func proxiedScopeLabel(cityPath, scopeRoot string) string {
 func (c *ProxiedBackupCoverageCheck) Name() string { return "proxied-backup-coverage" }
 
 // Run reports the advisory. It has no failing outcome: the exposure is a
-// property of the rc.2 topology, not of this city's configuration.
+// property of the v1.3.0 topology, not of this city's configuration.
 func (c *ProxiedBackupCoverageCheck) Run(_ *CheckContext) *CheckResult {
 	scopeNoun := "scopes"
 	if len(c.scopeLabels) == 1 {
@@ -93,7 +93,7 @@ func (c *ProxiedBackupCoverageCheck) Run(_ *CheckContext) *CheckResult {
 	}
 }
 
-// CanFix returns false: there is nothing to fix on rc.2.
+// CanFix returns false: there is nothing to fix on v1.3.0.
 func (c *ProxiedBackupCoverageCheck) CanFix() bool { return false }
 
 // Fix is a no-op. See CanFix.

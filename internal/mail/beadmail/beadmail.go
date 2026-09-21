@@ -204,9 +204,10 @@ func (p *Provider) sendWithExtraMetadata(from, to, subject, body string, extra m
 // unresolvable address) falls back to the literal recipient, exactly as
 // [Provider.Inbox] does, so the probe keeps answering the inbox's question: the
 // effect is a narrower match, which sends rather than suppresses, and a
-// duplicate notification beats a dropped one. The probe reads only open messages, and archiving closes
-// one, so an archived notification no longer matches: the dedup horizon is the
-// previous message's live lifetime by design (see [mail.DedupSender]).
+// duplicate notification beats a dropped one. The probe reads only open
+// messages, and archiving closes one, so an archived notification no longer
+// matches: the dedup horizon is the previous message's live lifetime by design
+// (see [mail.DedupSender]).
 func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Message, bool, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -216,7 +217,7 @@ func (p *Provider) SendDeduped(from, to, subject, body, key string) (mail.Messag
 		return mail.Message{}, false, fmt.Errorf("beadmail send: recipient is required")
 	}
 	existing, err := p.store.List(beads.ListQuery{
-		Type:     "message",
+		Type:     messageBeadType,
 		Status:   "open",
 		Metadata: map[string]string{mail.DedupKeyMetadataKey: key},
 		TierMode: beads.TierBoth,

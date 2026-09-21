@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beadstest",
+    srcs = [
+        "conditional_writer_conformance.go",
+        "conformance.go",
+        "conformance_skips.go",
+        "fence_conformance.go",
+        "metadata_cas_conformance.go",
+        "recording_store.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/beadstest",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/beads"],
+)
+
+go_test(
+    name = "beadstest_test",
+    srcs = [
+        "conformance_skips_test.go",
+        "recording_store_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":beadstest"],
+    deps = [
+        "//internal/beads",
+        "//internal/testenv",
+    ],
+)

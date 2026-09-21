@@ -74,7 +74,7 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	// one does.
 	//
 	// It must not read as coverage either, and what coverage exists differs by
-	// transport. On the proxied path rc.2 refuses `bd backup` outright, so
+	// transport. On the proxied path v1.3.0 refuses `bd backup` outright, so
 	// there is no backup at all and nothing else reports it —
 	// bd-backup-freshness skips a scope with no backup_state.json and delegates
 	// "no backup at all" to this check by name; that gap also gets one

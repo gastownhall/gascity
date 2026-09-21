@@ -106,3 +106,137 @@ func TestCanonicalWritersLeaveTheOriginalIntactWhenAWriteIsInterrupted(t *testin
 		})
 	}
 }
+
+// bd creates .beads/config.yaml and .beads/metadata.json 0600 (cmd/bd's init
+// templates and internal/configfile's own atomic save both pass 0600, and
+// `bd migrate` re-saves metadata.json 0600 partway through the mode flip). The
+// canonical writers replaced truncate-in-place writes — whose perm argument
+// only applies on create, so an existing 0600 file kept its mode — with
+// tmp+rename, which publishes a brand-new inode carrying whatever mode it was
+// handed. Without preservation every boot-door canonicalisation, every
+// `gc rig set-endpoint`, and every migrate-proxied turn would widen bd's files
+// to 0644. Neither file holds a secret today, but gc must not silently relax a
+// mode another owner chose.
+func TestCanonicalWritersPreserveAnExistingRestrictiveMode(t *testing.T) {
+	const metadataSeed = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq","project_id":"pid-1"}` + "\n"
+	const configSeed = "issue_prefix: gc\n"
+	// A config.yaml bd wrote that no YAML parser accepts, so
+	// EnsureCanonicalConfig falls through to ensureCanonicalConfigFallback —
+	// the fourth writer, which is otherwise unreachable from this table.
+	const malformedConfigSeed = "issue_prefix: gc\n\tdolt:\n  host: \"unclosed\n"
+
+	for name, tc := range map[string]struct {
+		file  string
+		seed  string
+		write func(fs fsys.FS, path string) error
+	}{
+		"SetMetadataDoltDataDir": {
+			file: "metadata.json",
+			seed: metadataSeed,
+			write: func(fs fsys.FS, path string) error {
+				return SetMetadataDoltDataDir(fs, path, "../../.beads/dolt")
+			},
+		},
+		"EnsureCanonicalMetadata": {
+			file: "metadata.json",
+			seed: metadataSeed,
+			write: func(fs fsys.FS, path string) error {
+				_, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+					Database:     "dolt",
+					Backend:      "dolt",
+					DoltMode:     "proxied-server",
+					DoltDatabase: "hq",
+				})
+				return err
+			},
+		},
+		"EnsureCanonicalConfig": {
+			file: "config.yaml",
+			seed: configSeed,
+			write: func(fs fsys.FS, path string) error {
+				_, err := EnsureCanonicalConfig(fs, path, ConfigState{
+					IssuePrefix:    "gc",
+					EndpointOrigin: EndpointOriginManagedCity,
+					EndpointStatus: EndpointStatusVerified,
+					DoltMode:       "server",
+				})
+				return err
+			},
+		},
+		"EnsureCanonicalConfigFallback": {
+			file: "config.yaml",
+			seed: malformedConfigSeed,
+			write: func(fs fsys.FS, path string) error {
+				_, err := EnsureCanonicalConfig(fs, path, ConfigState{
+					IssuePrefix:    "gc",
+					EndpointOrigin: EndpointOriginManagedCity,
+					EndpointStatus: EndpointStatusVerified,
+					DoltMode:       "server",
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scope := t.TempDir()
+			beadsDir := filepath.Join(scope, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(beadsDir, tc.file)
+			if err := os.WriteFile(path, []byte(tc.seed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// os.WriteFile only applies perm on create, and umask can relax
+			// it; chmod so the seed is unambiguously 0600.
+			if err := os.Chmod(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := tc.write(fsys.OSFS{}, path); err != nil {
+				t.Fatalf("canonical write: %v", err)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("the canonical write widened %s to %04o, want 0600", tc.file, got)
+			}
+		})
+	}
+}
+
+// A canonical file gc itself creates has no prior mode to preserve, so the
+// writers must still stamp their own 0644 default rather than inheriting
+// anything from the directory or leaving the file unreadable to peers.
+func TestCanonicalMetadataWriterUsesTheDefaultModeForANewFile(t *testing.T) {
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(beadsDir, "metadata.json")
+
+	changed, err := EnsureCanonicalMetadata(fsys.OSFS{}, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata: %v", err)
+	}
+	if !changed {
+		t.Fatalf("EnsureCanonicalMetadata reported no change while creating the file")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("a freshly created metadata.json is %04o, want 0644", got)
+	}
+}

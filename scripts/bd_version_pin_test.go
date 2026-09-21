@@ -72,6 +72,27 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
 			goModPin, bdCurrent)
 	}
+	// The integration suite installs bd from whatever go.mod names and pins the
+	// expected version in its own literal, so a bump that misses that literal
+	// leaves the suite asserting a version nobody ships. It lives in the
+	// `rest-full` shard, which is gated on `push` — so on a PR nothing catches
+	// the drift and the failure lands after merge, which is exactly how
+	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
+	// against the same go.mod pin the block above ties to deps.env. This test
+	// reaches PR-time CI through `make test-ci-policy` (preflight-static); the
+	// ./scripts unit-cover jobs are push-only, so that recipe line is what
+	// makes this fail before merge rather than after —
+	// TestMakeTestCIPolicyRunsVersionPinContracts pins it.
+	const integrationPinFile = "test/integration/integration_test.go"
+	integrationPin := extractGoStringConst(t, root, integrationPinFile, "wantPinnedBeadsModuleVersion")
+	if integrationPin == "" {
+		t.Fatalf("%s missing the wantPinnedBeadsModuleVersion const; it is the integration suite's beads pin anchor", integrationPinFile)
+	}
+	if integrationPin != goModPin {
+		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins github.com/steveyegge/beads to %q; the integration suite installs bd from go.mod, so the two must name the same version",
+			integrationPinFile, integrationPin, goModPin)
+	}
+
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
@@ -120,8 +141,9 @@ func TestBDVersionPins(t *testing.T) {
 	// init floor (otherwise it gates nothing), and unlike it, it must also be
 	// reachable -- no supported bd could satisfy a floor above the newest
 	// matrix cell, so a fresh `gc init` would refuse on every cell.
-	// deps.CompareVersions strips prerelease identifiers, so the rc.2 current
-	// cell compares equal to the 1.3.0 floor rather than below it.
+	// The current cell is the v1.3.0 tag, which compares equal to the 1.3.0
+	// floor. deps.CompareVersions strips prerelease identifiers, so a
+	// v1.3.0-rc.N cell compares equal too rather than below it.
 	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
 	if freshProviderFloor == "" {
 		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")

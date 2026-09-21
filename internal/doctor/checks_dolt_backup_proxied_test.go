@@ -13,7 +13,7 @@ import (
 // Every healthy proxied rig used to collect a `rig:<name>:dolt-backup` warning
 // whose fix hint prescribed a managed-Dolt `dolt backup` invocation against a
 // server gc does not own. Neither signal the check looks for can ever exist on
-// a bd-owned proxy root — gc writes no <city>/.dolt-backup for it, and rc.2
+// a bd-owned proxy root — gc writes no <city>/.dolt-backup for it, and v1.3.0
 // refuses `bd backup` on the proxied path outright.
 func TestDoltBackupCheckReportsNotRequiredOnProxiedRig(t *testing.T) {
 	city := t.TempDir()
@@ -37,11 +37,11 @@ func TestDoltBackupCheckReportsNotRequiredOnProxiedRig(t *testing.T) {
 		t.Errorf("message does not say why the check does not apply: %q", result.Message)
 	}
 	// "not gc's to register" on its own implies somebody else registers it.
-	// Nobody does on rc.2, and no other check says so, so this message has to.
+	// Nobody does on v1.3.0, and no other check says so, so this message has to.
 	if !strings.Contains(result.Message, "no gc or bd backup exists") {
 		t.Errorf("message reads as coverage rather than naming the gap: %q", result.Message)
 	}
-	if !strings.Contains(result.Message, "1.3.0-rc.2") {
+	if !strings.Contains(result.Message, "1.3.0") {
 		t.Errorf("message does not name the bd version that refuses backup: %q", result.Message)
 	}
 }
@@ -97,7 +97,7 @@ func TestDoltBackupCheckStillWarnsOnDirectRig(t *testing.T) {
 
 // One city-level advisory carries the fact the per-scope checks cannot: a
 // proxied city has no backup at all. It is StatusOK because a proxied city is
-// a healthy city on this branch (R3) and rc.2 offers the operator no action —
+// a healthy city on this branch (R3) and v1.3.0 offers the operator no action —
 // a warning would be a permanent red line — but it is an advisory that names
 // every proxied scope, not another line that reads as coverage.
 func TestProxiedBackupCoverageAdvisoryNamesEveryProxiedScope(t *testing.T) {
@@ -125,9 +125,9 @@ func TestProxiedBackupCoverageAdvisoryNamesEveryProxiedScope(t *testing.T) {
 		t.Errorf("severity = %v, want advisory", result.Severity)
 	}
 	if result.FixHint != "" {
-		t.Errorf("advisory prescribes a fix that does not exist on rc.2: %q", result.FixHint)
+		t.Errorf("advisory prescribes a fix that does not exist on v1.3.0: %q", result.FixHint)
 	}
-	for _, want := range []string{"city", filepath.Join("rigs", "r1"), "no backup", "1.3.0-rc.2"} {
+	for _, want := range []string{"city", filepath.Join("rigs", "r1"), "no backup", "1.3.0"} {
 		if !strings.Contains(result.Message, want) {
 			t.Errorf("message %q does not mention %q", result.Message, want)
 		}

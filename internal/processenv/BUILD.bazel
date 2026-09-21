@@ -1,0 +1,25 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "processenv",
+    srcs = [
+        "envfile.go",
+        "gcbin_path.go",
+        "provider.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/processenv",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/telemetry"],
+)
+
+go_test(
+    name = "processenv_test",
+    srcs = [
+        "envfile_test.go",
+        "gcbin_path_test.go",
+        "provider_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":processenv"],
+    deps = ["//internal/testenv"],
+)

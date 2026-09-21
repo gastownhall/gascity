@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "githubmonitor",
+    srcs = [
+        "client.go",
+        "monitor.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/githubmonitor",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "githubmonitor_test",
+    srcs = [
+        "client_test.go",
+        "monitor_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":githubmonitor"],
+    deps = ["//internal/testenv"],
+)

@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tmuxtest",
+    srcs = [
+        "guard.go",
+        "orphan_sweep.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/tmuxtest",
+    visibility = ["//visibility:public"],
+    deps = ["//internal/pidutil"],
+)
+
+go_test(
+    name = "tmuxtest_test",
+    srcs = [
+        "guard_test.go",
+        "orphan_sweep_sigkill_test.go",
+        "orphan_sweep_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":tmuxtest"],
+    deps = [
+        "//internal/pidutil",
+        "//internal/testenv",
+    ],
+)

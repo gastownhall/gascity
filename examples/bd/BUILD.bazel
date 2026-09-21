@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "bd",
+    srcs = ["embed.go"],
+    embedsrcs = [
+        "assets/scripts/dolt-enospc.sh",
+        "assets/scripts/gc-beads-bd.sh",
+        "doctor/check-bd/doctor.toml",
+        "doctor/check-bd/run.sh",
+        "pack.toml",
+        "template-fragments/bead-worktree.template.md",
+    ],
+    importpath = "github.com/gastownhall/gascity/examples/bd",
+    visibility = ["//visibility:public"],
+)

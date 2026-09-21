@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -491,13 +492,31 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		if env != nil {
 			cmd.Env = env
 		}
-		out, err := cmd.CombinedOutput()
+		// Output, never CombinedOutput: callers below parse this as JSON,
+		// and bd reports diagnostics on stderr through the standard log
+		// package, whose prefix is a bare "2026/09/19 18:23:29 " timestamp.
+		// Merged ahead of the document, that makes json.Unmarshal read 2026
+		// as a complete top-level number and then fail on the '/' —
+		// "invalid character '/' after top-level value" (ga-x5wacn). bd only
+		// emits on that path under contention, which is why merging the
+		// streams failed under the parallel suite and passed in isolation.
+		// Production reads this same command the same way; see
+		// customTypesFromBd in checks_custom_types.go.
+		out, err := cmd.Output()
 		return string(out), err
 	}
 	mustRunBD := func(dir string, env []string, args ...string) string {
 		t.Helper()
 		out, err := runBD(dir, env, args...)
 		if err != nil {
+			// Output keeps stderr off the parsed value but does not discard
+			// it: it lands on *exec.ExitError, so the diagnostics stay
+			// available exactly where they are useful.
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, out, exitErr.Stderr)
+			}
 			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 		return out
@@ -716,6 +735,19 @@ func TestParseCustomTypesJSON(t *testing.T) {
 		{
 			name:    "malformed JSON errors",
 			input:   `not json`,
+			wantErr: true,
+		},
+		{
+			// Guards ga-x5wacn. A caller that merges bd's stderr into its
+			// stdout puts the standard log package's bare timestamp ahead
+			// of the document; json.Unmarshal then reads 2026 as a complete
+			// top-level number and fails on the '/'. Parsing must keep
+			// rejecting this rather than learning to skip a prefix, which
+			// would mask genuine corruption — the caller is what must not
+			// merge the streams.
+			name: "log line merged from stderr is rejected, not skipped",
+			input: "2026/09/19 18:23:29 [circuit-breaker] 127.0.0.1:37379/prf: open \u2192 closed (active probe succeeded)\n" +
+				`{"key":"types.custom","value":"user-defined"}`,
 			wantErr: true,
 		},
 	}

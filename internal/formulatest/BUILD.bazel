@@ -1,0 +1,12 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "formulatest",
+    srcs = [
+        "env.go",
+        "v2.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/formulatest",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/formula"],
+)

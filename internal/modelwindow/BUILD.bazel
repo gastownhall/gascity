@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "modelwindow",
+    srcs = ["modelwindow.go"],
+    importpath = "github.com/gastownhall/gascity/internal/modelwindow",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "modelwindow_test",
+    srcs = [
+        "modelwindow_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":modelwindow"],
+    deps = ["//internal/testenv"],
+)

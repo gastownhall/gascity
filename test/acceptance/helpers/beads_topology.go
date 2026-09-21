@@ -285,7 +285,7 @@ func BeadsTopologies() []BeadsTopology {
 	}
 	// A scope bd initialized carries the project identity bd minted, in
 	// metadata.json. gc's preflight confirms identity with a direct SQL probe
-	// for `metadata._project_id`, a row rc.2's `bd init --server` does not
+	// for `metadata._project_id`, a row v1.3.0's `bd init --server` does not
 	// write, so the check cannot confirm what it is asked to confirm and the
 	// scope stays on the bd CLI front door.
 	//
@@ -561,7 +561,7 @@ func resolveLegacyGCBinary(raw string) (string, error) {
 // five seconds. It reproduces without gc — `bd init --server` against a fresh
 // database takes ~30s and reaches the current schema, `bd init --server
 // --force` against an empty one is pinned at ~5.5s and does not — and
-// identically on v1.3.0-rc.2 and on the rc.3 candidate.
+// identically on every v1.3.0 release candidate and on the v1.3.0 tag.
 //
 // It covers the whole legacy shape, not just the one `gc init` the old binary
 // runs: `gc rig add` under the binary being tested creates the rig's database
@@ -755,7 +755,7 @@ func (r *TopologyRun) GC(args ...string) (string, error) {
 // `gc stop` runs first, while the supervisor is still up: it needs a live
 // supervisor to drop the city's registration, and stopping the supervisor
 // first makes it restore the registration and exit non-zero. The supervisor
-// goes next, because on rc.2's proxied path any bd read restarts the proxy and
+// goes next, because on v1.3.0's proxied path any bd read restarts the proxy and
 // its Dolt child, so a sampler outliving the store undoes the stop. Then `gc
 // stop` again, to retire whatever that last sample revived — which is what
 // "stop is re-runnable" is for.

@@ -267,7 +267,7 @@ func jsonEqual(t *testing.T, a, b map[string]any) bool {
 // again even if it were still there.
 func TestBootCanonicalizationKeepsBdsUpstreamBinding(t *testing.T) {
 	city := t.TempDir()
-	writeBdOwnedDirectExternalCity(t, city, "db.example", "4406")
+	writeBdOwnedDirectExternalCity(t, city)
 	writeCityTOMLForBdProvider(t, city)
 
 	owned, err := scopeProviderOwned(city, city)
@@ -324,6 +324,14 @@ func TestBootCanonicalizationKeepsBdsUpstreamRigBinding(t *testing.T) {
 	city, rigs := newLegacyManagedCityFixture(t, "fe")
 	rig := rigs["fe"]
 	writeBdOwnedDirectExternalRig(t, rig, "fe", "db.example", 4406)
+	// The state a real `gc start` is in when it classifies a rig:
+	// startBeadsLifecycle raises the city's own provider, publishing
+	// dolt-state.json, before it reaches the rig loop. Without this the
+	// fixture tests a moment that never happens on disk, and a city-level
+	// ownership signal would look safe here while re-homing every rig in
+	// production.
+	seedCityDatabaseDir(t, city, "hq")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city))
 
 	owned, err := scopeProviderOwned(city, rig)
 	if err != nil {
@@ -396,5 +404,136 @@ func writeCityTOMLForBdProvider(t *testing.T, cityPath string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("name = \"fixture\"\n\n[beads]\nprovider = \"bd\"\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestScopeIsBdOwnedDirectExternal pins the predicate's evidence order. Its
+// only discriminator between "bd's upstream" and "gc's own managed server" is
+// the host recorded in bd's binding, compared against managedCityHost(), which
+// reads GC_DOLT_HOST from the live environment. A gc-managed scope initialized
+// under a non-loopback GC_DOLT_HOST records that host verbatim, so a later boot
+// with the variable unset compares unequal and the scope reads as bd-owned: gc
+// stops canonicalising it and stops raising its Dolt, and the beads stay
+// unavailable until an operator restores the variable by hand.
+//
+// What settles it is per-scope evidence, and it takes two facts together — gc
+// published a Dolt runtime for the city, AND the scope's own recorded database
+// has a Dolt directory inside the city's managed data dir. Neither half decides
+// alone, and the rig rows below are why: the publication is about the city, and
+// by the time any rig is classified it always exists, because
+// startBeadsLifecycle raises the city's provider before it reaches the rig
+// loop.
+func TestScopeIsBdOwnedDirectExternal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// setup prepares the fixture and returns the scope root to classify.
+		setup func(t *testing.T, cityPath string) string
+		want  bool
+	}{
+		// The M3b shape the predicate exists for: bd's own template config,
+		// bd's binding naming a host that is not gc's, and no sign gc ever ran
+		// a Dolt here.
+		"bd's binding on a city gc never published a runtime for": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				return cityPath
+			},
+			want: true,
+		},
+		"a published managed dolt runtime over the city's own database": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				seedCityDatabaseDir(t, cityPath, "hosted")
+				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
+				return cityPath
+			},
+			want: false,
+		},
+		"a published provider dolt runtime over the city's own database": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				seedCityDatabaseDir(t, cityPath, "hosted")
+				writeDoltRuntimePublicationFixture(t, cityPath, providerManagedDoltStatePath(cityPath))
+				return cityPath
+			},
+			want: false,
+		},
+		// The conjunction, from the city side: a publication proves gc raised
+		// SOME Dolt here, not that this scope's beads are in it. A city whose
+		// database is not under the managed data dir is still bd's.
+		"a publication alone does not claim a city whose database is not gc's": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
+				return cityPath
+			},
+			want: true,
+		},
+		// The conjunction, from the rig side, and the regression this table
+		// exists to stop: the city's own Dolt is up (it always is by the time
+		// the rig loop runs) and its database sits in the managed data dir, but
+		// the rig's beads are on a hosted server and it has no database there.
+		// Classifying it as gc's would stamp `gc.endpoint_origin:
+		// inherited_city` into bd's config.yaml and run `bd init` against gc's
+		// server, leaving gc-native reads on an empty database while `bd` in
+		// the rig still reached the real upstream.
+		"a bd-owned rig keeps its upstream while the city's own dolt is up": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				seedCityDatabaseDir(t, cityPath, "hosted")
+				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
+				rig := filepath.Join(cityPath, "rigs", "fe")
+				writeBdOwnedDirectExternalRig(t, rig, "fe", "db.example", 4406)
+				return rig
+			},
+			want: true,
+		},
+		// And the rig-flavored drift case the evidence closes: same
+		// non-authoritative config and same recorded non-loopback host, but
+		// this rig's database really is in the city's multi-database data dir,
+		// which is the legacy gc-managed layout.
+		"a rig whose database is in the city's data dir is gc's": {
+			setup: func(t *testing.T, cityPath string) string {
+				writeBdOwnedDirectExternalCity(t, cityPath)
+				seedCityDatabaseDir(t, cityPath, "hosted")
+				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
+				rig := filepath.Join(cityPath, "rigs", "fe")
+				writeBdOwnedDirectExternalRig(t, rig, "fe", "db.example", 4406)
+				seedCityDatabaseDir(t, cityPath, "fe")
+				return rig
+			},
+			want: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			city := t.TempDir()
+			writeCityTOMLForBdProvider(t, city)
+			scope := tc.setup(t, city)
+
+			got, err := scopeIsBdOwnedDirectExternal(city, scope)
+			if err != nil {
+				t.Fatalf("scopeIsBdOwnedDirectExternal: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("scopeIsBdOwnedDirectExternal() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// writeDoltRuntimePublicationFixture writes a runtime state file at path. Only
+// its existence is read: a state file left behind by a Dolt that died
+// uncleanly, and the `running:false` one a clean `gc stop` leaves behind, are
+// both still records that gc raised this city's Dolt. It is half the evidence
+// scopeStoreLivesInTheCitysManagedDolt needs; the scope's own database
+// directory is the other half.
+func writeDoltRuntimePublicationFixture(t *testing.T, cityPath, statePath string) {
+	t.Helper()
+	if err := writeDoltRuntimeStateFile(statePath, doltRuntimeState{
+		Running: true,
+		PID:     os.Getpid(),
+		Port:    3307,
+		DataDir: filepath.Join(cityPath, ".beads", "dolt"),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(%s): %v", statePath, err)
 	}
 }
