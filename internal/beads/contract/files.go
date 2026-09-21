@@ -428,7 +428,7 @@ func SetMetadataDoltDataDir(fs fsys.FS, path, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	return fsys.WriteFileAtomic(fs, path, append(encoded, '\n'), 0o644)
+	return fsys.WriteFileAtomic(fs, path, append(encoded, '\n'), canonicalScopeFilePerm(fs, path))
 }
 
 // ReadMetadataBackend reports the non-empty backend marker in metadata.json.
@@ -500,6 +500,27 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	}
 
 	return state, true, nil
+}
+
+// canonicalScopeFilePerm reports the mode a canonical-file rewrite must stamp
+// on path.
+//
+// [fsys.WriteFileAtomic] publishes a fresh inode by rename, so it applies the
+// mode it is handed rather than inheriting the replaced file's — unlike the
+// truncate-in-place [fsys.FS.WriteFile] these writers used before, whose perm
+// argument only takes effect on create. bd creates both .beads/config.yaml and
+// .beads/metadata.json 0600 and re-saves metadata.json 0600 partway through
+// `bd migrate`, so canonicalising a bd-created scope would otherwise widen
+// those files to 0644 on every boot-door pass, every `gc rig set-endpoint`,
+// and every migrate-proxied turn. Preserve whatever mode is already on disk;
+// fall back to gc's own 0644 default only when the file does not exist yet.
+func canonicalScopeFilePerm(fs fsys.FS, path string) os.FileMode {
+	const defaultPerm os.FileMode = 0o644
+	info, err := fs.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return defaultPerm
+	}
+	return info.Mode().Perm()
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
@@ -615,7 +636,7 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	if err != nil {
 		return false, err
 	}
-	return true, fsys.WriteFileAtomic(fs, path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }
 
 // EnsureCanonicalMetadata rewrites metadata.json into canonical GC-managed form.
@@ -687,7 +708,7 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		return false, err
 	}
 	encoded = append(encoded, '\n')
-	return true, fsys.WriteFileAtomic(fs, path, encoded, 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, encoded, canonicalScopeFilePerm(fs, path))
 }
 
 func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (bool, error) {
@@ -840,7 +861,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	if len(out) == 0 || strings.TrimSpace(out[len(out)-1]) != "" {
 		out = append(out, "")
 	}
-	return true, fsys.WriteFileAtomic(fs, path, []byte(strings.Join(out, "\n")), 0o644)
+	return true, fsys.WriteFileAtomic(fs, path, []byte(strings.Join(out, "\n")), canonicalScopeFilePerm(fs, path))
 }
 
 // parseCustomTypesValue splits a raw `types.custom` value ("a,b,c") into
