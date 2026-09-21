@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -64,5 +65,62 @@ func TestLegacyScriptProxiedInitPinsIdleNever(t *testing.T) {
 	}
 	if !strings.Contains(line, "--proxied-server-idle-timeout 0") {
 		t.Fatalf("run_bd_init_proxied omits the idle-never pin: %s", line)
+	}
+}
+
+// A bare non-bd provider (`provider = "doltlite"`) is not a bd-contract city:
+// gc runs no provider-owned front door for it, and the only provider shape that
+// door accepts is `exec:`. The default rig-store initializer nevertheless took
+// bd's proxied arm for such a city, which made the fresh rig provider-owned by
+// binding — after which every `gc start`, health tick and `gc stop` refused the
+// city with "requires an exec beads provider", and bd's idle-never proxy plus
+// its Dolt child stayed resident with no gc verb left to retire them.
+func TestDefaultRigBdStoreKeepsDirectServerForNonBdContractCity(t *testing.T) {
+	clearGCEnv(t)
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "api")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := "[workspace]\nname = \"tincan-city\"\n\n[beads]\nprovider = \"doltlite\"\n\n" +
+		"[[rigs]]\nname = \"api\"\npath = " + strconv.Quote(rig) + "\nprefix = \"api\"\n"
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(cityTOML), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(city, "bd-args")
+	fakeBd := filepath.Join(city, "bd")
+	if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil { //nolint:gosec // fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("BD_BIN", fakeBd)
+
+	if err := initDefaultRigBdStore(city, rig, "api", "api"); err != nil {
+		t.Fatalf("initDefaultRigBdStore: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("the initializer did not invoke bd: %v", err)
+	}
+	invocation := string(data)
+	if strings.Contains(invocation, "--proxied-server") {
+		t.Fatalf("bd was asked for a proxied store on a non-bd-contract city: %s", invocation)
+	}
+	if !strings.Contains(invocation, "--server") {
+		t.Fatalf("bd was not asked for a direct server store: %s", invocation)
+	}
+
+	// The point of keeping --server: the rig must not classify as
+	// provider-owned, because nothing here can run its lifecycle.
+	if owned, err := scopeProviderOwned(city, rig); err != nil {
+		t.Fatalf("scopeProviderOwned: %v", err)
+	} else if owned {
+		t.Fatalf("a rig store on a non-bd-contract city classified as provider-owned")
+	}
+	if err := initAndHookDir(city, rig, "api"); err != nil {
+		t.Fatalf("second boot door on the same rig: %v", err)
+	}
+	if err := shutdownBeadsProvider(city); err != nil {
+		t.Fatalf("gc stop after the rig add: %v", err)
 	}
 }

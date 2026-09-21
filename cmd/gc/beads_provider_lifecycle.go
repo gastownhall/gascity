@@ -341,7 +341,7 @@ func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 		return false, nil
 	}
 	provider := beadsProvider(cityPath)
-	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
+	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		if err := initDirIfReadyInitAndHookDir(cityPath, dir, prefix); err != nil {
 			return false, err
 		}
@@ -496,11 +496,14 @@ func scopeUsesProxiedDoltMode(cityPath, scopeRoot string) bool {
 	if samePath(cityPath, scopeRoot) {
 		return false
 	}
-	// Only bd-contract scopes can use the proxied Dolt UOW path. A rig whose
-	// city provider is file/sqlite still gets the default bd-backed rig store,
-	// so recognize that fresh per-rig path without reclassifying the city store.
-	if !providerUsesBdStoreContract(beadsProvider(cityPath)) &&
-		(samePath(cityPath, scopeRoot) || !shouldInitDefaultRigBdStore(cityPath, scopeRoot, beadsProvider(cityPath))) {
+	// Only bd-contract scopes can use the proxied Dolt UOW path — the whole
+	// path, not just the init. A proxied scope is provider-owned by its
+	// binding, and every provider-owned lifecycle op runs through the city's
+	// exec provider; a city whose provider is a bare non-bd name has none, so a
+	// rig initialized proxied under it is one gc can start, health-check and
+	// stop exactly never, with bd's idle-never proxy left resident. Its default
+	// rig store stays on the direct server path.
+	if !providerUsesBdStoreContract(beadsProvider(cityPath)) {
 		return false
 	}
 	if strings.TrimSpace(cityPath) == "" {
@@ -1683,7 +1686,7 @@ func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, exe
 			args = append(args, doltDatabase)
 		}
 		script := strings.TrimPrefix(provider, "exec:")
-		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath))) {
+		if execProviderUsesCanonicalBdScopeFiles(provider) && (scopeInitUsesProxiedDoltMode(cityPath, dir)) {
 			// Callers may invoke initBeadsForDir directly without the
 			// initAndHookDir wrapper that normally supplies the canonical
 			// database name. Resolve the same fallback here so proxied and
@@ -1840,6 +1843,30 @@ func shouldInitDefaultRigBdStore(cityPath, dir, provider string) bool {
 	return provider != "" && provider != "file" && !strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
 }
 
+// scopeInitUsesProxiedDoltMode reports whether an initializer is creating this
+// scope's store through bd's proxied path: the scope's own classification when
+// it has one, otherwise the city's unless the scope overrides the city backend.
+// It is the single statement of that decision, so the argv bd is handed and the
+// dolt_mode gc records for the store bd just created cannot disagree.
+func scopeInitUsesProxiedDoltMode(cityPath, dir string) bool {
+	return scopeUsesProxiedDoltMode(cityPath, dir) ||
+		(!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath))
+}
+
+// postInitScopeDoltMode reports the dolt_mode to record for a scope whose store
+// was just initialized. It is preInitScopeDoltMode's counterpart, and rests on
+// the same rule: the marker must be a true statement about the store that now
+// exists. A proxied marker over a store bd created with `--server` is the trap
+// preInitScopeDoltMode documents, reached from the other side — the marker
+// itself makes the scope provider-owned, and every later lifecycle op then
+// demands a proxy nobody ever started.
+func postInitScopeDoltMode(cityPath, dir string) string {
+	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
+		return defaultFreshScopeDoltMode
+	}
+	return "server"
+}
+
 func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	canonicalDoltDatabase := strings.TrimSpace(doltDatabase)
 	if canonicalDoltDatabase == "" {
@@ -1853,7 +1880,7 @@ func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
 	}
 	applyExportSuppressionEnv(env)
 	args := []string{"init", "-p", prefix, "--skip-hooks"}
-	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
+	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		env["BEADS_DOLT_PROXIED_SERVER"] = "1"
 		// Idle-never is not an optimization, it is D3: without it bd retires
 		// the proxy and its Dolt child after 30s quiet and every later command
@@ -1893,18 +1920,19 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = defaultScopeDoltDatabase(cityPath, dir, prefix)
 	}
+	freshDoltMode := postInitScopeDoltMode(cityPath, dir)
 	if isReservedManagedDoltDatabase(doltDatabase) {
-		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, defaultFreshScopeDoltMode); err != nil {
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, freshDoltMode); err != nil {
 			return err
 		}
-	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, defaultFreshScopeDoltMode); err != nil {
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, freshDoltMode); err != nil {
 		return err
 	}
 	// In proxied-server mode bd init owns the UOW, proxy, and child Dolt
 	// lifecycle. Do not reopen through Gas City's native/factory path here:
 	// that path can run direct SQL preflight and would either fail before the
 	// proxy is ready or accidentally create a second managed server.
-	if scopeUsesProxiedDoltMode(cityPath, dir) || (!scopeOverridesCityBackend(cityPath, dir) && scopeUsesProxiedDoltMode(cityPath, cityPath)) {
+	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
 		return nil
 	}
 	store, err := openStoreAtForCity(dir, cityPath)
