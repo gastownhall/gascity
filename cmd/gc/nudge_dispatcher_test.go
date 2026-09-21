@@ -709,3 +709,55 @@ func TestEnqueuePingsWakeSocket(t *testing.T) {
 		t.Fatal("wakeCh not signaled after enqueue")
 	}
 }
+
+// TestEnsureNudgeWakeListenerReconcilesOnConfigReload is the regression test
+// for finding 4 of PR #4967 gate report gc-75w2t8: the wake-socket listener
+// used to be decided once at startup
+// (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()), so a
+// later config reload that flips either condition true never started one.
+// ensureNudgeWakeListener must be re-run on every reload and open the
+// socket the first time either condition holds.
+func TestEnsureNudgeWakeListenerReconcilesOnConfigReload(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+
+	cr := &CityRuntime{
+		cityPath:    dir,
+		cfg:         &config.City{}, // legacy mode, no event-capable provider
+		stderr:      discardWriter{},
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("listener started in legacy mode with no event-capable provider")
+	}
+	if _, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(dir), 50*time.Millisecond); err == nil {
+		t.Fatal("wake socket accepted a dial before any listener was started")
+	}
+
+	// Simulate a cfg-only reload that turns on supervisor mode without a
+	// provider swap (providerChanged=false in reloadConfigTraced's call).
+	cr.cfg = supervisorCfg()
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("listener not started after reload flipped supervisor mode on")
+	}
+	defer cr.nudgeWakeListener.Close() //nolint:errcheck
+
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(dir), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial wake socket after reload: %v", err)
+	}
+	conn.Close() //nolint:errcheck
+
+	// A second reload must not attempt to start a duplicate listener (which
+	// would fail with "address already in use" and log a spurious warning).
+	startedListener := cr.nudgeWakeListener
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != startedListener {
+		t.Fatal("ensureNudgeWakeListener replaced an already-running listener")
+	}
+}

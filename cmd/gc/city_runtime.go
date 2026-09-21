@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,6 +213,7 @@ type CityRuntime struct {
 	sessionPhasesLast   time.Time                    // last tick that ran the session phases (reconciler goroutine only)
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	nudgeWakeListener   net.Listener                 // wake socket listener, once started; nil until ensureNudgeWakeListener starts one
 	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
@@ -834,11 +836,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// (kicked by this listener and by idle events) owns queued delivery.
 	// Legacy mode on polled providers skips the listener entirely;
 	// per-session pollers continue to own delivery.
-	if (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
+	cr.ensureNudgeWakeListener(ctx)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// pokeCh: a session death pokes the reconciler within seconds instead of
@@ -2349,6 +2347,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.nudgeEvents != nil {
 		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
 	}
+	cr.ensureNudgeWakeListener(ctx)
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -3501,6 +3500,33 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// ensureNudgeWakeListener starts the wake-socket listener when the current
+// config/provider combination requires one and none is running yet. Called
+// at startup and after every config reload — not just when the provider
+// swaps — because nudgeDispatcherIsSupervisor(cr.cfg) alone can flip on a
+// cfg-only reload (supervisor mode toggled without a provider change). The
+// listener decision was previously made once at startup
+// (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()); a later
+// reload that turns either condition true left the wake socket unopened for
+// the rest of the process's life, silently degrading queued-nudge delivery
+// to patrol-interval latency with no listener ever reconciled in. Reload
+// runs on the same goroutine as tick, so no concurrent call can race
+// cr.nudgeWakeListener here.
+func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
+	if cr.nudgeWakeListener != nil || cr.cityPath == "" {
+		return
+	}
+	if !nudgeDispatcherIsSupervisor(cr.cfg) && (cr.nudgeEvents == nil || !cr.nudgeEvents.active()) {
+		return
+	}
+	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	cr.nudgeWakeListener = lis
 }
 
 // nudgeDispatchTick runs one supervisor-side nudge dispatch pass. Called

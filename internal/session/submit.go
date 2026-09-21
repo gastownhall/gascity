@@ -92,6 +92,13 @@ func (m *Manager) Submit(ctx context.Context, id, message, resumeCommand string,
 }
 
 func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string, hints runtime.Config, intent SubmitIntent) (SubmitOutcome, error) {
+	// Probed before acquiring the per-session mutation lock: DispatcherIsHosting
+	// dials the wake socket with a 200ms timeout, and every enqueueDeferredSubmitLocked
+	// call site below runs inside that lock. Dialing under it would block every
+	// other mutation on this same session (a concurrent submit, nudge, wait, or
+	// prime) for up to 200ms on every deferred submit — a needless serialization
+	// point for a probe that has nothing to do with the session's own state.
+	dispatcherHosting := nudgequeue.DispatcherIsHosting(m.cityPath)
 	var outcome SubmitOutcome
 	err := withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -109,7 +116,7 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 			if err := m.pendingInteractionLocked(sessName); err != nil {
 				return err
 			}
-			if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+			if err := m.enqueueDeferredSubmitLocked(b, sessName, message, dispatcherHosting); err != nil {
 				return err
 			}
 			outcome.Queued = true
@@ -129,14 +136,14 @@ func (m *Manager) submit(ctx context.Context, id, message, resumeCommand string,
 				// against a conversation the operator has already discarded.
 				// Queue it for the incarnation the controller is about to bring
 				// up instead.
-				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message, dispatcherHosting); err != nil {
 					return err
 				}
 				outcome.Queued = true
 				return nil
 			}
 			if (State(b.Metadata["state"]) == StateStartPending || State(b.Metadata["state"]) == StateCreating) && !running {
-				if err := m.enqueueDeferredSubmitLocked(b, sessName, message); err != nil {
+				if err := m.enqueueDeferredSubmitLocked(b, sessName, message, dispatcherHosting); err != nil {
 					return err
 				}
 				outcome.Queued = true
@@ -562,7 +569,7 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
-func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
+func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string, dispatcherHosting bool) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
@@ -591,10 +598,11 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	// does not prove that dispatcher is actually running — the controller
 	// can be down while an event-capable provider is configured, leaving
 	// this deferred submit queued with no deliverer if only capability were
-	// checked — so this probes the live wake socket instead. A failed dial
-	// only ever fails toward starting a duplicate poller (harmless), never
-	// toward suppressing the only deliverer.
-	if !nudgequeue.DispatcherIsHosting(m.cityPath) && m.supportsFollowUpLocked(b) {
+	// checked — so the caller probes the live wake socket instead, before
+	// acquiring the per-session mutation lock this method runs under. A
+	// failed dial only ever fails toward starting a duplicate poller
+	// (harmless), never toward suppressing the only deliverer.
+	if !dispatcherHosting && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil
