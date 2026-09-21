@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -287,6 +290,50 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered on resync full pass; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
+// TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges
+// reproduces gc-08u54r finding #5: runPass used to derive the session-class
+// store by handing store.Store (already routed to the NUDGES class) to
+// cliSessionStore as its fallback workStore. cliSessionStore only diverges
+// from that fallback when sessions themselves relocate, so when nudges
+// relocate independently of sessions, session reads silently landed on the
+// nudges store instead of the (unrelocated) session store — finding nothing,
+// because the session bead lives on the real work store.
+//
+// This test relocates the nudges class to an isolated, empty MemStore while
+// leaving sessions unmapped (falls through to the work store). Before the
+// fix, runPass's session-bead snapshot comes up empty and delivery never
+// happens; after the fix, it reads the work store where the session bead
+// actually lives and delivery proceeds.
+func TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, _, info := newNudgeDispatcherFixture(t, fake)
+
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	// Relocate the NUDGES class only, to a store distinct from (and empty
+	// relative to) the on-disk work store the session bead was created in.
+	// cliStorageRoutes(dir) has already been resolved (and cached) to nil by
+	// the fixture's own openNudgeBeadStore call, so mutate the cached entry
+	// directly rather than going through config/city.toml.
+	entry := cliStorageRoutesEntryFor(filepath.Clean(dir))
+	entry.routes = &storageRoutes{
+		stores: map[coordclass.Class]beads.Store{
+			coordclass.ClassNudges: beads.NewMemStore(),
+		},
+		binding: "test-nudges-only",
+	}
+	t.Cleanup(func() { entry.routes = nil })
+
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("queued nudge not delivered: session-store resolution followed the relocated nudges store instead of the work store; state=%+v", queueStateSnapshot(t, dir))
 	}
 }
 

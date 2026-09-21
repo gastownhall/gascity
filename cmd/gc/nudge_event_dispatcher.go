@@ -325,9 +325,20 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
-	// Session-class reads route through the session store (identity today);
-	// the nudge queue stays on its own store.
-	sessStore := cliSessionStore(store.Store, cfg, d.cityPath)
+	// Session-class reads route through the session store, resolved from the
+	// city's raw work store rather than store.Store: store.Store has already
+	// been routed to the NUDGES class (openNudgeBeadStore), so reusing it as
+	// the fallback workStore would silently pin session reads to the nudges
+	// backend whenever nudges relocate independently of sessions
+	// ([beads.classes.nudges] set, [beads.classes.sessions] left default).
+	// cliSessionStore only diverges from its input when sessions themselves
+	// relocate, so an unrelocated raw store here is required for correctness.
+	rawStore, err := openCityStoreAt(d.cityPath)
+	if err != nil {
+		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening city store for session resolution: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	sessStore := cliSessionStore(rawStore, cfg, d.cityPath)
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
