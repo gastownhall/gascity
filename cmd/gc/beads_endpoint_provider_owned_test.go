@@ -330,7 +330,7 @@ func TestBootCanonicalizationKeepsBdsUpstreamRigBinding(t *testing.T) {
 	// fixture tests a moment that never happens on disk, and a city-level
 	// ownership signal would look safe here while re-homing every rig in
 	// production.
-	seedCityDatabaseDir(t, city, "ci")
+	seedCityDatabaseDir(t, city, "hq")
 	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city))
 
 	owned, err := scopeProviderOwned(city, rig)

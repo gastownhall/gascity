@@ -77,8 +77,12 @@ func TestBDVersionPins(t *testing.T) {
 	// leaves the suite asserting a version nobody ships. It lives in the
 	// `rest-full` shard, which is gated on `push` — so on a PR nothing catches
 	// the drift and the failure lands after merge, which is exactly how
-	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here, in
-	// unit CI, against the same go.mod pin the block above ties to deps.env.
+	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
+	// against the same go.mod pin the block above ties to deps.env. This test
+	// reaches PR-time CI through `make test-ci-policy` (preflight-static); the
+	// ./scripts unit-cover jobs are push-only, so that recipe line is what
+	// makes this fail before merge rather than after —
+	// TestMakeTestCIPolicyRunsVersionPinContracts pins it.
 	const integrationPinFile = "test/integration/integration_test.go"
 	integrationPin := extractGoStringConst(t, root, integrationPinFile, "wantPinnedBeadsModuleVersion")
 	if integrationPin == "" {
