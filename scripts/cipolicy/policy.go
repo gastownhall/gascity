@@ -38,7 +38,17 @@ const (
 	// Bumped again on the merge with main, which carried its own reviewed delta
 	// (Beads v1.3.0-rc.2 -> v1.3.0): the merged workflow holds both changes, so
 	// neither side's digest describes it.
-	expectedCIExecutionHash      = "85464ce04729488bb388cf0651f7a76d595fb42476177f4f278642f7cd90b104"
+	//
+	// Bumped again to widen beads_topology's internal/ globs to internal/**.
+	// The curated list repeated the same mistake one directory out: the Dolt
+	// floor (internal/doltversion), the proxied provider's auth scope
+	// (internal/doltauth), the pack state dir handed to the bd script
+	// (internal/citylayout) and the pool/binding/health packages matched
+	// neither beads_topology nor shared, so a change to any of them skipped the
+	// only job that stands up the proxied shapes and ci-required accepted the
+	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
+	// internal packages, so the filter is now the graph itself.
+	expectedCIExecutionHash      = "c74219f009d94965f5172398ad5d0cf9ad3215ab2621b8604076afdf02b19674"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
@@ -64,6 +74,21 @@ var requiredFilterPaths = map[string][]string{
 		"deps.env",
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
+	},
+	// beads-topology-acceptance is the only job that stands up the proxied
+	// shapes for real, and ci-required allows its skip, so the paths that must
+	// trigger it are policy rather than convention. The internal/** entry is
+	// the dependency graph of the binaries the job builds:
+	// `go list -deps ./test/acceptance/... ./cmd/gc`.
+	"beads_topology": {
+		"go.mod",
+		"go.sum",
+		"deps.env",
+		"cmd/gc/**",
+		"internal/**",
+		"examples/bd/**",
+		"test/acceptance/**",
+		".github/workflows/ci.yml",
 	},
 	"packs": {
 		"examples/gastown/**",

@@ -113,8 +113,14 @@ func TestProviderScriptRecoverLeavesTheSharedCityProxyAlone(t *testing.T) {
 		wantStop    bool
 	}{
 		{
+			// Three segments, not two: bd resolves a relative root_path
+			// against BEADS_DIR (`<rig>/.beads`), so the city's root is three
+			// levels up from a rig at <city>/rigs/api. The two-segment spelling
+			// this used to pin resolves to <city>/rigs/.beads/dolt for bd —
+			// a root the rig would own — and only matched because the script
+			// joined it to the scope dir instead.
 			name:        "shared city root via a relative data dir",
-			rigRootPath: func(_, _ string) string { return filepath.Join("..", "..", ".beads", "dolt") },
+			rigRootPath: func(_, _ string) string { return filepath.Join("..", "..", "..", ".beads", "dolt") },
 			wantStop:    false,
 		},
 		{

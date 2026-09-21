@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -287,6 +288,105 @@ func TestBootCanonicalizationKeepsBdsUpstreamBinding(t *testing.T) {
 	}
 	if port, ok := after["dolt_server_port"].(float64); !ok || int(port) != 4406 {
 		t.Fatalf("startup normalization erased bd's upstream port: %v", after)
+	}
+	// Keeping the record is only half the fix. The same pass used to stamp
+	// `gc.endpoint_origin: managed_city` into bd's config.yaml, which is exactly
+	// the marker that stops ResolveDoltConnectionTarget from ever consulting the
+	// binding again — so the address survived and was unreachable.
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, city)
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, city, city)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget after the boot door: %v", err)
+	}
+	if target.Host != "db.example" || target.Port != "4406" {
+		t.Fatalf("resolved target after the boot door = %q:%q, want db.example:4406", target.Host, target.Port)
+	}
+	if !target.External {
+		t.Fatalf("resolved target after the boot door = %+v, want an external upstream", target)
+	}
+	// And gc must not raise its own Dolt over the city's empty `.beads/dolt`:
+	// the store lives on db.example, so the managed lifecycle is not gc's.
+	if owned, err := managedDoltLifecycleOwned(city); err != nil {
+		t.Fatalf("managedDoltLifecycleOwned: %v", err)
+	} else if owned {
+		t.Fatalf("gc claims the managed Dolt lifecycle for a bd-owned direct-external city")
+	}
+}
+
+// TestBootCanonicalizationKeepsBdsUpstreamRigBinding is the rig arm of
+// TestBootCanonicalizationKeepsBdsUpstreamBinding. The door stamped
+// `gc.endpoint_origin: inherited_city` into any rig the ownership classifier
+// does not own, and the inherited-rig resolver treats that marker as proof the
+// endpoint comes from the city gc manages — so a bd-owned direct-external rig
+// on a gc-managed city resolved to gc's server, where its database does not
+// exist, while `bd` in the same rig still reached db.example.
+func TestBootCanonicalizationKeepsBdsUpstreamRigBinding(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "db.example", 4406)
+
+	owned, err := scopeProviderOwned(city, rig)
+	if err != nil {
+		t.Fatalf("scopeProviderOwned: %v", err)
+	}
+	if owned {
+		t.Skip("classifier now owns this shape; the boot door is guarded upstream")
+	}
+
+	if err := normalizeCanonicalBdScopeFilesForInit(city, rig, "fe", ""); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFilesForInit: %v", err)
+	}
+
+	after := readScopeMetadataMap(t, rig)
+	if after["dolt_server_host"] != "db.example" {
+		t.Fatalf("startup normalization erased bd's upstream host: %v", after)
+	}
+	if port, ok := after["dolt_server_port"].(float64); !ok || int(port) != 4406 {
+		t.Fatalf("startup normalization erased bd's upstream port: %v", after)
+	}
+	assertScopeConfigCarriesNoGCEndpointOrigin(t, rig)
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, city, rig)
+	if err != nil {
+		t.Fatalf("ResolveDoltConnectionTarget after the boot door: %v", err)
+	}
+	if target.Host != "db.example" || target.Port != "4406" {
+		t.Fatalf("resolved rig target after the boot door = %q:%q, want db.example:4406", target.Host, target.Port)
+	}
+	if !target.External {
+		t.Fatalf("resolved rig target after the boot door = %+v, want an external upstream", target)
+	}
+}
+
+// assertScopeConfigCarriesNoGCEndpointOrigin fails when the boot door wrote
+// gc's endpoint-origin marker into a config.yaml bd owns. The marker is the
+// discriminator every bd-owned fallback in contract rests on.
+func assertScopeConfigCarriesNoGCEndpointOrigin(t *testing.T, scopeRoot string) {
+	t.Helper()
+	cfg, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("ReadConfigState(%s): %v", scopeRoot, err)
+	}
+	if ok && cfg.EndpointOrigin != "" {
+		t.Fatalf("boot door stamped gc.endpoint_origin %q into bd's config.yaml at %s", cfg.EndpointOrigin, scopeRoot)
+	}
+}
+
+// writeBdOwnedDirectExternalRig replaces a rig's gc-canonical scope files with
+// the shape bd leaves behind: bd's own config.yaml template and a metadata.json
+// whose persisted server binding is the only record of the upstream.
+func writeBdOwnedDirectExternalRig(t *testing.T, rigPath, prefix, host string, port int) {
+	t.Helper()
+	beadsDir := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
+		`"dolt_server_host":%q,"dolt_server_port":%d,"dolt_database":%q}`+"\n", host, port, prefix)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: "+prefix+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

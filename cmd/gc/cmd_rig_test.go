@@ -231,8 +231,12 @@ esac
 	if err := json.Unmarshal(metaData, &meta); err != nil {
 		t.Fatalf("Unmarshal(metadata): %v", err)
 	}
-	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "proxied-server" {
-		t.Fatalf("metadata dolt_mode = %q, want proxied-server", got)
+	// server, not proxied-server: a sqlite city is not bd-contract, so the
+	// proxied path — which would make this rig provider-owned by its binding,
+	// with no exec provider able to run its lifecycle — is not available to it
+	// (council R4-F1).
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", got)
 	}
 
 	store, err := openStoreAtForCity(rigPath, cityPath)
@@ -248,7 +252,7 @@ esac
 	}
 	log := string(logData)
 	for _, want := range []string{
-		"init --proxied-server --proxied-server-idle-timeout 0 -p tc --skip-hooks --database tc",
+		"init --server -p tc --skip-hooks --database tc",
 		"update --json tc-1 --set-metadata gc.routed_to=sample/session-a",
 	} {
 		if !strings.Contains(log, want) {

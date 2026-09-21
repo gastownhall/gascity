@@ -1415,6 +1415,30 @@ func TestDoRigSetEndpointRequiresCanonicalMetadata(t *testing.T) {
 	}
 }
 
+// configWriteFailureFS fails every write that would land on config.yaml: the
+// direct write, the temp file an atomic writer stages it in, and the rename that
+// publishes it. The injection has to cover all three because the contract's
+// canonical writers are atomic, and the chmod 0444 this test used to rely on
+// injects nothing under one — a rename needs the directory's write bit, not the
+// file's, so the "failure" quietly succeeded and the rollback under test stopped
+// being exercised. Metadata writes are left alone, which is the point: the
+// assertion is that a config failure rolls the metadata back.
+type configWriteFailureFS struct{ fsys.FS }
+
+func (f configWriteFailureFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if strings.HasPrefix(filepath.Base(name), "config.yaml") {
+		return fmt.Errorf("simulated config.yaml write failure")
+	}
+	return f.FS.WriteFile(name, data, perm)
+}
+
+func (f configWriteFailureFS) Rename(oldpath, newpath string) error {
+	if strings.HasPrefix(filepath.Base(newpath), "config.yaml") {
+		return fmt.Errorf("simulated config.yaml publish failure")
+	}
+	return f.FS.Rename(oldpath, newpath)
+}
+
 func TestDoRigSetEndpointConfigFailureRollsBackMetadata(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1439,17 +1463,13 @@ func TestDoRigSetEndpointConfigFailureRollsBackMetadata(t *testing.T) {
 	})
 	beforeMeta := mustReadFile(t, metadataPath)
 	beforeConfig := mustReadFile(t, configPath)
-	if err := os.Chmod(configPath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chmod(configPath, 0o644) }()
 
 	origVerify := verifyRigExternalEndpoint
 	defer func() { verifyRigExternalEndpoint = origVerify }()
 	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
 
 	var stdout, stderr bytes.Buffer
-	code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{
+	code := doRigSetEndpoint(configWriteFailureFS{fsys.OSFS{}}, cityDir, "frontend", rigEndpointOptions{
 		External: true,
 		Host:     "new-db.example.com",
 		Port:     "4406",

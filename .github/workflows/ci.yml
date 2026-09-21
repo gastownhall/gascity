@@ -110,6 +110,21 @@ jobs:
             # matrix builds gc from ./cmd/gc and drives it through the bd script
             # in examples/bd, so anything under either can change what the
             # shapes do. Over-running this job is cheap next to a silent gate.
+            #
+            # The curated internal/ list was wrong the same way one level out:
+            # internal/doltversion carries the Dolt floor `gc init` enforces,
+            # internal/doltauth places the proxied provider's auth scope,
+            # internal/citylayout the pack state dir the bd script is handed,
+            # and none of them matched. The list is therefore the dependency
+            # graph itself, not a guess at which part of it matters:
+            #
+            #   go list -deps ./test/acceptance/... ./cmd/gc
+            #
+            # answers with 139 of the repo's 166 internal packages; the 27 it
+            # leaves out are test helpers (internal/*test, internal/testutil,
+            # internal/testenv), which the -test graph pulls in anyway. So the
+            # honest spelling of "everything the acceptance binaries import" is
+            # internal/**.
             beads_topology:
               - 'go.mod'
               - 'go.sum'
@@ -118,8 +133,7 @@ jobs:
               - '.github/scripts/install-dolt-archive.sh'
               - '.github/actions/setup-gascity-ubuntu/**'
               - 'cmd/gc/**'
-              - 'internal/beads/**'
-              - 'internal/doctor/**'
+              - 'internal/**'
               - 'examples/bd/**'
               - 'test/acceptance/**'
               - '.github/workflows/ci.yml'

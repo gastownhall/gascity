@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -314,6 +315,72 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 	}
 }
 
+// trivyIgnoreDoc is the shape of .trivyignore.yaml the guards below read. purls
+// is decoded because Trivy honors a purl-scoped waiver in every image, path or
+// no path: an entry naming only `purls: ["pkg:golang/github.com/apache/thrift"]`
+// is a waiver for bd, dolt and gh at once, and a guard that iterates `paths`
+// never sees it.
+type trivyIgnoreDoc struct {
+	Vulnerabilities []struct {
+		ID    string   `yaml:"id"`
+		Paths []string `yaml:"paths"`
+		Purls []string `yaml:"purls"`
+	} `yaml:"vulnerabilities"`
+}
+
+// reviewedTrivyIgnorePurlWaivers names the purl-scoped waivers this repo has
+// reviewed, as "<id> <purl>". It is empty and is meant to stay that way: a
+// module-scoped waiver is exactly the "waive instead of fix" shape the rebuilt-
+// tool guard forbids, and the images force the patched modules in instead
+// (Dockerfile.base's GRPC_VERSION/THRIFT_VERSION and the x/* pins). Adding an
+// entry here is the deliberate edit that admits one.
+var reviewedTrivyIgnorePurlWaivers = map[string]bool{}
+
+// unreviewedTrivyIgnorePurlWaivers reports every purl-scoped waiver the file
+// carries that no reviewer has admitted, as a ready-to-print message.
+func unreviewedTrivyIgnorePurlWaivers(doc trivyIgnoreDoc) []string {
+	var found []string
+	for _, v := range doc.Vulnerabilities {
+		for _, purl := range v.Purls {
+			if reviewedTrivyIgnorePurlWaivers[v.ID+" "+purl] {
+				continue
+			}
+			found = append(found, fmt.Sprintf("%s waives module %q by purl, which applies to every image including the rebuilt bd, dolt and gh; move the module forward in the build instead of waiving it", v.ID, purl))
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsPurlScopedWaivers drives the guard itself, because the
+// file it guards is (correctly) all kubectl paths today, so the assertion in
+// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools cannot demonstrate what it
+// catches. The entry below is the one the council named: a thrift regression
+// waived by module instead of moving Dockerfile.base's THRIFT_VERSION, on the
+// file's own horizon, which both existing guards accepted.
+func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-43871
+    purls:
+      - pkg:golang/github.com/apache/thrift
+    expired_at: 2026-11-07
+  - id: CVE-2026-56852
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2026-11-07
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := unreviewedTrivyIgnorePurlWaivers(doc)
+	if len(found) != 1 {
+		t.Fatalf("unreviewedTrivyIgnorePurlWaivers() = %v, want exactly the thrift purl entry", found)
+	}
+	if !strings.Contains(found[0], "CVE-2026-43871") || !strings.Contains(found[0], "apache/thrift") {
+		t.Fatalf("finding = %q, want it to name the CVE and the module", found[0])
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
 // 1.26.5 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
@@ -326,14 +393,12 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
-	var doc struct {
-		Vulnerabilities []struct {
-			ID    string   `yaml:"id"`
-			Paths []string `yaml:"paths"`
-		} `yaml:"vulnerabilities"`
-	}
+	var doc trivyIgnoreDoc
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
+		t.Error(unreviewed)
 	}
 
 	rebuiltPaths := map[string]bool{

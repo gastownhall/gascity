@@ -885,6 +885,60 @@ func validateSocketTarget(socket, host, port string) error {
 	return nil
 }
 
+// ScopeCarriesBdOwnedDirectBinding reports whether a scope's own artifacts say
+// bd bound it, in direct (server) mode, to a server gc does not run.
+//
+// Two facts together make that call, and neither is enough alone:
+//
+//   - metadata.json carries a usable persisted server binding naming a host
+//     that is neither loopback nor gc's own managed host. A gc-managed legacy
+//     scope also carries a binding — bd's `init --server` records whichever
+//     server it was pointed at, gc's included — so the host is what separates
+//     "someone else's server" from "a stale copy of gc's".
+//   - config.yaml is not gc-authoritative. gc writes its endpoint keys into
+//     every scope it canonicalises; a scope carrying only bd's template (or no
+//     config at all) has never been claimed.
+//
+// Callers use it to keep the boot-time canonicalizer off such a scope. Stamping
+// gc's endpoint origin into it is not merely cosmetic: `gc.endpoint_origin` is
+// the discriminator ResolveDoltConnectionTarget's bd-owned fallbacks rest on,
+// so the stamp makes the preserved binding permanently unreachable and re-homes
+// the scope onto gc's own empty store.
+//
+// A socket-only binding answers false: it names a server on this host, which is
+// the shape gc's own managed runtime and a bd-started local server share, and
+// this predicate fails closed rather than guessing.
+func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (bool, error) {
+	binding, ok, err := ReadPersistedServerBinding(fs, filepath.Join(scopeRoot, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return false, err
+	}
+	if !bindingNamesForeignServer(binding) {
+		return false, nil
+	}
+	resolved, err := ResolveScopeConfigState(fs, cityRoot, scopeRoot, issuePrefix)
+	if err != nil {
+		return false, err
+	}
+	return resolved.Kind != ScopeConfigAuthoritative, nil
+}
+
+// bindingNamesForeignServer reports whether a persisted binding points at a
+// server outside gc's managed lifecycle.
+func bindingNamesForeignServer(binding ConfigState) bool {
+	if strings.TrimSpace(binding.DoltSocket) != "" {
+		return false
+	}
+	host := strings.TrimSpace(binding.DoltHost)
+	if host == "" || strings.TrimSpace(binding.DoltPort) == "" {
+		return false
+	}
+	if DoltHostIsLocal(host) {
+		return false
+	}
+	return !strings.EqualFold(host, managedCityHost())
+}
+
 // bdExternalBindingTarget resolves the external upstream bd persisted for a
 // scope, if it recorded one.
 //

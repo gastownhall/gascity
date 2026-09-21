@@ -183,9 +183,15 @@ func doBeadsCityMigrateProxied(cityPath string, opts migrateProxiedOptions, stdo
 	// city's turn already made a repository there, so continuing hands bd the
 	// city's still-direct data dir and it commits the rig's flip against it,
 	// leaving a bd-proxied rig over a root gc still legacy-manages.
+	//
+	// SharedRootRel alone does not name every scope standing on that root:
+	// sharedCityRootForRig returns "" for a rig that already records a
+	// dolt_data_dir, including the rig whose own earlier turn recorded the
+	// city's. rigSharesCityDoltDataDir asks the question the field only
+	// answers for a rig that has not been through this yet.
 	sharedRootFailed := false
 	for i := range scopes {
-		if sharedRootFailed && scopes[i].SharedRootRel != "" {
+		if sharedRootFailed && (scopes[i].SharedRootRel != "" || rigSharesCityDoltDataDir(cityPath, scopes[i])) {
 			report.Scopes = append(report.Scopes, migrateProxiedSkippedOutcome(scopes[i]))
 			continue
 		}
@@ -225,7 +231,8 @@ func doBeadsCityMigrateProxied(cityPath string, opts migrateProxiedOptions, stdo
 // migrateProxiedSkippedOutcome records a scope this run did not touch because
 // the city whose Dolt root it shares failed to migrate. Untouched is what makes
 // the rerun the runbook promises work: the scope is still direct, so the next
-// run classifies it from scratch once the city is proxied.
+// run classifies it again — from scratch when it carries no dolt_data_dir, and
+// from the root a previous turn recorded when it does.
 func migrateProxiedSkippedOutcome(scope migrateProxiedScope) migrateProxiedScopeResult {
 	return migrateProxiedScopeResult{
 		Scope:       scope.Label,
@@ -337,6 +344,12 @@ func migrateProxiedScopeNow(cityPath string, scope migrateProxiedScope, classifi
 	// `dolt init` goes into the same data directory a live gc-managed server
 	// holds locked, and the entry check ran an unbounded number of scopes ago.
 	if err := requireNoManagedDoltServer(cityPath); err != nil {
+		return err
+	}
+	// The ordering stop in the scope loop is the common path into this refusal;
+	// this is the invariant itself, so no route into a rig's turn can hand bd
+	// the city's root before the city has been migrated onto it.
+	if err := requireCityProxiedForSharedRootRig(cityPath, scope); err != nil {
 		return err
 	}
 	if classification.NeedsDoltInit {
@@ -728,6 +741,42 @@ func scopeDoltDataDir(scopeRoot string) string {
 	return filepath.Clean(filepath.Join(beadsDir, recorded))
 }
 
+// rigSharesCityDoltDataDir reports whether a rig's own turn would migrate
+// against the city's Dolt root because its recorded dolt_data_dir resolves
+// there. It is the durable half of SharedRootRel, which only describes a rig
+// gc is about to point at that root for the first time.
+func rigSharesCityDoltDataDir(cityPath string, scope migrateProxiedScope) bool {
+	if scope.IsCity {
+		return false
+	}
+	return samePath(scopeDoltDataDir(scope.Path), scopeDoltDataDir(cityPath))
+}
+
+// requireCityProxiedForSharedRootRig refuses to migrate a rig that stands on
+// the city's Dolt root while the city itself is still direct.
+//
+// bd's migration commits the rig's mode flip against whatever root it resolves,
+// and it has no opinion about who else serves that root. Flipping the rig first
+// leaves a bd-proxied rig over a directory gc still legacy-manages, where the
+// next `gc start` and the next `bd` in the rig contend for one Dolt store — the
+// outcome the city-first ordering exists to prevent.
+func requireCityProxiedForSharedRootRig(cityPath string, scope migrateProxiedScope) error {
+	if scope.IsCity {
+		return nil
+	}
+	if scope.SharedRootRel == "" && !rigSharesCityDoltDataDir(cityPath, scope) {
+		return nil
+	}
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
+	if err != nil {
+		return err
+	}
+	if ok && contract.IsProxiedDoltMode("dolt", mode) {
+		return nil
+	}
+	return fmt.Errorf("%s migrates against the city's Dolt data directory %s and the city is still direct; migrate the city scope first, then rerun", scope.Label, scopeDoltDataDir(cityPath))
+}
+
 // planMigrateProxiedScopes orders the work: the city first, because a rig that
 // shares the city's data dir cannot be proxied while the city still is not.
 func planMigrateProxiedScopes(cityPath string, selected []string) ([]migrateProxiedScope, error) {
@@ -797,7 +846,11 @@ func planMigrateProxiedScopes(cityPath string, selected []string) ([]migrateProx
 // beads' configfile.Config.Save silently strips an absolute dolt_data_dir, and
 // bd saves the config mid-migration.
 func sharedCityRootForRig(cityPath, rigPath string) (string, error) {
-	cityDataDir := filepath.Join(normalizePathForCompare(cityPath), ".beads", "dolt")
+	// The city's RESOLVED data dir, not the default one. A city whose metadata
+	// records a dolt_data_dir serves its rigs' databases from there, and probing
+	// <city>/.beads/dolt instead found nothing, classified every such rig as
+	// owning its own empty root and refused the migration it was asked for.
+	cityDataDir := scopeDoltDataDir(cityPath)
 	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, scopeMetadataJSONPath(rigPath))
 	if err != nil {
 		return "", err
@@ -857,7 +910,7 @@ func requireNoManagedDoltServer(cityPath string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("probe managed dolt runtime state %s: %w", statePath, err)
 	}
-	dataDir := filepath.Join(normalizePathForCompare(cityPath), ".beads", "dolt")
+	dataDir := scopeDoltDataDir(cityPath)
 	if _, bdOwned := bdOwnedProxyDoltConfig(filepath.Join(dataDir, bdProxyConfigFileName)); bdOwned {
 		return nil
 	}
