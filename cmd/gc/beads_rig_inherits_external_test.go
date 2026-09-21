@@ -14,14 +14,24 @@ import (
 // beads ended up split across two servers, which the topology matrix caught as
 // a local sql-server appearing under a rig that is supposed to have none.
 
-func writeBdOwnedDirectExternalCity(t *testing.T, cityPath, host, port string) {
+// bdOwnedExternalHost and bdOwnedExternalPort are the upstream every
+// bd-owned-direct-external fixture in this package is bound to. The host is
+// deliberately not a loopback name: DoltHostIsLocal absorbs 127.0.0.1,
+// localhost, ::1 and 0.0.0.0, and the whole point of the shape is an upstream
+// that is not gc's own managed server.
+const (
+	bdOwnedExternalHost = "db.example"
+	bdOwnedExternalPort = "4406"
+)
+
+func writeBdOwnedDirectExternalCity(t *testing.T, cityPath string) {
 	t.Helper()
 	beadsDir := filepath.Join(cityPath, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server",` +
-		`"dolt_server_host":"` + host + `","dolt_server_port":` + port + `,"dolt_database":"hosted"}` + "\n"
+		`"dolt_server_host":"` + bdOwnedExternalHost + `","dolt_server_port":` + bdOwnedExternalPort + `,"dolt_database":"hosted"}` + "\n"
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +44,7 @@ func writeBdOwnedDirectExternalCity(t *testing.T, cityPath, host, port string) {
 
 func TestProviderOwnershipIntentFromPersistedCityReadsBdsExternalBinding(t *testing.T) {
 	cityPath := t.TempDir()
-	writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+	writeBdOwnedDirectExternalCity(t, cityPath)
 
 	intent, err := providerOwnershipIntentFromPersistedCity(cityPath)
 	if err != nil {
@@ -73,7 +83,7 @@ func TestProviderOwnershipIntentFromPersistedCityKeepsLocalWithoutABinding(t *te
 // server anyway.
 func TestInheritedProviderExternalEndpointEnvReadsBdsExternalBinding(t *testing.T) {
 	cityPath := t.TempDir()
-	writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+	writeBdOwnedDirectExternalCity(t, cityPath)
 
 	env, err := inheritedProviderExternalEndpointEnv(cityPath, providerScopeIntent{Transport: "direct", Target: "external"})
 	if err != nil {

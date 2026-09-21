@@ -267,7 +267,7 @@ func jsonEqual(t *testing.T, a, b map[string]any) bool {
 // again even if it were still there.
 func TestBootCanonicalizationKeepsBdsUpstreamBinding(t *testing.T) {
 	city := t.TempDir()
-	writeBdOwnedDirectExternalCity(t, city, "db.example", "4406")
+	writeBdOwnedDirectExternalCity(t, city)
 	writeCityTOMLForBdProvider(t, city)
 
 	owned, err := scopeProviderOwned(city, city)
@@ -419,20 +419,20 @@ func TestScopeIsBdOwnedDirectExternal(t *testing.T) {
 		// a Dolt here.
 		"bd's binding on a city gc never published a runtime for": {
 			setup: func(t *testing.T, cityPath string) {
-				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+				writeBdOwnedDirectExternalCity(t, cityPath)
 			},
 			want: true,
 		},
 		"a published managed dolt runtime outranks the recorded host": {
 			setup: func(t *testing.T, cityPath string) {
-				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+				writeBdOwnedDirectExternalCity(t, cityPath)
 				writeDoltRuntimePublicationFixture(t, cityPath, managedDoltStatePath(cityPath))
 			},
 			want: false,
 		},
 		"a published provider dolt runtime outranks it too": {
 			setup: func(t *testing.T, cityPath string) {
-				writeBdOwnedDirectExternalCity(t, cityPath, "db.example", "4406")
+				writeBdOwnedDirectExternalCity(t, cityPath)
 				writeDoltRuntimePublicationFixture(t, cityPath, providerManagedDoltStatePath(cityPath))
 			},
 			want: false,
