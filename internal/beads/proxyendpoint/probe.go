@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,6 +43,18 @@ const (
 	cursorTableIgnored = "ignored_schema_migrations"
 	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 )
+
+// ErrNoDatabase reports a probe asked to read cursors without naming a database.
+//
+// The cursor reads are scoped by DATABASE(): with no database selected it is
+// NULL, both existence probes count zero rows, both cursors read zero, and the
+// probe reports `served` with main=0 ignored=0 — a proxy that answered and a
+// database that is catastrophically behind, which is not what happened. The
+// design's own sketch of the session (doltpool.Open(host, port, "root", "", ""))
+// invites exactly that call, so the probe refuses it rather than answering it.
+// The refusal is not connection-level and not a timeout, so it classifies as
+// ProbeUnknown: it says something about the caller, not about the proxy.
+var ErrNoDatabase = errors.New("proxyendpoint: probe requires a database name")
 
 // ProbeOutcome is what one probe of a proxy's data port concluded. The three
 // real outcomes are the three observable states of bd's byte-pump proxy, and
@@ -298,6 +311,12 @@ func DefaultProbeIO(port int, database string) ProbeIO {
 }
 
 // ProbeEndpoint probes a validated endpoint's data port for one database.
+//
+// The database is required: the cursors are DATABASE()-scoped, so a probe with
+// none selected would report served with both cursors at zero. Callers get
+// ProbeUnknown and ErrNoDatabase instead. gc's own caller cannot reach it — the
+// connection target defaults the name to "beads" — which is precisely why the
+// refusal lives here rather than in a comment.
 func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResult {
 	return Probe(ctx, DefaultProbeIO(ep.Record.Port, database))
 }
@@ -312,6 +331,10 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
 func readCursors(ctx context.Context, port int, database string) (Cursors, error) {
+	if strings.TrimSpace(database) == "" {
+		// Cursors read against no database are zeros, not evidence.
+		return Cursors{}, ErrNoDatabase
+	}
 	connector, err := probeConnector(port, database)
 	if err != nil {
 		return Cursors{}, err

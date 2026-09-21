@@ -305,6 +305,35 @@ func TestProbeNeverConcludesFromItsOwnDeadline(t *testing.T) {
 	}
 }
 
+// TestProbeRefusesAnUnnamedDatabase pins the one input that would have produced
+// a confident wrong answer.
+//
+// Both cursor reads are scoped by DATABASE(). With no database selected it is
+// NULL, both existence probes count zero, both cursors read zero, and the probe
+// would report `served main=0 ignored=0` — which the cursor gate reads as a
+// database far behind the library on both lanes, with a schema_skew reason, for a
+// database it never looked at. It costs the proxy no session either: the refusal
+// happens before anything is dialed.
+func TestProbeRefusesAnUnnamedDatabase(t *testing.T) {
+	for _, database := range []string{"", "   "} {
+		dials := 0
+		probeIO := DefaultProbeIO(1, database)
+		got := Probe(context.Background(), ProbeIO{
+			Session: probeIO.Session,
+			Dial:    func(context.Context) error { dials++; return nil },
+		})
+		if got.Outcome != ProbeUnknown {
+			t.Fatalf("a probe with database %q reported %v, want unknown", database, got.Outcome)
+		}
+		if !errors.Is(got.Err, ErrNoDatabase) {
+			t.Fatalf("a probe with database %q reported %v, want ErrNoDatabase", database, got.Err)
+		}
+		if dials != 0 {
+			t.Fatalf("a probe with database %q spent %d dial(s), want 0", database, dials)
+		}
+	}
+}
+
 // TestProbeOutcomeTokensAreStable pins the strings automation reads.
 func TestProbeOutcomeTokensAreStable(t *testing.T) {
 	want := map[ProbeOutcome]string{
