@@ -37,6 +37,7 @@ const (
 	migrateProxiedStatusAlready   = "already-migrated"
 	migrateProxiedStatusPlanned   = "would-migrate"
 	migrateProxiedStatusFailed    = "failed"
+	migrateProxiedStatusSkipped   = "skipped"
 	migrateProxiedIdleTimeoutFlag = "0"
 )
 
@@ -71,10 +72,11 @@ type migrateProxiedScopeResult struct {
 }
 
 type migrateProxiedReport struct {
-	City   string                      `json:"city"`
-	DryRun bool                        `json:"dry_run"`
-	Scopes []migrateProxiedScopeResult `json:"scopes"`
-	Failed int                         `json:"failed"`
+	City    string                      `json:"city"`
+	DryRun  bool                        `json:"dry_run"`
+	Scopes  []migrateProxiedScopeResult `json:"scopes"`
+	Failed  int                         `json:"failed"`
+	Skipped int                         `json:"skipped"`
 }
 
 // runBdScopeCommand is the seam command tests replace. Production runs the bd
@@ -174,12 +176,31 @@ func doBeadsCityMigrateProxied(cityPath string, opts migrateProxiedOptions, stdo
 	}
 
 	report := migrateProxiedReport{City: cityPath, DryRun: opts.DryRun}
+	// planMigrateProxiedScopes puts the city first because a rig that shares the
+	// city's data dir cannot be proxied while the city still is not. That
+	// ordering only holds if a failed city turn stops the scopes standing on its
+	// root: classifyMigrateProxiedScope takes SharedRootRel != "" as proof the
+	// city's turn already made a repository there, so continuing hands bd the
+	// city's still-direct data dir and it commits the rig's flip against it,
+	// leaving a bd-proxied rig over a root gc still legacy-manages.
+	sharedRootFailed := false
 	for i := range scopes {
-		report.Scopes = append(report.Scopes, migrateProxiedScopeOutcome(cityPath, scopes[i], opts))
+		if sharedRootFailed && scopes[i].SharedRootRel != "" {
+			report.Scopes = append(report.Scopes, migrateProxiedSkippedOutcome(scopes[i]))
+			continue
+		}
+		outcome := migrateProxiedScopeOutcome(cityPath, scopes[i], opts)
+		if outcome.Status == migrateProxiedStatusFailed && scopes[i].IsCity {
+			sharedRootFailed = true
+		}
+		report.Scopes = append(report.Scopes, outcome)
 	}
 	for _, r := range report.Scopes {
-		if r.Status == migrateProxiedStatusFailed {
+		switch r.Status {
+		case migrateProxiedStatusFailed:
 			report.Failed++
+		case migrateProxiedStatusSkipped:
+			report.Skipped++
 		}
 	}
 
@@ -195,10 +216,24 @@ func doBeadsCityMigrateProxied(cityPath string, opts migrateProxiedOptions, stdo
 		printMigrateProxiedReport(stdout, report)
 	}
 	if report.Failed > 0 {
-		fmt.Fprintf(stderr, "%s: %d scope(s) failed; completed scopes stay migrated, rerun to finish the rest\n", name, report.Failed) //nolint:errcheck
+		fmt.Fprintf(stderr, "%s: %d scope(s) failed, %d skipped; completed scopes stay migrated, rerun to finish the rest\n", name, report.Failed, report.Skipped) //nolint:errcheck
 		return 1
 	}
 	return 0
+}
+
+// migrateProxiedSkippedOutcome records a scope this run did not touch because
+// the city whose Dolt root it shares failed to migrate. Untouched is what makes
+// the rerun the runbook promises work: the scope is still direct, so the next
+// run classifies it from scratch once the city is proxied.
+func migrateProxiedSkippedOutcome(scope migrateProxiedScope) migrateProxiedScopeResult {
+	return migrateProxiedScopeResult{
+		Scope:       scope.Label,
+		Path:        scope.Path,
+		Status:      migrateProxiedStatusSkipped,
+		DoltDataDir: scope.SharedRootRel,
+		Detail:      "not attempted: this scope shares the city's Dolt data directory and the city scope failed; migrate the city first, then rerun",
+	}
 }
 
 func migrateProxiedScopeOutcome(cityPath string, scope migrateProxiedScope, opts migrateProxiedOptions) migrateProxiedScopeResult {
@@ -283,7 +318,7 @@ func migrateProxiedScopeOutcome(cityPath string, scope migrateProxiedScope, opts
 func migrateProxiedPlanDetail(scope migrateProxiedScope, classification migrateProxiedClassification) string {
 	parts := make([]string, 0, 5)
 	if classification.NeedsDoltInit {
-		parts = append(parts, "dolt init "+scopeDoltDataDir(scope.Path))
+		parts = append(parts, "dolt init "+classification.DoltDataDir)
 	}
 	if scope.SharedRootRel != "" {
 		parts = append(parts, "set metadata dolt_data_dir="+scope.SharedRootRel)
@@ -305,7 +340,7 @@ func migrateProxiedScopeNow(cityPath string, scope migrateProxiedScope, classifi
 		return err
 	}
 	if classification.NeedsDoltInit {
-		dataDir := filepath.Join(scope.Path, ".beads", "dolt")
+		dataDir := classification.DoltDataDir
 		if out, err := runDoltInitDataDir(dataDir); err != nil {
 			return fmt.Errorf("dolt init %s: %w: %s", dataDir, err, strings.TrimSpace(string(out)))
 		}
@@ -500,6 +535,12 @@ func migrateProxiedSupportsJSON(cityPath, scopeRoot string) bool {
 type migrateProxiedClassification struct {
 	AlreadyProxied bool
 	NeedsDoltInit  bool
+	// DoltDataDir is the directory NeedsDoltInit was decided against, resolved
+	// once from the scope's recorded dolt_data_dir. The executor and the
+	// dry-run plan both use it, because deciding from the recorded dir and
+	// initializing in the default one puts a stray Dolt root beside a store bd
+	// then refuses to migrate, on every rerun. Empty when no init is needed.
+	DoltDataDir string
 }
 
 // rigMirrorsCityCanonicalEndpoint reports whether a rig's dolt.host/dolt.port
@@ -639,6 +680,7 @@ func classifyMigrateProxiedScope(cityPath string, scope migrateProxiedScope) (mi
 		}
 	}
 	classification.NeedsDoltInit = true
+	classification.DoltDataDir = dataDir
 	return classification, nil
 }
 

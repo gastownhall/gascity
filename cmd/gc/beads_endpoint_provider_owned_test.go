@@ -253,3 +253,48 @@ func jsonEqual(t *testing.T, a, b map[string]any) bool {
 	}
 	return string(left) == string(right)
 }
+
+// TestBootCanonicalizationKeepsBdsUpstreamBinding covers the door
+// TestNoDoorErasesAProviderOwnedScopesUpstreamBinding could not reach. The
+// endpoint doors refuse a provider-owned scope, but an un-journaled bd-owned
+// direct-external city classifies as legacy-managed — the journal is runtime
+// state under .gc, and regenerating it is enough to lose the record. Startup
+// normalization then canonicalized bd's metadata and took dolt_server_host and
+// dolt_server_port with it, silently re-homing the city onto a gc-managed Dolt
+// with an empty store and no way back: after the rewrite the config says
+// managed_city, so ResolveDoltConnectionTarget can never consult the binding
+// again even if it were still there.
+func TestBootCanonicalizationKeepsBdsUpstreamBinding(t *testing.T) {
+	city := t.TempDir()
+	writeBdOwnedDirectExternalCity(t, city, "db.example", "4406")
+	writeCityTOMLForBdProvider(t, city)
+
+	owned, err := scopeProviderOwned(city, city)
+	if err != nil {
+		t.Fatalf("scopeProviderOwned: %v", err)
+	}
+	if owned {
+		t.Skip("classifier now owns this shape; the boot door is guarded upstream")
+	}
+
+	if err := normalizeCanonicalBdScopeFilesForInit(city, city, "gc", ""); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFilesForInit: %v", err)
+	}
+
+	after := readScopeMetadataMap(t, city)
+	if after["dolt_server_host"] != "db.example" {
+		t.Fatalf("startup normalization erased bd's upstream host: %v", after)
+	}
+	if port, ok := after["dolt_server_port"].(float64); !ok || int(port) != 4406 {
+		t.Fatalf("startup normalization erased bd's upstream port: %v", after)
+	}
+}
+
+// writeCityTOMLForBdProvider gives a fixture city the minimum that makes
+// cityUsesBdStoreContract true, so startup normalization actually runs.
+func writeCityTOMLForBdProvider(t *testing.T, cityPath string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("name = \"fixture\"\n\n[beads]\nprovider = \"bd\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

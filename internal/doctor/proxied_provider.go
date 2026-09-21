@@ -54,10 +54,46 @@ func scopeBindingIsProviderOwnedProxied(scopeRoot string) bool {
 	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode)
 }
 
+// scopeProxiedUpstreamIsExternal reports whether a proxied scope's data lives on
+// a server somebody else runs (the M4 proxied-external shape), rather than under
+// the local proxy root.
+//
+// bd records the upstream it was pointed at in the proxy sidecar's `external`
+// block; a managed-local proxied scope writes the same sidecar with only proxy
+// lifecycle fields. It reads the file directly and decodes only that block, for
+// the reason scopeBindingIsProviderOwnedProxied does not use contract's loader:
+// an unreadable sidecar must answer "not external", which keeps the
+// locally-stored wording as the fallback rather than failing a check.
+func scopeProxiedUpstreamIsExternal(scopeRoot string) bool {
+	data, err := os.ReadFile(filepath.Join(pathutil.NormalizePathForCompare(scopeRoot), ".beads", "proxied_server_client_info.json"))
+	if err != nil {
+		return false
+	}
+	var sidecar struct {
+		External *struct {
+			Host   string `json:"host"`
+			Port   int    `json:"port"`
+			Socket string `json:"socket"`
+		} `json:"external"`
+	}
+	if err := json.Unmarshal(data, &sidecar); err != nil || sidecar.External == nil {
+		return false
+	}
+	return strings.TrimSpace(sidecar.External.Socket) != "" || (strings.TrimSpace(sidecar.External.Host) != "" && sidecar.External.Port > 0)
+}
+
+// externalUpstreamBackupNote is what backup coverage a scope fronting somebody
+// else's server has: the same answer the direct-external branch of the
+// dolt-backup check gives, because it is the same fact — the data is not here.
+const externalUpstreamBackupNote = "backups assumed self-managed at the endpoint"
+
 // bdOwnedStoreNoun names a bd-owned scope's topology for an operator-facing
 // message, so the reason a check does not apply says which shape it is.
 func bdOwnedStoreNoun(scopeRoot string) string {
 	if scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		if scopeProxiedUpstreamIsExternal(scopeRoot) {
+			return "bd-owned proxied store over an external upstream"
+		}
 		return "bd-owned proxied store"
 	}
 	return "bd-owned store"
@@ -71,8 +107,16 @@ func bdOwnedStoreNoun(scopeRoot string) string {
 // recovery point and the store under the proxy root is the only copy. A direct
 // bd-owned scope is merely not gc's to register — `bd backup` still works
 // against it — so its note must not borrow the proxied claim.
+//
+// A proxied scope over an external upstream has neither answer: the refusal is
+// real but irrelevant, because the beads live on a server this host does not
+// run and the local proxy root is scaffolding bd recreates on demand. Telling
+// that operator the local root is their only copy is the opposite of the truth.
 func bdOwnedBackupCoverageNote(scopeRoot string) string {
 	if scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		if scopeProxiedUpstreamIsExternal(scopeRoot) {
+			return externalUpstreamBackupNote
+		}
 		return "no gc or bd backup exists for it (" + proxiedBackupRefusal + ")"
 	}
 	return "Dolt backups are not gc's to register here; back it up through bd"

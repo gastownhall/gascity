@@ -226,6 +226,24 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 	}
 }
 
+// doctorScopeBdBinary resolves the bd executable a doctor check must run for
+// one scope, through the same resolver every other gc bd call uses: the
+// city.toml `[workspace.env] BD_BIN` pin first, then PATH.
+//
+// A check that execs bare `bd` talks to a different binary than the one that
+// created the store, and for a proxied scope a different one than owns the
+// proxy — the hazard providerOwnedScopeCustomTypesEnv already spells out for
+// these same two `bd config` calls. Resolution failure degrades to "" rather
+// than refusing: doctor's job is to report, and the check's own error is a
+// better diagnosis than no check at all.
+func doctorScopeBdBinary(cityPath, scopeRoot string) string {
+	bdPath, err := resolveBdBinaryForScope(cityPath, scopeRoot)
+	if err != nil {
+		return ""
+	}
+	return bdPath
+}
+
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
 	var checks []doctor.Check
 	register := func(c doctor.Check) {
@@ -452,7 +470,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types / hold-label conventions — city store (gated with preflight).
 	if storeOK {
-		register(doctor.NewCustomTypesCheck(cityPath, "city"))
+		register(doctor.NewCustomTypesCheck(cityPath, "city", doctorScopeBdBinary(cityPath, cityPath)))
 		register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 	}
 
@@ -475,7 +493,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			if storeOK {
-				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name, doctorScopeBdBinary(cityPath, rig.Path)))
 				register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
 			}
 			// Dolt-backup registration catches the silent gap left by

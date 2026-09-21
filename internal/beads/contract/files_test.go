@@ -2048,3 +2048,105 @@ func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding pins the boundary
+// between the endpoint keys gc writes and the one bd writes. dolt_server_host
+// and dolt_server_port are `bd init --server --external`'s record of the
+// upstream and nothing else on disk carries it, so canonicalisation scrubbing
+// them re-homes a bd-owned direct-external scope onto a gc-managed server with
+// no way back — see ReadPersistedServerBinding, whose doc calls metadata "the
+// only place the endpoint lives".
+func TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding(t *testing.T) {
+	for name, input := range map[string]string{
+		"tcp":    bdExternalTCPMetadata,
+		"socket": `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/var/run/dolt.sock","dolt_server_user":"beads","dolt_database":"hosted"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".beads", "metadata.json")
+			writeRawMetadata(t, fs, dir, input)
+
+			if _, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hosted",
+			}); err != nil {
+				t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+			}
+
+			binding, ok, err := ReadPersistedServerBinding(fs, path)
+			if err != nil {
+				t.Fatalf("ReadPersistedServerBinding() error = %v", err)
+			}
+			if !ok {
+				data, _ := fs.ReadFile(path)
+				t.Fatalf("canonicalisation erased bd's persisted server binding: %s", data)
+			}
+			want, _ := persistedServerBinding([]byte(input))
+			if binding.DoltHost != want.DoltHost || binding.DoltPort != want.DoltPort || binding.DoltSocket != want.DoltSocket {
+				t.Fatalf("binding = %+v, want %+v", binding, want)
+			}
+			// Every key of the binding survives, not only the ones the reader
+			// happens to need: dolt_server_user is bd's too, and a canonicalise
+			// that keeps the host while dropping the user still loses part of an
+			// endpoint gc cannot reconstruct.
+			var before, after map[string]any
+			if err := json.Unmarshal([]byte(input), &before); err != nil {
+				t.Fatal(err)
+			}
+			data, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &after); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range persistedServerBindingKeys {
+				if _, ok := before[key]; !ok {
+					continue
+				}
+				if _, ok := after[key]; !ok {
+					t.Fatalf("canonicalisation dropped %q from bd's binding: %s", key, data)
+				}
+			}
+		})
+	}
+}
+
+// A fragment that names no server is not a binding, and canonicalisation still
+// clears it: the preservation above must not become a way for stale keys to
+// outlive the endpoint they half-describe.
+func TestEnsureCanonicalMetadataScrubsAnUnusableServerBindingFragment(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".beads", "metadata.json")
+	writeRawMetadata(t, fs, dir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_port":0,"dolt_server_user":"legacy","dolt_database":"hq"}`)
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report the fragment scrub")
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range persistedServerBindingKeys {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain %q: %s", key, data)
+		}
+	}
+}

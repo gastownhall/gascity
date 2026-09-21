@@ -30,12 +30,19 @@ type ProxiedBackupCoverageCheck struct {
 }
 
 // NewProxiedBackupCoverageCheckForConfig returns the advisory for a city with
-// at least one bd-owned proxied scope, and nil for a city with none — there is
-// no gap to report, and doctor should not grow a line saying so.
+// at least one bd-owned proxied scope whose data is here, and nil for a city
+// with none — there is no gap to report, and doctor should not grow a line
+// saying so.
+//
+// A proxied-external scope (M4) is not counted. Its beads live on a server this
+// host does not run, so "the store is the only copy" and "copy
+// <scope>/.beads/dolt out of band" are both false: that root holds no data.
+// Backups there are the endpoint's owner's, exactly as they are for a direct
+// external endpoint, and the per-scope dolt-backup message says so.
 func NewProxiedBackupCoverageCheckForConfig(cityPath string, cfg *config.City, cfgErr error) *ProxiedBackupCoverageCheck {
 	var labels []string
 	for _, scopeRoot := range managedDoltScopeRootsForConfig(cityPath, cfg, cfgErr) {
-		if !scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		if !scopeBindingIsProviderOwnedProxied(scopeRoot) || scopeProxiedUpstreamIsExternal(scopeRoot) {
 			continue
 		}
 		labels = append(labels, proxiedScopeLabel(cityPath, scopeRoot))
