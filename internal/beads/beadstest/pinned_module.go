@@ -1,6 +1,7 @@
 package beadstest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,17 @@ import (
 const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 
 // PinnedBeadsModuleDir resolves the unpacked source directory of the beads
-// version this module requires, or skips the calling test when the module cache
-// does not hold it.
+// version this module requires, and FAILS the calling test when it cannot.
+//
+// Failing rather than skipping is the point. The packages that call this import
+// github.com/steveyegge/beads, so if the test binary compiled at all then cmd/go
+// resolved the pinned module — which means an absent directory does not say "the
+// module is not here", it says the resolution below disagreed with cmd/go's. That
+// is exactly the situation the drift check must shout about: a skip would let a
+// resolver bug read as green, and the check it silences is the one standing
+// between gc and a library that migrates somebody's shared database on open. A
+// quiet skip was demonstrated with nothing more than GOMODCACHE pointed
+// somewhere else.
 //
 // It resolves the cache the way the go command does rather than by reading
 // GOMODCACHE, because `go test` does not export that variable into the test
@@ -29,11 +39,32 @@ const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 func PinnedBeadsModuleDir(t *testing.T) string {
 	t.Helper()
 	version := PinnedBeadsVersion(t)
-	dir := filepath.Join(goModuleCache(t), filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		t.Skipf("pinned beads %s is not unpacked in the local module cache at %s", version, dir)
+	cache := goModuleCache(t)
+	dir, err := pinnedBeadsModuleDir(cache, version)
+	if err != nil {
+		t.Fatalf("%v\n"+
+			"The test binary links %s, so the go command resolved it; this resolution did not. "+
+			"Check GOMODCACHE, GOPATH and GOENV (resolved cache: %s), and whether go.mod gained a "+
+			"replace or the build moved to vendor mode — the pinned-cursor drift check cannot run "+
+			"without the module's own migration directories, and it must not pass without running.",
+			err, PinnedBeadsModulePath, cache)
 	}
 	return dir
+}
+
+// pinnedBeadsModuleDir is the resolution itself, separated from the test so that
+// the failure path has a test of its own.
+func pinnedBeadsModuleDir(cache, version string) (string, error) {
+	dir := filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
+	info, err := os.Stat(dir)
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("pinned beads %s is not unpacked in the module cache at %s: %w", version, dir, err)
+	case !info.IsDir():
+		return "", fmt.Errorf("pinned beads %s resolved to %s, which is not a directory", version, dir)
+	default:
+		return dir, nil
+	}
 }
 
 // PinnedBeadsVersion reads the beads version this module requires from go.mod.
