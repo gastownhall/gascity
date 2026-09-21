@@ -40,6 +40,16 @@
 #       advancing, and gives up earlier than this cap if the cursor stalls
 #       first. This cap only bounds the case where a concurrent initializer
 #       is genuinely still making slow progress.
+#   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
+#       per-database advisory locks that serialize a forced reinit's
+#       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
+#       under GC_CITY_PATH on purpose: two cities/worktrees that share one
+#       managed Dolt server can target the same dolt_database from
+#       different city paths, so the lock must resolve to the same file
+#       for both regardless of which city each process was invoked from.
+#   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
+#       gives up on a concurrent initializer and fails closed instead of
+#       forcing unprotected, in milliseconds (default: 60000).
 
 set -e
 
@@ -53,6 +63,11 @@ DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
+# Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
+# why (two cities/worktrees sharing one managed Dolt server must resolve to
+# the same lock file despite having different city paths).
+INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-${TMPDIR:-/tmp}/gc-beads-bd-init-locks}"
+INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
 
 # Probed once in the parent shell — dolt_data_lock_holder runs in $(...)
@@ -3443,6 +3458,29 @@ op_init() {
     # however-old -- this is the same probe the classification above used,
     # just re-run at the moment it actually matters.
     if [ -n "$bd_init_force" ]; then
+        # Revalidating alone is not enough when the concurrent initializer
+        # is a SEPARATE OS process (e.g. a second city/worktree pointed at
+        # this same dolt_database): two processes can each revalidate
+        # "still empty" and each proceed to force, because neither
+        # process's revalidation can observe the other's in-flight force
+        # until that force has actually landed and mutated visible state
+        # (gastownhall/beads#4566). Take a cross-process advisory lock,
+        # keyed by dolt_database (the one thing guaranteed identical
+        # between such processes — GC_CITY_PATH is not) and rooted outside
+        # any single city's directory tree, so a second process's
+        # revalidation cannot even begin until the first's force (or
+        # refusal) has completed and made its outcome visible.
+        if [ "$FLOCK_AVAILABLE" != true ]; then
+            die "flock is required to safely force-reinitialize database '$dolt_database' (data-safety): without it, two concurrent initializers cannot be serialized and could both force a destructive reinit (gastownhall/beads#4566). Install: brew install flock (macOS) or apt install util-linux (Linux)"
+        fi
+        local init_lock_file="$INIT_LOCK_DIR/$dolt_database.lock"
+        local init_lock_timeout_s=$((INIT_LOCK_TIMEOUT_MS / 1000))
+        mkdir -p "$INIT_LOCK_DIR"
+        exec 8>"$init_lock_file"
+        if ! flock -w "$init_lock_timeout_s" 8; then
+            die "could not acquire init lock for database '$dolt_database' ($init_lock_file) within ${init_lock_timeout_s}s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS."
+        fi
+
         local reinit_still_empty=0
         bd_runtime_store_holds_bd_tables "$dolt_database" || reinit_still_empty=$?
         if [ "$reinit_still_empty" -eq 0 ]; then
@@ -3465,6 +3503,17 @@ op_init() {
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
+
+    # Release the init lock (acquired above only when bd_init_force was
+    # set) promptly rather than holding it through the post-init
+    # verification below: once run_bd_init_pinned has returned, the
+    # database's schema is now genuinely present, so whichever process is
+    # next in line for this lock will see that in its own revalidation and
+    # correctly refuse to force again — it does not also need to wait out
+    # this process's own settle/verification below.
+    if [ -n "$bd_init_force" ]; then
+        exec 8>&-
+    fi
 
     # Re-register post-init: if bd init didn't catalog-register the DB
     # (server-mode quirk), do it now. After a successful bd init this is a
