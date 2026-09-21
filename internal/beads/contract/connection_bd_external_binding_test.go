@@ -2,7 +2,6 @@ package contract
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -127,21 +126,11 @@ func TestResolveDoltConnectionTargetPrefersLiveLocalServerOverExternalMarker(t *
 	}
 }
 
-// closedLoopbackPort returns a loopback port nothing listens on: the port bd
-// recorded for a server on the day a scope was initialized, after gc has
-// since restarted that server somewhere else.
-func closedLoopbackPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
+// staleBdBindingPort stands in for the port bd recorded for gc's server on
+// the day a scope was initialized, after gc has since brought that server
+// back somewhere else. Nothing listens on it, and nothing may need to: the
+// resolver under test must not consult the record at all.
+const staleBdBindingPort = 1
 
 // bd 1.3.0's `init --server` records whichever server it was pointed at in the
 // scope's metadata, including the one gc manages, so a gc-managed rig carries
@@ -160,9 +149,8 @@ func TestResolveDoltConnectionTargetInheritedManagedRigIgnoresStaleBdBinding(t *
 		EndpointOrigin: EndpointOriginInheritedCity,
 		EndpointStatus: EndpointStatusVerified,
 	})
-	stalePort := closedLoopbackPort(t)
 	writeRawMetadata(t, fs, rig, fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server",`+
-		`"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"fe"}`, stalePort))
+		`"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"fe"}`, staleBdBindingPort))
 	port := writeReachableRuntimeState(t, fs, city)
 
 	target, err := ResolveDoltConnectionTarget(fs, city, rig)
@@ -170,7 +158,7 @@ func TestResolveDoltConnectionTargetInheritedManagedRigIgnoresStaleBdBinding(t *
 		t.Fatalf("ResolveDoltConnectionTarget() on a gc-canonical inherited rig: %v", err)
 	}
 	if target.External || target.Host != "127.0.0.1" || target.Port != port || target.Database != "fe" {
-		t.Fatalf("target = %+v, want the city's live managed runtime on 127.0.0.1:%s, not bd's stale record on %d", target, port, stalePort)
+		t.Fatalf("target = %+v, want the city's live managed runtime on 127.0.0.1:%s, not bd's stale record on %d", target, port, staleBdBindingPort)
 	}
 }
 
