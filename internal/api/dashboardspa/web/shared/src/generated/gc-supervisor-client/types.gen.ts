@@ -3329,6 +3329,7 @@ export type SessionResponse = {
     active_bead?: string;
     activity?: string;
     agent_kind?: string;
+    agent_name?: string;
     alias?: string;
     attached: boolean;
     configured_named_session?: boolean;

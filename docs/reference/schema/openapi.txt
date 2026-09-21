@@ -7868,6 +7868,9 @@
           "agent_kind": {
             "type": "string"
           },
+          "agent_name": {
+            "type": "string"
+          },
           "alias": {
             "type": "string"
           },

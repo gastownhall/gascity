@@ -27,6 +27,7 @@ type sessionResponse struct {
 	Reason      string `json:"reason,omitempty"`
 	Title       string `json:"title"`
 	Alias       string `json:"alias,omitempty"`
+	AgentName   string `json:"agent_name,omitempty"`
 	Provider    string `json:"provider"`
 	DisplayName string `json:"display_name,omitempty"`
 	SessionName string `json:"session_name"`
@@ -100,6 +101,7 @@ func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 		State:       string(info.State),
 		Title:       info.Title,
 		Alias:       info.Alias,
+		AgentName:   info.AgentName,
 		Provider:    provider,
 		DisplayName: displayName,
 		SessionName: info.SessionName,
