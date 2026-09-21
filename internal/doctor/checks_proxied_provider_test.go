@@ -101,7 +101,7 @@ func TestRigBeadsCheck_ProxiedScopeReportsBdOwnedStore(t *testing.T) {
 	fs := fsys.OSFS{}
 	writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{EndpointOrigin: contract.EndpointOriginManagedCity, DoltMode: "proxied-server"})
 	writeDoctorProxiedMetadata(t, cityDir, "hq")
-	// A bd-initialized proxied rig carries the generic rc.2 config template:
+	// A bd-initialized proxied rig carries the generic v1.3.0 config template:
 	// the mode lives only in metadata.json, and there is no endpoint to mirror.
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)

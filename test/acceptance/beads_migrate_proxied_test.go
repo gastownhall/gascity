@@ -1,7 +1,7 @@
 //go:build acceptance_a
 
 // AC-X: a city initialised the OLD way, migrated to bd's proxied-server
-// topology on beads v1.3.0-rc.2.
+// topology on beads v1.3.0.
 //
 // The shape under test is the one real operators have: a gc-owned
 // `dolt sql-server` over `<city>/.beads/dolt`, metadata dolt_mode=server,
@@ -13,21 +13,21 @@
 // identity intact.
 //
 // Two real binaries are required and the test skips typed without either:
-//   - GC_ACCEPTANCE_BD_BIN — a bd >= 1.3.0-rc.2 with proxied-server support
+//   - GC_ACCEPTANCE_BD_BIN — a bd >= 1.3.0 with proxied-server support
 //     (plus a real dolt on PATH), same as TestBeadsProxiedDefault.
 //   - GC_ACCEPTANCE_LEGACY_GC_BIN — a gc built from a revision that still
 //     initialises the legacy GC-managed direct topology. The migration cannot
 //     be proved against a fixture the current binary writes: the point is that
 //     a city gc wrote BEFORE this feature existed still comes up.
 //
-// Locally that second one is a gc built from main at the rc.2 bump, e.g.
+// Locally that second one is a gc built from main at the v1.3.0 bump, e.g.
 //
 //	go build -o /tmp/gc-main ./cmd/gc   # from a clean checkout of main
-//	GC_ACCEPTANCE_BD_BIN=/data/tmp/bd-rc2/bd \
+//	GC_ACCEPTANCE_BD_BIN=/data/tmp/bd-v1.3.0/bd \
 //	GC_ACCEPTANCE_LEGACY_GC_BIN=/tmp/gc-main \
 //	  go test -tags acceptance_a -run TestBeadsMigrate ./test/acceptance
 //
-// This is the interim rc.2 path; the journaled ownership handoff (beads #6281)
+// This is the interim v1.3.0 path; the journaled ownership handoff (beads #6281)
 // supersedes it. See engdocs/runbooks/beads-migrate-proxied.md.
 package acceptance_test
 
@@ -270,7 +270,7 @@ func TestBeadsMigrateLegacyCityToProxied(t *testing.T) {
 		assertCheckOK(t, city, "dolt-config", "a migrated legacy city")
 		// Migration moves the city off gc's managed server and onto bd's proxy,
 		// which is also the moment its backup coverage goes to zero: the rig
-		// shares the city's proxy root, and rc.2 refuses backup on that path.
+		// shares the city's proxy root, and v1.3.0 refuses backup on that path.
 		// The advisory has to follow the topology, not the way the city was
 		// created.
 		assertProxiedBackupAdvisory(t, city, "a migrated legacy city", true, "city", "testrig")

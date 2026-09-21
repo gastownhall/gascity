@@ -454,7 +454,13 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.3.0-rc.2"
+	// A deliberate second anchor on go.mod's beads pin: this suite installs
+	// bd from whatever go.mod names (installPinnedBd above), so a bump must be
+	// a reviewed edit here too rather than silently changing which bd the
+	// integration tests run against. The first anchor —
+	// scripts/bd_version_pin_test.go — ties that same go.mod pin to deps.env
+	// BD_CURRENT_VERSION, so bumping the pin means editing both.
+	const want = "v1.3.0"
 	if version != want {
 		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
 	}

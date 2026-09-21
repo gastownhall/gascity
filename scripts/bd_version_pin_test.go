@@ -120,8 +120,9 @@ func TestBDVersionPins(t *testing.T) {
 	// init floor (otherwise it gates nothing), and unlike it, it must also be
 	// reachable -- no supported bd could satisfy a floor above the newest
 	// matrix cell, so a fresh `gc init` would refuse on every cell.
-	// deps.CompareVersions strips prerelease identifiers, so the rc.2 current
-	// cell compares equal to the 1.3.0 floor rather than below it.
+	// The current cell is the v1.3.0 tag, which compares equal to the 1.3.0
+	// floor. deps.CompareVersions strips prerelease identifiers, so a
+	// v1.3.0-rc.N cell compares equal too rather than below it.
 	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
 	if freshProviderFloor == "" {
 		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")

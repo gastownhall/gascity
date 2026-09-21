@@ -2,7 +2,7 @@
 
 // Proxied-local default acceptance test.
 //
-// This is the front-door proof for the beads v1.3.0-rc.2 proxied-local
+// This is the front-door proof for the beads v1.3.0 proxied-local
 // default: a fresh `gc init` with no transport selector must produce a store
 // whose Dolt process belongs to bd (a `bd db-proxy-child` supervising a
 // `dolt sql-server` under the scope's proxy root), and every ordinary command
@@ -256,7 +256,7 @@ func assertDoctorGreen(t *testing.T, city *helpers.City, label string) {
 // line through the real `gc doctor --json` front door.
 //
 // It is the one place doctor says out loud that a bd-owned proxied scope has no
-// backup at all — rc.2 refuses `bd backup` on that path, gc registers nothing
+// backup at all — v1.3.0 refuses `bd backup` on that path, gc registers nothing
 // against a proxy root it does not own, and the per-scope checks correctly go
 // quiet, which between them made a default city read as covered. The advisory
 // is deliberately StatusOK (R3: a proxied city is a healthy city, and a warning
@@ -609,7 +609,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 	})
 
 	t.Run("stop-quiescent", func(t *testing.T) {
-		// Retire the readers before the store. On rc.2's proxied path any bd
+		// Retire the readers before the store. On v1.3.0's proxied path any bd
 		// read restarts the proxy (R2), so `bd dolt stop` has to be the last
 		// thing that touches the scope — the order the design specifies:
 		// agents, then the supervisor, then the provider's own processes.
@@ -929,9 +929,9 @@ func TestBeadsProxiedDefault(t *testing.T) {
 			t.Log(s)
 		}
 		report := "# Slice 1 timing (R6, informational)\n\n" +
-			"Measured on the Tier A acceptance harness against a bd v1.3.0-rc.2\n" +
+			"Measured on the Tier A acceptance harness against a bd v1.3.0\n" +
 			"proxied-local city. Every command goes through the bd CLI front door\n" +
-			"(decision D2): there is no library open for a proxied workspace in rc.2.\n\n" +
+			"(decision D2): there is no library open for a proxied workspace in v1.3.0.\n\n" +
 			"| command | topology | wall clock |\n|---|---|---|\n" +
 			strings.Join(samples, "\n") + "\n"
 		if err := os.WriteFile(proxiedTimingReportPath, []byte(report), 0o644); err != nil {

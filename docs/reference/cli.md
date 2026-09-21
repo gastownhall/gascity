@@ -384,7 +384,7 @@ city first. The command is idempotent — an already-proxied scope reports
 "already migrated" — so a partially failed run can simply be rerun. It also
 retires gc's own runtime publication for the city it just handed over.
 
-On rc.2 this is the only supported migration for a legacy GC-managed city.
+On bd v1.3.0 this is the only supported migration for a legacy GC-managed city.
 Procedure, refusals and recovery: engdocs/runbooks/beads-migrate-proxied.md.
 
 ```
