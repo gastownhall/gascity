@@ -1184,6 +1184,97 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	}
 }
 
+// TestCityRuntimeTickStretchSkipStillRunsNudgeDispatchFallback proves the
+// patrol-tick fallback for the supervisor nudge dispatcher fires even when a
+// patrol tick's session phases are stretch-skipped. Before this fix, the
+// fallback lived only inside beadReconcileTick, which the stretch-skip branch
+// never reaches, so a queued nudge whose wake-socket enqueue was missed
+// waited out the full session_patrol_interval instead of the documented
+// belt-and-suspenders delivery on the next patrol tick.
+func TestCityRuntimeTickStretchSkipStillRunsNudgeDispatchFallback(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir,
+		Provider: "codex", Hints: runtime.Config{WorkDir: dir},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+
+	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	pump, cancelPump := streamingPump(t)
+	defer cancelPump()
+
+	cr := &CityRuntime{
+		cityPath: dir,
+		cityName: "test-city",
+		cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: "10m",
+				NudgeDispatcher:       "supervisor",
+			},
+		},
+		sp: fake,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(fake),
+		sessionDrains: newDrainTracker(),
+		sessionEvents: pump,
+		rec:           events.Discard,
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+	}
+	cs := newControllerState(context.Background(), cr.cfg, fake, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store.Store
+	cr.setControllerState(cs)
+
+	// Pin sessionPhasesLast to now so this patrol tick lands inside the
+	// stretch window and takes the stretch-skip branch, not the full
+	// session-reconcile branch that would reach the fallback the old way.
+	cr.sessionPhasesLast = time.Now()
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	if !cr.sessionPhaseStretchActive() {
+		t.Fatal("precondition: stretch must be active for this tick to have taken the stretch-skip branch")
+	}
+
+	var nudgeMessages []string
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeMessages = append(nudgeMessages, call.Message)
+		}
+	}
+	if len(nudgeMessages) != 1 {
+		t.Fatalf("nudge calls during a stretch-skipped patrol tick = %d, want 1 (fallback must still deliver)", len(nudgeMessages))
+	}
+	if !strings.Contains(nudgeMessages[0], "review the deploy logs") {
+		t.Fatalf("nudge message = %q, want original reminder", nudgeMessages[0])
+	}
+}
+
 func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

@@ -1485,6 +1485,17 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteControllerTickPhase, "session_phases.stretch_skip", time.Now(), map[string]any{
 			"session_patrol_interval": cr.cfg.Daemon.SessionPatrolInterval,
 		})
+		// The patrol-tick fallback for the supervisor nudge dispatcher
+		// normally runs from inside beadReconcileTick (see the call below),
+		// which this stretch-skip branch never reaches. nudgeDispatchTick is
+		// self-contained (loads its own session snapshot) and is exactly the
+		// belt-and-suspenders delivery this branch must not silently drop:
+		// without it, a missed wake-socket enqueue during a stretched patrol
+		// window waits out the full session_patrol_interval instead of the
+		// documented fallback cadence.
+		phaseStart = time.Now()
+		cr.nudgeDispatchTick(ctx)
+		recordPhase(TraceSiteControllerTickPhase, "session_phases.stretch_skip.nudge_dispatch_tick", phaseStart, nil)
 	}
 	// Graph stores intentionally do not emit bead.closed, so a step closed
 	// between the durable write and the best-effort journal append would be a
