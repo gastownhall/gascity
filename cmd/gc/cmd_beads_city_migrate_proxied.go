@@ -318,7 +318,7 @@ func migrateProxiedScopeOutcome(cityPath string, scope migrateProxiedScope, opts
 func migrateProxiedPlanDetail(scope migrateProxiedScope, classification migrateProxiedClassification) string {
 	parts := make([]string, 0, 5)
 	if classification.NeedsDoltInit {
-		parts = append(parts, "dolt init "+scopeDoltDataDir(scope.Path))
+		parts = append(parts, "dolt init "+classification.DoltDataDir)
 	}
 	if scope.SharedRootRel != "" {
 		parts = append(parts, "set metadata dolt_data_dir="+scope.SharedRootRel)
@@ -340,7 +340,7 @@ func migrateProxiedScopeNow(cityPath string, scope migrateProxiedScope, classifi
 		return err
 	}
 	if classification.NeedsDoltInit {
-		dataDir := filepath.Join(scope.Path, ".beads", "dolt")
+		dataDir := classification.DoltDataDir
 		if out, err := runDoltInitDataDir(dataDir); err != nil {
 			return fmt.Errorf("dolt init %s: %w: %s", dataDir, err, strings.TrimSpace(string(out)))
 		}
@@ -535,6 +535,12 @@ func migrateProxiedSupportsJSON(cityPath, scopeRoot string) bool {
 type migrateProxiedClassification struct {
 	AlreadyProxied bool
 	NeedsDoltInit  bool
+	// DoltDataDir is the directory NeedsDoltInit was decided against, resolved
+	// once from the scope's recorded dolt_data_dir. The executor and the
+	// dry-run plan both use it, because deciding from the recorded dir and
+	// initializing in the default one puts a stray Dolt root beside a store bd
+	// then refuses to migrate, on every rerun. Empty when no init is needed.
+	DoltDataDir string
 }
 
 // rigMirrorsCityCanonicalEndpoint reports whether a rig's dolt.host/dolt.port
@@ -674,6 +680,7 @@ func classifyMigrateProxiedScope(cityPath string, scope migrateProxiedScope) (mi
 		}
 	}
 	classification.NeedsDoltInit = true
+	classification.DoltDataDir = dataDir
 	return classification, nil
 }
 
