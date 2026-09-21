@@ -239,11 +239,12 @@ func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration)
 // directions.
 //
 // The two proxy verdicts are both positive claims and both need positive
-// evidence. accepted_no_greeting requires a real wire failure (an io.EOF, a
-// driver ErrInvalidConn, a net.OpError) AND a dial that something accepted;
-// refused requires the kernel's ECONNREFUSED. A confirming dial that timed out
-// is neither: it is a busy accept queue, and on a live same-generation record
-// calling that "refused" would name a healthy proxy as draining.
+// evidence. accepted_no_greeting requires a failure that could only have
+// happened after something accepted the connection (see IsPostAcceptFailure) AND
+// a dial that something accepted; refused requires the kernel's ECONNREFUSED. A
+// confirming dial that timed out is neither: it is a busy accept queue, and on a
+// live same-generation record calling that "refused" would name a healthy proxy
+// as draining.
 func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
 	switch {
 	case sessionErr == nil:
@@ -253,6 +254,15 @@ func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
 	case !IsConnectionLevel(sessionErr):
 		return ProbeUnknown
 	case dialErr == nil:
+		// "It accepted us and said nothing" is a claim about a greeting, so the
+		// session has to have got far enough to be owed one. A session refused
+		// by the kernel, confirmed by a dial a just-respawned proxy accepts,
+		// reaches this arm with no greeting ever attempted — a ~millisecond
+		// window on a proxy restart, but the design escalates on three of these
+		// in a row, and evidence that was never collected must not count as one.
+		if !IsPostAcceptFailure(sessionErr) {
+			return ProbeUnknown
+		}
 		return ProbeAcceptedNoGreeting
 	case errors.Is(dialErr, syscall.ECONNREFUSED):
 		return ProbeRefused
@@ -282,6 +292,39 @@ func IsIndeterminate(err error) bool {
 	// the sentinels above; a timeout is a timeout however it is spelled.
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// IsPostAcceptFailure reports whether err could only have happened AFTER
+// something accepted the connection.
+//
+// It is the narrower half of IsConnectionLevel, and it is what
+// accepted_no_greeting needs. Every error here is a peer that had the connection
+// and then dropped it: an EOF or an unexpected EOF mid-handshake, the driver's
+// ErrInvalidConn (which is how go-sql-driver reports a greeting read that
+// failed), a reset, a broken pipe. A dial the kernel refused or a host it could
+// not reach is connection-level too, but it never reached a greeting, so it is
+// not evidence that one was withheld.
+//
+// The distinction has a real window: on a proxy restart a session refused at
+// t=0 and a confirming dial the new proxy accepts at t=1ms would otherwise be
+// reported as the zombie signature with nothing having been read at all.
+func IsPostAcceptFailure(err error) bool {
+	if err == nil || IsIndeterminate(err) {
+		return false
+	}
+	for _, sentinel := range []error{
+		io.EOF,
+		io.ErrUnexpectedEOF,
+		driver.ErrBadConn,
+		mysql.ErrInvalidConn,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsConnectionLevel reports whether err is about the connection rather than

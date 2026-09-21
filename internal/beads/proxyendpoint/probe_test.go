@@ -130,6 +130,20 @@ func TestClassifyProbeOutcomeTable(t *testing.T) {
 			dialErr:    &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH},
 			want:       ProbeUnknown,
 		},
+		{
+			// A proxy restarting between the two connections: the session was
+			// refused by the kernel and the confirming dial met the NEW proxy's
+			// listener. No greeting was ever attempted, so "it accepted us and
+			// said nothing" is not something this probe observed.
+			name:       "refused and then accepted is not the zombie signature",
+			sessionErr: refused,
+			want:       ProbeUnknown,
+		},
+		{
+			name:       "an unreachable host on the session is not the zombie signature either",
+			sessionErr: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH},
+			want:       ProbeUnknown,
+		},
 	}
 
 	for _, tc := range cases {
@@ -228,6 +242,34 @@ func TestIsConnectionLevel(t *testing.T) {
 	for _, tc := range cases {
 		if got := IsConnectionLevel(tc.err); got != tc.want {
 			t.Errorf("%s: IsConnectionLevel(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestIsPostAcceptFailure pins the narrower set accepted_no_greeting needs: a
+// peer that had the connection and dropped it, never a dial that got nowhere.
+func TestIsPostAcceptFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"EOF", io.EOF, true},
+		{"unexpected EOF mid-handshake", io.ErrUnexpectedEOF, true},
+		{"the driver's invalid connection", mysql.ErrInvalidConn, true},
+		{"a wrapped invalid connection", fmt.Errorf("handshake: %w", mysql.ErrInvalidConn), true},
+		{"bad conn", driver.ErrBadConn, true},
+		{"reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, true},
+		{"broken pipe", syscall.EPIPE, true},
+		{"a refused dial never reached a greeting", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}, false},
+		{"an unreachable host never reached a greeting", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}, false},
+		{"the probe's own deadline is not the peer", context.DeadlineExceeded, false},
+		{"a MySQL error means the greeting succeeded", errors.New("Error 1049: Unknown database"), false},
+	}
+	for _, tc := range cases {
+		if got := IsPostAcceptFailure(tc.err); got != tc.want {
+			t.Errorf("%s: IsPostAcceptFailure(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
 		}
 	}
 }
