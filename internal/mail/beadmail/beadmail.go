@@ -582,7 +582,7 @@ func (p *Provider) CheckAutoHandoffs(recipients []string) ([]mail.Message, error
 	for _, b := range candidates {
 		if b.Status != "open" ||
 			(len(routes) > 0 && !matchesRecipientRoute(routes, b.Assignee)) ||
-			hasLabel(b.Labels, "read") ||
+			isMessageRead(b) ||
 			!hasLabel(b.Labels, mail.AutoHandoffLabel) ||
 			!hasLabel(b.Labels, mail.ArchiveAfterInjectLabel) {
 			continue
@@ -802,7 +802,7 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 			continue
 		}
 		total++
-		if !hasLabel(b.Labels, "read") {
+		if !isMessageRead(b) {
 			unread++
 		}
 	}

@@ -922,6 +922,46 @@ func TestInboxExcludesMetadataMarkedReadMessage(t *testing.T) {
 	if len(msgs) != 0 {
 		t.Errorf("Inbox = %d messages, want 0 (metadata mail.read=true must exclude, matching beadToMessage.Read)", len(msgs))
 	}
+
+	_, unread, err := p.CountRecipients([]string{"mayor"})
+	if err != nil {
+		t.Fatalf("CountRecipients: %v", err)
+	}
+	if unread != 0 {
+		t.Errorf("CountRecipients unread = %d, want 0 (metadata mail.read=true must count as read)", unread)
+	}
+}
+
+func TestCheckAutoHandoffsExcludesMetadataMarkedReadHandoff(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	auto, err := p.SendHandoff(mail.HandoffIntent{
+		From:        "worker",
+		To:          "worker",
+		Subject:     "context cycle",
+		Body:        "continue durable work",
+		ThreadID:    "thread-metadata-read",
+		ExtraLabels: []string{mail.AutoHandoffLabel, mail.ArchiveAfterInjectLabel},
+	})
+	if err != nil {
+		t.Fatalf("SendHandoff: %v", err)
+	}
+	// Mark it read via metadata only, without the "read" label, matching a
+	// caller that wrote metadata directly rather than through MarkRead/Read.
+	if err := store.Update(auto.ID, beads.UpdateOpts{
+		Metadata: map[string]string{mail.ReadMetadataKey: "true"},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	messages, err := p.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("CheckAutoHandoffs = %d messages, want 0 (metadata mail.read=true must not reinject)", len(messages))
+	}
 }
 
 func TestInboxIncludesGenuineUnreadMessage(t *testing.T) {
