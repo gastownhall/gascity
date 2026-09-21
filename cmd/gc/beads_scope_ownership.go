@@ -345,27 +345,69 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 	if !cityUsesBdStoreContract(cityPath) {
 		return false, nil
 	}
-	if cityCarriesGCDoltRuntimePublication(cityPath) {
+	if scopeStoreLivesInTheCitysManagedDolt(cityPath, scopeRoot) {
 		return false, nil
 	}
 	return contract.ScopeCarriesBdOwnedDirectBinding(fsys.OSFS{}, cityPath, scopeRoot, "")
 }
 
-// cityCarriesGCDoltRuntimePublication reports whether gc has published a
-// managed Dolt runtime for this city.
+// scopeStoreLivesInTheCitysManagedDolt reports whether gc's own managed Dolt is
+// where this scope's beads actually are.
 //
-// It is the same evidence rule scopeUsesProxiedDoltMode already applies: a
-// runtime publication under `.gc/runtime/packs/dolt` exists only because gc
-// itself raised the city's Dolt, so the direct managed lifecycle is gc's
-// whatever the scope's own files say. The binding predicate needs it because
-// its only discriminator is the recorded host, and a gc-managed city that was
-// initialized under a non-loopback GC_DOLT_HOST records that host verbatim —
-// so a later boot with GC_DOLT_HOST unset or pointing elsewhere compares
-// unequal and would read gc's own server as bd's foreign upstream. That
-// misread needs a non-authoritative config.yaml too (a city last booted before
-// `gc.endpoint_origin` existed, or one whose config was restored to bd's
-// template), which is exactly the legacy shape most likely to carry a
-// non-loopback host.
+// The predicate above discriminates "bd's foreign upstream" from "gc's own
+// managed server" on the recorded host alone, compared against
+// managedCityHost(), which reads GC_DOLT_HOST from the live environment. A
+// gc-managed scope initialized under a non-loopback GC_DOLT_HOST records that
+// host verbatim, so a later boot with the variable unset or pointing elsewhere
+// compares unequal and reads gc's own server as foreign. This is the evidence
+// that settles it without consulting the environment at all.
+//
+// It takes TWO facts, and the conjunction is the whole point:
+//
+//  1. gc has published a Dolt runtime for the city, so the direct managed
+//     lifecycle is gc's — the same rule scopeUsesProxiedDoltMode applies at
+//     beads_provider_lifecycle.go:486-491; and
+//  2. the scope's OWN recorded database has a Dolt directory inside the city's
+//     managed data dir, so that server is where this scope's beads live.
+//
+// Fact 1 alone is about the city, not about which server a rig's metadata
+// names, and using it on its own re-creates the split brain 2a615a90f9 fixed: a
+// rig bd bound directly to a hosted server keeps its beads there and has no
+// database under the city's data dir, yet startBeadsLifecycle raises the city's
+// provider (:248-262, publishing dolt-state.json at :1588) BEFORE it reaches
+// the rig loop at :277 — so by the time any rig is classified the publication
+// always exists. Answering false there would stamp `gc.endpoint_origin:
+// inherited_city` into bd's config.yaml and run `bd init` for the rig against
+// gc's server, creating an empty database while `bd` in the rig still reached
+// the real upstream.
+//
+// Fact 2 alone is not enough either: a city that gc managed and an operator
+// has since re-pointed at a hosted server still has its old database on disk.
+func scopeStoreLivesInTheCitysManagedDolt(cityPath, scopeRoot string) bool {
+	if !cityCarriesGCDoltRuntimePublication(cityPath) {
+		return false
+	}
+	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !ok || strings.TrimSpace(database) == "" {
+		return false
+	}
+	// The legacy layout keeps every rig's database inside the city's own
+	// multi-database Dolt data dir, so one stat answers for city and rig alike.
+	_, err = os.Stat(filepath.Join(scopeDoltDataDir(cityPath), strings.TrimSpace(database), ".dolt"))
+	return err == nil
+}
+
+// cityCarriesGCDoltRuntimePublication reports whether gc has published a
+// managed Dolt runtime for this city. A runtime publication under
+// `.gc/runtime/packs/dolt` exists only because gc itself raised the city's
+// Dolt.
+//
+// Existence is the signal: state left behind by a Dolt that died uncleanly is
+// still a record of who raised it. Note that a clean `gc stop` also leaves
+// `dolt-provider-state.json` behind with `running:false` (the provider script
+// rewrites it rather than removing it), so this answers true for any city that
+// has ever started — which is why the caller pairs it with per-scope evidence
+// rather than treating it as proof on its own.
 func cityCarriesGCDoltRuntimePublication(cityPath string) bool {
 	for _, statePath := range []string{managedDoltStatePath(cityPath), providerManagedDoltStatePath(cityPath)} {
 		if _, err := os.Stat(statePath); err == nil {
