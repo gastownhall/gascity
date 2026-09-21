@@ -648,9 +648,6 @@ func (m *Manager) transportForBead(b beads.Bead, sessName string) (string, bool)
 			return transport, true
 		}
 	}
-	if m.sp != nil && m.sp.IsRunning(sessName) {
-		return "", false
-	}
 	return "", false
 }
 
@@ -681,9 +678,6 @@ func (m *Manager) transportForInfo(info Info) (string, bool) {
 		if transport != "" {
 			return transport, true
 		}
-	}
-	if m.sp != nil && m.sp.IsRunning(info.SessionName) {
-		return "", false
 	}
 	return "", false
 }
