@@ -119,9 +119,9 @@ record="${PPID:-0}$us"
 for arg in "$@"; do
 	record="$record$arg$us"
 done
-printf '%%s\n' "$record$rs" >>%q 2>/dev/null || true
-exec %q "$@"
-`, fieldSeparator, recordSeparator, recorder.logPath, realBD)
+printf '%%s\n' "$record$rs" >>%s 2>/dev/null || true
+exec %s "$@"
+`, fieldSeparator, recordSeparator, shellQuote(recorder.logPath), shellQuote(realBD))
 	if err := os.WriteFile(recorder.Path, []byte(script), 0o755); err != nil { //nolint:gosec // the shim must be executable
 		t.Fatalf("write recording bd shim: %v", err)
 	}
@@ -190,6 +190,19 @@ func (r *RecordingBD) Describe() string {
 		lines = append(lines, fmt.Sprintf("  ppid=%s bd %s", invocation.PPID, strings.Join(invocation.Argv, " ")))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// shellQuote renders s as one POSIX shell word.
+//
+// Go's %q is not shell quoting and was standing in for it. It leaves `$` and
+// backticks unescaped inside the double quotes it produces — so a bd path or a
+// TMPDIR containing either would be expanded or command-substituted by sh — and
+// it renders non-ASCII and control bytes as \xNN/\uNNNN, which sh does not
+// decode inside double quotes at all. Single quotes suspend every expansion sh
+// performs, and the one character they cannot carry is closed, escaped and
+// reopened: the repo's existing idiom (internal/runtime/ssh, internal/runtime/exec).
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // invocationHasPrefix reports whether argv begins with prefix.

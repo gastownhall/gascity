@@ -21,7 +21,7 @@ func TestRecordingBDShimExecsThePinnedBinary(t *testing.T) {
 		t.Fatalf("read shim: %v", err)
 	}
 	body := string(script)
-	if !strings.Contains(body, "exec "+quoteForShell(realBD)) {
+	if !strings.Contains(body, "exec '"+realBD+"' \"$@\"") {
 		t.Fatalf("the shim does not exec the pinned bd:\n%s", body)
 	}
 	if !strings.Contains(body, `"$@"`) {
@@ -82,6 +82,62 @@ func TestRecordingBDShimWritesOneRecordPerInvocation(t *testing.T) {
 	if !strings.Contains(body, "us='"+fieldSeparator+"'") || !strings.Contains(body, "rs='"+recordSeparator+"'") {
 		t.Fatalf("the shim does not carry the literal field and record separators:\n%q", body)
 	}
+}
+
+// TestRecordingBDShimQuotesPathsForTheShell pins that the generated shim is
+// quoted for sh and not for Go.
+//
+// Go's %q produces DOUBLE quotes and leaves `$` and backticks alone inside them,
+// so a pinned bd or a TMPDIR containing either would be expanded or
+// command-substituted by the shell — the shim would exec a path nobody pinned,
+// or nothing at all. It also renders non-ASCII bytes as \uNNNN, which sh does
+// not decode. The assertions are on the bytes in the file rather than on a
+// re-application of the quoting helper: a test that quoted the expectation the
+// same way the shim quotes the path would pass while the shim ran the wrong
+// binary, which is how this went unnoticed.
+func TestRecordingBDShimQuotesPathsForTheShell(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "b$HOME and `id` and é", "bd")
+	recorder := NewRecordingBD(t, hostile)
+	script, err := os.ReadFile(recorder.Path)
+	if err != nil {
+		t.Fatalf("read shim: %v", err)
+	}
+	body := string(script)
+
+	if !strings.Contains(body, "'"+hostile+"'") {
+		t.Fatalf("the pinned bd is not carried as a single-quoted word:\n%s", body)
+	}
+	if strings.Contains(body, `"`+hostile+`"`) {
+		t.Fatalf("the pinned bd is double-quoted, so sh expands $HOME and command-substitutes in it:\n%s", body)
+	}
+	if !strings.Contains(body, "and é") {
+		t.Fatalf("a non-ASCII path byte was escaped into something sh does not decode:\n%q", body)
+	}
+	for _, escape := range []string{`\x`, `\u`} {
+		if strings.Contains(body, escape) {
+			t.Fatalf("the shim carries a Go escape %q, which sh does not decode:\n%q", escape, body)
+		}
+	}
+
+	// And the one byte single quotes cannot carry is closed, escaped, reopened.
+	quoted := NewRecordingBD(t, filepath.Join(t.TempDir(), "it's", "bd"))
+	body = readShim(t, quoted)
+	if !strings.Contains(body, `'\''`) {
+		t.Fatalf("a single quote in the pinned path is not escaped for sh:\n%s", body)
+	}
+	if strings.Contains(body, `"it's"`) {
+		t.Fatalf("a single quote in the pinned path was left to Go's %%q:\n%s", body)
+	}
+}
+
+// readShim returns the generated shim's body.
+func readShim(t *testing.T, recorder *RecordingBD) string {
+	t.Helper()
+	data, err := os.ReadFile(recorder.Path)
+	if err != nil {
+		t.Fatalf("read shim: %v", err)
+	}
+	return string(data)
 }
 
 // TestRecordingBDCountsInvocations drives the reader over records in the shim's
@@ -160,9 +216,4 @@ func writeInvocations(t *testing.T, recorder *RecordingBD, records ...[]string) 
 	if err := os.WriteFile(recorder.logPath, []byte(buf.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// quoteForShell renders a path the way %q does in the generated shim.
-func quoteForShell(path string) string {
-	return `"` + path + `"`
 }
