@@ -39,6 +39,51 @@ func TestRecordingBDShimExecsThePinnedBinary(t *testing.T) {
 	}
 }
 
+// TestRecordingBDShimWritesOneRecordPerInvocation is the fence under the
+// atomicity the shim's log depends on.
+//
+// O_APPEND makes a single write(2) atomic and says nothing about a block of
+// them. The shim used to emit one printf per field — strace showed five writes
+// for a three-argument fork — so two bd forks in flight interleaved their fields
+// and Invocations() read one spliced record plus one empty one, under-reporting
+// Count() by one. The next slice builds a deterministic fork gate on Count(),
+// and this is what that gate stands on.
+//
+// It is asserted on the generated source rather than by racing real forks: the
+// number of write syscalls is a property of the script's shape, and a test that
+// spawned its own processes to observe it would grow the repo's shrink-only
+// subprocess census for evidence strace already gives once. What must hold is
+// that the record is assembled first and written once.
+func TestRecordingBDShimWritesOneRecordPerInvocation(t *testing.T) {
+	recorder := NewRecordingBD(t, filepath.Join(t.TempDir(), "bd"))
+	script, err := os.ReadFile(recorder.Path)
+	if err != nil {
+		t.Fatalf("read shim: %v", err)
+	}
+	body := string(script)
+
+	if got := strings.Count(body, "printf"); got != 1 {
+		t.Fatalf("the shim issues %d printf(s); one invocation must be one write, or concurrent bd forks interleave their fields:\n%s", got, body)
+	}
+	// The one printf must be the one that appends the whole assembled record.
+	if !strings.Contains(body, `printf '%s\n' "$record$rs" >>`) {
+		t.Fatalf("the shim does not append one assembled record:\n%s", body)
+	}
+	if !strings.Contains(body, `record="$record$arg$us"`) {
+		t.Fatalf("the shim does not accumulate its argv into the record before writing:\n%s", body)
+	}
+	// Building the record must cost no subshell: a fork per invocation inside
+	// the instrument is a process the fork census cannot see.
+	if strings.Contains(body, "$(") || strings.Contains(body, "`") {
+		t.Fatalf("the shim forks a subshell to build its record:\n%s", body)
+	}
+	// The separators are literal bytes, so the record written is the record
+	// Invocations parses.
+	if !strings.Contains(body, "us='"+fieldSeparator+"'") || !strings.Contains(body, "rs='"+recordSeparator+"'") {
+		t.Fatalf("the shim does not carry the literal field and record separators:\n%q", body)
+	}
+}
+
 // TestRecordingBDCountsInvocations drives the reader over records in the shim's
 // own format, including the argv shapes a naive line-and-space parser loses.
 func TestRecordingBDCountsInvocations(t *testing.T) {

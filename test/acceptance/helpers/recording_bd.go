@@ -87,18 +87,41 @@ func NewRecordingBD(t *testing.T, realBD string) *RecordingBD {
 		logPath: filepath.Join(dir, "invocations.log"),
 	}
 
-	// One append per invocation, written as a single small record so
-	// concurrent gc processes appending to the same O_APPEND file do not
-	// interleave. Failures are swallowed: a test's instrument must not be able
-	// to fail the city it is only observing.
+	// ONE write(2) per invocation, not one per field.
+	//
+	// O_APPEND makes a single write atomic; it does not make a block of them
+	// atomic, and the block this used to be issued one write per printf —
+	// strace confirms N+2 of them for an N-argument fork. Two bd forks in
+	// flight (the daemon's reconciler cascade plus an operator command, or a
+	// provider `health` racing an in-process call) therefore interleaved their
+	// fields, and Invocations() read the result as one record with a foreign
+	// ppid spliced into its argv plus one empty record — so Count() silently
+	// under-reported by one, exactly when the city was doing real work. The
+	// deterministic fork gate the next slice builds on Count() cannot stand on
+	// that.
+	//
+	// The record is assembled in a variable and emitted with one printf, whose
+	// single write is atomic under O_APPEND for any record up to PIPE_BUF (4096
+	// bytes) — every argv gc or its provider script builds. The separators are
+	// literal bytes rather than printf escapes so that assembling a record
+	// costs no subshell: a fork per invocation inside the instrument would be a
+	// process the fork census cannot see.
+	//
+	// The bytes on disk are unchanged (ppid US arg US … US RS newline), so
+	// Invocations parses exactly what it parsed before.
+	//
+	// Failures are swallowed: a test's instrument must not be able to fail the
+	// city it is only observing.
 	script := fmt.Sprintf(`#!/bin/sh
-{
-	printf '%%s\037' "${PPID:-0}"
-	for arg in "$@"; do printf '%%s\037' "$arg"; done
-	printf '\036\n'
-} >>%q 2>/dev/null || true
+us='%s'
+rs='%s'
+record="${PPID:-0}$us"
+for arg in "$@"; do
+	record="$record$arg$us"
+done
+printf '%%s\n' "$record$rs" >>%q 2>/dev/null || true
 exec %q "$@"
-`, recorder.logPath, realBD)
+`, fieldSeparator, recordSeparator, recorder.logPath, realBD)
 	if err := os.WriteFile(recorder.Path, []byte(script), 0o755); err != nil { //nolint:gosec // the shim must be executable
 		t.Fatalf("write recording bd shim: %v", err)
 	}
