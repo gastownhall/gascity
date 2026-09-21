@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,12 +150,15 @@ func TestProviderScriptTraceExitCodeForANonExitFailure(t *testing.T) {
 	if records[0].ExitCode != -1 {
 		t.Fatalf("a failure with no child status recorded exit code %d, want -1", records[0].ExitCode)
 	}
-
-	// And an ExitError still reports the child's own status.
-	var exitErr *exec.ExitError
-	if errors.As(errors.New("not an exit error"), &exitErr) {
-		t.Fatal("errors.As matched a plain error")
+	if records[0].Error == "" {
+		t.Error("a failure with no child status recorded no error either; -1 alone does not say what happened")
 	}
+	// The other side of this branch — an *exec.ExitError reporting the child's
+	// own status — is asserted where a real child produces one: the exit-7 case
+	// in TestProviderScriptTraceRecordsEveryScriptFork. It cannot be asserted
+	// here, because an ExitError's status lives in an os.ProcessState no test can
+	// fabricate, and an errors.As over a plain error tests nothing about the
+	// branch it names.
 }
 
 // TestProviderScriptTraceDir pins where the record's dir comes from. The script
