@@ -111,6 +111,21 @@ func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 		Without("GC_DOLT")
 }
 
+// proxiedEnvRecordingBD is proxiedEnv with every bd fork counted.
+//
+// BD_BIN is the one thing both halves of gc resolve bd through — the
+// in-process BdStore chokepoint and the provider script's `"${BD_BIN:-bd}"` —
+// so pointing it at a shim that records and then execs the real bd counts
+// every fork whatever spawned it. That is the property a fork-count gate needs
+// and a source-level trace cannot have: the provider script is a separate
+// process, and the calls it makes are exactly the ones the proxied topology
+// added.
+func proxiedEnvRecordingBD(t *testing.T, bdPath, doltPath string) (*helpers.Env, *helpers.RecordingBD) {
+	t.Helper()
+	recorder := helpers.NewRecordingBD(t, bdPath)
+	return proxiedEnv(t, bdPath, doltPath).With("BD_BIN", recorder.Path), recorder
+}
+
 // doltProcessesUnder returns the command lines of every live bd proxy or dolt
 // sql-server whose argv names root. It reads the process table rather than a
 // pid file because the leak worth catching is a process whose record is gone.
@@ -459,7 +474,7 @@ func assertProxiedScope(t *testing.T, scopeRoot, label string) {
 
 func TestBeadsProxiedDefault(t *testing.T) {
 	bdPath, doltPath := requireProxiedTooling(t)
-	env := proxiedEnv(t, bdPath, doltPath)
+	env, bdCalls := proxiedEnvRecordingBD(t, bdPath, doltPath)
 
 	city := helpers.NewCity(t, env)
 	cityRoot := city.Dir
@@ -516,6 +531,40 @@ func TestBeadsProxiedDefault(t *testing.T) {
 	t.Run("doctor-green", func(t *testing.T) {
 		assertDoctorGreen(t, city, "a fresh proxied city")
 		assertDoctorReportsBdOwnedProxiedStore(t, city, "a fresh proxied city")
+	})
+
+	t.Run("bd-forks-are-counted", func(t *testing.T) {
+		// The instrument, proved on the city the rest of this test uses.
+		//
+		// The fork counts the native-over-proxy work is measured against are
+		// only as good as the thing counting them, and the calls that matter
+		// most — the `bd ping` behind every readiness op — are forked by the
+		// provider script, a separate process that records nothing of its own.
+		// A gate built on a count nobody had checked would read as a
+		// measurement while measuring the harness.
+		//
+		// `gc init` is the step under the count here because it is the one that
+		// definitely pings: the provider-owned readiness op is what declares
+		// the scope ready, and nothing declares it ready without observing it.
+		if total := bdCalls.Count(); total == 0 {
+			t.Fatalf("no bd invocations recorded through BD_BIN; the shim is not the bd gc forks, so every count taken through it is zero by construction:\n%s", bdCalls.Describe())
+		}
+		pings := bdCalls.Count("ping")
+		if pings == 0 {
+			t.Fatalf("recorded %d bd invocation(s) but no `bd ping`; readiness on a proxied scope is a ping gc observed:\n%s",
+				bdCalls.Count(), bdCalls.Describe())
+		}
+		t.Logf("bd forks through BD_BIN so far: %d total, %d ping", bdCalls.Count(), pings)
+
+		// Reset and re-count over one bounded step, so the number is
+		// attributable rather than cumulative. `gc doctor --json` on a healthy
+		// proxied city is the read-only shape PR2's budget is stated against.
+		bdCalls.Reset()
+		if out, err := city.GC("doctor", "--json"); err != nil {
+			t.Fatalf("gc doctor --json: %v\n%s", err, out)
+		}
+		t.Logf("gc doctor --json on a 0-rig proxied city: %d bd fork(s), %d ping(s)\n%s",
+			bdCalls.Count(), bdCalls.Count("ping"), bdCalls.Describe())
 	})
 
 	var createdBead string

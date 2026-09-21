@@ -1501,6 +1501,56 @@ func validatePendingProviderEndpoint(cityPath, scopeRoot string, intent provider
 	return nil
 }
 
+// providerScriptTraceSource is the `source` every provider-script record
+// carries, so a trace consumer can separate the bd calls gc makes in-process
+// from the ones it delegates to the exec provider.
+const providerScriptTraceSource = "provider-script"
+
+// traceProviderScriptCall records one provider-script invocation in the same
+// JSONL trace gc's in-process bd calls use.
+//
+// Without it the trace is a partial census of its own subject. gc's bd calls go
+// through internal/beads and are recorded; the provider script's do not — it is
+// a separate process that never writes the trace file — so every `bd ping` the
+// lifecycle delegates to the script was invisible to the fork accounting, which
+// is exactly the traffic the proxied topology added. The record names the op
+// rather than the bd subcommand, because that is the level gc controls: one
+// `health` becomes one `bd ping`, and an op that fans out is the thing worth
+// seeing.
+//
+// Best-effort and unconditional in cost: TraceBDCall returns immediately when
+// the trace env var is unset.
+func traceProviderScriptCall(script, dir string, args []string, start time.Time, err error) {
+	record := make([]string, 0, len(args)+1)
+	record = append(record, filepath.Base(script))
+	record = append(record, args...)
+
+	exitCode := 0
+	if err != nil {
+		// -1 for a kill, a spawn failure or a context cancellation: the child
+		// never reported a status of its own, and reporting 0 for those would
+		// make a failed op read as a successful one.
+		exitCode = -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	beads.TraceBDCall(providerScriptTraceSource, dir, record, start, exitCode, err)
+}
+
+// providerScriptTraceDir reports the city the script was pointed at, read back
+// out of the environment gc built for it. The trace's dir field is per-call
+// context, and the script runs with no working directory of its own.
+func providerScriptTraceDir(environ []string) string {
+	for _, entry := range environ {
+		if value, ok := strings.CutPrefix(entry, "GC_CITY_PATH="); ok {
+			return value
+		}
+	}
+	return ""
+}
+
 // runProviderOwnedOpStrict differs from the legacy generic provider runner:
 // an exit status of 2 is a provider failure for a scope GC has explicitly
 // handed to the provider, never an invitation to fall back to GC lifecycle.
@@ -1517,7 +1567,10 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 	cmd.Env = environ
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	start := time.Now()
+	err := cmd.Run()
+	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("provider-owned beads %s: %w", op, ctxErr)
 		}
@@ -3305,7 +3358,10 @@ func runProviderProbe(script, cityPath, provider string) bool {
 		}
 		cmd.Env = env
 	}
-	return cmd.Run() == nil
+	start := time.Now()
+	err := cmd.Run()
+	traceProviderScriptCall(script, cityPath, []string{"probe"}, start, err)
+	return err == nil
 }
 
 func providerLifecycleDoltPathEnv(cityPath string) []string {
@@ -3822,7 +3878,9 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
+	start := time.Now()
 	err := cmd.Run()
+	traceProviderScriptCall(script, providerScriptTraceDir(environ), args, start, err)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("exec beads %s: %w", args[0], ctxErr)
