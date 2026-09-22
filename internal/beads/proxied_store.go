@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -89,6 +90,43 @@ type ProxiedStore struct {
 	// stopGuard stops the long-lived guard ticker. Nil for a one-shot store and
 	// until P2-11 installs one.
 	stopGuard func()
+	// reopenNative is the ONLY recovery path a non-terminally demoted handle
+	// has. See NativeLeafReopener.
+	reopenNative NativeLeafReopener
+}
+
+// NativeLeafReopener re-runs admission and opens a FRESH native read leaf.
+//
+// It exists because a non-terminal stand-down had no recovery at all (council
+// A-F1). The wrapper's read path recovers through the NATIVE handle's reopen
+// hook, and that hook is reachable only from a read served by the native leaf —
+// so once the leaf is nil every read goes to bd, the hook is unreachable, and
+// the store forks bd for the rest of the process. That is the outcome design
+// U22 forbids for the endpoint-in-motion verdicts (proxy_gone, draining,
+// budget_exhausted), which are exactly the ones a loaded box produces.
+//
+// It returns a leaf and the pin it was admitted against, so the caller can
+// install both atomically: a leaf without its pin would leave the generation
+// the mutation bracket compares against pointing at the old proxy.
+//
+// The caller (cmd/gc's opener) supplies one only for a LONG-LIVED store, which
+// is the only store with a guard to call it.
+type NativeLeafReopener func(ctx context.Context) (*NativeDoltStore, Pin, error)
+
+// ProxiedStoreOption configures a split store at construction.
+type ProxiedStoreOption func(*ProxiedStore)
+
+// WithNativeLeafReopener installs the recovery path for a non-terminal
+// stand-down. See NativeLeafReopener.
+func WithNativeLeafReopener(reopen NativeLeafReopener) ProxiedStoreOption {
+	return func(s *ProxiedStore) { s.reopenNative = reopen }
+}
+
+// nativeReopener returns the recovery path, or nil when none was installed.
+func (s *ProxiedStore) nativeReopener() NativeLeafReopener {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reopenNative
 }
 
 // localSidecarCarrier is how the wrapper reaches the ONE clone-local sidecar
@@ -116,7 +154,7 @@ type localSidecarCarrier interface {
 // through one and a GetLocalString through the other would disagree for the life
 // of the process. Sharing the object is the only fix that does not require
 // re-reading a file on every access.
-func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin) (*ProxiedStore, error) {
+func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin, opts ...ProxiedStoreOption) (*ProxiedStore, error) {
 	if native == nil {
 		return nil, errors.New("proxied store: native read leaf is nil")
 	}
@@ -146,7 +184,40 @@ func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin) (*ProxiedStore,
 		// leaf's own in place rather than losing local strings entirely.
 		store.sidecar = native.localStrings
 	}
+	for _, opt := range opts {
+		opt(store)
+	}
 	return store, nil
+}
+
+// ProxiedPrefixAgreement is H10, and it is exported because it is checked in
+// two places: once by the opener with both handles fresh, and again by the
+// guard tick's recovery when it installs a replacement native leaf.
+//
+// The bd leaf's prefix comes from the scope's config; the native leaf's comes
+// from the database's own issue_prefix row. CachingStore filters foreign bead
+// events by the backing store's prefix, and the two leaves of a split that
+// disagreed would classify the same bead differently depending on which leaf
+// answered. An empty prefix on either side is not a disagreement: an unfenced
+// store is the shipped default for scopes an operator never configured.
+//
+// One implementation rather than two, because a re-pin that applied a DIFFERENT
+// rule from the open is a split whose halves can disagree only after a proxy
+// restart — the hardest shape to reproduce and the least likely to be noticed.
+func ProxiedPrefixAgreement(database string, native *NativeDoltStore, bd Store) error {
+	if native == nil {
+		return nil
+	}
+	nativePrefix := native.IDPrefix()
+	bdPrefix := ""
+	if reporter, ok := bd.(interface{ IDPrefix() string }); ok {
+		bdPrefix = reporter.IDPrefix()
+	}
+	if nativePrefix == "" || bdPrefix == "" || nativePrefix == bdPrefix {
+		return nil
+	}
+	return NewProxiedVerdictError(ProxiedVerdictPrefixMismatch, fmt.Sprintf(
+		"database %s mints %q and the bd front door mints %q", database, nativePrefix, bdPrefix), nil)
 }
 
 // Pin returns the admission pass this store opened against.

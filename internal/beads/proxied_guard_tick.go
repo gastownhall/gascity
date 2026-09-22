@@ -41,18 +41,25 @@ import (
 // design asks for (563-565), because a cursor pair that moved is a fact about
 // the database that re-pinning cannot change.
 //
-// # Why the tick never opens the library
+// # Why the tick does not open the library WHILE THE LEAF IS SERVING
 //
 // A re-pin needs a fresh library handle against the new generation's port, and
 // opening one means the hermetic env window: a process-global environment
-// mutation under nativeDoltOpenEnvMu. The tick deliberately does NOT perform it.
-// It re-runs ADMISSION (file reads plus one probe session — no library, no fork)
-// and then marks the native handle's pool stale, so the next READ reconnects
-// through the injected reopen hook on the CALLER's goroutine, which is where
-// every other library open in this package already happens. A background
-// goroutine that mutated the process environment at an arbitrary moment would be
-// a new class of hazard for every concurrent scope open and bd-child env build in
-// the process, to save a re-pin a few milliseconds.
+// mutation under nativeDoltOpenEnvMu. While the native leaf is still serving the
+// tick deliberately does NOT perform it. It re-runs ADMISSION (file reads plus
+// one probe session — no library, no fork) and then marks the native handle's
+// pool stale, so the next READ reconnects through the injected reopen hook on
+// the CALLER's goroutine, which is where every other library open in this
+// package already happens. A background goroutine that mutated the process
+// environment at an arbitrary moment would be a new class of hazard for every
+// concurrent scope open and bd-child env build in the process, to save a re-pin
+// a few milliseconds.
+//
+// There is exactly one state where that argument does not hold, and the tick
+// does open the library there: a handle that has ALREADY stood down
+// non-terminally. Its native leaf is nil, so every read is on the bd leaf and
+// the reopen hook cannot be reached by anything — there is no caller's goroutine
+// to defer to, only the choice between a recovery and none. See recoverNative.
 //
 // # What the tick may spend
 //
@@ -267,10 +274,15 @@ func (g *proxiedGuard) tickSteps(ctx context.Context, n int) proxiedGuardStep {
 			// will never serve natively again. Nothing left to guard.
 			return proxiedGuardStopped
 		}
-		// A non-terminal stand-down. The re-pin belongs to the read path (the
-		// reopen hook) or to a fresh open; a tick that opened the library from
-		// here would be the one thing this file refuses to do.
-		return proxiedGuardHeld
+		// A non-terminal stand-down: the endpoint was in MOTION (a proxy
+		// restart, a drain, a spent budget), which is not a fact about the
+		// database. This arm used to return Held on the theory that "the re-pin
+		// belongs to the read path (the reopen hook)". That theory was wrong,
+		// and it is council A-F1: the reopen hook lives on the NATIVE handle
+		// and is reached only from a read the native leaf serves, so with the
+		// leaf nil every read goes to bd and the hook is unreachable for ever.
+		// The tick is the only place left, so the tick does it.
+		return g.recoverNative(ctx)
 	}
 	if !pin.Admitted() {
 		return proxiedGuardStopped
@@ -359,13 +371,36 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		SkipMemo: true,
 	})
 	if err != nil {
-		if verdict, ok := ProxiedVerdictOf(err); ok {
+		if verdict, ok := ProxiedVerdictOf(err); ok && verdict.Terminal() {
+			// A fact about the database, the record or the policy. Re-pinning
+			// could only re-learn it.
 			g.store.standDown(verdict)
 			return proxiedGuardStoodDown
 		}
-		// Admission names every outcome it reaches, so an untyped error is a bug
-		// rather than a fact about the endpoint. A tick does not demote a healthy
-		// city over one.
+		// Council A-F1. Everything else is UNDECIDED, and the distinction is the
+		// whole difference between "bd restarted its proxy" and "this store forks
+		// bd for the rest of the process".
+		//
+		// A non-terminal verdict is, by its own definition, the endpoint in
+		// motion or a budget that ran out — budget_exhausted, draining,
+		// proxy_gone, a backend still warming up. The probe is built so its own
+		// 2s clock can never conclude anything about an endpoint
+		// (proxyendpoint.IsIndeterminate, and ProbeUnknown's doc: "never a
+		// conclusion about the proxy"), and on a loaded box that is the ordinary
+		// outcome of a re-admission. Handing it to standDown demoted a
+		// long-lived controller store permanently for one slow probe, which is
+		// the exact regression design U22 (648-654) and the plan's "demotes only
+		// on cursor drift" forbid.
+		//
+		// An UNTYPED error lands here too, for the reason it always did:
+		// admission names every outcome it reaches, so an untyped error is a bug
+		// rather than a fact about the endpoint.
+		//
+		// Leave the pin and the native leaf alone and ask again next tick. The
+		// handle keeps serving from the generation it is still pinned to, which
+		// is the generation the record says has been replaced — so the next tick
+		// re-runs exactly this comparison and re-admits. That is a re-pin
+		// deferred, not a re-pin skipped.
 		return proxiedGuardUndecided
 	}
 
@@ -431,6 +466,73 @@ func cursorDriftAgainst(pinned, observed proxyendpoint.Cursors) (lane, dir strin
 	default:
 		return "", ""
 	}
+}
+
+// recoverNative re-opens the native read leaf of a handle that stood down
+// NON-terminally, and is the only recovery such a handle has (council A-F1).
+//
+// # Why this one opens the library, when the rest of the file refuses to
+//
+// The refusal above is about a handle that is still SERVING: a re-pin there
+// only needs the pool re-pointed, the reader's own goroutine is the natural
+// place to do it, and a background library open would put a process-global
+// environment mutation on a timer for no gain. None of that applies here.
+// There is no reader to hand the work to — every read is on the bd leaf, and
+// the native reopen hook is unreachable — so the choice is not "which
+// goroutine" but "recovery or none". The window is still the hermetic one
+// under nativeDoltOpenEnvMu, so a concurrent scope open or bd-child env build
+// blocks on it rather than reading a transient value.
+//
+// It spends NO provider verb. The reopener admission runs with nil Ops, so the
+// tick's "never forks bd" invariant survives: a recovery that needs bd to make
+// its proxy healthy comes back non-terminal, the tick stays Undecided, and the
+// rung is spent later by the read path's reopen hook, where a caller is waiting
+// and the cost is attributable.
+func (g *proxiedGuard) recoverNative(ctx context.Context) proxiedGuardStep {
+	reopen := g.store.nativeReopener()
+	if reopen == nil {
+		// No recovery path was installed — a store assembled by hand, or a test
+		// double. The handle keeps serving from the bd leaf, which is what a
+		// demoted store is.
+		return proxiedGuardHeld
+	}
+	native, pin, err := reopen(ctx)
+	if err != nil {
+		if verdict, ok := ProxiedVerdictOf(err); ok && verdict.Terminal() {
+			g.store.standDown(verdict)
+			return proxiedGuardStoodDown
+		}
+		return proxiedGuardUndecided
+	}
+	if native == nil || !pin.Admitted() {
+		// A reopener that returned neither an error nor a usable leaf is a bug,
+		// and a tick does not act on one.
+		return proxiedGuardUndecided
+	}
+	// H10 again, with both handles in hand. A replacement leaf that minted a
+	// different prefix from the bd leaf is a split whose halves disagree about
+	// which beads are foreign, and it is worse than staying demoted.
+	if verdict := ProxiedPrefixAgreement(pin.Database(), native, g.store.writeLeaf()); verdict != nil {
+		closeNativeLeafQuietly(native)
+		if typed, ok := ProxiedVerdictOf(verdict); ok {
+			g.store.standDown(typed)
+			return proxiedGuardStoodDown
+		}
+		return proxiedGuardUndecided
+	}
+	if !g.store.repin(native, pin) {
+		// A terminal stand-down landed between the reopen and the swap, or the
+		// store closed underneath us. The fresh leaf belongs to nobody.
+		closeNativeLeafQuietly(native)
+		return proxiedGuardStopped
+	}
+	return proxiedGuardRepinned
+}
+
+// closeNativeLeafQuietly releases a leaf the tick is abandoning, off the tick's
+// own path: CloseStore can block on a wedged connection.
+func closeNativeLeafQuietly(native *NativeDoltStore) {
+	go func() { _ = native.CloseStore() }()
 }
 
 // checkOwner asks whether the pinned process still holds the pinned port.

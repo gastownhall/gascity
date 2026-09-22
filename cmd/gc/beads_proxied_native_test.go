@@ -409,6 +409,83 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 	})
 }
 
+// TestProxiedGuardRecoveryAdmitsWithoutForkingBd is council A-F1's production
+// half: the guard tick now has a recovery path for a non-terminally demoted
+// handle, and that path must not break the tick's "never forks bd" invariant.
+//
+// The invariant is stated in proxied_guard_tick.go's header ("It holds NO
+// ProviderOps: a tick never forks bd. An escalation rung is the read path's to
+// spend, through the reopen hook, where a caller is waiting for an answer and
+// the cost is attributable"). The recovery runs on the tick's goroutine, so it
+// admits with nil Ops. The control is the same scope admitted through the
+// ordinary path, which DOES spend the probe — without it this test would pass
+// against a fixture that simply had nothing to escalate.
+func TestProxiedGuardRecoveryAdmitsWithoutForkingBd(t *testing.T) {
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, ops *scriptedProviderOps) *proxiedNativeOpener {
+		t.Helper()
+		observed := beads.NewGenerationSet()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error {
+			err := ops.run(op)
+			f.writeRecord(7104, "1a2b3c4d")
+			return err
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			ops:          proxiedProviderOps{cityPath: t.TempDir(), observed: observed},
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+			},
+			observed:  observed,
+			recovered: beads.NewGenerationSet(),
+			sleep:     func(context.Context, time.Duration) error { return nil },
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				return nil, errors.New("this test never reaches the library open")
+			},
+		}
+	}
+
+	t.Run("the ordinary admission path spends the probe", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops)
+		f.removeRecord()
+
+		if _, err := opener.admit(context.Background(), true); err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: without this control the assertion below is vacuous", spent)
+		}
+	})
+
+	t.Run("the guard recovery spends nothing", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops)
+		f.removeRecord()
+
+		_, _, err := opener.recoverNativeLeaf()(context.Background())
+		if err == nil {
+			t.Fatal("the recovery admitted a scope whose proxy record is gone")
+		}
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("the recovery returned an untyped error the tick cannot classify: %v", err)
+		}
+		if verdict.Terminal() {
+			t.Errorf("a stopped proxy is not a fact about the database, so the refusal must be non-terminal: %v", verdict)
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Fatalf("the guard recovery forked bd for %v; a tick never forks bd, and the rung belongs to the read path", spent)
+		}
+	})
+}
+
 // TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot is the wiring assertion.
 //
 // Every earlier group built machinery that nothing calls; this is the commit

@@ -35,6 +35,26 @@ type guardFixture struct {
 	owner proxiedOwner
 	// probes counts the probe sessions admission ran through this fixture.
 	probes int
+	// probeResult, when set, replaces the served answer the injected probe
+	// gives. It is how a test drives a re-admission that learns NOTHING about
+	// the endpoint — the ordinary outcome on a loaded box, and the one a tick
+	// must not demote on.
+	probeResult func() proxyendpoint.ProbeResult
+	// recover, when set, is the store's NativeLeafReopener: the recovery path a
+	// non-terminally demoted handle has.
+	recover func(context.Context) (*NativeDoltStore, Pin, error)
+	// recoveries counts the calls the guard made to it.
+	recoveries int
+}
+
+// probe is the injected probe both admission and the tick run through. It
+// answers served unless a test says otherwise.
+func (f *guardFixture) probe(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+	f.probes++
+	if f.probeResult != nil {
+		return f.probeResult()
+	}
+	return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
 }
 
 func newGuardFixture(t *testing.T) *guardFixture {
@@ -73,7 +93,14 @@ func newGuardFixture(t *testing.T) *guardFixture {
 	writeLeaf.idPrefix = "prx"
 	f.bd = &recordingLeaf{Store: writeLeaf}
 
-	store, err := NewProxiedStore(native, f.bd, pin)
+	store, err := NewProxiedStore(native, f.bd, pin, WithNativeLeafReopener(
+		func(ctx context.Context) (*NativeDoltStore, Pin, error) {
+			f.recoveries++
+			if f.recover == nil {
+				return nil, Pin{}, errors.New("this fixture installed no recovery")
+			}
+			return f.recover(ctx)
+		}))
 	if err != nil {
 		t.Fatalf("NewProxiedStore: %v", err)
 	}
@@ -87,7 +114,7 @@ func (f *guardFixture) admissionInput(longLived bool) AdmissionInput {
 		ScopeRoot:    f.admitted.scopeRoot,
 		Database:     "beads",
 		ProcessTable: f.admitted.processTable(),
-		Probe:        servedProbe(pinnedCursors(), &f.probes),
+		Probe:        f.probe,
 		LongLived:    longLived,
 		Observed:     NewGenerationSet(),
 		Recovered:    NewGenerationSet(),
@@ -103,7 +130,7 @@ func (f *guardFixture) start() {
 	f.guard = f.store.startGuard(proxiedGuardOptions{
 		ticks:        f.ticks,
 		processTable: f.admitted.processTable(),
-		probe:        servedProbe(pinnedCursors(), &f.probes),
+		probe:        f.probe,
 		cursors: func(context.Context, Pin) (proxyendpoint.Cursors, error) {
 			return f.cursors, nil
 		},
@@ -483,4 +510,153 @@ func TestProxiedOpenFiniteIdleLongLivedFallsToBdStore(t *testing.T) {
 		t.Fatalf("proxied diagnostic = %+v, want verdict idle_policy_finite; the deviation was accepted only as a VISIBLE one",
 			result.Diagnostic.Proxied)
 	}
+}
+
+// TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission is council A-F1.
+//
+// bd replacing its proxy is ORDINARY operation — an operator `bd dolt stop`, an
+// idle expiry, a crash-restart — and this file's own header says so. The tick
+// answers it by RE-PINNING (design U22, 648-654). The re-pin is an admission,
+// and an admission's probe has a 2s budget of its own; on a loaded box it
+// routinely runs out. proxyendpoint is built so that outcome can never be a
+// conclusion about the endpoint (ProbeUnknown: "never a conclusion about the
+// proxy"), and admission spells it budget_exhausted, NON-terminal.
+//
+// Handing any typed verdict to standDown converted that into a permanent
+// demotion of a controller store: the leaf is nil, so every read is on bd, the
+// reopen hook is unreachable, and nothing ever promotes. The tick must stay
+// UNDECIDED and ask again.
+func TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission(t *testing.T) {
+	f := newGuardFixture(t)
+	f.start()
+	before := f.store.Pin()
+
+	// bd replaced its proxy...
+	f.admitted.corrupt(func(rec *proxyendpoint.Record) {
+		rec.PID = 6004
+		rec.Birth = proxyendpoint.BirthToken("boot-fixture", "99887766")
+	})
+	// ...and the re-admission's probe runs out of its own clock.
+	f.probeResult = func() proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeUnknown, Err: context.DeadlineExceeded}
+	}
+
+	for pass := 0; pass < 3; pass++ {
+		if step := f.tick(); step != proxiedGuardUndecided {
+			t.Fatalf("pass %d: an indeterminate re-admission reported %s, want undecided: "+
+				"the probe's own clock is not evidence about the proxy", pass, step)
+		}
+		if f.store.Demoted() {
+			t.Fatalf("pass %d: the tick demoted a long-lived store over a probe that learned nothing; "+
+				"this is the regression U22 forbids", pass)
+		}
+		if verdict := f.store.Verdict(); verdict != nil {
+			t.Fatalf("pass %d: the tick recorded verdict %v for an undecided pass", pass, verdict)
+		}
+	}
+
+	// The box recovers. The very next tick re-pins, against the generation the
+	// record has been naming all along.
+	f.probeResult = nil
+	if step := f.tick(); step != proxiedGuardRepinned {
+		t.Fatalf("a healthy re-admission after the indeterminate ones reported %s, want repinned", step)
+	}
+	if f.store.Demoted() {
+		t.Fatal("the re-pin left the store demoted")
+	}
+	if after := f.store.Pin(); after.PoolKey().PID != 6004 {
+		t.Fatalf("re-pinned to pid %d, want the replacement proxy 6004 (was %d)",
+			after.PoolKey().PID, before.PoolKey().PID)
+	}
+}
+
+// TestProxiedGuardTickRecoversANonTerminallyDemotedHandle is the other half of
+// council A-F1: the recovery path that (*ProxiedStore).repin did not have.
+//
+// A non-terminal stand-down can arrive from three places that are not the tick —
+// the mutation bracket's generation change, a read whose budget ran out, a
+// markPoolStale that could not be honored. Before this, all three were
+// permanent: tickSteps returned Held on the theory that "the re-pin belongs to
+// the read path (the reopen hook)", and with the native leaf nil that hook is
+// unreachable by construction.
+func TestProxiedGuardTickRecoversANonTerminallyDemotedHandle(t *testing.T) {
+	t.Run("a fresh leaf is installed and the store is native again", func(t *testing.T) {
+		f := newGuardFixture(t)
+		f.start()
+		replacement := newNativeDoltStoreForTest(&nativeDoltMemStorage{
+			store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true},
+		})
+		replacement.idPrefix = "prx"
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return replacement, f.store.Pin(), nil
+		}
+
+		// A write found the generation moved: H6's bracket, non-terminal.
+		f.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone,
+			"the proxy generation changed across create", nil))
+		if !f.store.Demoted() {
+			t.Fatal("standDown left the store native")
+		}
+
+		if step := f.tick(); step != proxiedGuardRepinned {
+			t.Fatalf("the recovery tick reported %s, want repinned", step)
+		}
+		if f.store.Demoted() {
+			t.Fatal("the tick reported a re-pin and left the store on the bd leaf")
+		}
+		if f.store.Verdict() != nil {
+			t.Fatalf("the re-pin left the stale verdict in place: %v", f.store.Verdict())
+		}
+		if f.recoveries != 1 {
+			t.Fatalf("the guard called the recovery %d time(s), want exactly 1", f.recoveries)
+		}
+	})
+
+	t.Run("a non-terminal refusal leaves the handle demoted and asks again", func(t *testing.T) {
+		f := newGuardFixture(t)
+		f.start()
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return nil, Pin{}, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+				"the proxy is still refusing after the drain ceiling", nil)
+		}
+		f.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+
+		for pass := 0; pass < 2; pass++ {
+			if step := f.tick(); step != proxiedGuardUndecided {
+				t.Fatalf("pass %d: a non-terminal recovery refusal reported %s, want undecided", pass, step)
+			}
+			if !f.store.Demoted() {
+				t.Fatalf("pass %d: the store promoted itself on a refusal", pass)
+			}
+		}
+		if f.recoveries != 2 {
+			t.Fatalf("the guard asked %d time(s) across two ticks, want 2: a non-terminal refusal is retried", f.recoveries)
+		}
+	})
+
+	t.Run("a terminal refusal latches and the tick stops", func(t *testing.T) {
+		f := newGuardFixture(t)
+		f.start()
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return nil, Pin{}, NewSchemaSkewVerdictError(ProxiedSkewLaneIgnored, ProxiedSkewDirBehind,
+				"the database moved while this handle was demoted")
+		}
+		f.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "bd restarted its proxy", nil))
+
+		if step := f.tick(); step != proxiedGuardStoodDown {
+			t.Fatalf("a terminal recovery refusal reported %s, want stood-down", step)
+		}
+		verdict := f.store.Verdict()
+		if verdict == nil || verdict.Verdict != ProxiedVerdictSchemaSkew || !verdict.Terminal() {
+			t.Fatalf("verdict = %v, want a terminal schema_skew", verdict)
+		}
+		// The latch holds: the next tick has nothing left to guard, and the
+		// recovery is never asked again.
+		if step := f.tick(); step != proxiedGuardStopped {
+			t.Fatalf("the tick after a terminal latch reported %s, want stopped", step)
+		}
+		if f.recoveries != 1 {
+			t.Fatalf("the guard asked %d time(s) after a TERMINAL refusal, want exactly 1", f.recoveries)
+		}
+	})
 }

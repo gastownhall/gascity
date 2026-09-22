@@ -258,21 +258,9 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 		return nil, pin.Report(), err
 	}
 
-	native, err := o.openNative(ctx, o.scopeRoot, nativeDoltProxiedOpenEnvForPin(o.cityName, pin, longLived),
-		// The reconnect hook is where a re-pin actually happens: it re-runs
-		// admission and re-projects the CURRENT generation's endpoint, on the
-		// reader's goroutine.
-		beads.WithNativeReopen(o.reopen(longLived)),
-		// Ten seconds, not the direct lane's ninety: a bd-owned proxy is not
-		// gc's to restart, so a read that cannot reach it should demote in
-		// seconds rather than hold a caller through a minute and a half of
-		// mysql i/o timeouts.
-		beads.WithNativeReadRetryBudget(beads.ProxiedReadBudget()),
-		// The second read-only fence (the first is that the wrapper claims no
-		// graph-apply interface), in case a bare leaf ever escapes the wrapper.
-		beads.WithProxiedReadOnly())
+	native, err := o.openNativeLeaf(ctx, pin, longLived)
 	if err != nil {
-		return nil, pin.Report(), fmt.Errorf("open native store over bd's proxy at %s: %w", o.scopeRoot, err)
+		return nil, pin.Report(), err
 	}
 
 	bd, err := o.openBd()
@@ -292,7 +280,14 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 		return nil, pin.Report(), verdict
 	}
 
-	store, err := beads.NewProxiedStore(native, bd, pin)
+	// The recovery path for a NON-terminal stand-down, and only for a
+	// long-lived store: a one-shot has no guard to call it, and its handle does
+	// not outlive the command. See beads.NativeLeafReopener (council A-F1).
+	var opts []beads.ProxiedStoreOption
+	if longLived {
+		opts = append(opts, beads.WithNativeLeafReopener(o.recoverNativeLeaf()))
+	}
+	store, err := beads.NewProxiedStore(native, bd, pin, opts...)
 	if err != nil {
 		closeProxiedLeafQuietly(native)
 		closeProxiedLeafQuietly(bd)
@@ -305,6 +300,61 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 		store.StartGuard()
 	}
 	return store, store.Report(), nil
+}
+
+// openNativeLeaf opens the library against an admitted pin. It is shared by the
+// first open and by the guard tick's recovery, so a replacement leaf is
+// configured exactly like the one it replaces — the read-only fence, the proxied
+// read budget and the reconnect hook are not things a second call site may
+// forget.
+func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin, longLived bool) (*beads.NativeDoltStore, error) {
+	native, err := o.openNative(ctx, o.scopeRoot, nativeDoltProxiedOpenEnvForPin(o.cityName, pin, longLived),
+		// The reconnect hook is where a re-pin actually happens: it re-runs
+		// admission and re-projects the CURRENT generation's endpoint, on the
+		// reader's goroutine.
+		beads.WithNativeReopen(o.reopen(longLived)),
+		// Ten seconds, not the direct lane's ninety: a bd-owned proxy is not
+		// gc's to restart, so a read that cannot reach it should demote in
+		// seconds rather than hold a caller through a minute and a half of
+		// mysql i/o timeouts.
+		beads.WithNativeReadRetryBudget(beads.ProxiedReadBudget()),
+		// The second read-only fence (the first is that the wrapper claims no
+		// graph-apply interface), in case a bare leaf ever escapes the wrapper.
+		beads.WithProxiedReadOnly())
+	if err != nil {
+		return nil, fmt.Errorf("open native store over bd's proxy at %s: %w", o.scopeRoot, err)
+	}
+	return native, nil
+}
+
+// recoverNativeLeaf is the guard tick's recovery for a handle that stood down
+// NON-terminally, and it is the production caller (*beads.ProxiedStore).repin
+// did not have (council A-F1).
+//
+// It re-runs admission with NO provider ops. That is what keeps the tick's
+// "never forks bd" invariant true through the recovery: a proxy that needs bd
+// to make it healthy comes back with a non-terminal verdict, the tick stays
+// undecided, and the rung is spent later by a read through the reconnect hook,
+// where a caller is waiting for the answer and the cost is attributable to it.
+//
+// It is always the LONG-LIVED admission shape, because only a long-lived store
+// has a guard: the finite-idle rule must apply to the replacement exactly as it
+// applied to the original, or a re-pin would quietly acquire a resident handle
+// on a proxy bd is going to retire.
+func (o *proxiedNativeOpener) recoverNativeLeaf() beads.NativeLeafReopener {
+	return func(parent context.Context) (*beads.NativeDoltStore, beads.Pin, error) {
+		ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(true))
+		defer cancel()
+		pin, err := o.admitWith(ctx, true, nil)
+		if err != nil {
+			return nil, beads.Pin{}, err
+		}
+		native, err := o.openNativeLeaf(ctx, pin, true)
+		if err != nil {
+			return nil, beads.Pin{}, err
+		}
+		return native, pin, nil
+	}
 }
 
 // admit is the escalation ladder: beads.Admit, plus a bounded outer retry for
@@ -324,6 +374,13 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 //     alternative is a controller that forks bd for the rest of the process
 //     because of a two-second restart at boot.
 func (o *proxiedNativeOpener) admit(ctx context.Context, longLived bool) (beads.Pin, error) {
+	return o.admitWith(ctx, longLived, o.ops)
+}
+
+// admitWith is admit with the provider surface chosen by the caller. A nil ops
+// means the ladder cannot escalate, which is what the guard tick's recovery
+// passes: a tick never forks bd.
+func (o *proxiedNativeOpener) admitWith(ctx context.Context, longLived bool, ops beads.ProviderOps) (beads.Pin, error) {
 	database := o.scopeDatabase()
 	var lastErr error
 	for pass := 0; pass < proxiedAdmissionPasses; pass++ {
@@ -332,7 +389,7 @@ func (o *proxiedNativeOpener) admit(ctx context.Context, longLived bool) (beads.
 			Database:     database,
 			ProcessTable: o.processTable,
 			Probe:        o.probe,
-			Ops:          o.ops,
+			Ops:          ops,
 			LongLived:    longLived,
 			Observed:     o.observed,
 			Recovered:    o.recovered,
@@ -361,9 +418,11 @@ func (o *proxiedNativeOpener) admit(ctx context.Context, longLived bool) (beads.
 // reopen is the read path's re-pin: re-run admission, re-project the CURRENT
 // generation's endpoint, and hand back a fresh storage handle.
 //
-// It is the only library open that happens after the store exists, and it
-// happens on the goroutine of the read that needed it — never on the guard
-// tick's, which marks a pool stale and lets the next reader do this. A typed
+// It happens on the goroutine of the read that needed it — never on the guard
+// tick's, which marks a pool stale and lets the next reader do this. It is the
+// only library open that happens after the store exists WHILE THE NATIVE LEAF
+// IS SERVING; once a handle has stood down non-terminally there is no read on
+// the native leaf to carry it, and recoverNativeLeaf is the path instead. A typed
 // verdict returned from here ends the read on its first pass (the native read
 // path propagates it) so the wrapper can stand the handle down instead of
 // spending the whole read budget re-learning the same refusal.
@@ -407,16 +466,7 @@ func proxiedAdmissionBudget(longLived bool) time.Duration {
 // answered. An empty prefix on either side is not a disagreement: an unfenced
 // store is the shipped default for scopes an operator never configured.
 func proxiedPrefixAgreement(pin beads.Pin, native *beads.NativeDoltStore, bd beads.Store) error {
-	nativePrefix := native.IDPrefix()
-	bdPrefix := ""
-	if reporter, ok := bd.(interface{ IDPrefix() string }); ok {
-		bdPrefix = reporter.IDPrefix()
-	}
-	if nativePrefix == "" || bdPrefix == "" || nativePrefix == bdPrefix {
-		return nil
-	}
-	return beads.NewProxiedVerdictError(beads.ProxiedVerdictPrefixMismatch, fmt.Sprintf(
-		"database %s mints %q and the bd front door mints %q", pin.Database(), nativePrefix, bdPrefix), nil)
+	return beads.ProxiedPrefixAgreement(pin.Database(), native, bd)
 }
 
 // closeProxiedLeafQuietly releases a leaf an open is abandoning. A failed open
