@@ -356,6 +356,24 @@ type NativeDoltStore struct {
 	// backend; see row_witness.go for what a caller may conclude from it.
 	sawRows atomic.Bool
 
+	// poolStale marks a handle whose pooled connections point at a proxy
+	// generation that has already been replaced, so the next read must reconnect
+	// BEFORE it is served rather than after it fails.
+	//
+	// It exists for the one hazard a read cannot see: bd's proxy root is moved
+	// and recreated at the same path, and the old pooled socket keeps serving the
+	// MOVED database without any error at all (design U22). The proxied guard
+	// tick notices the generation change from its own goroutine and sets this;
+	// the reconnect itself happens on the next READER's goroutine, through the
+	// injected reopen hook, because opening the library means mutating the
+	// process environment under nativeDoltOpenEnvMu and a background ticker is
+	// the wrong place for that.
+	//
+	// It is false on every direct and hosted handle — only the proxied guard tick
+	// sets it — so the read path's extra atomic load is the whole cost of the
+	// mechanism on those lanes.
+	poolStale atomic.Bool
+
 	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
 	// binding claims. Empty leaves the store unfenced, which is the shipped
 	// default everywhere it is not opened as a class binding — including a
@@ -712,6 +730,34 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		if err != nil {
 			return err
 		}
+		if s.poolStale.Load() {
+			// The guard tick saw this handle's proxy generation replaced. Re-point
+			// the pool BEFORE serving: a moved root serves the old database
+			// without an error, so waiting for a failure would wait forever.
+			release()
+			rcErr := s.repinStalePool(ctx, gen)
+			if rcErr == nil {
+				continue
+			}
+			if _, typed := ProxiedVerdictOf(rcErr); typed {
+				// The re-admission inside the hook refused with a verdict. It is
+				// already the answer; looping would bury it under a budget error.
+				return rcErr
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
+			}
+			if classifyNativeDoltReadError(rcErr).disposition != nativeReadTransient {
+				return rcErr
+			}
+			// A proxy mid-restart is worth another pass while the budget remains.
+			select {
+			case <-ctx.Done():
+				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), rcErr))
+			case <-time.After(nativeReadRetryBackoff):
+			}
+			continue
+		}
 		opErr := fn(ctx, storage)
 		release()
 		if opErr == nil {
@@ -786,6 +832,53 @@ func nativeReadRetryBudgetError(ctxErr, lastErr error) error {
 		return fmt.Errorf("native Dolt read retry budget exhausted: %w", ctxErr)
 	}
 	return fmt.Errorf("native Dolt read retry budget exhausted (%w), last error: %w", ctxErr, lastErr)
+}
+
+// markPoolStale asks this handle to reconnect before it serves another read,
+// and reports whether the request can be honored.
+//
+// It is the proxied guard tick's re-pin, minus the library open. A handle with no
+// reopen hook, or one already closed, CANNOT re-point its pool — marking it would
+// leave every later read reconnecting through a nil hook — so it reports false
+// and the caller stands the handle down instead.
+func (s *NativeDoltStore) markPoolStale() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	closed, reopen := s.closed, s.reopen
+	s.mu.RUnlock()
+	if closed || reopen == nil {
+		return false
+	}
+	s.poolStale.Store(true)
+	return true
+}
+
+// repinStalePool swaps the pool a guard tick invalidated for one bound to the
+// current generation, on the CALLER's goroutine.
+//
+// The reconnect is the existing single-flight path, so concurrent readers
+// re-point once and the reopen hook — which re-runs admission and re-projects the
+// current endpoint — is what decides whether the new generation may be served at
+// all. Clearing the mark after reconnect returns nil (installed, or another
+// reader installed first) is what keeps the read loop from spinning.
+func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen uint64) error {
+	reopen, closed := s.reopenState()
+	if closed {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if reopen == nil {
+		// markPoolStale refuses a hook-less handle, so this is only reachable if
+		// the hook went away afterwards. Clear the mark rather than spin.
+		s.poolStale.Store(false)
+		return nil
+	}
+	if err := s.reconnect(ctx, observedGen); err != nil {
+		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
+	}
+	s.poolStale.Store(false)
+	return nil
 }
 
 // reopenState returns the reconnect hook and terminal-close state atomically.
