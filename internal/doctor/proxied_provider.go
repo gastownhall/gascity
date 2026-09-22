@@ -18,6 +18,12 @@ const proxiedProviderStoreMessage = "bd-owned proxied store (bd CLI front door)"
 // initialisation never reached the ready state.
 const pendingScopeInitMessage = "beads scope initialisation pending — rerun gc start"
 
+// pendingScopeDetailSuffix marks a scope listed as pending in a detail list that
+// also carries offenders. The two say opposite things about the same city, and
+// the offenders' entries read `label (policy)`, so a bare label beside them
+// would read as one more misconfigured scope.
+const pendingScopeDetailSuffix = "(still initializing)"
+
 // proxiedBackupRefusal is the single statement of why a proxied scope has no
 // backup. Both the per-rig dolt-backup message and the city-level advisory say
 // it, and they must not drift: `backup*` is in v1.3.0's proxied refusal matrix

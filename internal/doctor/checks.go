@@ -724,6 +724,16 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store ping failed: %v", err)
 		return r
 	}
+	// The structured half of the answer, for the consumers that must not parse
+	// the message below. On a proxied scope it carries gc's read-only account
+	// of bd's proxy — the record, the liveness verdict and its evidence, the
+	// idle policy and both schema cursors — which is what the native-over-proxy
+	// work has to be able to observe before it may use any of it.
+	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
+		Store:           result.Diagnostic.Store,
+		PreflightGate:   result.Diagnostic.PreflightGate,
+		PreflightReason: result.Diagnostic.PreflightReason,
+	})
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
 		// Not a degraded fallback: bd owns the Dolt topology for proxied
 		// scopes and the CLI front door is the only supported store.

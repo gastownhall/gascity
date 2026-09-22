@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
 
 // Observed filesystem state for a per-process path (cwd, --config). The zero
@@ -297,7 +299,11 @@ func classifyDoltProcess(p DoltProcInfo, rigPortByPort map[int]string, homeDir, 
 	}
 
 	cfgPath := extractConfigPath(p.Argv)
-	if argvRunsDBProxyChild(p.Argv) {
+	// The standing guard for the supervisor process itself. Process discovery
+	// only enumerates `dolt sql-server` today, so nothing reaches here with a
+	// supervisor's argv — but if discovery ever widens, bd's own proxy must not
+	// become a candidate.
+	if proxyendpoint.ArgvRunsChild(p.Argv) {
 		return reapClassification{
 			Action: "protect",
 			Reason: "bd db-proxy-child; bd owns this proxy's lifecycle",
