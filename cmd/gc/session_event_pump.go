@@ -28,6 +28,20 @@ import (
 const (
 	sessionEventResyncPokeDelay    = 15 * time.Second
 	sessionEventResyncPokeMaxDefer = time.Minute
+
+	// sessionEventFlowingStaleAfter bounds how long flowing() may report true
+	// after the last observed event. herdr (the only current
+	// SessionEventProvider) retries a broken transport forever, capped at
+	// sessionEventMaxBackoff (5s, internal/runtime/herdr/events.go), without
+	// ever closing the channel — so a transport outage is invisible to
+	// streamGen/observedGen, which only clear on ctx.Done or a channel
+	// close. Without a staleness bound, flowing() would keep reporting true
+	// through the whole outage, and sessionPhaseStretchActive would keep
+	// stretching patrol-driven session scans even though the event path
+	// delivering the "real-time work" it stretches against has gone silent.
+	// 30s is 6x the max reconnect backoff, giving margin for reconnect
+	// latency and scheduling jitter before declaring the stream stale.
+	sessionEventFlowingStaleAfter = 30 * time.Second
 )
 
 // sessionEventPump bridges a provider's push session-event stream
@@ -64,6 +78,11 @@ type sessionEventPump struct {
 	// successful Subscribe call may merely start a disconnected retry loop, so
 	// it is not sufficient evidence for stretching patrol liveness checks.
 	observedGen atomic.Int64
+	// lastEventUnixNano is the receive time (UnixNano) of the most recent
+	// event on the current stream. Used by flowing() to detect a transport
+	// outage that neither closes the channel nor updates streamGen/
+	// observedGen — see sessionEventFlowingStaleAfter.
+	lastEventUnixNano atomic.Int64
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -95,6 +114,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.gen++
 	p.streamGen.Store(0)
 	p.observedGen.Store(0)
+	p.lastEventUnixNano.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
@@ -125,10 +145,22 @@ func (p *sessionEventPump) streaming() bool {
 }
 
 // flowing reports whether the current subscription has actually delivered at
-// least one event (normally its contract-required leading resync).
+// least one event (normally its contract-required leading resync) recently.
+// A stream stuck retrying a broken transport (herdr never closes the
+// channel on a transient failure) stops updating lastEventUnixNano, so
+// flowing() goes false once sessionEventFlowingStaleAfter has elapsed since
+// the last delivered event — even though streamGen/observedGen still report
+// the subscription as established and previously-observed.
 func (p *sessionEventPump) flowing() bool {
 	gen := p.streamGen.Load()
-	return gen != 0 && p.observedGen.Load() == gen
+	if gen == 0 || p.observedGen.Load() != gen {
+		return false
+	}
+	last := p.lastEventUnixNano.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) < sessionEventFlowingStaleAfter
 }
 
 // forward pumps liveness events into the poke channel until the stream ends.
@@ -159,6 +191,7 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 			}
 			if p.streamGen.Load() == gen {
 				p.observedGen.Store(gen)
+				p.lastEventUnixNano.Store(time.Now().UnixNano())
 			}
 			switch ev.Kind {
 			case runtime.SessionEventExited, runtime.SessionEventClosed:

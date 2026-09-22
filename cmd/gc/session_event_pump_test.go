@@ -429,6 +429,46 @@ func streamingPump(t *testing.T) (*sessionEventPump, context.CancelFunc) {
 	return pump, cancel
 }
 
+func TestSessionEventPumpFlowingGoesFalseAfterStaleness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp)
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
+
+	// Simulate elapsed time by backdating the recorded last-event timestamp
+	// directly, rather than racing the still-running forward() goroutine
+	// with an injected clock.
+	realLast := pump.lastEventUnixNano.Load()
+	pump.lastEventUnixNano.Store(time.Now().Add(-(sessionEventFlowingStaleAfter - time.Second)).UnixNano())
+	if !pump.flowing() {
+		t.Error("flowing() went false just under the staleness bound, want true")
+	}
+	pump.lastEventUnixNano.Store(time.Now().Add(-(sessionEventFlowingStaleAfter + time.Second)).UnixNano())
+	if pump.flowing() {
+		t.Error("flowing() = true past the staleness bound with no new events, want false: a stuck herdr reconnect loop retries forever without closing the channel, so streamGen/observedGen alone never detect this outage")
+	}
+	pump.lastEventUnixNano.Store(realLast)
+
+	// A fresh event resets the staleness clock.
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline = time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Error("flowing() did not recover after a fresh event arrived")
+	}
+}
+
 func TestSessionPhasesDueDoesNotStretchBeforeEventFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
