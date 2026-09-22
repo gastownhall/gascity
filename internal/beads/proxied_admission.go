@@ -33,7 +33,7 @@ type ProviderOps interface {
 	Recover(ctx context.Context, scopeRoot string) error
 }
 
-// GenerationSet is a process-local set of proxy generations.
+// GenerationSet is a process-local set of proxy generations, with a TTL.
 //
 // Two of them bound the escalation ladder across the many opens a single gc
 // command performs: one records generations a ping has already proven healthy,
@@ -46,18 +46,46 @@ type ProviderOps interface {
 // databases — a rig sharing its city's proxy root differs from the city in the
 // database alone, and recovering for the rig would otherwise look unrecovered
 // to the city.
+//
+// # Why the entries expire (council A-F5)
+//
+// They did not, and the set is process-lifetime. On a one-shot command that is
+// the same thing; on a controller or an api server it is not, and the
+// difference is an operator-visible fault.
+//
+// A long-running gc pings a scope at boot, which records that generation as one
+// a rung has been spent on. Two hours later that generation's Dolt child is
+// OOM-killed: the endpoint accepts and never greets, the ladder walks its three
+// probes, reaches the ping rung, finds the generation already "spent" — and
+// falls straight through to the RECOVER rung. Recover is the provider script's
+// `provider_owned_retire_local_dolt` (`bd dolt stop`) plus `bd ping`, and the
+// script's own comment says that for a city root this takes down the one proxy
+// and Dolt child serving hq and every other rig, under live agents. A plain
+// `bd ping` — which the script documents as blocking until the Dolt child
+// reports ready — would have fixed it without cycling anything.
+//
+// The design's memo (3.3 step 2) exists to dedupe the many opens of ONE
+// command. generationMemoTTL is that window made explicit: long enough that no
+// single command or burst of opens buys the same answer twice, short enough
+// that an hours-old ping is not mistaken for a rung this incident has spent.
 type GenerationSet struct {
 	mu   sync.Mutex
-	seen map[string]struct{}
+	seen map[string]time.Time
+	ttl  time.Duration
+	now  func() time.Time
 }
 
-// NewGenerationSet returns an empty set.
+// generationMemoTTL is how long a spent rung stays spent. See GenerationSet.
+const generationMemoTTL = 5 * time.Minute
+
+// NewGenerationSet returns an empty set with the default TTL.
 func NewGenerationSet() *GenerationSet {
-	return &GenerationSet{seen: map[string]struct{}{}}
+	return &GenerationSet{seen: map[string]time.Time{}, ttl: generationMemoTTL, now: time.Now}
 }
 
-// Add records a generation and reports whether it was NEW, which is how a
-// caller spends an escalation rung exactly once.
+// Add records a generation and reports whether it was NEW — absent, or recorded
+// longer ago than the TTL — which is how a caller spends an escalation rung
+// exactly once per incident rather than once per process.
 func (s *GenerationSet) Add(generation string) bool {
 	if s == nil || generation == "" {
 		return false
@@ -65,24 +93,55 @@ func (s *GenerationSet) Add(generation string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.seen == nil {
-		s.seen = map[string]struct{}{}
+		s.seen = map[string]time.Time{}
 	}
-	if _, ok := s.seen[generation]; ok {
+	now := s.clock()
+	if at, ok := s.seen[generation]; ok && !s.expired(at, now) {
 		return false
 	}
-	s.seen[generation] = struct{}{}
+	s.seen[generation] = now
 	return true
 }
 
-// Has reports whether a generation is already in the set.
+// Release drops a generation, so the rung it stood for may be spent again.
+//
+// It is what keeps a rung that did not actually buy anything from counting: a
+// provider verb that failed for a reason of gc's own — the lifecycle semaphore,
+// the op budget — learned nothing about the proxy, and recording it would poison
+// the scope for the rest of the TTL on the strength of gc's own contention.
+func (s *GenerationSet) Release(generation string) {
+	if s == nil || generation == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.seen, generation)
+}
+
+// Has reports whether a generation is in the set and has not expired.
 func (s *GenerationSet) Has(generation string) bool {
 	if s == nil || generation == "" {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.seen[generation]
-	return ok
+	at, ok := s.seen[generation]
+	return ok && !s.expired(at, s.clock())
+}
+
+func (s *GenerationSet) clock() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
+}
+
+func (s *GenerationSet) expired(at, now time.Time) bool {
+	ttl := s.ttl
+	if ttl <= 0 {
+		ttl = generationMemoTTL
+	}
+	return now.Sub(at) >= ttl
 }
 
 // The process-local defaults, used when a caller supplies no sets. They are
@@ -478,14 +537,27 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 	// the same process skips its ping" true: a generation gc has already asked
 	// bd about does not get asked again just because a second scope opened.
 	if in.Observed.Add(generation) {
-		if err := in.Ops.Ping(ctx, in.ScopeRoot); err == nil {
+		err := in.Ops.Ping(ctx, in.ScopeRoot)
+		switch {
+		case err == nil:
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"pinged the provider; re-admitting", nil)
-		} else if !in.sameGeneration(root, key) {
+		case !in.sameGeneration(root, key):
 			// The ping failed but the generation moved anyway, which is bd
 			// replacing its proxy. Re-admit against whatever is there now.
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the generation moved during the ping; re-admitting", err)
+		default:
+			// The ping failed and nothing moved. That is not evidence that bd
+			// cannot fix this proxy — the failure is as likely to be gc's own
+			// lifecycle semaphore or op budget — so it does NOT cascade into a
+			// `bd dolt stop` in the same pass (council A-F5). The rung is
+			// released so a later open may ask again, and the answer is
+			// non-terminal so the next open re-admits from the top.
+			in.Observed.Release(generation)
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the endpoint accepts and never greets, and the provider ping failed; "+
+					"not escalating to a recover on a failure that says nothing about the proxy", err)
 		}
 	}
 

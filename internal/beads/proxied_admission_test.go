@@ -843,3 +843,106 @@ func TestProxiedPinMemoTTLIsCapped(t *testing.T) {
 		}
 	})
 }
+
+// TestGenerationSetRungsExpire is council A-F5.
+//
+// The escalation ledgers were process-lifetime sets. On a one-shot command that
+// is indistinguishable from the design's "dedupe the many opens of one
+// command"; on a controller or an api server it is not, and the difference is
+// an operator-visible fault: a generation pinged at boot is still "spent" two
+// hours later, so when that generation's Dolt child is OOM-killed the ladder
+// skips the ping rung it would have been fixed by and escalates straight to
+// `bd dolt stop` — which on a city root takes down the one proxy and Dolt child
+// serving hq and every other rig, under live agents.
+func TestGenerationSetRungsExpire(t *testing.T) {
+	now := time.Now()
+	set := NewGenerationSet()
+	set.now = func() time.Time { return now }
+
+	if !set.Add("6001:abcd") {
+		t.Fatal("the first Add did not report the generation as new")
+	}
+	if set.Add("6001:abcd") {
+		t.Fatal("a second Add inside the TTL spent the rung again; one command's many opens must share it")
+	}
+	if !set.Has("6001:abcd") {
+		t.Fatal("Has does not see a generation recorded a moment ago")
+	}
+
+	// One second before the boundary: still spent, because the whole point is
+	// that a burst of opens shares one answer.
+	now = now.Add(generationMemoTTL - time.Second)
+	if set.Add("6001:abcd") {
+		t.Fatal("the rung expired early")
+	}
+
+	// And after it: a NEW incident, on a generation whose rung was spent long
+	// ago, gets its ping.
+	now = now.Add(2 * time.Second)
+	if set.Has("6001:abcd") {
+		t.Error("Has reports an expired rung as spent")
+	}
+	if !set.Add("6001:abcd") {
+		t.Fatalf("a rung spent %s ago is still spent; a proxy that goes silent hours after gc pinged it "+
+			"skips the ping and escalates straight to `bd dolt stop`", generationMemoTTL)
+	}
+
+	// Release is the other half: a rung that bought nothing does not count.
+	if !set.Add("7001:beef") {
+		t.Fatal("the first Add of a fresh generation did not report it as new")
+	}
+	if set.Add("7001:beef") {
+		t.Fatal("the rung was not recorded, so Release below would prove nothing")
+	}
+	set.Release("7001:beef")
+	if !set.Add("7001:beef") {
+		t.Fatal("Release did not free the rung")
+	}
+}
+
+// TestZombieLadderDoesNotRecoverOnAFailedPing is the second half of A-F5.
+//
+// A provider ping can fail for reasons that are entirely gc's — the lifecycle
+// semaphore, the op budget — and none of them is evidence that bd cannot make
+// its proxy healthy. Cascading into `bd dolt stop` in the same pass spends the
+// most destructive rung in the ladder on gc's own contention.
+func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ops := &admissionOps{onPing: func() error {
+		return errors.New("provider op timed out waiting on the lifecycle semaphore")
+	}}
+
+	in := baseAdmissionInput(f, ops)
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+	}
+
+	_, err := Admit(context.Background(), in)
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok {
+		t.Fatalf("Admit error = %v, want a typed verdict", err)
+	}
+	if verdict.Terminal() {
+		t.Errorf("a ping that failed on gc's own semaphore says nothing about the proxy, "+
+			"so the refusal must be non-terminal: %v", verdict)
+	}
+	pings, recovers := ops.counts()
+	if recovers != 0 {
+		t.Fatalf("a failed ping cascaded into %d recover(s) in the same pass; `bd dolt stop` on a city "+
+			"root takes down the proxy serving hq and every rig", recovers)
+	}
+	if pings != 1 {
+		t.Errorf("the ladder spent %d ping(s), want 1", pings)
+	}
+
+	// The rung was released, so a later open — when the semaphore is free — may
+	// ask bd again instead of finding the scope poisoned.
+	ops.onPing = nil
+	if _, err := Admit(context.Background(), in); err == nil {
+		t.Fatal("the second admission admitted a proxy that still never greets")
+	}
+	if pings, _ := ops.counts(); pings != 2 {
+		t.Fatalf("the second open spent %d ping(s) in total, want 2: a ping that failed for gc's own "+
+			"reason must not count as the rung", pings)
+	}
+}
