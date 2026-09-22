@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
-	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
@@ -15,12 +13,25 @@ import (
 // sidecar's root_path when either is set. The sql-server child is launched
 // with --config pointing at that config.yaml, and proxy.pid is the proxy's own
 // liveness record.
-const (
-	bdProxyConfigFileName = "config.yaml"
-	bdProxyPIDFileName    = "proxy.pid"
-	bdProxyRecordKind     = "db-proxy"
-	bdProxyRootFlagName   = "--root"
-)
+//
+// The layout, the record schema and the supervisor's argv shape are read by
+// internal/beads/proxyendpoint, gc's one reader of bd's proxy files. The reaper
+// held the only copy of that parser and now shares it.
+//
+// What the reaper deliberately does NOT share is the question.
+// proxyendpoint.Validate answers "may gc dial this endpoint", which also
+// demands a schema-2 record, a birth token and a matching root identity. The
+// reaper asks the narrower "is this process bd's, so that reaping it would
+// reap bd's proxy" — and that answer has to stay yes for a record too old or
+// too sparse to dial, because a process gc cannot identify well enough to talk
+// to is still a process gc must not kill.
+//
+// That is also why it reads the record through proxyendpoint.ReadOwnership
+// rather than Read: encoding/json fails a whole decode on a type mismatch in
+// ANY field, so a proxy.pid from a newer bd — birth promoted to an object,
+// schema written as a string — would read as "no record" through the strict
+// decoder and unprotect a live proxy over a field the reaper never consults.
+const bdProxyConfigFileName = proxyendpoint.ConfigFileName
 
 // bdProxyPIDAlive and bdProxyProcessArgv are the process-table reads that
 // decide whether a proxy.pid record still describes bd's proxy. Both are
@@ -30,15 +41,6 @@ var (
 	bdProxyPIDAlive    = pidutil.Alive
 	bdProxyProcessArgv = pidutil.Cmdline
 )
-
-// bdProxyPIDRecord is the subset of bd's proxy.pid JSON gc needs to prove
-// ownership. The full record also carries upstream_id, birth, root_id and
-// control_port; gc reads none of those.
-type bdProxyPIDRecord struct {
-	PID  int    `json:"pid"`
-	Port int    `json:"port"`
-	Kind string `json:"kind"`
-}
 
 // bdOwnedProxyDoltConfig reports whether configPath is the sql-server config
 // of a bd proxy root whose proxy.pid names a live `bd db-proxy-child` for that
@@ -90,60 +92,19 @@ func bdOwnedProxyDoltConfig(configPath string) (int, bool) {
 		return 0, false
 	}
 	root := filepath.Dir(filepath.Clean(configPath))
-	data, err := os.ReadFile(filepath.Join(root, bdProxyPIDFileName))
+	record, err := proxyendpoint.ReadOwnership(root)
 	if err != nil {
 		return 0, false
 	}
-	var record bdProxyPIDRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		return 0, false
-	}
-	if record.Kind != bdProxyRecordKind || record.PID <= 0 {
+	if record.Kind != proxyendpoint.RecordKind || record.PID <= 0 {
 		return 0, false
 	}
 	if !bdProxyPIDAlive(record.PID) {
 		return 0, false
 	}
 	argv, err := bdProxyProcessArgv(record.PID)
-	if err != nil || !argvRunsDBProxyChild(argv) || !argvNamesProxyRoot(argv, root) {
+	if err != nil || !proxyendpoint.ArgvRunsChild(argv) || !proxyendpoint.ArgvMentionsRoot(argv, root) {
 		return 0, false
 	}
 	return record.PID, true
-}
-
-// argvNamesProxyRoot reports whether argv carries `--root <root>`, comparing
-// resolved so a symlinked spelling of the same directory still matches.
-func argvNamesProxyRoot(argv []string, root string) bool {
-	root = normalizePathForCompare(root)
-	if root == "" {
-		return false
-	}
-	for i, arg := range argv {
-		value := ""
-		switch {
-		case arg == bdProxyRootFlagName && i+1 < len(argv):
-			value = argv[i+1]
-		case strings.HasPrefix(arg, bdProxyRootFlagName+"="):
-			value = strings.TrimPrefix(arg, bdProxyRootFlagName+"=")
-		default:
-			continue
-		}
-		if value != "" && samePath(value, root) {
-			return true
-		}
-	}
-	return false
-}
-
-// argvRunsDBProxyChild reports whether argv invokes bd's proxy-supervisor
-// verb. It deliberately ignores argv[0]: bd execs the child as
-// os.Executable(), so the filename is the operator's choice, not a contract.
-//
-// Used two ways, both of which only ever protect: as half of the ownership
-// proof above, where the --root match carries the evidence; and as the
-// reaper's standing guard for the supervisor process itself. Process discovery
-// only enumerates `dolt sql-server` today, so the guard is not a live path —
-// but if discovery ever widens, the supervisor must not become a candidate.
-func argvRunsDBProxyChild(argv []string) bool {
-	return len(argv) >= 2 && argv[1] == "db-proxy-child"
 }
