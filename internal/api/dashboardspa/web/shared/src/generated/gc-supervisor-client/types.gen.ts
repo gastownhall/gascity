@@ -465,6 +465,7 @@ export type BeadsDiagnostic = {
     native_store_eligible: boolean;
     preflight_gate?: string;
     preflight_reason?: string;
+    proxied?: ProxiedDiagnostic;
 };
 
 /**
@@ -819,6 +820,11 @@ export type ConvoyRemoveInputBody = {
      * Bead IDs to remove.
      */
     items?: Array<string> | null;
+};
+
+export type Cursors = {
+    ignored: number;
+    main: number;
 };
 
 export type DeliveryContextRecord = {
@@ -2612,6 +2618,22 @@ export type ProviderUpdateInputBody = {
      * Milliseconds to wait before probing readiness.
      */
     ready_delay_ms?: number;
+};
+
+export type ProxiedDiagnostic = {
+    cursors: Cursors;
+    demoted?: boolean;
+    detail?: string;
+    endpoint: ProxiedEndpointStamp;
+    evidence?: string;
+    idle_policy?: string;
+    verdict?: string;
+};
+
+export type ProxiedEndpointStamp = {
+    generation?: string;
+    pid?: number;
+    port?: number;
 };
 
 export type PublishReceipt = {

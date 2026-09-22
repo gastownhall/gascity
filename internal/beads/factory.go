@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -58,6 +60,84 @@ type BeadsDiagnostic struct {
 	NativeStoreEligible bool   `json:"native_store_eligible"`
 	PreflightGate       string `json:"preflight_gate,omitempty"`
 	PreflightReason     string `json:"preflight_reason,omitempty"`
+
+	// Proxied carries the proxied-native lane's account of this open, and is
+	// nil on every other lane.
+	//
+	// It is a new omitempty field rather than a change to any existing one, on
+	// purpose: `gc doctor --json` and the topology matrix assert on this struct
+	// today, and a proxied scope with the rollout flag OFF must serialize
+	// byte-identically to what it serializes now. The proxied lane adds a
+	// field; it never repurposes one.
+	Proxied *ProxiedDiagnostic `json:"proxied,omitempty"`
+}
+
+// ProxiedEndpointStamp identifies the proxy generation an open was pinned to.
+//
+// Generation is the {pid, birth} pair proxyendpoint.PoolKey derives, not a
+// counter: a proxy that dies and is restarted at the same port and even the
+// same pid is a DIFFERENT generation, and a reader comparing ports alone would
+// call two databases one.
+type ProxiedEndpointStamp struct {
+	Port       int    `json:"port,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	Generation string `json:"generation,omitempty"`
+}
+
+// ProxiedDiagnostic is the proxied-native lane's account of one store open.
+//
+// It sits BESIDE doctor's own independent endpoint inspection rather than
+// replacing it, so the two can disagree visibly. That is the point: the store's
+// account is what gc decided at open, doctor's is what the endpoint looks like
+// now, and an operator debugging a proxied city needs to see both in order to
+// tell "the proxy changed under us" from "gc read it wrong".
+type ProxiedDiagnostic struct {
+	// Endpoint is the generation this open pinned. Zero when admission refused
+	// before it resolved one.
+	Endpoint ProxiedEndpointStamp `json:"endpoint"`
+	// Evidence names how the proxy's liveness was established (argv, birth
+	// token, and so on) — proxyendpoint.Evidence rendered.
+	Evidence string `json:"evidence,omitempty"`
+	// IdlePolicy is the proxy's idle-timeout shape: never, or finite.
+	IdlePolicy string `json:"idle_policy,omitempty"`
+	// Cursors are the database's two migration cursors as the probe read them
+	// straight off disk.
+	Cursors proxyendpoint.Cursors `json:"cursors"`
+	// Verdict is why the lane refused, empty when it did not.
+	Verdict ProxiedVerdict `json:"verdict,omitempty"`
+	// Detail carries an unexpected opener failure's text. A verdict refusal
+	// leaves it empty: the verdict IS the explanation.
+	Detail string `json:"detail,omitempty"`
+	// Demoted reports that a handle which had been serving natively has
+	// dropped to the bd leaf. One-way; the wrapper never promotes.
+	Demoted bool `json:"demoted,omitempty"`
+}
+
+// ProxiedOpenReport is what a proxied opener tells the factory about the open
+// it attempted.
+//
+// It is returned on FAILURE as well as success, because a refusal that also
+// reports which generation it was looking at and which cursors it read is a
+// diagnostic, and one that reports only a verdict string is a mystery.
+type ProxiedOpenReport struct {
+	Endpoint   ProxiedEndpointStamp
+	Evidence   string
+	IdlePolicy string
+	Cursors    proxyendpoint.Cursors
+	Demoted    bool
+}
+
+// diagnostic projects the report, plus whatever ended the open, onto the wire.
+func (r ProxiedOpenReport) diagnostic(verdict ProxiedVerdict, detail string) *ProxiedDiagnostic {
+	return &ProxiedDiagnostic{
+		Endpoint:   r.Endpoint,
+		Evidence:   r.Evidence,
+		IdlePolicy: r.IdlePolicy,
+		Cursors:    r.Cursors,
+		Verdict:    verdict,
+		Detail:     detail,
+		Demoted:    r.Demoted,
+	}
 }
 
 // StoreOpenOptions holds dependencies for opening a beads Store.
@@ -71,6 +151,28 @@ type StoreOpenOptions struct {
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
 	OpenNativeStore  func() (Store, error)
+
+	// OpenProxiedStore opens the split store for a proxied-server scope:
+	// reads on a native handle over bd's proxy data port, mutations on the bd
+	// leaf. It is consulted ONLY when the persisted topology is
+	// proxied-server, GC_BEADS_PROXIED_NATIVE is on, and it is non-nil — so a
+	// composition root that has not been taught about the lane, and every
+	// binary with the flag off, take exactly the path they take today.
+	//
+	// longLived is threaded through the call rather than captured by the
+	// closure so one opener per scope serves both shapes: the controller holds
+	// its store for the process lifetime, a one-shot command does not, and the
+	// idle-policy rule turns on that difference.
+	//
+	// The report comes back on failure as well as success, because a refusal
+	// that names the generation it was looking at is a diagnostic and one that
+	// names only a verdict is a mystery.
+	OpenProxiedStore func(ctx context.Context, longLived bool) (Store, ProxiedOpenReport, error)
+
+	// LongLived says whether the store this open produces will be held for the
+	// process lifetime (a controller or rig store) rather than used once and
+	// dropped.
+	LongLived bool
 
 	// ConditionalWrites is the resolved city-global beads.conditional_writes
 	// mode, stamped onto every store this open produces and latched for the
@@ -181,7 +283,16 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	// unreachable"). The gate a reader sees has to name the reason that
 	// actually decided.
 	if diag, refused := persistedDoltModeRefusal(opts.ScopeRoot); refused {
-		if diag.PreflightGate != proxiedProviderGate {
+		if diag.PreflightGate == proxiedProviderGate {
+			// The proxied arm sits between the persisted-topology refusal and
+			// preflight, and preflight is deliberately NEVER reached for a
+			// proxied scope: its bd-context probe would add a fork per open,
+			// and `bd context` restarts a stopped proxy — so re-enabling it
+			// here would make a diagnostic path change the city.
+			if served, result, err := opts.openProxiedNative(ctx, &diag); served {
+				return result, err
+			}
+		} else {
 			logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
 		}
 		return opts.openBdFallback(provider, diag)
@@ -232,6 +343,61 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 			NativeStoreEligible: true,
 		},
 	}, nil)
+}
+
+// openProxiedNative is the proxied-server arm.
+//
+// It reports served=true only when the split store is open and is the result
+// the caller should return. On every other outcome it reports served=false,
+// having annotated diag with the lane's account, and the caller falls through
+// to the bd front door — which is the SAME fallback a proxied scope takes
+// today, under the SAME gate. PreflightGate stays proxied_provider on purpose:
+// doctor's matcher keys on that value, and a healthy fallback is not a
+// degradation to be renamed. The verdict rides in the new omitempty field.
+//
+// Three guards decide whether the lane is even consulted, and all three must
+// pass: the rollout flag, a non-nil opener, and a persisted proxied-server
+// topology (the caller's condition). Nothing else in this function can turn
+// the lane on.
+func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsDiagnostic) (bool, StoreOpenResult, error) {
+	if !proxiedNativeEnabled() || opts.OpenProxiedStore == nil {
+		return false, StoreOpenResult{}, nil
+	}
+	store, report, err := opts.OpenProxiedStore(ctx, opts.LongLived)
+	if err == nil && store != nil {
+		result, stampErr := opts.stampedResult(StoreOpenResult{
+			Store: store,
+			Diagnostic: BeadsDiagnostic{
+				// The flag-on lane reports the store it actually is. There is
+				// no "ProxiedStore" name on the wire: the reads a caller gets
+				// are a NativeDoltStore's, and inventing a third store name
+				// would break every consumer that already knows two.
+				Store:               storeNameNativeDoltStore,
+				NativeStoreEligible: true,
+				Proxied:             report.diagnostic(ProxiedVerdictNone, ""),
+			},
+		}, nil)
+		return true, result, stampErr
+	}
+	if err == nil {
+		err = errors.New("proxied store opener returned no store and no error")
+	}
+	if verdictErr, ok := ProxiedVerdictOf(err); ok {
+		// An expected refusal. The bd front door is the designed outcome, so
+		// this is not logged as an outage: proxied_provider is the one gate
+		// logNativeUnavailable deliberately stays quiet about, and a warning
+		// per open on every scope of a healthy Finite-idle city would be noise
+		// an operator learns to ignore.
+		diag.Proxied = report.diagnostic(verdictErr.Verdict, "")
+		return false, StoreOpenResult{}, nil
+	}
+	// An UNTYPED failure is a different thing: admission is supposed to name
+	// every outcome, so this is a bug or an unhandled shape. The city still
+	// gets its store -- an operator who turned on a rollout flag must not lose
+	// a city to it -- but loudly, and with the text preserved.
+	diag.Proxied = report.diagnostic(ProxiedVerdictNone, err.Error())
+	logNativeUnavailable(opts.Logger, opts.ScopeRoot, proxiedProviderGate, err.Error())
+	return false, StoreOpenResult{}, nil
 }
 
 func (opts StoreOpenOptions) openBdFallback(provider string, diag BeadsDiagnostic) (StoreOpenResult, error) {

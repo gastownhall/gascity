@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -792,5 +794,338 @@ func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	}
 	if mode, _ := carrier.conditionalWritesMode(); mode != gate.Require {
 		t.Fatalf("stamped mode = %q, want require", mode)
+	}
+}
+
+// proxiedScopeFixture writes the metadata.json that makes a scope
+// proxied-server: the only authority persistedDoltModeRefusal accepts for that
+// topology.
+func proxiedScopeFixture(t *testing.T) string {
+	t.Helper()
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return scope
+}
+
+// refusingPreflightChecker fails the test if preflight runs at all.
+//
+// Preflight must never be reached on a proxied scope, in EITHER flag lane. Its
+// bd-context probe is a fork per open, and `bd context` starts a stopped proxy
+// -- so a diagnostic path that ran here would both cost the fork the lane
+// exists to remove and change the city it was asked to describe.
+func refusingPreflightChecker(t *testing.T) contract.PreflightChecker {
+	t.Helper()
+	return contract.PreflightChecker{
+		FS:                  fsys.NewFake(),
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (contract.PreflightBDContext, error) {
+			t.Error("preflight ran on a proxied scope: that is a bd fork per open, and bd context restarts a stopped proxy")
+			return contract.PreflightBDContext{}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			t.Error("preflight read the database project id on a proxied scope")
+			return "", false, nil
+		},
+	}
+}
+
+func proxiedOpenReportFixture() ProxiedOpenReport {
+	return ProxiedOpenReport{
+		Endpoint:   ProxiedEndpointStamp{Port: 44561, PID: 6001, Generation: "6001:44556677"},
+		Evidence:   "argv+birth",
+		IdlePolicy: "never",
+		Cursors:    proxyendpoint.Cursors{Main: SchemaCursorMain, Ignored: SchemaCursorIgnored},
+	}
+}
+
+// TestOpenStoreAtForCityProxiedFlagOffKeepsProviderGate is the rollout fence.
+//
+// With GC_BEADS_PROXIED_NATIVE unset, a proxied scope must take the path it
+// takes today, down to the serialized bytes: the same store, the same gate, the
+// same reason, and NO new field. `gc doctor --json` and the topology matrix
+// both assert on this struct, so "flag off is byte-identical" is checked as
+// bytes rather than field by field -- a field-by-field check passes a struct
+// that grew a `"proxied":null`.
+func TestOpenStoreAtForCityProxiedFlagOffKeepsProviderGate(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "")
+	scope := proxiedScopeFixture(t)
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: refusingPreflightChecker(t),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		LongLived:        true,
+		OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+			t.Fatal("the proxied opener ran with GC_BEADS_PROXIED_NATIVE unset")
+			return nil, ProxiedOpenReport{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if result.Store != Store(fallback) {
+		t.Fatalf("Store = %T, want the bd fallback", result.Store)
+	}
+	if result.Diagnostic.Proxied != nil {
+		t.Errorf("flag-off diagnostic carries a proxied account: %+v", result.Diagnostic.Proxied)
+	}
+
+	encoded, err := json.Marshal(result.Diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"beads_store":"BdStore","native_store_eligible":false,"preflight_gate":"proxied_provider","preflight_reason":"proxied-server mode is owned by the bd provider"}`
+	if string(encoded) != want {
+		t.Fatalf("flag-off diagnostic JSON =\n  %s\nwant\n  %s\nThe proxied lane may ADD an omitempty field; it may never change what a flag-off open serializes.",
+			encoded, want)
+	}
+}
+
+// TestOpenStoreAtForCityProxiedFlagOnUsesProxiedOpenerAndReportsNativeDoltStore
+// is the arm itself.
+//
+// The store name is the part worth pinning: the flag-on lane reports
+// NativeDoltStore, not a third name. What a caller gets back IS a native
+// handle's reads, and inventing "ProxiedStore" on the wire would break every
+// consumer that already knows exactly two store names.
+func TestOpenStoreAtForCityProxiedFlagOnUsesProxiedOpenerAndReportsNativeDoltStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "1")
+	scope := proxiedScopeFixture(t)
+	proxied := NewMemStore()
+
+	calls, gotLongLived := 0, false
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: refusingPreflightChecker(t),
+		LongLived:        true,
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("the bd fallback opened on a healthy proxied native open")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("the DIRECT native opener ran for a proxied scope")
+			return nil, nil
+		},
+		OpenProxiedStore: func(_ context.Context, longLived bool) (Store, ProxiedOpenReport, error) {
+			calls++
+			gotLongLived = longLived
+			return proxied, proxiedOpenReportFixture(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the proxied opener ran %d times, want exactly 1", calls)
+	}
+	if !gotLongLived {
+		t.Error("LongLived did not reach the opener; the idle-policy rule turns on it")
+	}
+	if result.Store != Store(proxied) {
+		t.Fatalf("Store = %T, want the proxied store", result.Store)
+	}
+	if result.Diagnostic.Store != BeadsStoreNameNativeDoltStore {
+		t.Errorf("beads_store = %q, want %q", result.Diagnostic.Store, BeadsStoreNameNativeDoltStore)
+	}
+	if !result.Diagnostic.NativeStoreEligible {
+		t.Error("native_store_eligible = false on a served proxied native open")
+	}
+	if result.Diagnostic.PreflightGate != "" {
+		t.Errorf("preflight_gate = %q, want empty: nothing refused this open", result.Diagnostic.PreflightGate)
+	}
+	proxiedDiag := result.Diagnostic.Proxied
+	if proxiedDiag == nil {
+		t.Fatal("a served proxied open reported no proxied account")
+	}
+	if proxiedDiag.Verdict != ProxiedVerdictNone {
+		t.Errorf("verdict = %q on a served open, want empty", proxiedDiag.Verdict)
+	}
+	if proxiedDiag.Endpoint.Generation != "6001:44556677" || proxiedDiag.Endpoint.Port != 44561 {
+		t.Errorf("endpoint = %+v, want the pinned generation", proxiedDiag.Endpoint)
+	}
+	if proxiedDiag.Cursors.Main != SchemaCursorMain || proxiedDiag.IdlePolicy != "never" {
+		t.Errorf("proxied account = %+v, want the probed cursors and idle policy", proxiedDiag)
+	}
+	// The stamp still reaches the store: the proxied arm funnels through
+	// stampedResult like every other selection path.
+	carrier, ok := result.Store.(conditionalWritesModeCarrier)
+	if !ok {
+		t.Fatal("the proxied store carries no conditional-writes stamp")
+	}
+	if _, defaulted := carrier.conditionalWritesMode(); !defaulted {
+		t.Error("an unthreaded conditional-writes mode did not default on the proxied arm")
+	}
+}
+
+// TestOpenStoreAtForCityProxiedVerdictFallsBackKeepingTheGate pins the healthy
+// fallback.
+//
+// A refusal is an expected outcome, not a degradation, so the scope takes the
+// SAME bd front door under the SAME proxied_provider gate it takes today --
+// internal/doctor keys its proxied branch on that exact value, and renaming it
+// for a lane the operator may not even have enabled would break a matcher for
+// everybody. The verdict rides in the additive field.
+func TestOpenStoreAtForCityProxiedVerdictFallsBackKeepingTheGate(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "true")
+	scope := proxiedScopeFixture(t)
+	fallback := NewMemStore()
+
+	report := proxiedOpenReportFixture()
+	report.Cursors = proxyendpoint.Cursors{Main: SchemaCursorMain + 1, Ignored: SchemaCursorIgnored}
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: refusingPreflightChecker(t),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+			return nil, report, NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "main=67 pinned=66")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if result.Store != Store(fallback) {
+		t.Fatalf("Store = %T, want the bd fallback", result.Store)
+	}
+	if result.Diagnostic.Store != BeadsStoreNameBdStore {
+		t.Errorf("beads_store = %q, want BdStore", result.Diagnostic.Store)
+	}
+	if result.Diagnostic.PreflightGate != BeadsGateProxiedProvider {
+		t.Fatalf("preflight_gate = %q, want proxied_provider unchanged: internal/doctor matches on it", result.Diagnostic.PreflightGate)
+	}
+	if result.Diagnostic.PreflightReason != "proxied-server mode is owned by the bd provider" {
+		t.Errorf("preflight_reason = %q, want today's text unchanged", result.Diagnostic.PreflightReason)
+	}
+	proxiedDiag := result.Diagnostic.Proxied
+	if proxiedDiag == nil {
+		t.Fatal("a refused proxied open reported no verdict")
+	}
+	if proxiedDiag.Verdict != ProxiedVerdictSchemaSkew {
+		t.Errorf("verdict = %q, want schema_skew", proxiedDiag.Verdict)
+	}
+	if proxiedDiag.Detail != "" {
+		t.Errorf("detail = %q on a typed verdict; the verdict IS the explanation", proxiedDiag.Detail)
+	}
+	// The refusal still carries what it saw, which is the difference between a
+	// diagnostic and a mystery.
+	if proxiedDiag.Cursors.Main != SchemaCursorMain+1 || proxiedDiag.Endpoint.Port != 44561 {
+		t.Errorf("proxied account = %+v, want the cursors and endpoint the refusal observed", proxiedDiag)
+	}
+}
+
+// TestOpenStoreAtForCityProxiedUntypedErrorFallsBackLoudly separates the two
+// failure shapes. Admission is supposed to name every outcome, so an untyped
+// error is a bug or an unhandled case. The city still gets a store -- an
+// operator who turned on a rollout flag must not lose a city to it -- but the
+// text is preserved and the fallback is logged, where a typed verdict is
+// deliberately silent.
+func TestOpenStoreAtForCityProxiedUntypedErrorFallsBackLoudly(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "1")
+	scope := proxiedScopeFixture(t)
+	fallback := NewMemStore()
+
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		Logger:           logger,
+		PreflightChecker: refusingPreflightChecker(t),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+			return nil, ProxiedOpenReport{}, errors.New("nobody classified this")
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if result.Store != Store(fallback) {
+		t.Fatalf("Store = %T, want the bd fallback", result.Store)
+	}
+	if result.Diagnostic.Proxied == nil || result.Diagnostic.Proxied.Detail != "nobody classified this" {
+		t.Fatalf("proxied account = %+v, want the untyped error text preserved", result.Diagnostic.Proxied)
+	}
+	if result.Diagnostic.Proxied.Verdict != ProxiedVerdictNone {
+		t.Errorf("verdict = %q, want empty: nothing classified this failure", result.Diagnostic.Proxied.Verdict)
+	}
+	if !strings.Contains(logged.String(), "nobody classified this") {
+		t.Errorf("an unclassified proxied failure was not logged:\n%s", logged.String())
+	}
+}
+
+// TestOpenStoreAtForCityProxiedForceFallbackWinsOverTheFlag pins the escape
+// hatch's precedence. GC_BEADS_FORCE_FALLBACK is checked before the persisted
+// topology is even read, so an operator turning it on gets BdStore on a box
+// where the proxied lane is enabled -- which is the entire value of an escape
+// hatch.
+func TestOpenStoreAtForCityProxiedForceFallbackWinsOverTheFlag(t *testing.T) {
+	t.Setenv(proxiedNativeEnv, "1")
+	t.Setenv(nativeForceFallbackEnv, "1")
+	scope := proxiedScopeFixture(t)
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: refusingPreflightChecker(t),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+			t.Fatal("the proxied opener ran with GC_BEADS_FORCE_FALLBACK=1")
+			return nil, ProxiedOpenReport{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if result.Store != Store(fallback) {
+		t.Fatalf("Store = %T, want the bd fallback", result.Store)
+	}
+	if result.Diagnostic.PreflightGate != nativeForceFallbackGate {
+		t.Fatalf("preflight_gate = %q, want force_fallback", result.Diagnostic.PreflightGate)
+	}
+	if result.Diagnostic.Proxied != nil {
+		t.Errorf("the force-fallback arm reported a proxied account: %+v", result.Diagnostic.Proxied)
+	}
+}
+
+// TestOpenStoreAtForCityProxiedFlagOnWithoutAnOpenerFallsBack covers the
+// binary that has the flag but not the wiring: the lane needs BOTH the flag
+// and a composition root that supplied an opener, so a partially-rolled-out
+// build behaves exactly like flag-off.
+func TestOpenStoreAtForCityProxiedFlagOnWithoutAnOpenerFallsBack(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "1")
+	scope := proxiedScopeFixture(t)
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: refusingPreflightChecker(t),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity: %v", err)
+	}
+	if result.Store != Store(fallback) || result.Diagnostic.PreflightGate != BeadsGateProxiedProvider {
+		t.Fatalf("result = (%T, %+v), want the bd fallback under proxied_provider", result.Store, result.Diagnostic)
+	}
+	if result.Diagnostic.Proxied != nil {
+		t.Errorf("an unwired binary reported a proxied account: %+v", result.Diagnostic.Proxied)
 	}
 }
