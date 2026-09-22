@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -11,6 +12,83 @@ import (
 // gc-beads-bd.sh goes through: the inline default and the bd_bin local the
 // proxied paths resolve first.
 var bdForkSpellings = []string{`"${BD_BIN:-bd}"`, `"$bd_bin"`}
+
+// bdChokepointSpellings are the spellings a line may legitimately contain when
+// it names the bd binary: the two fork chokepoints, and the assignment that
+// resolves the local. Anything else — "$BD_BIN", ${BD_BIN}, $bd_bin unquoted —
+// runs bd past the census bdForkSpellings counts.
+var bdChokepointSpellings = []string{`"${BD_BIN:-bd}"`, `"$bd_bin"`, `bd_bin=`}
+
+// bareBdFork matches `bd` used as a command: at the start of a line or after a
+// separator, with nothing quoting it. The two chokepoints are quoted, so they
+// are removed before this runs (see shellCode with dropQuoted).
+var bareBdFork = regexp.MustCompile(`(?:^|[;&|(]|&&|\|\||\bexec\b|\bthen\b|\bdo\b)[[:space:]]*bd(?:[[:space:]]|$)`)
+
+// jsonlTraceRedirect matches a redirection into the JSONL trace file in any
+// spelling: >> or >, any spacing, braced or bare, quoted or not. Pinning the one
+// byte sequence `>>"$GC_BD_TRACE_JSON"` left `>> "$GC_BD_TRACE_JSON"` and
+// `>>"${GC_BD_TRACE_JSON}"` passing, which is the same hole the fork lint had.
+var jsonlTraceRedirect = regexp.MustCompile(`>>?[[:space:]]*"?\$\{?GC_BD_TRACE_JSON`)
+
+// shellCode returns line with comments removed, and — when dropQuoted is set —
+// quoted text removed too.
+//
+// It is a lint's approximation of the shell's lexer, not the shell's lexer: it
+// tracks single and double quotes and treats an unquoted `#` at the start of a
+// word as a comment. That is enough to keep prose out of the scan. Without it
+// `die "bd $version cannot initialize …"` reads as a bd fork, which is how the
+// bare-word check would have cried wolf on its first run.
+func shellCode(line string, dropQuoted bool) string {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			if !dropQuoted {
+				out.WriteByte(c)
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"':
+			quote = c
+			if dropQuoted {
+				out.WriteByte(' ')
+			} else {
+				out.WriteByte(c)
+			}
+		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t'):
+			return out.String()
+		default:
+			out.WriteByte(c)
+		}
+	}
+	return out.String()
+}
+
+// unpinnedBdReference returns the leftover text of a line that names the bd
+// binary outside the chokepoint spellings, or "".
+func unpinnedBdReference(line string) string {
+	code := shellCode(line, false)
+	for _, spelling := range bdChokepointSpellings {
+		code = strings.ReplaceAll(code, spelling, " ")
+	}
+	for _, name := range []string{"BD_BIN", "bd_bin"} {
+		if index := strings.Index(code, name); index >= 0 {
+			return strings.TrimSpace(code[index:])
+		}
+	}
+	return ""
+}
+
+// forksBareBd reports whether line runs `bd` off PATH rather than through the
+// chokepoint.
+func forksBareBd(line string) bool {
+	return bareBdFork.MatchString(shellCode(line, true))
+}
 
 // bdForkSiteCount is how many places the script forks bd. It is pinned because
 // it IS the census: a fork budget is only meaningful against a known number of
@@ -75,6 +153,23 @@ func TestGCBeadsBDScriptTracesEveryBDFork(t *testing.T) {
 
 	forks := 0
 	for i, line := range lines {
+		// The census is only a census if the chokepoint is the only door. A
+		// fork written `"$BD_BIN" "$@"`, `${BD_BIN} "$@"` or as a bare `bd` runs
+		// the same binary and is invisible to bdForkOffset, so the lint refuses
+		// those spellings outright rather than pretending it counted them.
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if leftover := unpinnedBdReference(line); leftover != "" {
+			t.Errorf("gc-beads-bd.sh:%d names the bd binary outside the traced chokepoint:\n  %s\n  (%s)\n"+
+				"use \"${BD_BIN:-bd}\" or the resolved \"$bd_bin\", or the fork is invisible to gc's bd census",
+				i+1, strings.TrimSpace(line), leftover)
+		}
+		if forksBareBd(line) {
+			t.Errorf("gc-beads-bd.sh:%d forks a bare `bd` off PATH:\n  %s\n"+
+				"use \"${BD_BIN:-bd}\" so the fork passes the chokepoint the census counts",
+				i+1, strings.TrimSpace(line))
+		}
 		offset := bdForkOffset(line)
 		if offset < 0 {
 			continue
@@ -109,8 +204,15 @@ func TestGCBeadsBDScriptTracesEveryBDFork(t *testing.T) {
 	if !strings.Contains(script, `[ -n "${GC_BD_TRACE:-}" ] || return 0`) {
 		t.Error("trace_bd_argv is not gated on GC_BD_TRACE; an ordinary run must write nothing")
 	}
-	if strings.Contains(script, `>>"$GC_BD_TRACE_JSON"`) {
-		t.Error("gc-beads-bd.sh writes the JSONL trace, which double-counts every fork a recording BD_BIN shim already records")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if jsonlTraceRedirect.MatchString(line) {
+			t.Errorf("gc-beads-bd.sh:%d writes the JSONL trace:\n  %s\n"+
+				"that file is the fork census's, and writing it here double-counts every fork a recording BD_BIN shim already records",
+				i+1, strings.TrimSpace(line))
+		}
 	}
 	// The other half of that rule, and the one the in-process writer already
 	// honors (bdstore.go newBDExecTrace): when the JSONL trace is claimed, this
@@ -156,6 +258,76 @@ func TestBdForkOffsetSeesMidLineForksAndIgnoresAssignments(t *testing.T) {
 				t.Fatalf("bdForkOffset(%q) >= 0 = %v, want %v", tc.line, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBdForkLintSeesEveryWayOfNamingBd pins the negative half of the census: the
+// spellings that would run bd without passing the chokepoint.
+//
+// bdForkOffset knows two spellings, so "a fork site added later fails this test"
+// held only for forks written with them. `"$BD_BIN"`, `${BD_BIN}` and a bare `bd`
+// are the same fork and were invisible. They are now refused by shape, and the
+// matcher has to tell them from the prose that merely says the word.
+func TestBdForkLintSeesEveryWayOfNamingBd(t *testing.T) {
+	cases := []struct {
+		name         string
+		line         string
+		wantUnpinned bool
+		wantBare     bool
+	}{
+		{name: "the inline chokepoint", line: `        "${BD_BIN:-bd}" "$@"`},
+		{name: "the resolved local", line: `        "$bd_bin" "$@"`},
+		{name: "resolving the local", line: `        bd_bin="${BD_BIN:-bd}"`},
+		{name: "an unquoted brace expansion", line: `        ${BD_BIN} "$@"`, wantUnpinned: true},
+		{name: "the bare variable", line: `        "$BD_BIN" "$@"`, wantUnpinned: true},
+		{name: "exec through the unpinned local", line: `        exec $bd_bin "$@"`, wantUnpinned: true},
+		{name: "a bare bd off PATH", line: `        bd ping --json`, wantBare: true},
+		{name: "a bare bd after exec", line: `        exec bd "$@"`, wantBare: true},
+		{name: "a bare bd in a pipeline", line: `        printf '%s' "$x" | bd create --json`, wantBare: true},
+		{name: "a bare bd in a subshell", line: `        (cd "$dir" && bd context >/dev/null)`, wantBare: true},
+		// The prose the script is full of. A lint that flagged these would be
+		// turned off within a week.
+		{name: "bd named inside a message", line: `            die "bd $version cannot initialize the workspace at $dir (bd 1.0.0 or newer required)"`},
+		{name: "a comment naming the chokepoint", line: `        # honor "${BD_BIN:-bd}" here too`},
+		{name: "a trailing comment naming bd", line: `        run_init "$dir"   # bd init runs here`},
+		{name: "a function whose name contains bd", line: `        run_bd_init_proxied "$dir" "$prefix"`},
+		{name: "a single-quoted bd", line: `        printf '%s\n' 'bd ping'`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unpinnedBdReference(tc.line) != ""; got != tc.wantUnpinned {
+				t.Errorf("unpinnedBdReference(%q) = %q, want a finding: %v", tc.line, unpinnedBdReference(tc.line), tc.wantUnpinned)
+			}
+			if got := forksBareBd(tc.line); got != tc.wantBare {
+				t.Errorf("forksBareBd(%q) = %v, want %v", tc.line, got, tc.wantBare)
+			}
+		})
+	}
+}
+
+// TestJSONLTraceRedirectIsMatchedByShapeNotByBytes pins the other narrowed
+// check: the script must not write the fork census's file, in any spelling.
+func TestJSONLTraceRedirectIsMatchedByShapeNotByBytes(t *testing.T) {
+	redirects := []string{
+		`        >>"$GC_BD_TRACE_JSON" 2>/dev/null || true`,
+		`        >> "$GC_BD_TRACE_JSON"`,
+		`        >>"${GC_BD_TRACE_JSON}"`,
+		`        >>${GC_BD_TRACE_JSON}`,
+		`        printf '%s' "$rec" > $GC_BD_TRACE_JSON`,
+	}
+	for _, line := range redirects {
+		if !jsonlTraceRedirect.MatchString(line) {
+			t.Errorf("a write to the JSONL trace went unnoticed: %q", line)
+		}
+	}
+	// Reading the variable is how the helper stands down, and must stay legal.
+	for _, line := range []string{
+		`    [ -z "${GC_BD_TRACE_JSON:-}" ] || return 0`,
+		`        >>"$GC_BD_TRACE" 2>/dev/null || true`,
+	} {
+		if jsonlTraceRedirect.MatchString(line) {
+			t.Errorf("the lint refused a line that writes no JSONL trace: %q", line)
+		}
 	}
 }
 
