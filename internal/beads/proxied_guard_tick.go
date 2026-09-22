@@ -380,6 +380,15 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		// A tick that re-admitted out of the memo it populated would be
 		// asserting that nothing changed by reading its own answer back.
 		SkipMemo: true,
+		// One probe session, no waiting — the per-tick budget the header
+		// states (council pr2 D-F5, re-pin arm). This re-admission was the
+		// long-lived shape with the REAL clock, so a new generation that
+		// refused ran the 60s drain on the tick goroutine, re-probing every 2s,
+		// and a silent one walked the three-attempt ladder with 1s sleeps.
+		// Undecided is the right answer to both: the next tick asks again, and
+		// a reader that needs the new generation sooner re-pins through the
+		// reopen hook.
+		ProbeOnce: true,
 	})
 	if err != nil {
 		if verdict, ok := ProxiedVerdictOf(err); ok && verdict.Terminal() {

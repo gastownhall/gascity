@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -723,6 +724,38 @@ func TestProxiedGuardTickSpendsOneSessionPerTick(t *testing.T) {
 				"gated the new generation's cursors, so a second session buys the same answer", got)
 		}
 	})
+
+	// Council pr2 D-F5, re-pin arm. The re-admission inside a generation change
+	// was the long-lived ladder on the real clock: a new generation that
+	// refused ran the 60s drain on the tick goroutine (this fixture's 5s step
+	// timeout fires first), and a silent one walked three probes with 1s
+	// sleeps. Either way the tick spent more than the one session its header
+	// promises; the next tick is the retry.
+	for i, tc := range []struct {
+		name    string
+		outcome proxyendpoint.ProbeOutcome
+	}{
+		{name: "a re-pin against a new generation that refuses costs one session and waits out nothing", outcome: proxyendpoint.ProbeRefused},
+		{name: "a re-pin against a new generation that never greets costs one session", outcome: proxyendpoint.ProbeAcceptedNoGreeting},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.probeResult = func() proxyendpoint.ProbeResult { return proxyendpoint.ProbeResult{Outcome: tc.outcome} }
+			t.Cleanup(func() { f.probeResult = nil })
+			before := f.probes
+			f.admitted.corrupt(func(rec *proxyendpoint.Record) {
+				rec.PID = 6010 + i
+				rec.Birth = proxyendpoint.BirthToken("boot-fixture", fmt.Sprintf("feed%04d", i))
+			})
+
+			if step := f.tick(); step != proxiedGuardUndecided {
+				t.Fatalf("the re-pin reported %s, want undecided: a proxy in motion is not a fact about the database", step)
+			}
+			if got := f.probes - before; got != 1 {
+				t.Fatalf("the re-pin ran %d probe session(s), want exactly 1: the tick's budget is one "+
+					"session, and the next tick is the retry", got)
+			}
+		})
+	}
 }
 
 // TestProxiedGuardTickForgetsTheMemoOnCursorDrift is the other half of council
