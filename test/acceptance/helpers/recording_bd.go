@@ -218,6 +218,31 @@ func (r *RecordingBD) Count(prefix ...string) int {
 	return count
 }
 
+// CountWhere returns how many recorded invocations satisfy match.
+//
+// Count's argv-prefix form answers "how many `bd dolt stop` forks", which is
+// most of what a fork gate asks. It cannot answer the questions the proxied
+// lane's gates ask, because those are about a fork's SHAPE rather than its
+// leading words: how many forks came from the provider script rather than from
+// gc itself (a PPID question), how many carried `--json` (a flag anywhere in
+// argv), how many were anything other than the one passthrough a command is
+// allowed. Writing those by hand means every call site re-implements the
+// Invocations() loop, and a call site that loops itself is one that can forget
+// the interleave check Invocations performs.
+func (r *RecordingBD) CountWhere(match func(Invocation) bool) int {
+	r.t.Helper()
+	if match == nil {
+		r.t.Fatal("CountWhere needs a predicate")
+	}
+	count := 0
+	for _, invocation := range r.Invocations() {
+		if match(invocation) {
+			count++
+		}
+	}
+	return count
+}
+
 // Reset discards the recorded history, so a count can be attributed to one
 // step of a test rather than to everything that ran before it.
 func (r *RecordingBD) Reset() {
