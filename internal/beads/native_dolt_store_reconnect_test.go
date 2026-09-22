@@ -532,6 +532,24 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			wantDirect: disposition(nativeReadUnclassified),
 			verdict:    ProxiedVerdictCircuitOpen,
 		},
+		// Council pr2 E-I1: the direct lane's two stated departures from main.
+		// Each error ALSO carries one of the nine transient substrings, so
+		// main's text table reconnected on it; the classifier's earlier rung
+		// returns it on the first pass on BOTH lanes.
+		{
+			name:    "an indeterminate commit that also says invalid connection is never replayed, on either lane",
+			err:     fmt.Errorf("commit: invalid connection: %w", beadslib.ErrCommitIndeterminate),
+			want:    nativeReadNonReplayable,
+			verdict: ProxiedVerdictWriteIndeterminate,
+			why:     "main's text table matched \"invalid connection\" and reconnected; rung 1 outranks it on purpose",
+		},
+		{
+			name:    "a 1049 whose text also says dial tcp is terminal, on either lane",
+			err:     errors.New("dial tcp 127.0.0.1:3307: Error 1049 (42000): Unknown database 'beads'"),
+			want:    nativeReadTerminal,
+			verdict: ProxiedVerdictDatabaseGone,
+			why:     "main's text table matched \"dial tcp\" and reconnected; a fresh pool gets the same 1049",
+		},
 		{
 			name:    "MySQL 1049 is terminal and names database_gone",
 			err:     errors.New("begin read tx: Error 1049 (42000): Unknown database 'beads'"),

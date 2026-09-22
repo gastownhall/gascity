@@ -76,10 +76,25 @@ import (
 //
 // Rungs 2, 3 and 6 are the three rungs that would change what the DIRECT native
 // lane treats as transient, and all three are gated on the lane. On a direct or
-// hosted handle the classifier therefore adds exactly one thing to main:
-// terminality for MySQL 1049/1045 (rungs 4/5), which is a no-op in practice
-// because the text table matches neither, so "terminal" and "unclassified" are
-// the same immediate return.
+// hosted handle the classifier still differs from main in exactly two places,
+// both of them rungs that run AHEAD of the text table and both only for an
+// error that ALSO carries one of the nine transient substrings (council pr2
+// E-I1):
+//
+//   - rung 1: an ErrCommitIndeterminate whose text also says, say, "invalid
+//     connection" returns on the first pass, where main's text table
+//     reconnected and read again;
+//   - rungs 4/5: an Error 1049/1045 whose text also says, say, "dial tcp"
+//     returns on the first pass as terminal, where main reconnected.
+//
+// Both are deliberate — an indeterminate commit must never be replayed, and a
+// fresh pool asks the same question and gets the same 1049 — and neither was
+// reachable from beads v1.3.0's reads when this was written: withReadTx always
+// rolls back, wakeExpiredDefers swallows its errors, and no driver path found
+// joins 1049/1045 with a transient substring. For every error WITHOUT such a
+// mixed signature, rungs 4/5's terminality is the no-op it looks like (the text
+// table matches neither, so "terminal" and "unclassified" are the same
+// immediate return). TestClassifyNativeDoltReadErrorOrder pins both exceptions.
 //
 // # What the classifier does NOT decide
 //
@@ -87,9 +102,10 @@ import (
 // names the endpoint fact; only a handle opened for the proxied lane turns that
 // name into a *ProxiedVerdictError (see NativeDoltStore.proxiedReadVerdict). On
 // a direct or hosted handle rungs 4 and 5 are still TERMINAL — which is exactly
-// what happens today, since the text table matches neither, so "terminal" and
-// "unclassified" are the same immediate return — and the error the caller
-// receives is byte-identical to the one it receives now.
+// what happens on main, since the text table matches neither, so "terminal"
+// and "unclassified" are the same immediate return — and the error the caller
+// receives is byte-identical to main's, except for the mixed-signature case
+// stated above.
 //
 // # The lane gate, and why rungs 2, 3 and 6 carry one (council B-F1 / C-F1 / C-F5)
 //
@@ -137,7 +153,9 @@ import (
 // on the first pass — the behavior main has. What the direct lane still gets
 // from this file is the ORDER (rung 1 ahead of everything, so an indeterminate
 // commit is never replayed whatever else it looks like) and rungs 4/5's
-// terminality; neither changes an error or a call count.
+// terminality. Neither changes an error or a call count for an error main would
+// classify the same way; the two mixed-signature errors it does change are
+// stated above.
 //
 // A claim about this lane is only worth what its test asserts. Each gated rung
 // is pinned by a mirror pair over one error that measures what the CALLER sees
