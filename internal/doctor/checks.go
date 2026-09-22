@@ -729,16 +729,40 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	// of bd's proxy — the record, the liveness verdict and its evidence, the
 	// idle policy and both schema cursors — which is what the native-over-proxy
 	// work has to be able to observe before it may use any of it.
+	//
+	// On the proxied-native lane it ALSO carries the store open's own account of
+	// bd's proxy — the generation it pinned, the verdict if it refused, whether
+	// the handle has since dropped to bd — projected from the same diagnostic the
+	// message below is built from, and sitting beside the independent endpoint
+	// account so a disagreement between the two is visible rather than averaged.
+	//
+	// It is the account AT OPEN. A handle that stood down afterwards is not
+	// visible here in PR2: the store doctor holds has been through
+	// wrapStoreWithBeadPolicies, which embeds the Store interface and therefore
+	// strips the wrapper's Demoted()/Verdict(). Reporting a demotion live needs
+	// cmd/gc to expose the unwrap, which is the same seam P2-13 opens for
+	// scopedStoreLike — recorded as a gap rather than guessed at.
+	proxied := result.Diagnostic.Proxied
 	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
 		Store:           result.Diagnostic.Store,
 		PreflightGate:   result.Diagnostic.PreflightGate,
 		PreflightReason: result.Diagnostic.PreflightReason,
+		Proxied:         proxied,
 	})
+	if result.Diagnostic.Store == beads.BeadsStoreNameNativeDoltStore && proxied != nil {
+		// The proxied-native lane. The store name is NativeDoltStore because that
+		// is what serves the reads (design 5.3); the message is what tells an
+		// operator that this native store is reading through somebody else's
+		// proxy and writing through somebody else's CLI.
+		r.Status = StatusOK
+		r.Message = proxiedNativeStoreMessage(proxied)
+		return r
+	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
 		// Not a degraded fallback: bd owns the Dolt topology for proxied
 		// scopes and the CLI front door is the only supported store.
 		r.Status = StatusOK
-		r.Message = proxiedProviderStoreMessage
+		r.Message = proxiedFallbackStoreMessage(proxied)
 		return r
 	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
@@ -1624,7 +1648,12 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Status = StatusOK
 	r.Message = "store accessible"
 	if proxied {
-		r.Message = proxiedProviderStoreMessage
+		// The rig lane has no store-open diagnostic to project: NewRigBeadsCheck
+		// takes a factory that returns a bare beads.Store, and rig diagnostics are
+		// not retained anywhere today (the city's are, via CityBeadsDiagnostic).
+		// So the lane is read off the store itself, which is the one piece of
+		// evidence this check does hold.
+		r.Message = rigProxiedStoreMessage(store)
 	}
 	return r
 }
