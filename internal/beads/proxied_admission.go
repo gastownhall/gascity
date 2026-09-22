@@ -175,6 +175,16 @@ type Pin struct {
 	idle      proxyendpoint.IdlePolicy
 	cursors   proxyendpoint.Cursors
 	evidence  proxyendpoint.Evidence
+	// head is the database's HEAD commit hash as the admitting probe session
+	// saw it, or "" for a pin served from the memo (see withoutHead). A fresh
+	// probe always carries one: it is read on the session's first statement,
+	// and a session that cannot read it is not served.
+	//
+	// It is not admission evidence: no decision above is made from it, and a
+	// pin with no head is a perfectly good pin. It is carried so the OPENER can
+	// re-read the same value once the library open has returned and see whether
+	// the open moved HEAD. See ProxiedHeadUnmoved.
+	head string
 }
 
 // Admitted reports whether this is a real pass rather than the zero value.
@@ -207,6 +217,31 @@ func (p Pin) Cursors() proxyendpoint.Cursors { return p.cursors }
 
 // Evidence is the strongest liveness proof the inspection obtained.
 func (p Pin) Evidence() proxyendpoint.Evidence { return p.evidence }
+
+// Head is the database's HEAD commit hash at admission time, or "" when it was
+// not observed. See the field comment: it is an observation the opener re-reads
+// after the library open, not a fact admission decided on.
+func (p Pin) Head() string { return p.head }
+
+// withoutHead returns the pin with its HEAD observation dropped.
+//
+// A memoized pin is served for up to proxiedPinMemoTTL, and any bd client can
+// commit to that database in the meantime, so the hash it carries stops being a
+// statement about what THIS open did the moment it is reused. Dropping it makes
+// the post-open comparison decline to conclude rather than accuse another
+// process's ordinary write, which is the one way a belt-and-braces check can do
+// damage.
+//
+// What it gives up, stated: an open served from the memo is NOT checked, for up
+// to the memo's TTL. That is bounded rather than open-ended because the writes in
+// question are reconciles — the fresh, checked open at the head of a memo window
+// performs them, and the memoized opens behind it find nothing left to do — and
+// because a head_moved verdict forgets the memo, so the open after an incident
+// probes fresh and is checked again.
+func (p Pin) withoutHead() Pin {
+	p.head = ""
+	return p
+}
 
 // Report projects the pin onto the factory's diagnostic shape, so the opener
 // does not restate facts admission already established.
@@ -334,7 +369,8 @@ func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 
 	if !in.SkipMemo {
 		if pin, ok := lookupProxiedPin(in.ScopeRoot, in.Database, in.LongLived, root, beadsDir, in.Now()); ok {
-			return pin, nil
+			// The HEAD observation does not survive the memo: see withoutHead.
+			return pin.withoutHead(), nil
 		}
 	}
 
@@ -460,6 +496,7 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 			idle:      idle,
 			cursors:   probe.Cursors,
 			evidence:  ep.Liveness.Evidence,
+			head:      probe.Head,
 		}, false, nil
 
 	case proxyendpoint.ProbeRefused:

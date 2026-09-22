@@ -1114,3 +1114,91 @@ func TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers(t *testing.T) {
 			"costs bd an accepted connection every 250ms for a minute", probes, perPass)
 	}
 }
+
+// TestProxiedHeadUnmovedDeclinesRatherThanAgrees is council pr2 D-F3's unit
+// half.
+//
+// Both "did not move" and "could not tell" are legitimate answers, and the whole
+// value of the check turns on their not being the same answer: the probe's head
+// read degrades to "" rather than failing its session, and a memoized pin
+// carries none, so an empty-means-equal comparison would report every one of
+// those as a clean open and the check would quietly stop existing.
+func TestProxiedHeadUnmovedDeclinesRatherThanAgrees(t *testing.T) {
+	pinAt := func(head string) Pin { return Pin{admitted: true, database: "beads", head: head} }
+
+	t.Run("an unchanged head admits", func(t *testing.T) {
+		if err := ProxiedHeadUnmoved(pinAt("abc123"), "abc123"); err != nil {
+			t.Fatalf("a healthy open was refused: %v", err)
+		}
+	})
+
+	t.Run("a moved head is the head_moved verdict", func(t *testing.T) {
+		err := ProxiedHeadUnmoved(pinAt("abc123"), "def456")
+		verdict, typed := ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("err = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictHeadMoved {
+			t.Fatalf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictHeadMoved)
+		}
+		if verdict.Terminal() {
+			t.Error("head_moved must be non-terminal: gc cannot attribute the commit to its own open")
+		}
+	})
+
+	for _, tc := range []struct{ name, before, after string }{
+		{"the probe could not read a head", "", "def456"},
+		{"the re-read produced nothing", "abc123", ""},
+		{"neither side was observed", "", ""},
+	} {
+		t.Run(tc.name+" concludes nothing", func(t *testing.T) {
+			if err := ProxiedHeadUnmoved(pinAt(tc.before), tc.after); err != nil {
+				t.Fatalf("an unobserved hash was read as evidence: %v", err)
+			}
+		})
+	}
+}
+
+// TestAdmitCarriesTheProbesHeadButNotTheMemos is the
+// other end of the same finding.
+//
+// The pin's head is the pre-open half of a comparison the opener completes. It
+// must survive a fresh admission — otherwise the opener has nothing to compare
+// and the check is inert — and it must NOT survive the memo, because a hash up
+// to proxiedPinMemoTTL old is a statement about some earlier open, and any bd
+// client may have committed since. Reusing it would make another process's
+// ordinary write read as gc's own, which is the one way a belt-and-braces check
+// can do damage.
+func TestAdmitCarriesTheProbesHeadButNotTheMemos(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { ForgetProxiedPin(f.scopeRoot, "beads") })
+
+	probes := 0
+	in := baseAdmissionInput(f, &admissionOps{})
+	in.SkipMemo = false
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		probes++
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors(), Head: "head0000"}
+	}
+
+	fresh, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if fresh.Head() != "head0000" {
+		t.Fatalf("a freshly probed pin carries head %q, want the probe's: the opener has nothing to compare", fresh.Head())
+	}
+
+	memoized, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit (memoized): %v", err)
+	}
+	if probes != 1 {
+		t.Fatalf("the second open probed again (%d sessions); this row must exercise the MEMO", probes)
+	}
+	if memoized.Head() != "" {
+		t.Fatalf("a memoized pin carries head %q; comparing a post-open re-read against a hash up to the "+
+			"memo TTL old would accuse another bd client's write of being gc's", memoized.Head())
+	}
+}

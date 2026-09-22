@@ -96,6 +96,19 @@ const (
 	// about the endpoint, so it is never terminal.
 	ProxiedVerdictBudgetExhausted ProxiedVerdict = "budget_exhausted"
 
+	// ProxiedVerdictHeadMoved reports that the database's HEAD commit hash
+	// changed across gc's own library open: the value the admitting probe
+	// session read is not the value a re-read sees once the open has returned.
+	//
+	// PR2's native lane serves reads only, so an open that moves HEAD may be
+	// gc writing to bd's database — the hazard the schema gate exists for, in
+	// the shapes that gate cannot see. It is not terminal, because gc cannot
+	// tell a commit ITS open minted from one another bd client made in the same
+	// window, and another process's ordinary write must not permanently demote
+	// this scope. It is the one verdict the factory logs at WARN: it is an
+	// incident, not an expected refusal. See ProxiedHeadUnmoved.
+	ProxiedVerdictHeadMoved ProxiedVerdict = "head_moved"
+
 	// ProxiedVerdictWriteIndeterminate is RESERVED and never produced in PR2.
 	// PR2's native lane serves reads only, so there is no write whose outcome
 	// could be unknown. It is declared now so the terminality table is complete
@@ -127,8 +140,10 @@ func (v ProxiedVerdict) String() string { return string(v) }
 // somebody changing something:
 //
 //   - Not terminal: the endpoint is in motion (proxy_gone, draining,
-//     backend_unreachable, circuit_open) or gc simply ran out of clock
-//     (budget_exhausted). Retrying inside the escalation ladder is the point.
+//     backend_unreachable, circuit_open), gc simply ran out of clock
+//     (budget_exhausted), or gc saw something it cannot attribute to itself
+//     (head_moved — any bd client may commit inside the same window).
+//     Retrying inside the escalation ladder is the point.
 //   - Terminal: a fact about the database, the record, or the policy that a
 //     retry cannot move (schema_skew, not_ours, legacy_schema, database_gone,
 //     access_denied, prefix_mismatch, idle_policy_finite, no_ownership_record),
@@ -142,7 +157,8 @@ func (v ProxiedVerdict) Terminal() bool {
 		ProxiedVerdictDraining,
 		ProxiedVerdictBackendUnreachable,
 		ProxiedVerdictCircuitOpen,
-		ProxiedVerdictBudgetExhausted:
+		ProxiedVerdictBudgetExhausted,
+		ProxiedVerdictHeadMoved:
 		return false
 	default:
 		return true

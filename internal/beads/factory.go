@@ -106,7 +106,8 @@ type ProxiedDiagnostic struct {
 	// Verdict is why the lane refused, empty when it did not.
 	Verdict ProxiedVerdict `json:"verdict,omitempty"`
 	// Detail carries an unexpected opener failure's text. A verdict refusal
-	// leaves it empty: the verdict IS the explanation.
+	// leaves it empty — the verdict IS the explanation — except head_moved,
+	// which is an incident rather than a refusal and carries both hashes.
 	Detail string `json:"detail,omitempty"`
 	// Demoted reports that a handle which had been serving natively has
 	// dropped to the bd leaf. One-way; the wrapper never promotes.
@@ -381,6 +382,16 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 	}
 	if err == nil {
 		err = errors.New("proxied store opener returned no store and no error")
+	}
+	if verdictErr, ok := ProxiedVerdictOf(err); ok && verdictErr.Verdict == ProxiedVerdictHeadMoved {
+		// NOT an expected refusal: HEAD moved across gc's own library open,
+		// which may be gc having committed to bd's database (council pr2 D-F3).
+		// The city still gets its store, but the operator is told — at WARN,
+		// with both hashes — and the diagnostic keeps the detail, because
+		// "head_moved" alone does not say which database or which commit.
+		diag.Proxied = report.diagnostic(verdictErr.Verdict, verdictErr.Detail)
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, proxiedProviderGate, verdictErr.Error())
+		return false, StoreOpenResult{}, nil
 	}
 	if verdictErr, ok := ProxiedVerdictOf(err); ok {
 		// An expected refusal. The bd front door is the designed outcome, so

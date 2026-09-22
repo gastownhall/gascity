@@ -717,3 +717,187 @@ func functionBody(source, prefix string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestProxiedOpenRefusesAnOpenThatMovedHead is council pr2 D-F3's production
+// half: the post-open observation that catches what the pre-open schema gate
+// cannot see.
+//
+// A-F2's gate is sound for what it covers — a database it admits is one whose
+// numbered ignored series does not replay. It cannot cover the writes a
+// writable library open still makes on an admitted database (the dolt_ignore
+// seed, the tracked-cursor heal, the content_hash pass), each ending in a
+// DOLT_COMMIT. A cursor comparison is blind to all three; a HEAD hash moves for
+// every one of them.
+//
+// The rows assert what the CALLER sees, and what the check COSTS: a moved HEAD
+// must abort the open, close the leaf it opened, arrive as a verdict the factory
+// can fall back on, and make the next open re-probe; and the re-read must go
+// over the handle the open just built, never through another probe session.
+func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
+	type counters struct {
+		probes, reads int
+	}
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, head string, n *counters, readHead func() (string, error)) *proxiedNativeOpener {
+		t.Helper()
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				n.probes++
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors(), Head: head}
+			},
+			observed:  beads.NewGenerationSet(),
+			recovered: beads.NewGenerationSet(),
+			sleep:     func(context.Context, time.Duration) error { return nil },
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				// A nil leaf is enough: the assertions are about the opener's
+				// control flow, and CloseStore is nil-safe by construction.
+				return nil, nil
+			},
+			leafHead: func(context.Context, *beads.NativeDoltStore) (string, error) {
+				n.reads++
+				return readHead()
+			},
+		}
+	}
+
+	t.Run("an open that moved HEAD is refused non-terminally, and the next open re-probes", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "after11111", nil })
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if pin.Head() != "before0000" {
+			t.Fatalf("the pin carries head %q, want the probe's: admission must record what it saw", pin.Head())
+		}
+
+		_, err = opener.openNativeLeaf(context.Background(), pin, false)
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("openNativeLeaf err = %v, want a typed verdict the factory can fall back on", err)
+		}
+		if verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("verdict = %q, want %q", verdict.Verdict, beads.ProxiedVerdictHeadMoved)
+		}
+		if verdict.Terminal() {
+			t.Error("gc cannot tell its own commit from another bd client's in the same window, " +
+				"so head_moved must not pin a scope to the bd front door for the process")
+		}
+		for _, want := range []string{"before0000", "after11111", "beads"} {
+			if !strings.Contains(verdict.Detail, want) {
+				t.Errorf("the verdict detail omits %q, which is what an operator needs to act: %s", want, verdict.Detail)
+			}
+		}
+		if n.reads != 1 {
+			t.Fatalf("the open re-read HEAD %d time(s), want exactly 1", n.reads)
+		}
+		if n.probes != 1 {
+			t.Fatalf("the open spent %d probe session(s), want only admission's 1: the re-read must ride the library's pool", n.probes)
+		}
+
+		// The memoized pin carries no hash, so an open served from it would walk
+		// past the check that just fired. It must have been forgotten.
+		if _, err := opener.admit(context.Background(), false); err != nil {
+			t.Fatalf("re-admit: %v", err)
+		}
+		if n.probes != 2 {
+			t.Fatalf("the open after a head_moved verdict was served from the memo (%d probe session(s) in total, want 2)", n.probes)
+		}
+	})
+
+	t.Run("an open that left HEAD alone is admitted, and a memoized open spends nothing", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "steady0000", &n, func() (string, error) { return "steady0000", nil })
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false); err != nil {
+			t.Fatalf("a healthy open was refused: %v", err)
+		}
+		if n.reads != 1 || n.probes != 1 {
+			t.Fatalf("a healthy open cost %d probe(s) and %d re-read(s), want 1 and 1", n.probes, n.reads)
+		}
+
+		// The control for the row above: a healthy open leaves the memo in
+		// place, and the memo's pin has no hash to compare against.
+		memoized, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit (memoized): %v", err)
+		}
+		if n.probes != 1 {
+			t.Fatalf("the second open probed again (%d sessions); this row must exercise the memo", n.probes)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), memoized, false); err != nil {
+			t.Fatalf("a memoized open was refused: %v", err)
+		}
+		if n.reads != 1 {
+			t.Fatalf("a memoized open re-read HEAD (%d reads in total, want 1): it has nothing to compare", n.reads)
+		}
+	})
+
+	t.Run("a re-read that fails says nothing about what the open did", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) {
+			return "", errors.New("invalid connection")
+		})
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false); err != nil {
+			t.Fatalf("a failed belt-and-braces re-read refused an open the schema gate admitted: %v", err)
+		}
+	})
+
+	t.Run("the read path's reopen takes the same check over the storage it opened", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		storage := &closeCountingStorage{}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		var readFrom beads.NativeStorage
+		opener.storageHead = func(_ context.Context, s beads.NativeStorage) (string, error) {
+			readFrom = s
+			return "after11111", nil
+		}
+
+		got, err := opener.reopen(false)(context.Background())
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("reopen = (%v, %v), want the head_moved verdict", got, err)
+		}
+		if got != nil {
+			t.Error("a refused reopen handed back a storage handle")
+		}
+		if readFrom != beads.NativeStorage(storage) {
+			t.Error("the reopen re-read HEAD somewhere other than the handle it had just opened")
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+	})
+}
+
+// closeCountingStorage is a library handle whose only real surface is Close.
+type closeCountingStorage struct {
+	beads.NativeStorage
+	closed int
+}
+
+func (s *closeCountingStorage) Close() error {
+	s.closed++
+	return nil
+}

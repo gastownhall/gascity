@@ -1068,6 +1068,72 @@ func TestOpenStoreAtForCityProxiedUntypedErrorFallsBackLoudly(t *testing.T) {
 	}
 }
 
+// TestOpenStoreAtForCityProxiedHeadMovedIsLoud is council pr2 D-F3's factory
+// half. Every other verdict is an expected refusal and is deliberately quiet;
+// head_moved is not a refusal but an incident — HEAD moved across gc's own
+// library open, which may be gc having committed to bd's database — so it must
+// reach the operator at WARN with the hashes, and the diagnostic must keep the
+// detail the verdict name alone does not carry. The draining row beside it is
+// the control: loudness is specific to the incident, not a new default.
+func TestOpenStoreAtForCityProxiedHeadMovedIsLoud(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantLoud   bool
+		wantDetail string
+	}{
+		{
+			name:       "head_moved is logged with both hashes",
+			err:        NewProxiedVerdictError(ProxiedVerdictHeadMoved, "moved HEAD from before0000 to after11111", nil),
+			wantLoud:   true,
+			wantDetail: "moved HEAD from before0000 to after11111",
+		},
+		{
+			name: "an expected refusal stays quiet",
+			err:  NewProxiedVerdictError(ProxiedVerdictDraining, "the proxy is still refusing", nil),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(nativeForceFallbackEnv, "")
+			t.Setenv(proxiedNativeEnv, "1")
+			scope := proxiedScopeFixture(t)
+			fallback := NewMemStore()
+
+			var logged bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+				ScopeRoot:        scope,
+				Provider:         "bd",
+				Logger:           logger,
+				PreflightChecker: refusingPreflightChecker(t),
+				OpenBdStore:      func() (Store, error) { return fallback, nil },
+				OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+					return nil, proxiedOpenReportFixture(), tc.err
+				},
+			})
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity: %v", err)
+			}
+			if result.Store != Store(fallback) || result.Diagnostic.PreflightGate != BeadsGateProxiedProvider {
+				t.Fatalf("result = (%T, %+v), want the bd fallback under proxied_provider", result.Store, result.Diagnostic)
+			}
+			if result.Diagnostic.Proxied == nil {
+				t.Fatal("the refusal reported no proxied account")
+			}
+			if got := result.Diagnostic.Proxied.Detail; got != tc.wantDetail {
+				t.Errorf("detail = %q, want %q", got, tc.wantDetail)
+			}
+			loud := strings.Contains(logged.String(), "level=WARN") && strings.Contains(logged.String(), "head_moved")
+			if loud != tc.wantLoud {
+				t.Fatalf("logged loudly = %v, want %v:\n%s", loud, tc.wantLoud, logged.String())
+			}
+			if tc.wantLoud && !strings.Contains(logged.String(), "after11111") {
+				t.Errorf("the WARN line omits the hash an operator needs:\n%s", logged.String())
+			}
+		})
+	}
+}
+
 // TestOpenStoreAtForCityProxiedForceFallbackWinsOverTheFlag pins the escape
 // hatch's precedence. GC_BEADS_FORCE_FALLBACK is checked before the persisted
 // topology is even read, so an operator turning it on gets BdStore on a box

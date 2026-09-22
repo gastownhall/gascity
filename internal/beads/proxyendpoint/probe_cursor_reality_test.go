@@ -2,6 +2,7 @@ package proxyendpoint
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -131,4 +132,67 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProbeSessionReadsHeadOnItsFirstStatement is council pr2 D-F3's probe
+// half: the pre-open HEAD observation rides as a second column on the
+// statement every session already issues first, so it costs no statement, no
+// round trip and no session of its own.
+//
+// It pins the COST as well as the value, because the cheap shape is the
+// finding: a HEAD read issued as its own statement would pass a value-only test
+// while adding a round trip to every probe, and one issued on its own session
+// would add an accepted connection on bd's proxy per open.
+func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
+	fake := &fakeProbeConnector{
+		cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+		head:    "9abjndl5v792ofto5hlg6u0lvbao65tq",
+	}
+	report, err := readCursorsOver(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("readCursorsOver: %v", err)
+	}
+	if report.Head != "9abjndl5v792ofto5hlg6u0lvbao65tq" {
+		t.Fatalf("report.Head = %q, want the session's HEAD", report.Head)
+	}
+	statements := fake.statements()
+	if len(statements) == 0 || !strings.HasPrefix(statements[0], cursorExistsWithHeadQuery) {
+		t.Fatalf("the session's first statement is not the main-lane existence check carrying HEAD: %v", statements)
+	}
+	headReads := 0
+	for _, statement := range statements {
+		if strings.Contains(statement, "DOLT_HASHOF") {
+			headReads++
+		}
+	}
+	if headReads != 1 {
+		t.Fatalf("the session asked for HEAD in %d statement(s), want exactly 1: %v", headReads, statements)
+	}
+	// A healthy database at 66/26 with every sentinel present: two cursor
+	// existence checks, two MAX reads, two sentinel tables, one sentinel column.
+	// That is what a session issued before the HEAD observation existed.
+	if len(statements) != 7 {
+		t.Fatalf("the session issued %d statements, want the 7 it issued before HEAD was observed: %v", len(statements), statements)
+	}
+	if opened := fake.opened.Load(); opened != 1 {
+		t.Fatalf("the session opened %d connection(s), want 1", opened)
+	}
+
+	t.Run("a HEAD the server cannot answer fails the session and admits nothing", func(t *testing.T) {
+		fake := &fakeProbeConnector{
+			cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+			headErr: errors.New("Error 1105 (HY000): function: 'dolt_hashof' not found"),
+		}
+		dials := 0
+		got := Probe(context.Background(), ProbeIO{
+			Session: func(ctx context.Context) (CursorReport, error) { return readCursorsOver(ctx, fake) },
+			Dial:    func(context.Context) error { dials++; return nil },
+		})
+		if got.Outcome != ProbeUnknown {
+			t.Fatalf("outcome = %v, want ProbeUnknown: an unobservable HEAD is a server answer, not a verdict about the proxy", got.Outcome)
+		}
+		if dials != 0 {
+			t.Fatalf("a server error spent %d confirming dial(s); it must not reach the no-greeting ladder", dials)
+		}
+	})
 }

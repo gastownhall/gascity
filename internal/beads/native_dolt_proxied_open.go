@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	beadslib "github.com/steveyegge/beads"
 )
@@ -165,4 +166,44 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 		return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
 	}
 	return storage, prefix, nil
+}
+
+// ProxiedOpenedHead reads the database's HEAD commit hash over a library handle
+// gc has just opened, through that handle's OWN connection pool (council pr2
+// D-F3).
+//
+// It is the post-open half of the HEAD observation, and the reason it goes
+// through the library rather than through a probe session is the cost: the pool
+// already holds a connection the open used, so the re-read is one statement on
+// it, with no dial, no handshake and no accepted connection on bd's proxy that
+// bd's idle watcher would have to count. VersionControlReader is the library's
+// exported, read-only surface for exactly this question (beads v1.3.0
+// beads.go:259; GetCurrentCommit is SELECT DOLT_HASHOF('HEAD') on the store's
+// pool, internal/storage/dolt/versioned.go:190).
+//
+// A handle that does not implement it is reported as an error, not as "".
+// Every server-mode open returns *dolt.DoltStore, which does, so this can only
+// fire if a beads bump changes that — and the caller treats an unreadable hash
+// as "not observed", which is the safe reading of a check it could not make.
+func ProxiedOpenedHead(ctx context.Context, storage NativeStorage) (string, error) {
+	reader, ok := storage.(beadslib.VersionControlReader)
+	if !ok {
+		return "", fmt.Errorf("read HEAD after the proxied open: the linked library's %T is not a VersionControlReader", storage)
+	}
+	head, err := reader.GetCurrentCommit(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read HEAD after the proxied open: %w", err)
+	}
+	return strings.TrimSpace(head), nil
+}
+
+// ProxiedLeafHead is ProxiedOpenedHead for a leaf the open has already wrapped in
+// a NativeDoltStore.
+func ProxiedLeafHead(ctx context.Context, store *NativeDoltStore) (string, error) {
+	storage, release, err := store.acquireStorage()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return ProxiedOpenedHead(ctx, storage)
 }

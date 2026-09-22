@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -330,5 +331,69 @@ func TestProxiedOpenIsReadOnlyWithoutBeingAsked(t *testing.T) {
 	// neither can drift back to opt-in alone.
 	if !store.proxiedReadVerdicts {
 		t.Fatal("a proxied native handle does not classify its read failures as verdicts")
+	}
+}
+
+// headReadingStorage is a library handle whose only real surface is
+// VersionControlReader, counting the re-reads it serves.
+type headReadingStorage struct {
+	beadslib.Storage
+	head  string
+	err   error
+	reads int
+}
+
+func (s *headReadingStorage) GetCurrentCommit(context.Context) (string, error) {
+	s.reads++
+	return s.head, s.err
+}
+
+func (s *headReadingStorage) CurrentBranch(context.Context) (string, error) { return "main", nil }
+
+func (s *headReadingStorage) ListBranches(context.Context) ([]string, error) { return nil, nil }
+
+func (s *headReadingStorage) CommitExists(context.Context, string) (bool, error) { return false, nil }
+
+func (s *headReadingStorage) Status(context.Context) (*beadslib.VCStatus, error) { return nil, nil }
+
+func (s *headReadingStorage) Log(context.Context, int) ([]beadslib.CommitInfo, error) {
+	return nil, nil
+}
+
+// TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool is council pr2 D-F3's
+// re-read half: the post-open HEAD comes from the handle the open just built —
+// one statement on its pool — and not from a session of gc's own, which would
+// be one more accepted connection on bd's proxy per open.
+func TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool(t *testing.T) {
+	storage := &headReadingStorage{head: " after11111\n"}
+	head, err := ProxiedOpenedHead(context.Background(), storage)
+	if err != nil {
+		t.Fatalf("ProxiedOpenedHead: %v", err)
+	}
+	if head != "after11111" {
+		t.Fatalf("head = %q, want the library's answer, trimmed", head)
+	}
+	if storage.reads != 1 {
+		t.Fatalf("the re-read asked the library %d time(s), want exactly 1", storage.reads)
+	}
+
+	// The same question through the wrapped leaf reaches the same pool.
+	leaf := newNativeDoltStoreForTest(storage)
+	if head, err := ProxiedLeafHead(context.Background(), leaf); err != nil || head != "after11111" {
+		t.Fatalf("ProxiedLeafHead = (%q, %v), want the leaf's own pool's answer", head, err)
+	}
+
+	// A handle that cannot answer is an error, never "": the caller must be
+	// able to tell "not observed" from a value.
+	if _, err := ProxiedOpenedHead(context.Background(), &nativeDoltStorageSpy{}); err == nil {
+		t.Fatal("a handle with no VersionControlReader produced a HEAD")
+	}
+	failing := &headReadingStorage{err: errors.New("invalid connection")}
+	if _, err := ProxiedOpenedHead(context.Background(), failing); err == nil {
+		t.Fatal("a failed re-read produced a HEAD")
+	}
+	// A closed leaf is refused before anything is asked.
+	if _, err := ProxiedLeafHead(context.Background(), nil); err == nil {
+		t.Fatal("a nil leaf produced a HEAD")
 	}
 }

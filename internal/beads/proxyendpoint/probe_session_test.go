@@ -300,10 +300,16 @@ type fakeProbeConnector struct {
 	// here exists, which keeps a healthy fixture a zero value.
 	absentTables  map[string]bool
 	absentColumns map[string]bool
-	opened        atomic.Int64
-	closed        atomic.Int64
-	mu            sync.Mutex
-	issued        []string
+	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
+	// statement; "" means the fixture default, fakeProbeHead.
+	head string
+	// headErr is what the main-lane existence statement fails with when the
+	// server cannot answer DOLT_HASHOF('HEAD').
+	headErr error
+	opened  atomic.Int64
+	closed  atomic.Int64
+	mu      sync.Mutex
+	issued  []string
 }
 
 func (c *fakeProbeConnector) Connect(context.Context) (driver.Conn, error) {
@@ -368,15 +374,26 @@ func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr
 // whole statement surface readCursors uses.
 func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.connector.record(query, args)
-	if c.connector.queryErr != nil && query != cursorExistsQuery {
+	if c.connector.queryErr != nil && query != cursorExistsQuery && query != cursorExistsWithHeadQuery {
 		return nil, c.connector.queryErr
 	}
-	if query == cursorExistsQuery {
+	if query == cursorExistsQuery || query == cursorExistsWithHeadQuery {
 		table := namedArg(args, 0)
+		exists := int64(1)
 		if c.connector.absentTables[table] {
-			return &fakeProbeRows{value: 0}, nil
+			exists = 0
 		}
-		return &fakeProbeRows{value: 1}, nil
+		if query == cursorExistsQuery {
+			return &fakeProbeRows{value: exists}, nil
+		}
+		if c.connector.headErr != nil {
+			return nil, c.connector.headErr
+		}
+		head := c.connector.head
+		if head == "" {
+			head = fakeProbeHead
+		}
+		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
 	}
 	if query == columnExistsQuery {
 		key := namedArg(args, 0) + "." + namedArg(args, 1)
@@ -400,14 +417,25 @@ func namedArg(args []driver.NamedValue, n int) string {
 	return fmt.Sprint(args[n].Value)
 }
 
-// fakeProbeRows is one row of one integer column, which is the shape of every
-// answer the probe reads.
+// fakeProbeHead is the HEAD hash the fixture answers when a test names none.
+const fakeProbeHead = "fakehead0000000000000000000000000"
+
+// fakeProbeRows is one row: an integer column, which is the shape of every
+// answer the probe reads, plus whatever extra columns the statement carries
+// (the main-lane existence statement carries HEAD).
 type fakeProbeRows struct {
 	value int64
+	extra []driver.Value
 	done  bool
 }
 
-func (r *fakeProbeRows) Columns() []string { return []string{"value"} }
+func (r *fakeProbeRows) Columns() []string {
+	columns := []string{"value"}
+	for i := range r.extra {
+		columns = append(columns, fmt.Sprintf("extra%d", i))
+	}
+	return columns
+}
 
 func (r *fakeProbeRows) Close() error { return nil }
 
@@ -417,5 +445,6 @@ func (r *fakeProbeRows) Next(dest []driver.Value) error {
 	}
 	r.done = true
 	dest[0] = r.value
+	copy(dest[1:], r.extra)
 	return nil
 }

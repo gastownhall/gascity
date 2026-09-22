@@ -162,7 +162,7 @@ func TestProbeRunsTheSessionFirst(t *testing.T) {
 	dials := 0
 	got := Probe(context.Background(), ProbeIO{
 		Session: func(context.Context) (CursorReport, error) {
-			return CursorReport{Cursors: Cursors{Main: 66, Ignored: 26}}, nil
+			return CursorReport{Cursors: Cursors{Main: 66, Ignored: 26}, Head: "0abcdef"}, nil
 		},
 		Dial: func(context.Context) error { dials++; return nil },
 	})
@@ -171,6 +171,12 @@ func TestProbeRunsTheSessionFirst(t *testing.T) {
 	}
 	if got.Cursors != (Cursors{Main: 66, Ignored: 26}) {
 		t.Fatalf("Probe cursors = %v, want main=66 ignored=26", got.Cursors)
+	}
+	// The HEAD hash rides out with the cursors. It is not schema evidence and
+	// nothing admits on it, but a probe that dropped it would leave the
+	// post-open observation with nothing to compare (council pr2 D-F3).
+	if got.Head != "0abcdef" {
+		t.Fatalf("Probe head = %q, want the session's", got.Head)
 	}
 	if dials != 0 {
 		t.Fatalf("a served probe made %d confirming dial(s), want 0", dials)

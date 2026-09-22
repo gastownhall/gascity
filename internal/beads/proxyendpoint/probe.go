@@ -67,6 +67,22 @@ const (
 	cursorTableIgnored = "ignored_schema_migrations"
 	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 	columnExistsQuery  = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
+	// cursorExistsWithHeadQuery is cursorExistsQuery with the database's HEAD
+	// commit hash riding along as a second column. It is the FIRST statement of
+	// every probe session (the main lane's existence check), so the HEAD
+	// observation costs no statement, no round trip and no session of its own
+	// (council pr2 D-F3).
+	//
+	// DOLT_HASHOF('HEAD') is a Dolt system function over the session's own
+	// DATABASE(), not a table read, so it can neither miss nor poison the
+	// session's catalog snapshot the way a SELECT against an absent table would.
+	// It is also a function the linked library itself calls unconditionally on
+	// the server path (beads v1.3.0 internal/storage/dolt/versioned.go
+	// GetCurrentCommit, and schema/lock.go's fresh-bootstrap capture), so an
+	// engine that could not answer it is one the library does not support
+	// either. An aggregate beside a column-free scalar function is one row even
+	// when the table is absent, which is what keeps the existence answer intact.
+	cursorExistsWithHeadQuery = "SELECT COUNT(*), DOLT_HASHOF('HEAD') FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 )
 
 // The IGNORED lane's sentinels, mirrored from the linked library.
@@ -248,11 +264,14 @@ func (r CursorReality) String() string {
 }
 
 // CursorReport is everything one probe session reads about a database's schema:
-// the two cursors as they sit on disk, and how much of the ignored one the live
-// schema corroborates.
+// the two cursors as they sit on disk, how much of the ignored one the live
+// schema corroborates, and where HEAD was.
 type CursorReport struct {
 	Cursors Cursors
 	Reality CursorReality
+	// Head is the database's HEAD commit hash as of this session. See
+	// ProbeResult.Head.
+	Head string
 }
 
 // ProbeResult is one probe's outcome plus whatever it learned.
@@ -263,6 +282,18 @@ type ProbeResult struct {
 	// Reality is the ignored lane's cursor reality, meaningful only for
 	// ProbeServed. A gate must read it: see CursorReality.
 	Reality CursorReality
+	// Head is the database's HEAD commit hash at probe time, meaningful only
+	// for ProbeServed. It is read in the same statement as the main lane's
+	// existence check (cursorExistsWithHeadQuery), so a served probe always
+	// carries one.
+	//
+	// It is not schema evidence and no admission decision is made from it.
+	// It exists so a caller can re-read the same value AFTER opening the
+	// library and see whether the open moved HEAD — which is the only
+	// observation that catches a write the schema gate cannot see, because
+	// every write MigrateUp's un-numbered prologue can perform ends in a
+	// DOLT_COMMIT. See beads.ProxiedHeadUnmoved.
+	Head string
 	// Err is the failure behind any outcome other than served.
 	Err error
 }
@@ -306,7 +337,7 @@ func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration)
 	report, sessionErr := probeIO.Session(sessionCtx)
 	spent := time.Since(started)
 	if sessionErr == nil {
-		return ProbeResult{Outcome: ProbeServed, Cursors: report.Cursors, Reality: report.Reality}
+		return ProbeResult{Outcome: ProbeServed, Cursors: report.Cursors, Reality: report.Reality, Head: report.Head}
 	}
 	// The budget expiring is a fact this function owns, and it outranks every
 	// spelling the driver may have put on the error. go-sql-driver turns a socket
@@ -617,7 +648,7 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 	if err := conn.PingContext(ctx); err != nil {
 		return report, err
 	}
-	if report.Cursors.Main, err = readCursor(ctx, conn, cursorTableMain, mainCursorQuery); err != nil {
+	if report.Cursors.Main, report.Head, err = readMainCursorAndHead(ctx, conn); err != nil {
 		return report, err
 	}
 	if report.Cursors.Ignored, err = readCursor(ctx, conn, cursorTableIgnored, ignoredCursorQuery); err != nil {
@@ -676,6 +707,28 @@ func readExistsCount(ctx context.Context, conn *sql.Conn, query string, args ...
 	return count, nil
 }
 
+// readMainCursorAndHead is readCursor for the main lane, with the database's
+// HEAD commit hash read as a second column of the SAME existence statement.
+//
+// It is the session's first statement, so HEAD is observed before anything
+// else this session reads and at no cost in statements: a probe session issues
+// exactly what it issued before the HEAD observation existed (council pr2
+// D-F3). A HEAD that cannot be read fails the session exactly as an unreadable
+// cursor does — the classifier sees a server error, not a connection-level one,
+// and reports ProbeUnknown, which admits nothing.
+func readMainCursorAndHead(ctx context.Context, conn *sql.Conn) (int, string, error) {
+	var exists int
+	var head sql.NullString
+	if err := conn.QueryRowContext(ctx, cursorExistsWithHeadQuery, cursorTableMain).Scan(&exists, &head); err != nil {
+		return 0, "", fmt.Errorf("probing %s existence and HEAD: %w", cursorTableMain, err)
+	}
+	version, err := readCursorVersion(ctx, conn, cursorTableMain, mainCursorQuery, exists)
+	if err != nil {
+		return 0, "", err
+	}
+	return version, strings.TrimSpace(head.String), nil
+}
+
 // readCursor reads one cursor table's highest applied version, treating a table
 // that does not exist as version 0 — which is what it means: a database that
 // predates that lane has applied none of it.
@@ -684,6 +737,12 @@ func readCursor(ctx context.Context, conn *sql.Conn, table, query string) (int, 
 	if err := conn.QueryRowContext(ctx, cursorExistsQuery, table).Scan(&exists); err != nil {
 		return 0, fmt.Errorf("probing %s existence: %w", table, err)
 	}
+	return readCursorVersion(ctx, conn, table, query, exists)
+}
+
+// readCursorVersion is the second half of a cursor read: given the existence
+// count, the table's MAX(version), or 0 for a table that is not there.
+func readCursorVersion(ctx context.Context, conn *sql.Conn, table, query string, exists int) (int, error) {
 	if exists == 0 {
 		return 0, nil
 	}

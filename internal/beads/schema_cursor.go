@@ -1,6 +1,11 @@
 package beads
 
-import "github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+)
 
 // The schema cursors of the beads library this binary is linked against: the
 // highest migration in each of bd's two lanes at the pinned version.
@@ -23,7 +28,7 @@ import "github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 // They are deleted when beads exports SchemaVersions(), which is the standing
 // ask; the drift test goes with them.
 //
-// # The residual, stated rather than implied (council A-F2)
+// # The residual, stated rather than implied (council A-F2, corrected by pr2 D-F3)
 //
 // The gate below is what keeps the linked library from applying a NUMBERED
 // migration to a database bd owns: it compares the pair migrationSource.atLatest
@@ -31,13 +36,40 @@ import "github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 // `current >= target` before it opens a migration file. It is not a read-only
 // open, because beads exports none to an embedder at v1.3.0 — OpenBestAvailable
 // goes to NewFromConfigWithOptions(ctx, beadsDir, nil), and Config.ReadOnly and
-// Config.Gateway are both unreachable from outside internal/storage/dolt. So a
-// writable open still runs MigrateUp's idempotent, UNnumbered tail against the
-// database (the bootstrap CREATE TABLE IF NOT EXISTS, ensureContentHashColumn's
-// guarded ALTER, dolt_ignore re-assertion) exactly as every bd open does. That
-// is bd's own behavior on its own database rather than a replay of somebody
-// else's series, and closing it needs a read-only open FROM BEADS: that is the
-// standing ask, alongside SchemaVersions().
+// Config.Gateway are both unreachable from outside internal/storage/dolt.
+//
+// An earlier version of this paragraph described what a writable open still
+// does as "MigrateUp's idempotent, UNnumbered tail". That UNDERSTATED it (council
+// pr2 D-F3), and the understatement is the part worth correcting, because the
+// whole safety argument is read off this comment. At beads v1.3.0 a writable
+// open of a database this gate ADMITS can still commit to it, on three paths:
+//
+//   - seedDoltIgnorePatterns runs BEFORE the migrationWorkNeeded short-circuit,
+//     explicitly so an at-latest database cannot skip it (schema.go:603-645),
+//     and on the no-work path commitSeededDoltIgnore commits the seed with
+//     CALL DOLT_ADD('dolt_ignore') + CALL DOLT_COMMIT (schema.go:495-503, :656);
+//   - healTrackedIgnoredCursorTable (ignored_cursor_untrack.go:134) runs there
+//     too, "on every writable open" in its own words, untracks the legacy
+//     cursor table and commits — and it is NOT one-shot, because a pull from a
+//     not-yet-healed peer can re-introduce the shape;
+//   - migrationWorkNeeded (schema.go:868-891) answers TRUE for a database at
+//     both latest cursors when either cursor table lacks its content_hash
+//     column or the custom statuses/types backfill is pending, so the migration
+//     pass proper runs: it replays no numbered migration (migrate() still
+//     returns at current >= target), but it ALTERs, backfills and commits
+//     "schema: apply migrations" (schema.go:825-855).
+//
+// None of these is decided by the cursor pair or the sentinel reality this file
+// checks. Those commits carry no --author, so they are attributed to the SQL
+// session's identity rather than to the GIT_AUTHOR pair gc projects — which is
+// also why nothing can tell gc's commit from another bd client's after the fact.
+//
+// ProxiedHeadUnmoved below is the belt-and-braces answer, and it is strictly
+// wider than the gate: every one of those paths ends in a DOLT_COMMIT, and a
+// commit moves HEAD. It DETECTS; it cannot prevent, because the write has
+// happened by the time the open returns. Closing the hole rather than detecting
+// it still needs a read-only open FROM BEADS: that is the standing ask,
+// alongside SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
 	SchemaCursorMain = 66
@@ -139,4 +171,60 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 	default:
 		return true, "", ""
 	}
+}
+
+// ProxiedHeadUnmoved reports whether gc's own library open left bd's database
+// where it found it, and returns the head_moved verdict when it did not.
+//
+// # Why a HEAD hash and not another cursor read
+//
+// The gate above is a PRE-open check, and it is sound for what it covers: a
+// database it admits is one whose numbered ignored series does not replay. It
+// cannot cover the three commit paths in "The residual" above, because none of
+// them is a function of the cursors. A post-open MAX(version) re-read would be
+// no better — for an admitted database it is byte-identical by construction.
+//
+// A HEAD hash is the moving evidence for all of it: every one of those paths
+// ends in a DOLT_COMMIT, and a healthy open moves nothing. The two halves cost
+// no session of their own: the pre-open hash is a second column on the probe
+// session's first statement (proxyendpoint's cursorExistsWithHeadQuery), and the
+// re-read is one statement over the pool the library open itself just built
+// (ProxiedOpenedHead).
+//
+// # Why it is not terminal, and what it therefore does NOT claim
+//
+// gc cannot tell a commit ITS open minted from one another bd client made in the
+// same window: bd writes to this database constantly, and the schema commits
+// carry no author gc could recognize. Demoting terminally on that would let
+// another process's ordinary `bd update` permanently pin a scope to the bd front
+// door. So the verdict is non-terminal: this open stands down loudly (the
+// factory logs it with both hashes, see openProxiedNative), the opener forgets
+// the memoized admission so the next open re-probes and is checked again, and a
+// genuine per-open write shows up as a per-open demotion rather than as silence.
+//
+// The price of that choice is stated rather than hidden: on a city whose bd
+// clients commit inside the probe-to-re-read window, an open that wrote nothing
+// is demoted to the bd front door it would otherwise have replaced. That is the
+// pre-PR2 path, so it costs forks, never correctness.
+//
+// # Both empty cases decline rather than agree
+//
+// An unobserved hash on either side is "not observed", never "unchanged" — and
+// never "moved". A pin served from the admission memo carries no hash
+// (Pin.withoutHead), because comparing against a value up to the memo's TTL old
+// would make an unrelated write look like gc's; a re-read that produced nothing
+// has nothing to compare. Neither is a verdict, and neither is agreement.
+func ProxiedHeadUnmoved(pin Pin, observed string) error {
+	before, after := strings.TrimSpace(pin.Head()), strings.TrimSpace(observed)
+	if before == "" || after == "" || before == after {
+		return nil
+	}
+	return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+		"opening the linked library against database %q moved HEAD from %s to %s: "+
+			"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
+			"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
+			"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
+			"If another bd client committed in the same window this is that write and not gc's, "+
+			"which is why the verdict is non-terminal and the next open re-probes",
+		pin.Database(), before, after), nil)
 }
