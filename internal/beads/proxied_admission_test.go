@@ -987,6 +987,62 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 	}
 }
 
+// TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing is
+// council pr2 E-S6.
+//
+// Observed.Add writes a success-shaped entry for the generation BEFORE the
+// ping. When the ping failed and the record read right after it failed too
+// (EMFILE, EIO, a torn read), sameGeneration reported "moved" and the arm
+// re-admitted without Backoff — so the entry stayed success-shaped while the
+// generation was in fact still current, and the next silent open found the
+// ping "spent", no backoff, and recovered: a `bd dolt stop` with no successful
+// ping on this generation.
+func TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	pidPath := proxyendpoint.PIDPath(f.root)
+	calls := 0
+	ops := &admissionOps{onPing: func() error {
+		calls++
+		switch calls {
+		case 1:
+			// The read right after this failed ping cannot see the record.
+			if err := os.Rename(pidPath, pidPath+".unreadable"); err != nil {
+				t.Errorf("hide the record: %v", err)
+			}
+		case 2:
+			// ...and it is back, naming the SAME generation.
+			if err := os.Rename(pidPath+".unreadable", pidPath); err != nil {
+				t.Errorf("restore the record: %v", err)
+			}
+		}
+		return errors.New("provider op timed out waiting on the lifecycle semaphore")
+	}}
+	in := baseAdmissionInput(f, ops)
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+	}
+	clock := time.Now()
+	in.Observed.now = func() time.Time { return clock }
+
+	if _, err := Admit(context.Background(), in); err == nil {
+		t.Fatal("a silent proxy admitted")
+	}
+	if _, recovers := ops.counts(); recovers != 0 {
+		t.Fatalf("the first open recovered %d time(s) on a failed ping", recovers)
+	}
+	pingsBefore, _ := ops.counts()
+
+	// A second open inside the backoff, with the record readable and the
+	// generation unchanged.
+	if _, err := Admit(context.Background(), in); err == nil {
+		t.Fatal("a silent proxy admitted")
+	}
+	if pings, recovers := ops.counts(); recovers != 0 || pings != pingsBefore {
+		t.Fatalf("the open after a failed ping and an unreadable record spent %d more ping(s) and %d recover(s), "+
+			"want 0 and 0: a `bd dolt stop` with no successful ping on this generation", pings-pingsBefore, recovers)
+	}
+}
+
 // TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess is council A-F6.
 //
 // escalateWithPing has no generation for an absent record, so it keys the rung

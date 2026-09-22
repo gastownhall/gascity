@@ -740,7 +740,18 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 				"pinged the provider; re-admitting", nil)
 		case !in.sameGeneration(root, key):
 			// The ping failed but the generation moved anyway, which is bd
-			// replacing its proxy. Re-admit against whatever is there now.
+			// replacing its proxy — or the record could not be read at all,
+			// which sameGeneration also reports as "moved". Re-admit against
+			// whatever is there now, and hold THIS generation's rung for the
+			// backoff first (council pr2 E-S6). Observed.Add has already
+			// written a success-shaped entry for it; left as that, a record
+			// read that merely failed (EMFILE, EIO, a torn read) while the
+			// generation stayed current let the next open find the ping
+			// "spent", no backoff, and escalate straight to a recover — a
+			// `bd dolt stop` with no successful ping on this generation, the
+			// cascade D-F9 says a failed ping never causes. If the generation
+			// really moved, the backoff sits on a key nobody asks about again.
+			in.Observed.Backoff(generation, failedPingBackoff)
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the generation moved during the ping; re-admitting", err)
 		default:
