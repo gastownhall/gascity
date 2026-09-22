@@ -1329,7 +1329,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// fallback covers sessions created before provider_kind was stamped.
 		// Event-capable session providers retire the sidecar class: the
 		// supervisor's nudge event dispatcher owns queued delivery there.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && !providerRetiresNudgePollers(sp) {
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && !providerRetiresNudgePollers(sp, sessionInfo.SessionNameMetadata) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}

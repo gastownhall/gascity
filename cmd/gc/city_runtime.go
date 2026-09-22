@@ -1127,30 +1127,37 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 
 // sessionPhasesDue reports whether this tick must run the session-management
 // phases (pool death detection, corpse sweeps, demand/desired state, bead
-// reconcile) and stamps the last-run time when it does. Always true except
-// on patrol ticks in stretched mode: with [daemon].session_patrol_interval
-// longer than patrol_interval and the provider's session-event stream live,
-// patrol-driven session scans run at the stretched cadence — event pokes
-// carry the real-time work and the patrol scan is the safety net. A pending
-// config change always runs the phases (a reload must reconcile fully).
+// reconcile). Always true except on patrol ticks in stretched mode: with
+// [daemon].session_patrol_interval longer than patrol_interval and the
+// provider's session-event stream delivering, patrol-driven session scans
+// run at the stretched cadence — event pokes carry the real-time work and
+// the patrol scan is the safety net. A pending config change always runs
+// the phases (a reload must reconcile fully).
+//
+// This is a pure read: it does not stamp sessionPhasesLast. The tick can
+// still bail out (FS-pressure skip) after calling this and before the
+// session phases actually run; a caller that stamped here unconditionally
+// would consume the whole stretch interval on a tick that did no session
+// work. Callers stamp sessionPhasesLast themselves once the phases are
+// confirmed to run.
 func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now time.Time) bool {
-	due := trigger != "patrol" || configPending || !cr.sessionPhaseStretchActive() ||
+	return trigger != "patrol" || configPending || !cr.sessionPhaseStretchActive() ||
 		!now.Before(cr.sessionPhasesLast.Add(cr.cfg.Daemon.SessionPatrolIntervalDuration()))
-	if due {
-		cr.sessionPhasesLast = now
-	}
-	return due
 }
 
 // sessionPhaseStretchActive reports whether the stretched session-phase
 // patrol is in effect: configured longer than the patrol interval AND a
-// session-event stream currently established. Without a live stream
-// (tmux, subscribe failure) the stretch is ignored so session liveness
-// never degrades below the patrol cadence.
+// session-event stream currently DELIVERING. streaming() alone is not
+// enough — a subscribe call can succeed and return a channel before the
+// provider actually connects behind it (herdr retries forever with capped
+// backoff), so an established-but-silent stream would otherwise stretch the
+// patrol cadence with no event pokes ever arriving to cover it. Without a
+// delivering stream (tmux, subscribe failure, still connecting) the stretch
+// is ignored so session liveness never degrades below the patrol cadence.
 func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
 	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
-		cr.sessionEvents != nil && cr.sessionEvents.streaming()
+		cr.sessionEvents != nil && cr.sessionEvents.delivering()
 }
 
 // tick performs one reconciliation tick: pool death detection, config
@@ -1190,7 +1197,8 @@ func (cr *CityRuntime) tick(
 	// ([daemon].session_patrol_interval) — event pokes carry the real-time
 	// work and the patrol scan is the safety net. Non-patrol triggers and
 	// pending config changes always run the session phases.
-	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), time.Now())
+	tickNow := time.Now()
+	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), tickNow)
 	// Detect pool instance deaths since last tick (session phase). Ordered
 	// ahead of the config reload so it compares against the config the
 	// deaths happened under.
@@ -1234,7 +1242,6 @@ func (cr *CityRuntime) tick(
 		// A config change that landed after the top-of-tick check still
 		// requires a full reconcile this tick.
 		runSessionPhases = true
-		cr.sessionPhasesLast = time.Now()
 	}
 	if configChanged {
 		dirtyCleared = true
@@ -1333,6 +1340,10 @@ func (cr *CityRuntime) tick(
 	// inside the stretched session-patrol window (see sessionPhasesDue) —
 	// event pokes re-run them on demand.
 	if runSessionPhases {
+		// Stamped here, not in sessionPhasesDue: a tick that bails out
+		// earlier (FS-pressure skip) never reaches this point, so it must
+		// not consume the stretch interval for work it did not do.
+		cr.sessionPhasesLast = tickNow
 		phaseStart = time.Now()
 		sessionBeads := cr.loadSessionBeadSnapshot()
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))

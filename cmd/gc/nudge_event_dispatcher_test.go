@@ -522,13 +522,38 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 }
 
 func TestProviderRetiresNudgePollers(t *testing.T) {
-	if providerRetiresNudgePollers(nil) {
+	if providerRetiresNudgePollers(nil, "sess") {
 		t.Fatal("nil provider must not retire pollers")
 	}
-	if providerRetiresNudgePollers(runtime.NewFake()) {
+	if providerRetiresNudgePollers(runtime.NewFake(), "sess") {
 		t.Fatal("plain provider must not retire pollers")
 	}
-	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
+	if !providerRetiresNudgePollers(newNudgeEventedFake(), "sess") {
 		t.Fatal("event-capable provider must retire pollers")
+	}
+}
+
+// compositeRoutedNudgeFake implements eventCapableRouter to verify
+// providerRetiresNudgePollers asks per-session rather than asserting the
+// composite provider type globally.
+type compositeRoutedNudgeFake struct {
+	runtime.Provider
+	eventCapableSessions map[string]bool
+}
+
+func (f *compositeRoutedNudgeFake) EventCapableRoute(name string) bool {
+	return f.eventCapableSessions[name]
+}
+
+func TestProviderRetiresNudgePollers_CompositeRouter(t *testing.T) {
+	sp := &compositeRoutedNudgeFake{
+		Provider:             newNudgeEventedFake(),
+		eventCapableSessions: map[string]bool{"evented-sess": true},
+	}
+	if !providerRetiresNudgePollers(sp, "evented-sess") {
+		t.Fatal("session routed to an event-capable backend must retire pollers")
+	}
+	if providerRetiresNudgePollers(sp, "non-evented-sess") {
+		t.Fatal("session routed to a non-event-capable backend must not retire pollers, even though the composite type is globally event-capable")
 	}
 }

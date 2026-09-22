@@ -10,7 +10,18 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/worker"
+)
+
+// Compile-time checks that the composite providers this fix targets still
+// implement eventCapableRouter. A refactor that drops the method must fail
+// the build here instead of silently falling back to the top-level
+// SessionEventProvider assertion these checks exist to bypass.
+var (
+	_ eventCapableRouter = (*sessionauto.Provider)(nil)
+	_ eventCapableRouter = (*sessionhybrid.Provider)(nil)
 )
 
 // nudgeEventRetryEpsilon pads each delayed retry an attempt may schedule, so
@@ -388,14 +399,31 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 	return quiescence - since, true
 }
 
+// eventCapableRouter is implemented by composite providers (auto, hybrid)
+// that route different sessions to different backends. See
+// internal/session's providerRetiresDeferredSubmitPoller for the sibling
+// call site this mirrors; that copy cannot be imported here (internal/session
+// must not depend on cmd/gc), so the interface is declared on both sides.
+type eventCapableRouter interface {
+	EventCapableRoute(name string) bool
+}
+
 // providerRetiresNudgePollers reports whether sp's event stream retires the
-// sidecar poller class: the supervisor-hosted event dispatcher owns queued
-// delivery for such providers (in both nudge_dispatcher modes), so a spawned
-// poller would only race it. A nil provider fails open — callers without a
-// resolved provider keep today's spawn behavior.
-func providerRetiresNudgePollers(sp runtime.Provider) bool {
+// sidecar poller class for sessName: the supervisor-hosted event dispatcher
+// owns queued delivery for such providers (in both nudge_dispatcher modes),
+// so a spawned poller would only race it. A nil provider fails open —
+// callers without a resolved provider keep today's spawn behavior. Composite
+// providers (auto, hybrid) route different sessions to different backends,
+// so the top-level SessionEventProvider assertion alone answers "is ANY
+// routed backend event-capable" — true even when sessName is routed to a
+// non-event-capable backend. Ask per-session via EventCapableRoute when the
+// provider supports it.
+func providerRetiresNudgePollers(sp runtime.Provider, sessName string) bool {
 	if sp == nil {
 		return false
+	}
+	if router, ok := sp.(eventCapableRouter); ok {
+		return router.EventCapableRoute(sessName)
 	}
 	_, ok := sp.(runtime.SessionEventProvider)
 	return ok

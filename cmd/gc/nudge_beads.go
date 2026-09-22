@@ -46,7 +46,19 @@ func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+	resolved := resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)
+	if resolved != store {
+		// The nudges class is relocated to the shared binding: this freshly
+		// opened work-store handle was never returned to the caller and
+		// nothing else will close it. Close it here instead of leaking it —
+		// callers of this seam (the nudge event dispatcher's per-pass runPass
+		// among them) run far more often than the class-relocation case is
+		// rare, so each pass would otherwise open-and-drop one handle.
+		if closeErr := closeBeadStoreHandle(store); closeErr != nil {
+			return beads.NudgesStore{}, fmt.Errorf("closing discarded work-store handle for %q: %w", cityPath, closeErr)
+		}
+	}
+	return beads.NudgesStore{Store: resolved}, nil
 }
 
 // nudgeBeadStoreOwned reports whether the store openNudgeBeadStore(cityPath)
