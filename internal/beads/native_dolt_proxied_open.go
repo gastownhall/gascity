@@ -106,6 +106,20 @@ func OpenNativeDoltStoreAtProxied(parent context.Context, scopeRoot string, env 
 	// handle that classified its failures and then returned them untyped is
 	// exactly the shape that leaves the wrapper sitting on a dead pool.
 	store.proxiedReadVerdicts = true
+	// And so is the read-only fence, for exactly the same reason (council
+	// B-F5). It was left to WithProxiedReadOnly, which one call site passed —
+	// so a SECOND proxied open site (PR3's write arm, a new rig path, an
+	// acceptance seam) that omitted the option got a fully writable native
+	// handle against a database bd owns, with no compile error, no runtime
+	// signal, and a green read-only latch test (which builds its own latched
+	// store). "No native write reaches a bd-owned database" is one claim with
+	// two halves; leaving one half opt-in while the other is structural is how
+	// they drift.
+	//
+	// PR3's delta is therefore an explicit WithProxiedWritable(), not the
+	// ABSENCE of an option: a writable proxied handle should have to be asked
+	// for by name, in a diff a reviewer reads.
+	store.readOnlyReason = proxiedNativeReadOnlyReason
 	for _, opt := range opts {
 		opt(store)
 	}

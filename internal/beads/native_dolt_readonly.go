@@ -33,7 +33,11 @@ const proxiedNativeReadOnlyReason = "this scope's writes go through the bd CLI, 
 // that has already happened once.
 //
 // A field costs one branch per mutation and cannot lose an interface, because
-// there is no new type. PR3's delta is to stop setting it.
+// there is no new type. PR3's delta is to stop setting it — by asking, with a
+// WithProxiedWritable() that a reviewer can see in a diff, rather than by
+// omitting this option: OpenNativeDoltStoreAtProxied sets readOnlyReason
+// STRUCTURALLY (council B-F5), so this option is now belt to that braces and
+// the one that matters for a handle built by hand in a test.
 //
 // This is the SECOND of the two read-only fences, and the belt to the other's
 // braces: the first is that the split wrapper does not implement the graph-apply

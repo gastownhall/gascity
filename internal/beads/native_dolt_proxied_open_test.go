@@ -289,3 +289,46 @@ func TestWithNativeReadRetryBudgetIsAProductionOption(t *testing.T) {
 		}
 	}
 }
+
+// TestProxiedOpenIsReadOnlyWithoutBeingAsked is council B-F5.
+//
+// OpenNativeDoltStoreAtProxied sets proxiedReadVerdicts structurally, with a
+// comment explaining that a caller must not be able to forget it — and two
+// lines later left readOnlyReason, the OTHER half of "no native write reaches a
+// bd-owned database", to an option exactly one call site passed. A second
+// proxied open site (PR3's write arm, a new rig path, an acceptance seam) that
+// omitted it would get a fully writable native handle against a database bd
+// owns, with no compile error, no runtime signal, and a green
+// TestNativeDoltStoreReadOnlyLatchRefusesEveryMutation — which builds its own
+// latched store.
+//
+// This opens with NO options at all, which is the shape of the caller the
+// finding is about.
+func TestProxiedOpenIsReadOnlyWithoutBeingAsked(t *testing.T) {
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAtProxied(context.Background(), filepath.Join(t.TempDir(), "scope"), nil)
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtProxied: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	if !store.ReadOnly() {
+		t.Fatal("a proxied native handle opened with no options is WRITABLE against a database bd " +
+			"owns; the read-only fence must not be something a second call site can forget")
+	}
+	if _, err := store.Create(Bead{Title: "a write that must not land", Type: "task"}); err == nil {
+		t.Fatal("Create succeeded on a proxied native handle")
+	}
+	// The verdict fence beside it, so the two halves are asserted together and
+	// neither can drift back to opt-in alone.
+	if !store.proxiedReadVerdicts {
+		t.Fatal("a proxied native handle does not classify its read failures as verdicts")
+	}
+}
