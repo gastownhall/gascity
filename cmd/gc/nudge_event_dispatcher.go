@@ -322,6 +322,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		return
 	}
 	store := openNudgeBeadStore(d.cityPath)
+	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	if store.Store == nil {
 		return
 	}
