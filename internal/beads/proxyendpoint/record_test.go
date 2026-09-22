@@ -477,6 +477,29 @@ func TestProviderRootMirrorsBdDoltDirResolution(t *testing.T) {
 			env:     map[string]string{SharedServerModeEnv: "true", SharedServerDirEnv: "/srv/shared-server"},
 			want:    func(_, _ string) string { return filepath.FromSlash("/srv/pinned/dolt") },
 		},
+		{
+			// R2-F5: bd takes these values RAW (physical_root.go:64,114,
+			// doltserver.go:118,249). A leading space is a directory name, and a
+			// reader that trimmed it would resolve "<.beads>/data" for a proxy
+			// bd rooted at "<.beads>/ data" — a root nobody publishes into, and
+			// no_record for a healthy scope.
+			name: "BEADS_DOLT_DATA_DIR keeps the whitespace bd keeps",
+			env:  map[string]string{DoltDataDirEnv: " data"},
+			want: func(_, beadsDir string) string { return filepath.Join(beadsDir, " data") },
+		},
+		{
+			name: "BEADS_PROXIED_SERVER_ROOT_PATH keeps it too",
+			env:  map[string]string{RootPathEnv: " proxyroot"},
+			want: func(_, beadsDir string) string { return filepath.Join(beadsDir, " proxyroot") },
+		},
+		{
+			// bd's IsSharedServerMode compares the raw value, so " 1" is not on;
+			// a trim here would turn shared-server mode on for gc alone.
+			name:     "a padded BEADS_DOLT_SHARED_SERVER is off for bd and off here",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":"elsewhere/dolt"}`,
+			env:      map[string]string{SharedServerModeEnv: " 1", SharedServerDirEnv: "/srv/shared-server"},
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, "elsewhere", "dolt") },
+		},
 	}
 
 	for _, tc := range cases {
