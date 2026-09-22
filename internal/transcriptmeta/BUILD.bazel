@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "transcriptmeta",
+    srcs = ["transcriptmeta.go"],
+    importpath = "github.com/gastownhall/gascity/internal/transcriptmeta",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/fsys"],
+)
+
+go_test(
+    name = "transcriptmeta_test",
+    srcs = [
+        "testenv_import_test.go",
+        "transcriptmeta_test.go",
+    ],
+    embed = [":transcriptmeta"],
+    deps = ["//internal/testenv"],
+)

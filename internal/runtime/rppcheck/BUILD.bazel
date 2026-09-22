@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "rppcheck",
+    srcs = ["rppcheck.go"],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/rppcheck",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "rppcheck_test",
+    srcs = [
+        "rppcheck_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":rppcheck"],
+    deps = ["//internal/testenv"],
+)

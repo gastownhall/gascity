@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "builtinpacks",
+    srcs = ["registry.go"],
+    importpath = "github.com/gastownhall/gascity/internal/builtinpacks",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//examples/bd",
+        "//examples/bd/dolt",
+        "//internal/bootstrap/packs/core",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/remotesource",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+    ],
+)
+
+go_test(
+    name = "builtinpacks_test",
+    srcs = [
+        "embedded_overlay_test.go",
+        "registry_scoped_test.go",
+        "registry_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":builtinpacks"],
+    deps = ["//internal/testenv"],
+)

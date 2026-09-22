@@ -14,13 +14,21 @@ import (
 // TestManagedBeadsNativeCLICompatibility exercises the released CLI against
 // the linked library. A successful init alone can hide a schema mismatch by
 // silently selecting the subprocess fallback instead of native storage.
+//
+// The city is the gc-managed direct-server shape on purpose: it is the shape
+// gc opens through the linked library. A fresh provider-owned city — the
+// proxied-local default and the `--beads-transport direct` escape hatch
+// alike — is bd's, and gc reads it through the bd front door by design (gate
+// proxied_provider, or a preflight that cannot confirm identity on a scope gc
+// never canonicalised), so no library open happens there and nothing about
+// the linked schema would be exercised.
 func TestManagedBeadsNativeCLICompatibility(t *testing.T) {
 	// Select the installed test CLI from PATH, not a developer home override.
 	for _, entry := range gcBeadsBdTestHomeEnv(t) {
 		key, value, _ := strings.Cut(entry, "=")
 		t.Setenv(key, value)
 	}
-	cityPath := setupFreshManagedBdWaitTestCity(t)
+	cityPath, _ := setupManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
 	witness, err := os.ReadFile(filepath.Join(cityPath, ".beads", ".local_version"))

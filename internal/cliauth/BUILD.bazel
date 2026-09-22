@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cliauth",
+    srcs = [
+        "client.go",
+        "errors.go",
+        "store.go",
+        "wire.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/cliauth",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/gchome"],
+)
+
+go_test(
+    name = "cliauth_test",
+    srcs = [
+        "client_test.go",
+        "store_test.go",
+        "testenv_import_test.go",
+        "wire_test.go",
+    ],
+    embed = [":cliauth"],
+    deps = ["//internal/testenv"],
+)

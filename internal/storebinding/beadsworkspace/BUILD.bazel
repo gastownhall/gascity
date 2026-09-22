@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "beadsworkspace",
+    srcs = [
+        "engine.go",
+        "provider.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/storebinding/beadsworkspace",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/shellquote",
+        "//internal/storebinding",
+    ],
+)
+
+go_test(
+    name = "beadsworkspace_test",
+    srcs = [
+        "provider_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":beadsworkspace"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/shellquote",
+        "//internal/storebinding",
+        "//internal/testenv",
+    ],
+)

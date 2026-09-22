@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 
 func TestCustomTypesCheck_NoBeadsDir(t *testing.T) {
 	dir := t.TempDir()
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK (no .beads dir)", r.Status)
@@ -56,7 +57,7 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	// This will fail because bd isn't initialized in the temp dir.
 	// The check should report a warning (can't read config).
 	r := c.Run(&CheckContext{CityPath: dir})
@@ -353,7 +354,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 		t.Fatalf("dolt sql delete: %v\n%s", err, out)
 	}
 
-	c := NewCustomTypesCheck(dir, "test")
+	c := NewCustomTypesCheck(dir, "test", "")
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusError {
 		t.Fatalf("Run status = %v, want StatusError (table drift); message=%q", r.Status, r.Message)
@@ -369,7 +370,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 		t.Fatalf("Fix: %v", err)
 	}
 
-	c2 := NewCustomTypesCheck(dir, "test")
+	c2 := NewCustomTypesCheck(dir, "test", "")
 	r2 := c2.Run(&CheckContext{CityPath: dir})
 	if r2.Status != StatusOK {
 		t.Fatalf("after Fix, Run status = %v, want StatusOK; message=%q", r2.Status, r2.Message)
@@ -491,13 +492,31 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		if env != nil {
 			cmd.Env = env
 		}
-		out, err := cmd.CombinedOutput()
+		// Output, never CombinedOutput: callers below parse this as JSON,
+		// and bd reports diagnostics on stderr through the standard log
+		// package, whose prefix is a bare "2026/09/19 18:23:29 " timestamp.
+		// Merged ahead of the document, that makes json.Unmarshal read 2026
+		// as a complete top-level number and then fail on the '/' —
+		// "invalid character '/' after top-level value" (ga-x5wacn). bd only
+		// emits on that path under contention, which is why merging the
+		// streams failed under the parallel suite and passed in isolation.
+		// Production reads this same command the same way; see
+		// customTypesFromBd in checks_custom_types.go.
+		out, err := cmd.Output()
 		return string(out), err
 	}
 	mustRunBD := func(dir string, env []string, args ...string) string {
 		t.Helper()
 		out, err := runBD(dir, env, args...)
 		if err != nil {
+			// Output keeps stderr off the parsed value but does not discard
+			// it: it lands on *exec.ExitError, so the diagnostics stay
+			// available exactly where they are useful.
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, out, exitErr.Stderr)
+			}
 			t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
 		return out
@@ -555,7 +574,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	t.Setenv("GC_BEADS_BACKEND", "doltlite")
 	t.Setenv("GC_DOLT_DATABASE", "wrong-db")
-	c := NewCustomTypesCheck(targetDir, "target")
+	c := NewCustomTypesCheck(targetDir, "target", "")
 	ctx := &CheckContext{CityPath: targetDir}
 	if result := c.Run(ctx); result.Status != StatusError {
 		t.Fatalf("Run status = %v, want StatusError for missing required target types; message=%q", result.Status, result.Message)
@@ -563,7 +582,7 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	if err := c.Fix(ctx); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	if result := NewCustomTypesCheck(targetDir, "target").Run(ctx); result.Status != StatusOK {
+	if result := NewCustomTypesCheck(targetDir, "target", "").Run(ctx); result.Status != StatusOK {
 		t.Fatalf("Run after Fix status = %v, want StatusOK; message=%q", result.Status, result.Message)
 	}
 
@@ -718,6 +737,19 @@ func TestParseCustomTypesJSON(t *testing.T) {
 			input:   `not json`,
 			wantErr: true,
 		},
+		{
+			// Guards ga-x5wacn. A caller that merges bd's stderr into its
+			// stdout puts the standard log package's bare timestamp ahead
+			// of the document; json.Unmarshal then reads 2026 as a complete
+			// top-level number and fails on the '/'. Parsing must keep
+			// rejecting this rather than learning to skip a prefix, which
+			// would mask genuine corruption — the caller is what must not
+			// merge the streams.
+			name: "log line merged from stderr is rejected, not skipped",
+			input: "2026/09/19 18:23:29 [circuit-breaker] 127.0.0.1:37379/prf: open \u2192 closed (active probe succeeded)\n" +
+				`{"key":"types.custom","value":"user-defined"}`,
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -794,7 +826,7 @@ func TestCustomTypesCheck_RequiredTypesComplete(t *testing.T) {
 		"event": true, "gate": true, "merge-request": true,
 		"agent": true, "role": true, "rig": true,
 		"session": true, "spec": true, "convergence": true,
-		"step": true,
+		"step": true, "startup-health-episode": true,
 	}
 	for _, typ := range RequiredCustomTypes {
 		if !expected[typ] {

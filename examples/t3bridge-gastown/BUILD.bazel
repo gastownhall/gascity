@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "t3bridge-gastown_test",
+    srcs = [
+        "t3bridge_gastown_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        "//internal/builtinpacks",
+        "//internal/fsys",
+        "//internal/packman",
+        "//internal/testenv",
+    ],
+)

@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hooks",
+    srcs = ["hooks.go"],
+    embedsrcs = [
+        "config/README.md",
+        "config/claude.json",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/hooks",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/bootstrap/packs/core",
+        "//internal/citylayout",
+        "//internal/fsys",
+        "//internal/overlay",
+        "//internal/shellquote",
+    ],
+)
+
+go_test(
+    name = "hooks_test",
+    srcs = [
+        "hooks_family_test.go",
+        "hooks_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":hooks"],
+    deps = [
+        "//internal/fsys",
+        "//internal/shellquote",
+        "//internal/testenv",
+    ],
+)

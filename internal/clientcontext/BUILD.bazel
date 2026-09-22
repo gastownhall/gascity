@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clientcontext",
+    srcs = ["clientcontext.go"],
+    importpath = "github.com/gastownhall/gascity/internal/clientcontext",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_burntsushi_toml//:toml"],
+)
+
+go_test(
+    name = "clientcontext_test",
+    srcs = [
+        "clientcontext_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":clientcontext"],
+    deps = ["//internal/testenv"],
+)
