@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -544,14 +545,39 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			verdict: ProxiedVerdictAccessDenied,
 		},
 		{
-			name: "a bare io.EOF is connection-level even though no substring matches",
-			err:  fmt.Errorf("reading greeting: %w", io.EOF),
-			want: nativeReadTransient,
-			why:  "the sentinel rung is what the substring table could not see",
+			name:       "a bare io.EOF is connection-level on the proxied lane and nothing on the direct one",
+			err:        fmt.Errorf("reading greeting: %w", io.EOF),
+			want:       nativeReadTransient,
+			wantDirect: disposition(nativeReadUnclassified),
+			why:        "the sentinel rung is what the substring table could not see, and seeing more is a widening",
 		},
 		{
-			name:    "ECONNREFUSED is connection-level",
-			err:     fmt.Errorf("dial: %w", syscall.ECONNREFUSED),
+			name: "a name that does not resolve is connection-level on the proxied lane and nothing on the direct one",
+			// Council C-F5 / pr2 D-F2's reproduction. *net.DNSError satisfies
+			// net.Error, so IsConnectionLevel claims it; nothing in the nine
+			// substrings does, so on main a misconfigured BEADS_DOLT_SERVER_HOST
+			// was an instant "no such host" rather than a 90s uncancellable
+			// reconnect loop against a name that will not resolve either.
+			err: fmt.Errorf("dialing managed dolt: %w", &net.DNSError{
+				Err: "no such host", Name: "beads-dolt.invalid", IsNotFound: true,
+			}),
+			want:       nativeReadTransient,
+			wantDirect: disposition(nativeReadUnclassified),
+		},
+		{
+			name: "an unreachable host is connection-level on the proxied lane and nothing on the direct one",
+			err:  fmt.Errorf("dial: %w", syscall.EHOSTUNREACH),
+			// "no route to host" is in no substring the table carries.
+			want:       nativeReadTransient,
+			wantDirect: disposition(nativeReadUnclassified),
+		},
+		{
+			name: "ECONNREFUSED is connection-level on BOTH lanes, through the text table",
+			err:  fmt.Errorf("dial: %w", syscall.ECONNREFUSED),
+			// The direct lane reaches the same answer at rung 7 — "connection
+			// refused" is one of the nine substrings — which is what makes this
+			// row the control for the three above: gating rung 6 took nothing
+			// away that main already had.
 			want:    nativeReadTransient,
 			verdict: ProxiedVerdictNone,
 		},
@@ -764,7 +790,7 @@ func TestNativeDoltProxiedReadBudgetExhaustionIsANonTerminalVerdict(t *testing.T
 // council B-F1: rung 3 is lane-gated, because on the DIRECT lane the immediate
 // return IS the contract main has and this PR promises not to change it. The
 // direct-lane half of the same rung is
-// TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs; the two are
+// TestFlagOffNativeReadIsByteIdenticalForTheLaneGatedRungs; the two are
 // deliberately mirror images.
 func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 	var reads, reopens int32
@@ -837,11 +863,12 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 	})
 }
 
-// TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs is council
-// B-F1 / C-F1's pin, and it is a pin on the lane this PR promises not to touch.
+// TestFlagOffNativeReadIsByteIdenticalForTheLaneGatedRungs is council
+// B-F1 / C-F1 / C-F5's pin, and it is a pin on the lane this PR promises not to
+// touch.
 //
 // The flag-off lane is every existing direct/hosted managed-Dolt city, and its
-// read path is ordinary List/Get/Ready. Two of P2-08's rungs changed it:
+// read path is ordinary List/Get/Ready. Three of P2-08's rungs changed it:
 //
 //   - An open library breaker returned instantly on main (its text matches none
 //     of the nine transient substrings). Classified as nativeReadCircuitOpen it
@@ -851,6 +878,13 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 //     consulted on the write path only). Classified as nativeReadTransient every
 //     pass called the reopen hook, which on a hosted city re-resolves the managed
 //     port with recovery enabled and can restart a healthy city's Dolt server.
+//   - A name that does not resolve returned instantly on main. Rung 6's
+//     proxyendpoint.IsConnectionLevel claims ANY net.Error, and *net.DNSError is
+//     one, so a misconfigured BEADS_DOLT_SERVER_HOST became the same 90s
+//     reconnect loop — against a name the reopen hook will re-resolve to the
+//     same failure. Council C-F5 filed this, the first fix round gated rungs 2
+//     and 3 only, and the round's tally counted it closed; pr2 D-F2 re-found it
+//     with exactly the reproduction this row now runs.
 //
 // Each row therefore asserts three things together, because any one alone
 // passes on the broken code: the error is returned VERBATIM (not wrapped in a
@@ -858,7 +892,7 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 // wall time. The reopen hook is INSTALLED in every row — the `reopen == nil`
 // escape protects only bare test handles, and all three production direct/hosted
 // open sites pass one.
-func TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs(t *testing.T) {
+func TestFlagOffNativeReadIsByteIdenticalForTheLaneGatedRungs(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
@@ -876,6 +910,13 @@ func TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs(t *testing.T) {
 		{
 			name:           "a serialization conflict on a read",
 			err:            errors.New("begin read tx: Error 1213 (40001): Deadlock found when trying to get lock"),
+			proxiedReopens: true,
+		},
+		{
+			name: "a host name that does not resolve",
+			err: fmt.Errorf("dialing managed dolt: %w", &net.DNSError{
+				Err: "no such host", Name: "beads-dolt.invalid", IsNotFound: true,
+			}),
 			proxiedReopens: true,
 		},
 	}

@@ -68,17 +68,18 @@ import (
 //     EPIPE, ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, any net.Error or
 //     *net.OpError — and, because IsIndeterminate runs first inside it, never a
 //     timeout or a cancellation. Reconnect is the right response, which is what
-//     the text table was reaching for.
+//     the text table was reaching for. PROXIED LANE ONLY — see "What the
+//     classifier does NOT decide".
 //
 //  7. The text table (isNativeDoltTransientReadError), unchanged, as the
 //     backstop for a driver string none of the above catches.
 //
-// Rung 6 is the one small, deliberate widening of what the DIRECT native lane
-// treats as transient: a bare io.EOF and the two unreachable-host errno values
-// are sentinel-typed connection failures the substring table did not name. Every
-// member added is a connection that demonstrably failed, which is precisely what
-// the reconnect hook exists for. Rungs 2 and 3 are NOT widenings of that lane —
-// they are gated on it; see the lane note below.
+// Rungs 2, 3 and 6 are the three rungs that would change what the DIRECT native
+// lane treats as transient, and all three are gated on the lane. On a direct or
+// hosted handle the classifier therefore adds exactly one thing to main:
+// terminality for MySQL 1049/1045 (rungs 4/5), which is a no-op in practice
+// because the text table matches neither, so "terminal" and "unclassified" are
+// the same immediate return.
 //
 // # What the classifier does NOT decide
 //
@@ -90,12 +91,13 @@ import (
 // "unclassified" are the same immediate return — and the error the caller
 // receives is byte-identical to the one it receives now.
 //
-// # The lane gate, and why rungs 2 and 3 carry one (council B-F1 / C-F1)
+// # The lane gate, and why rungs 2, 3 and 6 carry one (council B-F1 / C-F1 / C-F5)
 //
 // An earlier version of this comment claimed rung 6 was the ONLY widening of
-// the direct lane. That was false, and the two counterexamples were live
-// behavior changes on every existing hosted/managed-Dolt city — the lane this
-// PR promises not to touch:
+// the direct lane. That was false in both directions: two other rungs widened
+// it, and rung 6's own widening was not the small one the comment described.
+// Every one of the three was a live behavior change on every existing
+// hosted/managed-Dolt city — the lane this PR promises not to touch:
 //
 //   - Rung 3. On main, beadslib.ErrCircuitOpen's text
 //     ("dolt circuit breaker is open: server appears down, failing fast") matched
@@ -113,17 +115,35 @@ import (
 //     budget. Reconnecting is also the wrong remedy: a 40001 says nothing about
 //     the connection, and the library has already spent its own serialization
 //     retry before gc sees it.
+//   - Rung 6 (council C-F5, missed by the first fix round and re-found as pr2
+//     D-F2). proxyendpoint.IsConnectionLevel is far wider than the "bare io.EOF
+//     plus two errno values" this comment used to describe: it returns true for
+//     ANY net.Error and any *net.OpError, and *net.DNSError satisfies
+//     net.Error. So a misconfigured BEADS_DOLT_SERVER_HOST on a flag-off
+//     direct/hosted city — an instant `lookup x: no such host` on main, because
+//     the text table matches none of it — became reconnect-and-retry on the 90s
+//     context.Background()-derived budget and returned a rewritten "retry
+//     budget exhausted" string. The reconnect is also the wrong remedy for a
+//     name that does not resolve: the reopen hook re-resolves the same name.
 //
-// The `reopen == nil` escape in withReadRetry protects neither: every
+// The `reopen == nil` escape in withReadRetry protects none of them: every
 // production direct/hosted open installs a hook (cmd/gc/main.go,
 // cmd/gc/api_state.go, internal/storebinding/beadsworkspace/engine.go), so it
 // protects only bare test handles.
 //
-// So both rungs are gated on the LANE, exactly as rungs 4/5's verdict already
-// is. On the direct lane the two errors fall through to the text table, match
-// nothing, classify as nativeReadUnclassified and are returned verbatim on the
-// first pass — the behavior main has. Rung 6 remains the one deliberate
-// widening, and now that claim is true.
+// So all three rungs are gated on the LANE, exactly as rungs 4/5's verdict
+// already is. On the direct lane those errors fall through to the text table,
+// match nothing, classify as nativeReadUnclassified and are returned verbatim
+// on the first pass — the behavior main has. What the direct lane still gets
+// from this file is the ORDER (rung 1 ahead of everything, so an indeterminate
+// commit is never replayed whatever else it looks like) and rungs 4/5's
+// terminality; neither changes an error or a call count.
+//
+// A claim about this lane is only worth what its test asserts. Each gated rung
+// is pinned by a mirror pair over one error that measures what the CALLER sees
+// — verbatim error, reopen count, wall time — because any one of those alone
+// passes on the un-gated code. See
+// TestFlagOffNativeReadIsByteIdenticalForTheLaneGatedRungs.
 type nativeReadDisposition int
 
 const (
@@ -252,7 +272,11 @@ func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass
 	}
 
 	// 6. The sentinel-and-type half of "the endpoint was disturbed".
-	if proxyendpoint.IsConnectionLevel(err) {
+	// PROXIED LANE ONLY, for the same reason as rungs 2 and 3: on the direct
+	// lane a *net.DNSError, a bare io.EOF, EHOSTUNREACH or ENETUNREACH matches
+	// nothing in the text table and main returned it on the first pass. See the
+	// lane note above.
+	if lane == proxiedNativeLane && proxyendpoint.IsConnectionLevel(err) {
 		return nativeReadClass{disposition: nativeReadTransient}
 	}
 
