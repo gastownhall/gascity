@@ -8,17 +8,23 @@ go_library(
         "conformance_skips.go",
         "fence_conformance.go",
         "metadata_cas_conformance.go",
+        "pinned_id_fence_conformance.go",
+        "pinned_module.go",
         "recording_store.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/beadstest",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/beads"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+    ],
 )
 
 go_test(
     name = "beadstest_test",
     srcs = [
         "conformance_skips_test.go",
+        "pinned_module_test.go",
         "recording_store_test.go",
         "testenv_import_test.go",
     ],
