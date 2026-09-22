@@ -106,9 +106,14 @@ func NewRecordingBD(t *testing.T, realBD string) *RecordingBD {
 	// this used to claim otherwise. Measured with strace on a 20 000-byte
 	// record:
 	//
-	//   - /bin/dash: one write(1, …, 20000) for the record plus a separate
-	//     write of the trailing newline. Records of any size are one write;
-	//     Invocations() already treats the newline as belonging to no record.
+	//   - /bin/dash: one write(1, …, 20000) for the record plus a SEPARATE
+	//     write of the trailing newline (measured: one write up to 8000 bytes,
+	//     two from 8200 on). The record is never split, so dash cannot splice;
+	//     but because the newline is its own write, a concurrent fork's record
+	//     can land between a record and its newline, and the log then carries
+	//     two newlines in a row. Invocations() treats every leading newline as
+	//     belonging to no record, so that shape parses as the two intact
+	//     records it is.
 	//   - /bin/bash standing in as /bin/sh (Fedora, macOS): five writes in
 	//     4096-byte chunks. Two concurrent forks whose argv exceeds 4 KiB can
 	//     interleave chunks there.
@@ -178,8 +183,13 @@ func parseInvocations(data []byte) ([]Invocation, error) {
 	var out []Invocation
 	for _, record := range strings.Split(string(data), recordSeparator) {
 		// The shim writes a newline after each record separator so the log is
-		// still readable by eye; it belongs to neither record.
-		record = strings.TrimPrefix(record, "\n")
+		// still readable by eye; it belongs to neither record. There can be
+		// more than one: dash writes a record over 8 KiB and its newline as two
+		// writes, so a concurrent fork's whole record (and its newline) can land
+		// between them, leaving "\n\n" ahead of the next record. Trimming only
+		// the first would leave a newline where a pid is expected and fail a log
+		// whose records are all intact.
+		record = strings.TrimLeft(record, "\n")
 		if record == "" {
 			continue
 		}

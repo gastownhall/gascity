@@ -225,6 +225,61 @@ func TestRecordingBDRefusesAnInterleavedLog(t *testing.T) {
 	}
 }
 
+// TestParseInvocationsToleratesDashsSeparateNewlineWrite pins the one shape
+// /bin/dash really produces: a record over 8 KiB is one write and its trailing
+// newline is a SECOND write (measured with strace: one write up to 8000 bytes,
+// two from 8200 on). A concurrent fork's record can therefore land between the
+// two, and the log carries the first record, then the second record and ITS
+// newline, then the first record's newline — so the reader meets "\n\n" ahead of
+// the next record, or a trailing "\n" segment of nothing but newlines.
+//
+// Both records are intact and the count is exact, so this must parse, not fail:
+// dash is the shell this host runs and the one the shim's comment calls safe.
+// Stripping only the first newline left a "\n" where the pid check wants a
+// number and failed a correct log with "cannot be trusted".
+func TestParseInvocationsToleratesDashsSeparateNewlineWrite(t *testing.T) {
+	first := "4242" + fieldSeparator + "create" + fieldSeparator + "--description" + fieldSeparator + strings.Repeat("x", 9000) + fieldSeparator + recordSeparator
+	second := "4243" + fieldSeparator + "ping" + fieldSeparator + recordSeparator + "\n"
+
+	for _, tc := range []struct {
+		name string
+		log  string
+	}{
+		// The big record, then the small fork's record and newline, then the big
+		// record's own newline: the doubled newline lands at the end of the log.
+		{name: "doubled newline at the tail", log: first + second + "\n"},
+		// The same interleave with a third fork behind it: the doubled newline
+		// now sits in front of a record whose pid must still be read.
+		{name: "doubled newline mid-log", log: first + second + "\n" + "4244" + fieldSeparator + "ready" + fieldSeparator + recordSeparator + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invocations, err := parseInvocations([]byte(tc.log))
+			if err != nil {
+				t.Fatalf("parseInvocations over a dash split-newline log: %v", err)
+			}
+			var ppids []string
+			for _, invocation := range invocations {
+				ppids = append(ppids, invocation.PPID)
+			}
+			want := []string{"4242", "4243"}
+			if strings.Contains(tc.name, "mid-log") {
+				want = append(want, "4244")
+			}
+			if len(ppids) != len(want) {
+				t.Fatalf("parseInvocations = %v ppids, want %v; every record in this log is intact, so the count is exact", ppids, want)
+			}
+			for i := range want {
+				if ppids[i] != want[i] {
+					t.Fatalf("parseInvocations ppids = %v, want %v", ppids, want)
+				}
+			}
+			if got := invocations[0].Argv; len(got) != 3 || got[0] != "create" || len(got[2]) != 9000 {
+				t.Fatalf("the oversized record's argv came back as %d fields (first %q, last %d bytes), want create/--description/9000 bytes intact", len(got), got[0], len(got[len(got)-1]))
+			}
+		})
+	}
+}
+
 // writeInvocations appends records in the shim's wire format: ppid first, then
 // argv, every field unit-separated, every record separator-terminated and
 // followed by the readability newline the shim writes.
