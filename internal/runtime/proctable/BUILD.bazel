@@ -1,0 +1,53 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "proctable",
+    srcs = [
+        "descendants.go",
+        "descendants_darwin.go",
+        "descendants_linux.go",
+        "descendants_stub.go",
+        "doc.go",
+        "guard.go",
+        "kill_stub.go",
+        "kill_unix.go",
+        "proctable.go",
+        "scan_darwin.go",
+        "scan_darwin_command.go",
+        "scan_linux.go",
+        "scan_stub.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/proctable",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/runtime",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/pidutil",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/pidutil",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "proctable_test",
+    srcs = [
+        "descendants_test.go",
+        "guard_test.go",
+        "kill_unix_test.go",
+        "scan_darwin_command_test.go",
+        "scan_linux_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":proctable"],
+    deps = ["//internal/testenv"],
+)

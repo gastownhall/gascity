@@ -76,6 +76,11 @@ prepare required startup state in that directory too. Verify a fresh interactive
 launch as well as resume: a non-interactive prompt can skip first-run screens
 that would block an interactive agent.
 
+Keep wrapper diagnostics out of the interactive terminal so they cannot overwrite
+startup menu options. Match `process_names` to the executable actually running
+inside the wrapper, and verify that Gas City still reports the agent alive after
+startup and while it claims work.
+
 For copy-paste setup of each built-in harness — the env vars it reads and the
 direct / custom-endpoint / model permutations — see
 [Harness Recipes](/guides/harness-recipes). See

@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "waiverclock",
+    srcs = ["waiverclock.go"],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/waiverclock",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "waiverclock_test",
+    srcs = [
+        "testenv_import_test.go",
+        "waiverclock_test.go",
+    ],
+    embed = [":waiverclock"],
+    deps = ["//internal/testenv"],
+)

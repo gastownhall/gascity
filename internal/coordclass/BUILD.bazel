@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "coordclass",
+    srcs = [
+        "class.go",
+        "classify.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/coordclass",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+    ],
+)
+
+go_test(
+    name = "coordclass_test",
+    srcs = [
+        "classify_nudge_queue_test.go",
+        "classify_test.go",
+        "guard_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":coordclass"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/nudgequeue",
+        "//internal/session",
+        "//internal/storebinding",
+        "//internal/testenv",
+    ],
+)

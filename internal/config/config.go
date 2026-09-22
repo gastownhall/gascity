@@ -1811,8 +1811,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -4677,6 +4680,13 @@ func Parse(data []byte) (*City, error) {
 	cfg := City{}
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := validateStorageAuthoringSurface(md); err != nil {

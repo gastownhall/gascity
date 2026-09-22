@@ -1787,7 +1787,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	statePtr := &nudgeState
 
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	mailTTL := nudgeMailSweepMailTTLForConfig(cr.cfg, cr.stderr)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -3710,10 +3711,19 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
+	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+	} else {
+		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
+	// Emit here, at the FRESH build, rather than where the result is consumed:
+	// loadDemandSnapshot reuses a cached result across stable patrol ticks, so a
+	// consumer-side emission would replay an observation this tick never made.
+	// This keeps the event one-for-one with the stderr line the same build
+	// printed.
+	emitControlDispatcherScopeGapEvents(cr.rec, cr.cityName, result.ControlDispatcherScopeGaps, time.Now())
+	return result
 }
 
 // refreshDesiredState re-applies the session-bead overlay to an already-built

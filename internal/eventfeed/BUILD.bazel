@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "eventfeed",
+    srcs = ["muxsource.go"],
+    importpath = "github.com/gastownhall/gascity/internal/eventfeed",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/events",
+        "//pkg/eventexport",
+    ],
+)
+
+go_test(
+    name = "eventfeed_test",
+    srcs = [
+        "allowlist_drift_test.go",
+        "muxsource_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":eventfeed"],
+    deps = [
+        "//internal/events",
+        "//internal/testenv",
+        "//internal/testutil",
+        "//pkg/eventexport",
+    ],
+)

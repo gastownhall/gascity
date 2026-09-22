@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "shellquote",
+    srcs = ["shellquote.go"],
+    importpath = "github.com/gastownhall/gascity/internal/shellquote",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "shellquote_test",
+    srcs = [
+        "shellquote_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":shellquote"],
+    deps = ["//internal/testenv"],
+)

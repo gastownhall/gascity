@@ -24,7 +24,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/steveyegge/beads v1.3.0-rc.2
+	github.com/steveyegge/beads v1.3.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.19.0

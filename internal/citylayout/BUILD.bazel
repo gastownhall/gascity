@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "citylayout",
+    srcs = [
+        "layout.go",
+        "runtime.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/citylayout",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/pathutil"],
+)
+
+go_test(
+    name = "citylayout_test",
+    srcs = [
+        "runtime_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":citylayout"],
+    deps = ["//internal/testenv"],
+)

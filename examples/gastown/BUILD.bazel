@@ -1,0 +1,30 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "gastown_test",
+    srcs = [
+        "bind_key_script_test.go",
+        "cycle_script_test.go",
+        "embedded_pack_test.go",
+        "gastown_test.go",
+        "main_test.go",
+        "maintenance_scripts_test.go",
+        "operational_awareness_test.go",
+        "precompact_hook_test.go",
+        "testenv_import_test.go",
+        "tmux_theme_script_test.go",
+    ],
+    deps = [
+        "//internal/beads",
+        "//internal/builtinpacks",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/molecule",
+        "//internal/packman",
+        "//internal/session",
+        "//internal/testenv",
+        "//test/dolttest",
+        "@com_github_burntsushi_toml//:toml",
+        "@com_github_gastownhall_gascity_packs//:gascity-packs",
+    ],
+)

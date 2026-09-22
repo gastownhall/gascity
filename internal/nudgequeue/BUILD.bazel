@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "nudgequeue",
+    srcs = [
+        "state.go",
+        "store.go",
+        "waits.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/nudgequeue",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/citylayout",
+        "//internal/fsys",
+    ],
+)
+
+go_test(
+    name = "nudgequeue_test",
+    srcs = [
+        "store_test.go",
+        "testenv_import_test.go",
+        "waits_test.go",
+    ],
+    embed = [":nudgequeue"],
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/testenv",
+    ],
+)

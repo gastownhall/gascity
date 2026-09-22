@@ -22,6 +22,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
 | `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
+| `beads-proxied-local-default` | Accepted | bd-owned proxied-server store as the fresh-init default on bd >= 1.3.0: topology authority, ownership journal, stop ordering, idle policy |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
 | `runtime-partial-discipline` | Accepted (source-level), follow-ups Proposed | Treat a failed tmux-liveness observation as partial (defer destructive arms) instead of "nothing running"; mirrors storeQueryPartial |
 | `idle-claim-nudge-followups` | Proposed | Widen the stalled-pool-claim backstop key to unassigned pool-routed beads (the case the tmux warm-slot un-gate does not cover) |

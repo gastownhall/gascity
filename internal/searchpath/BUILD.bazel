@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "searchpath",
+    srcs = ["searchpath.go"],
+    importpath = "github.com/gastownhall/gascity/internal/searchpath",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "searchpath_test",
+    srcs = [
+        "searchpath_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":searchpath"],
+    deps = ["//internal/testenv"],
+)

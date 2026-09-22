@@ -185,6 +185,18 @@ func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessi
 	return bead, ok
 }
 
+// buildClosedNamedSessionBeadIndex batches the per-identity
+// findClosedNamedSessionBead lookup into one store read, for callers that
+// need the sessionName=="" answer for every configured named session in one
+// pass (ga-0t7qjl) instead of once per identity. Discards the underlying
+// error the same way findClosedNamedSessionBead does: a failed read leaves
+// the index empty, so every identity's Find reports no match rather than
+// stopping the caller's whole loop.
+func buildClosedNamedSessionBeadIndex(store beads.Store) session.ClosedNamedSessionBeadIndex {
+	idx, _ := session.BuildClosedNamedSessionBeadIndex(store)
+	return idx
+}
+
 func findNamedSessionConflictInfo(sessionBeads *sessionBeadSnapshot, spec namedSessionSpec) (session.Info, bool) {
 	if sessionBeads == nil {
 		return session.Info{}, false
