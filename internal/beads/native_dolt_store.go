@@ -393,6 +393,13 @@ type NativeDoltStore struct {
 	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
 
+	// readOnlyReason, when non-empty, latches this handle read-only: every
+	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
+	// storage. It is set once at open by WithProxiedReadOnly and never cleared
+	// in PR2. See native_dolt_readonly.go for why the fence lives here rather
+	// than in a hand-written read-only leaf type.
+	readOnlyReason string
+
 	// condWritesStamp carries the factory-stamped conditional-writes mode. The
 	// pinned upstream Storage contract requires row-version checked update and
 	// close plus transactions; DeleteIfMatch composes the matching transaction
@@ -922,6 +929,9 @@ func (s *NativeDoltStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPl
 // ApplyGraphPlanWithStorage creates a bead graph atomically in the selected
 // storage tier through the native beads storage layer.
 func (s *NativeDoltStore) ApplyGraphPlanWithStorage(parent context.Context, plan *GraphApplyPlan, storageClass StorageClass) (*GraphApplyResult, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return nil, err
+	}
 	if plan == nil {
 		return nil, fmt.Errorf("graph apply plan is nil")
 	}
@@ -1094,6 +1104,12 @@ func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 // there would leave the beads it carries nowhere at all. It satisfies
 // ForeignIDCreator.
 func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
+	// Ahead of the id validation, not after it: a read-only handle must refuse
+	// for the reason it is read-only, not report an argument problem it would
+	// never have acted on anyway.
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
 	if strings.TrimSpace(b.ID) == "" {
 		return Bead{}, fmt.Errorf("creating bead with foreign id: empty id")
 	}
@@ -1108,6 +1124,9 @@ func (s *NativeDoltStore) CreateWithForeignID(b Bead) (Bead, error) {
 // sequence, and cannot reveal through its refusal whether the store already
 // holds a relic under that id.
 func (s *NativeDoltStore) create(b Bead, allowForeign bool) (Bead, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return Bead{}, err
+	}
 	if !allowForeign {
 		if err := checkPinnedIDNamespace("native dolt create", b.ID, s.reservedPrefixes); err != nil {
 			return Bead{}, err
@@ -1173,6 +1192,9 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1312,6 +1334,9 @@ func (s *NativeDoltStore) applyCreateInTx(ctx context.Context, tx beadslib.Trans
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee inside one native Dolt transaction.
 func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return false, err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err
@@ -1349,6 +1374,9 @@ func (s *NativeDoltStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 
 // Close sets a bead's status to closed through the upstream beads storage layer.
 func (s *NativeDoltStore) Close(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1414,6 +1442,9 @@ func (s *NativeDoltStore) closeOnce(ctx context.Context, storage beadslib.Storag
 
 // Reopen sets a closed bead's status back to open.
 func (s *NativeDoltStore) Reopen(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1457,6 +1488,9 @@ func (s *NativeDoltStore) reopenOnce(ctx context.Context, storage beadslib.Stora
 
 // CloseAll closes multiple beads and sets metadata on each newly closed bead.
 func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if err := s.readOnlyGuard(); err != nil {
+		return 0, err
+	}
 	closed := 0
 	for _, id := range ids {
 		current, err := s.Get(id)
@@ -1800,6 +1834,9 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1852,6 +1889,9 @@ func isNativeDoltSerializationConflict(err error) bool {
 // this never touches the Dolt DB or commits. Does not validate that id
 // refers to an existing bead — see the interface doc comment for why.
 func (s *NativeDoltStore) SetLocalString(id, key, value string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	if err := s.localStrings.Set(id, key, value); err != nil {
 		return fmt.Errorf("setting local string on %q: %w", id, err)
 	}
@@ -1873,6 +1913,9 @@ func (s *NativeDoltStore) GetLocalString(id, key string) (string, error) {
 // caller (e.g. an extmsg bind) issue several bead writes at the cost of one
 // commit instead of one per write.
 func (s *NativeDoltStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
@@ -1925,6 +1968,9 @@ func (t *nativeDoltTx) Close(id string) error {
 
 // Delete permanently removes a bead from the upstream beads storage layer.
 func (s *NativeDoltStore) Delete(id string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1956,6 +2002,9 @@ func (s *NativeDoltStore) Ping() error {
 
 // DepAdd records a dependency between two beads.
 func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1972,6 +2021,9 @@ func (s *NativeDoltStore) DepAdd(issueID, dependsOnID, depType string) error {
 
 // DepRemove removes a dependency between two beads.
 func (s *NativeDoltStore) DepRemove(issueID, dependsOnID string) error {
+	if err := s.readOnlyGuard(); err != nil {
+		return err
+	}
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
