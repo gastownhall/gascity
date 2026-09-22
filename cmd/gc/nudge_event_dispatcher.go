@@ -326,7 +326,17 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+	if nudgeBeadStoreOwned(d.cityPath) {
+		// Only close a handle this pass opened itself. When the nudges class is
+		// relocated to a split binding, store.Store is the shared, process-scoped
+		// route cliStorageRoutes owns; closing it here would tear it down for
+		// every other consumer of that binding after the first pass.
+		defer func() {
+			if err := closeBeadStoreHandle(store.Store); err != nil {
+				fmt.Fprintf(d.stderr, "%s: nudge event dispatch: closing bead store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+		}()
+	}
 	// Session-class reads route through the session store, resolved from the
 	// city's raw work store rather than store.Store: store.Store has already
 	// been routed to the NUDGES class (openNudgeBeadStore), so reusing it as

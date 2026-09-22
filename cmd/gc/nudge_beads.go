@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -46,6 +47,13 @@ func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
 	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+}
+
+func nudgeBeadStoreOwned(cityPath string) bool {
+	// Ownership probe, not a fresh store enumeration — mirrors the identical,
+	// already-accepted relocation check in cliSessionsRelocated (cli_class_stores.go).
+	_, relocated := cliStorageRoutes(cityPath).storeFor(coordclassFor(config.BeadClassNudges)) // residency:allow mirrors cliSessionsRelocated's identical check
+	return !relocated
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

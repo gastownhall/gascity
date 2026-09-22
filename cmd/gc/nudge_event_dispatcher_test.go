@@ -391,6 +391,44 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 	_ = d
 }
 
+// TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore reproduces
+// the regression in ac9715472c: an unconditional defer closeBeadStoreHandle
+// in runPass closed whatever openNudgeBeadStore returned, including the
+// shared, process-scoped store cliStorageRoutes memoizes when the nudges
+// class is relocated. Closing that shared instance per pass would tear the
+// binding down for every other consumer routed onto it (messaging, orders,
+// sessions, graph) after the first dispatch pass. This test relocates the
+// nudges class to a counting-close wrapper standing in for that shared store
+// and calls runPass directly (an empty queue, so deliverPendingQueuedNudges /
+// nudgeMaintenanceStore never opens) to isolate runPass's own close-guard
+// behavior from that separate, pre-existing, unconditional-close code path.
+func TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, _ := newNudgeDispatcherFixture(t, fake)
+
+	var closes int32
+	shared := countingCloseNudgesStore{Store: beads.NewMemStore(), closes: &closes}
+
+	// Relocate the NUDGES class to the shared, counting-close store, mirroring
+	// TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges's
+	// direct-mutation approach: cliStorageRoutes(dir) has already resolved (and
+	// cached) to nil via the fixture's own openNudgeBeadStore call.
+	entry := cliStorageRoutesEntryFor(filepath.Clean(dir))
+	entry.routes = &storageRoutes{
+		stores: map[coordclass.Class]beads.Store{
+			coordclass.ClassNudges: shared,
+		},
+		binding: "test-nudges-relocated",
+	}
+	t.Cleanup(func() { entry.routes = nil })
+
+	d.runPass("", 0)
+
+	if closes != 0 {
+		t.Fatalf("runPass closed the shared relocated-class store %d time(s); it does not own that handle and must never close it", closes)
+	}
+}
+
 // TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges
 // reproduces gc-08u54r finding #5: runPass used to derive the session-class
 // store by handing store.Store (already routed to the NUDGES class) to
