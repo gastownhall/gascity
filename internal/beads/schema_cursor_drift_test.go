@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
 
 // The two migration directories beads embeds, and the suffix its own loader
@@ -71,6 +72,90 @@ func TestPinnedSchemaCursorsProjectsBothConstants(t *testing.T) {
 	}
 	if main == ignored {
 		t.Fatal("the two lanes are at the same version, so this test cannot detect a swapped pair; assert the values directly instead")
+	}
+}
+
+// TestCursorsMatchPinnedReportsLaneAndDirection pins the typed gate the proxied
+// admission path runs before it opens the linked library against somebody
+// else's database.
+//
+// It asserts the direction's ORIENTATION as much as its value: dir describes
+// where the database sits relative to this binary, so a database one migration
+// up on the main lane is "ahead". Getting that backwards would print a verdict
+// telling an operator to upgrade the thing that is already newer.
+//
+// That this test imports proxyendpoint at all is the point of the item: the
+// retired comment on PinnedSchemaCursors claimed the import closed a cycle, and
+// a compiling test that passes proxyendpoint.Cursors into internal/beads is the
+// executable retraction.
+func TestCursorsMatchPinnedReportsLaneAndDirection(t *testing.T) {
+	main, ignored := beads.PinnedSchemaCursors()
+
+	cases := []struct {
+		name     string
+		cursors  proxyendpoint.Cursors
+		wantOK   bool
+		wantLane string
+		wantDir  string
+	}{
+		{
+			name:    "equal",
+			cursors: proxyendpoint.Cursors{Main: main, Ignored: ignored},
+			wantOK:  true,
+		},
+		{
+			name:     "main ahead",
+			cursors:  proxyendpoint.Cursors{Main: main + 1, Ignored: ignored},
+			wantLane: beads.ProxiedSkewLaneMain,
+			wantDir:  beads.ProxiedSkewDirAhead,
+		},
+		{
+			name:     "main behind",
+			cursors:  proxyendpoint.Cursors{Main: main - 1, Ignored: ignored},
+			wantLane: beads.ProxiedSkewLaneMain,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+		{
+			name:     "ignored ahead",
+			cursors:  proxyendpoint.Cursors{Main: main, Ignored: ignored + 1},
+			wantLane: beads.ProxiedSkewLaneIgnored,
+			wantDir:  beads.ProxiedSkewDirAhead,
+		},
+		{
+			name:     "ignored behind",
+			cursors:  proxyendpoint.Cursors{Main: main, Ignored: ignored - 1},
+			wantLane: beads.ProxiedSkewLaneIgnored,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+		{
+			// Both lanes drifted: the main lane is reported, because that is
+			// the one bd's own migration gate consults.
+			name:     "both drift reports main",
+			cursors:  proxyendpoint.Cursors{Main: main - 1, Ignored: ignored - 1},
+			wantLane: beads.ProxiedSkewLaneMain,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+		{
+			// A probe against a database with no migration rows reads zeros.
+			// That must NOT read as "equal" through some zero-value shortcut.
+			name:     "unmigrated database",
+			cursors:  proxyendpoint.Cursors{},
+			wantLane: beads.ProxiedSkewLaneMain,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, lane, dir := beads.CursorsMatchPinned(tc.cursors)
+			if ok != tc.wantOK {
+				t.Fatalf("CursorsMatchPinned(%v) ok = %v, want %v", tc.cursors, ok, tc.wantOK)
+			}
+			if lane != tc.wantLane || dir != tc.wantDir {
+				t.Errorf("CursorsMatchPinned(%v) = lane %q dir %q, want lane %q dir %q",
+					tc.cursors, lane, dir, tc.wantLane, tc.wantDir)
+			}
+		})
 	}
 }
 
