@@ -702,8 +702,11 @@ const (
 // a typed table (indeterminate commit, serialization conflict, open circuit,
 // MySQL 1049/1045, sentinel connection-level failures) AHEAD of the substring
 // signatures, so a fact a retry cannot move stops the loop instead of being
-// returned as if it were an endpoint state. See native_dolt_errors.go for the
-// order and why each rung sits where it does.
+// returned as if it were an endpoint state. It is classified for THIS handle's
+// lane: the serialization and open-circuit rungs are proxied-lane only, so a
+// direct or hosted handle's control flow and returned error are the ones it has
+// on main. See native_dolt_errors.go for the order, and for the two rungs that
+// carry a lane gate and why.
 //
 // This closes the gap #4188 left: runBDTransientRead hardened the bd-CLI read
 // path (each bd subprocess re-resolves the port and restarts Dolt), but
@@ -747,7 +750,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
 			}
-			if classifyNativeDoltReadError(rcErr).disposition != nativeReadTransient {
+			if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
 				return rcErr
 			}
 			// A proxy mid-restart is worth another pass while the budget remains.
@@ -770,7 +773,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		if closed {
 			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 		}
-		class := classifyNativeDoltReadError(opErr)
+		class := classifyNativeDoltReadError(opErr, s.readLane())
 		backoff := nativeReadRetryBackoff
 		switch class.disposition {
 		case nativeReadTerminal:
@@ -812,7 +815,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
 				}
-				if classifyNativeDoltReadError(rcErr).disposition != nativeReadTransient {
+				if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
 					return reconnectErr
 				}
 			}

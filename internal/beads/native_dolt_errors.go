@@ -44,7 +44,8 @@ import (
 //
 //  2. A Dolt/MySQL serialization conflict (isNativeDoltSerializationConflict).
 //     Known not to have committed, and the existing write path already replays
-//     it; a read that hits one is retryable for the same reason.
+//     it; a read that hits one is retryable for the same reason. PROXIED LANE
+//     ONLY — see "What the classifier does NOT decide".
 //
 //  3. beadslib.ErrCircuitOpen (beads.go:205). The library refused BEFORE the
 //     wire, so there is nothing to reconnect: reconnecting would re-open a pool
@@ -52,7 +53,8 @@ import (
 //     wait the breaker's cooldown inside the read's own budget and ask again.
 //     This rung exists because such an error usually has no transient signature
 //     at all, so the text table returned it to the caller as if the endpoint had
-//     said something about itself.
+//     said something about itself. PROXIED LANE ONLY — see "What the classifier
+//     does NOT decide".
 //
 //  4. MySQL 1049 (unknown database) → database_gone, terminal. The proxy served
 //     and answered that the database this scope names is not there. No retry, no
@@ -71,11 +73,12 @@ import (
 //  7. The text table (isNativeDoltTransientReadError), unchanged, as the
 //     backstop for a driver string none of the above catches.
 //
-// Rung 6 is a small, deliberate widening of what the DIRECT native lane treats
-// as transient: a bare io.EOF and the two unreachable-host errno values are
-// sentinel-typed connection failures the substring table did not name. Every
+// Rung 6 is the one small, deliberate widening of what the DIRECT native lane
+// treats as transient: a bare io.EOF and the two unreachable-host errno values
+// are sentinel-typed connection failures the substring table did not name. Every
 // member added is a connection that demonstrably failed, which is precisely what
-// the reconnect hook exists for.
+// the reconnect hook exists for. Rungs 2 and 3 are NOT widenings of that lane —
+// they are gated on it; see the lane note below.
 //
 // # What the classifier does NOT decide
 //
@@ -83,8 +86,44 @@ import (
 // names the endpoint fact; only a handle opened for the proxied lane turns that
 // name into a *ProxiedVerdictError (see NativeDoltStore.proxiedReadVerdict). On
 // a direct or hosted handle rungs 4 and 5 are still TERMINAL — which is exactly
-// what happens today, since the text table matches neither — and the error the
-// caller receives is byte-identical to the one it receives now.
+// what happens today, since the text table matches neither, so "terminal" and
+// "unclassified" are the same immediate return — and the error the caller
+// receives is byte-identical to the one it receives now.
+//
+// # The lane gate, and why rungs 2 and 3 carry one (council B-F1 / C-F1)
+//
+// An earlier version of this comment claimed rung 6 was the ONLY widening of
+// the direct lane. That was false, and the two counterexamples were live
+// behavior changes on every existing hosted/managed-Dolt city — the lane this
+// PR promises not to touch:
+//
+//   - Rung 3. On main, beadslib.ErrCircuitOpen's text
+//     ("dolt circuit breaker is open: server appears down, failing fast") matched
+//     none of the nine transient substrings, so the read returned it on the FIRST
+//     pass, immediately. Classified as nativeReadCircuitOpen it slept a 5s
+//     cooldown and asked again inside a 90s budget — ~18 passes, ~90 seconds of
+//     hang per read — and then returned a DIFFERENT error, wrapped in
+//     "native Dolt read retry budget exhausted".
+//   - Rung 2. On main, isNativeDoltSerializationConflict was consulted on the
+//     WRITE path only, and none of its strings is in the transient table, so an
+//     Error 1213 on a read returned immediately. Classified as
+//     nativeReadTransient every pass calls reconnect() — the injected hook,
+//     which on a hosted city re-resolves the managed port with recovery enabled
+//     and can restart the Dolt server — roughly 450 times inside one read's
+//     budget. Reconnecting is also the wrong remedy: a 40001 says nothing about
+//     the connection, and the library has already spent its own serialization
+//     retry before gc sees it.
+//
+// The `reopen == nil` escape in withReadRetry protects neither: every
+// production direct/hosted open installs a hook (cmd/gc/main.go,
+// cmd/gc/api_state.go, internal/storebinding/beadsworkspace/engine.go), so it
+// protects only bare test handles.
+//
+// So both rungs are gated on the LANE, exactly as rungs 4/5's verdict already
+// is. On the direct lane the two errors fall through to the text table, match
+// nothing, classify as nativeReadUnclassified and are returned verbatim on the
+// first pass — the behavior main has. Rung 6 remains the one deliberate
+// widening, and now that claim is true.
 type nativeReadDisposition int
 
 const (
@@ -143,25 +182,59 @@ const (
 	mysqlErrAccessDenied    = "error 1045"
 )
 
-// classifyNativeDoltReadError classifies err for the native read path. See the
-// package-level commentary above for the order and the reason for each rung.
-func classifyNativeDoltReadError(err error) nativeReadClass {
+// nativeReadLane is which lane a classification is being made for.
+//
+// It is a named type rather than a bare bool so a call site reads as a lane
+// rather than as an unexplained true, and so a caller cannot pass some other
+// flag where the lane was meant.
+type nativeReadLane bool
+
+const (
+	// directNativeLane is a handle against a database gc configured — a direct
+	// or hosted managed-Dolt city. The rollout flag is off for it and its read
+	// path must stay byte-identical to the one it has today.
+	directNativeLane nativeReadLane = false
+	// proxiedNativeLane is a handle against a database bd's proxy owns.
+	proxiedNativeLane nativeReadLane = true
+)
+
+// readLane reports which lane this handle's reads are classified for. It is the
+// same latch proxiedReadVerdict consults, read through one accessor so the two
+// halves of "flag off is inert" cannot drift apart.
+func (s *NativeDoltStore) readLane() nativeReadLane {
+	if s != nil && s.proxiedReadVerdicts {
+		return proxiedNativeLane
+	}
+	return directNativeLane
+}
+
+// classifyNativeDoltReadError classifies err for the native read path on lane.
+// See the package-level commentary above for the order, the reason for each
+// rung, and why two of them are lane-gated.
+func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass {
 	if err == nil {
 		return nativeReadClass{disposition: nativeReadUnclassified}
 	}
 
 	// 1. An indeterminate commit is never replayed, whatever else it looks like.
+	// Both lanes: replaying a write whose outcome nobody knows is not a proxied
+	// hazard, it is a hazard.
 	if errors.Is(err, beadslib.ErrCommitIndeterminate) {
 		return nativeReadClass{disposition: nativeReadNonReplayable, verdict: ProxiedVerdictWriteIndeterminate}
 	}
 
 	// 2. A lost serialization race committed nothing and is safe to repeat.
-	if isNativeDoltSerializationConflict(err) {
+	// PROXIED LANE ONLY: on the direct lane this falls through to the text
+	// table, matches nothing and returns on the first pass, which is what main
+	// does. See the lane note above.
+	if lane == proxiedNativeLane && isNativeDoltSerializationConflict(err) {
 		return nativeReadClass{disposition: nativeReadTransient}
 	}
 
 	// 3. The breaker refused before the wire; there is no connection to remake.
-	if errors.Is(err, beadslib.ErrCircuitOpen) {
+	// PROXIED LANE ONLY, for the same reason: on a direct handle main returned
+	// the breaker's error immediately and must keep doing so.
+	if lane == proxiedNativeLane && errors.Is(err, beadslib.ErrCircuitOpen) {
 		return nativeReadClass{
 			disposition: nativeReadCircuitOpen,
 			verdict:     ProxiedVerdictCircuitOpen,

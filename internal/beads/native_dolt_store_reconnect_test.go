@@ -487,11 +487,18 @@ func TestNativeDoltStoreConcurrentReadersReopenOnce(t *testing.T) {
 // the whole content of the table: every rung below is reachable by an error that
 // a LATER rung would also claim, so a reordering silently changes what the read
 // path does with it.
+//
+// Every row is driven on BOTH lanes. Rungs 2 and 3 are proxied-lane only
+// (council B-F1 / C-F1), so wantDirect says what a direct or hosted handle —
+// the lane the rollout flag is off for — makes of the same error.
 func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want nativeReadDisposition
+		// wantDirect, when set, is the DIRECT lane's disposition where it
+		// differs from the proxied one. Unset means both lanes agree.
+		wantDirect *nativeReadDisposition
 		// verdict, when set, is the endpoint fact the class must name.
 		verdict ProxiedVerdict
 		why     string
@@ -507,19 +514,22 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			why:     "ErrCommitIndeterminate must outrank every retryable signature",
 		},
 		{
-			name:    "a bare serialization conflict is transient",
-			err:     errors.New("Error 1213 (40001): Deadlock found when trying to get lock"),
-			want:    nativeReadTransient,
-			verdict: ProxiedVerdictNone,
+			name:       "a bare serialization conflict is transient on the proxied lane and nothing on the direct one",
+			err:        errors.New("Error 1213 (40001): Deadlock found when trying to get lock"),
+			want:       nativeReadTransient,
+			wantDirect: disposition(nativeReadUnclassified),
+			verdict:    ProxiedVerdictNone,
+			why:        "main consulted this matcher on the WRITE path only; a 1213 on a read returned at once",
 		},
 		{
 			name: "an open circuit with no transient signature is a cooldown, not a return",
 			// This is the rung the text table could not express at all: the
 			// message says nothing a substring search recognizes, so before the
 			// classifier it was handed straight back to the caller.
-			err:     fmt.Errorf("reading beads: %w", beadslib.ErrCircuitOpen),
-			want:    nativeReadCircuitOpen,
-			verdict: ProxiedVerdictCircuitOpen,
+			err:        fmt.Errorf("reading beads: %w", beadslib.ErrCircuitOpen),
+			want:       nativeReadCircuitOpen,
+			wantDirect: disposition(nativeReadUnclassified),
+			verdict:    ProxiedVerdictCircuitOpen,
 		},
 		{
 			name:    "MySQL 1049 is terminal and names database_gone",
@@ -570,7 +580,7 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyNativeDoltReadError(tc.err)
+			got := classifyNativeDoltReadError(tc.err, proxiedNativeLane)
 			if got.disposition != tc.want {
 				t.Fatalf("disposition = %d, want %d (%s)", got.disposition, tc.want, tc.why)
 			}
@@ -580,9 +590,24 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			if tc.want == nativeReadCircuitOpen && got.cooldown != nativeReadCircuitCooldown {
 				t.Errorf("cooldown = %s, want %s", got.cooldown, nativeReadCircuitCooldown)
 			}
+
+			wantDirect := tc.want
+			if tc.wantDirect != nil {
+				wantDirect = *tc.wantDirect
+			}
+			direct := classifyNativeDoltReadError(tc.err, directNativeLane)
+			if direct.disposition != wantDirect {
+				t.Fatalf("direct-lane disposition = %d, want %d: the rollout flag is off for that lane and its read path must not change (%s)",
+					direct.disposition, wantDirect, tc.why)
+			}
 		})
 	}
 }
+
+// disposition returns a pointer to d, for the table's optional direct-lane
+// column: nativeReadUnclassified is the zero value, so "unset" and "explicitly
+// unclassified" would otherwise be the same thing.
+func disposition(d nativeReadDisposition) *nativeReadDisposition { return &d }
 
 // TestNativeDoltReadTerminalEndpointFactStopsImmediately is the behavioral half
 // of rungs 4 and 5: a database that is not there must not cost the caller the
@@ -800,4 +825,114 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 			t.Fatalf("Get took %s; a hook-less handle must not spend a cooldown", elapsed)
 		}
 	})
+}
+
+// TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs is council
+// B-F1 / C-F1's pin, and it is a pin on the lane this PR promises not to touch.
+//
+// The flag-off lane is every existing direct/hosted managed-Dolt city, and its
+// read path is ordinary List/Get/Ready. Two of P2-08's rungs changed it:
+//
+//   - An open library breaker returned instantly on main (its text matches none
+//     of the nine transient substrings). Classified as nativeReadCircuitOpen it
+//     slept a 5s cooldown and retried inside a 90s budget — ~18 passes, ~90s of
+//     hang — and then returned a different error string.
+//   - An Error 1213 on a READ returned instantly on main (the matcher was
+//     consulted on the write path only). Classified as nativeReadTransient every
+//     pass called the reopen hook, which on a hosted city re-resolves the managed
+//     port with recovery enabled and can restart a healthy city's Dolt server.
+//
+// Each row therefore asserts three things together, because any one alone
+// passes on the broken code: the error is returned VERBATIM (not wrapped in a
+// budget message), the reopen hook was never called, and the read did not spend
+// wall time. The reopen hook is INSTALLED in every row — the `reopen == nil`
+// escape protects only bare test handles, and all three production direct/hosted
+// open sites pass one.
+func TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		// proxiedReopens is what the SAME error must still cost on the proxied
+		// lane, so a row cannot be satisfied by disabling the rung outright.
+		proxiedReopens bool
+	}{
+		{
+			name: "an open circuit breaker",
+			err:  fmt.Errorf("read issue: %w", beadslib.ErrCircuitOpen),
+			// Rung 3's remedy is a cooldown on the SAME handle: nothing reached
+			// a socket, so there is nothing to reconnect.
+			proxiedReopens: false,
+		},
+		{
+			name:           "a serialization conflict on a read",
+			err:            errors.New("begin read tx: Error 1213 (40001): Deadlock found when trying to get lock"),
+			proxiedReopens: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+" on the direct lane", func(t *testing.T) {
+			var reopens int32
+			store := newNativeDoltStoreForTest(deadSearchStorage(tc.err))
+			store.reopen = func(context.Context) (beadslib.Storage, error) {
+				atomic.AddInt32(&reopens, 1)
+				return healthySearchStorage(), nil
+			}
+			// Short, so a regression reads as a budget spent rather than as a
+			// 90-second test.
+			store.readRetryBudgetOverride = 400 * time.Millisecond
+
+			start := time.Now()
+			_, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth})
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("List err = %v, want the storage error itself", err)
+			}
+			if strings.Contains(err.Error(), "retry budget exhausted") {
+				t.Fatalf("the direct lane spent its budget and rewrote the error: %v", err)
+			}
+			if _, typed := ProxiedVerdictOf(err); typed {
+				t.Fatalf("a DIRECT handle rendered a proxied verdict: %v", err)
+			}
+			if n := atomic.LoadInt32(&reopens); n != 0 {
+				t.Fatalf("the direct lane called the reopen hook %d time(s); on a hosted city that hook "+
+					"re-resolves the managed port with recovery enabled and can restart a healthy server", n)
+			}
+			if elapsed > 100*time.Millisecond {
+				t.Fatalf("the direct lane spent %s on a read that returned immediately on main", elapsed)
+			}
+		})
+
+		t.Run(tc.name+" on the proxied lane", func(t *testing.T) {
+			var reopens int32
+			store := newNativeDoltStoreForTest(deadSearchStorage(tc.err))
+			store.proxiedReadVerdicts = true
+			store.reopen = func(context.Context) (beadslib.Storage, error) {
+				atomic.AddInt32(&reopens, 1)
+				return deadSearchStorage(tc.err), nil
+			}
+			store.readRetryBudgetOverride = 300 * time.Millisecond
+			// The production cooldown is five seconds, which is the budget's
+			// business rather than this test's.
+			restore := nativeReadCircuitCooldown
+			nativeReadCircuitCooldown = 20 * time.Millisecond
+			t.Cleanup(func() { nativeReadCircuitCooldown = restore })
+
+			_, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth})
+			if err == nil {
+				t.Fatal("the proxied lane returned no error for a permanently failing read")
+			}
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed {
+				t.Fatalf("the proxied lane returned an untyped error the wrapper cannot demote on: %v", err)
+			}
+			if verdict.Terminal() {
+				t.Errorf("a spent budget says nothing about the endpoint, so it must be non-terminal: %v", verdict)
+			}
+			if got := atomic.LoadInt32(&reopens) > 0; got != tc.proxiedReopens {
+				t.Fatalf("the proxied lane reopened = %v, want %v: the rung is gated on the lane, not disabled", got, tc.proxiedReopens)
+			}
+		})
+	}
 }
