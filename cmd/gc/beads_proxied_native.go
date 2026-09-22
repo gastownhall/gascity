@@ -417,9 +417,19 @@ func (o *proxiedNativeOpener) headUnmoved(ctx context.Context, pin beads.Pin, re
 // it runs again one interval later, which IS the retry. Without the cap a
 // demoted controller on a silent proxy spent up to nine probe sessions and ~6s
 // of sleeps every interval, on a proxy bd may be trying to retire.
+//
+// Its whole budget is the READ budget, not the long-lived admission budget
+// (council pr2 D-F16). The library open inside it holds nativeDoltOpenEnvMu —
+// process-global, and what every other scope's native open and
+// ProcessEnvSnapshotExcludingNativeDoltOpen wait on — and the read path's
+// equivalent reopen already runs under the read's ctx, ProxiedReadBudget. The
+// 90s long-lived budget exists for a controller BOOT that may wait out a drain;
+// a ProbeOnce recovery never waits, so the only thing the extra 80s bought was
+// a background timer, with no caller waiting, able to hold that lock for a
+// minute and a half against a proxy that served the probe and then wedged.
 func (o *proxiedNativeOpener) recoverNativeLeaf() beads.NativeLeafReopener {
 	return func(parent context.Context) (*beads.NativeDoltStore, beads.Pin, error) {
-		ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(true))
+		ctx, cancel := context.WithTimeout(parent, beads.ProxiedReadBudget())
 		defer cancel()
 		in := o.admissionInput(true, nil)
 		in.ProbeOnce = true

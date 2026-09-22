@@ -579,6 +579,49 @@ func TestProxiedGuardRecoverySpendsAtMostOneProbeSession(t *testing.T) {
 	})
 }
 
+// TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget is council pr2 D-F16.
+//
+// The recovery's library open holds nativeDoltOpenEnvMu, a process-global lock
+// every other scope's native open waits on. It ran under the 90s long-lived
+// admission budget, on a background timer with no caller waiting, where the
+// read path's equivalent reopen is held to ProxiedReadBudget. The row captures
+// the deadline the library open actually receives.
+func TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	beads.ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+	var openBudget time.Duration
+	opener := &proxiedNativeOpener{
+		cityPath:     t.TempDir(),
+		scopeRoot:    f.scopeRoot,
+		database:     "beads",
+		processTable: f.processTable(),
+		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+		},
+		observed:  beads.NewGenerationSet(),
+		recovered: beads.NewGenerationSet(),
+		sleep:     func(context.Context, time.Duration) error { return nil },
+		openNative: func(ctx context.Context, _ string, _ map[string]string, _ ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("the recovery's library open ran with no deadline at all")
+			}
+			openBudget = time.Until(deadline)
+			return nil, nil
+		},
+	}
+
+	if _, _, err := opener.recoverNativeLeaf()(context.Background()); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if limit := beads.ProxiedReadBudget(); openBudget <= 0 || openBudget > limit {
+		t.Fatalf("the recovery's library open had %s left on its clock, want at most the read budget %s: "+
+			"it holds the process-global open-env lock on a background timer with no caller waiting",
+			openBudget.Round(time.Second), limit)
+	}
+}
+
 // TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot is the wiring assertion.
 //
 // Every earlier group built machinery that nothing calls; this is the commit
