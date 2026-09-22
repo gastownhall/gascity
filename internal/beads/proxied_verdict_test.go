@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,9 +111,37 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 			t.Errorf("verdict %q is retryable, want terminal", v)
 		}
 	}
-	if len(nonTerminal)+len(terminal) != 16 {
-		t.Fatalf("the table covers %d verdicts; add the new one here and decide its terminality deliberately",
-			len(nonTerminal)+len(terminal))
+	// The exhaustiveness guard, and it must observe the PRODUCTION enum.
+	//
+	// It used to be `len(nonTerminal)+len(terminal) != 16`, over two slices
+	// declared twenty lines above it — a checksum of this file. Adding a
+	// seventeenth ProxiedVerdict and touching nothing else left the sum at 16,
+	// the "add the new one here" message never fired, and Terminal()'s
+	// `default: return true` silently made the new verdict a PERMANENT
+	// demotion: exactly the hazard the doc comment above says this test exists
+	// to prevent (council C-F7).
+	//
+	// The constants are read out of proxied_verdict.go's own AST rather than
+	// counted, because Go exposes no enumeration of a named string type and a
+	// number is not a set.
+	declared := declaredProxiedVerdicts(t)
+	covered := map[ProxiedVerdict]bool{}
+	for _, v := range append(append([]ProxiedVerdict(nil), nonTerminal...), terminal...) {
+		if covered[v] {
+			t.Errorf("verdict %q appears twice in the terminality table", v)
+		}
+		covered[v] = true
+	}
+	for name, verdict := range declared {
+		if !covered[verdict] {
+			t.Errorf("%s (%q) is declared in proxied_verdict.go and is in neither half of this table.\n"+
+				"Add it, and decide its terminality deliberately: Terminal()'s default arm returns TRUE, "+
+				"so a verdict nobody classified becomes a permanent demotion to the bd CLI.", name, verdict)
+		}
+		delete(covered, verdict)
+	}
+	for verdict := range covered {
+		t.Errorf("the table classifies %q, which proxied_verdict.go no longer declares", verdict)
 	}
 
 	// The one override the design needs: admission's bounded drain expiring
@@ -211,4 +243,65 @@ func TestProxiedKnobsDefaultAndFloor(t *testing.T) {
 	if got := ProxiedReadBudget(); got != proxiedReadBudgetDefault {
 		t.Errorf("an unparseable read budget -> %v, want the default %v", got, proxiedReadBudgetDefault)
 	}
+}
+
+// declaredProxiedVerdicts reads every ProxiedVerdict constant out of
+// proxied_verdict.go, keyed by its Go name.
+//
+// It parses the source rather than listing the constants, because a list is the
+// thing the guard above is trying not to be: Go has no enumeration for a named
+// string type, so the only source of truth that cannot drift from production is
+// production's own declaration.
+func declaredProxiedVerdicts(t *testing.T) map[string]ProxiedVerdict {
+	t.Helper()
+	const source = "proxied_verdict.go"
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, source, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", source, err)
+	}
+
+	declared := map[string]ProxiedVerdict{}
+	for _, decl := range parsed.Decls {
+		general, ok := decl.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		// A const block states its type once, on the first spec; the rest
+		// inherit it. Tracking it is what keeps the sibling blocks in this file
+		// (ProxiedSkewLane*, which are untyped strings) out of the set.
+		typeName := ""
+		for _, spec := range general.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if ident, ok := value.Type.(*ast.Ident); ok {
+				typeName = ident.Name
+			} else if value.Type != nil {
+				typeName = ""
+			}
+			if typeName != "ProxiedVerdict" {
+				continue
+			}
+			for i, name := range value.Names {
+				if i >= len(value.Values) {
+					continue
+				}
+				literal, ok := value.Values[i].(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					t.Fatalf("%s: %s is not a string literal; this guard cannot read it", source, name.Name)
+				}
+				unquoted, err := strconv.Unquote(literal.Value)
+				if err != nil {
+					t.Fatalf("%s: %s has an unreadable literal %s: %v", source, name.Name, literal.Value, err)
+				}
+				declared[name.Name] = ProxiedVerdict(unquoted)
+			}
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatalf("%s declared no ProxiedVerdict constants; the guard is broken, not satisfied", source)
+	}
+	return declared
 }
