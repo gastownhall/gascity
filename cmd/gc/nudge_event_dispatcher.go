@@ -378,7 +378,9 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: loading session beads: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	deliverInvoked := false
 	deliver := func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		deliverInvoked = true
 		ok, err := nudgePollDeliverQueued(target, store.Store, sessStore, sp, d.quiescence, obs)
 		if ok || err != nil {
 			return ok, err
@@ -406,6 +408,31 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	}
 	if _, err := deliverPendingQueuedNudges(d.cityPath, cfg, sessStore, sp, sessionBeads, sessionFilter, d.stderr, deliver); err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if sessionFilter == "" || deliverInvoked {
+		return
+	}
+	// deliverPendingQueuedNudges excludes any pending item whose own
+	// DeliverAfter has not yet arrived from pendingAgents before it ever
+	// reaches deliver (nudge_dispatcher.go's pendingAgents build). A
+	// targeted kick fires this pass once its OWN dueAt elapses, but
+	// kickSessionAfter coalesces repeated kicks for the same session to the
+	// EARLIEST dueAt: a fresh idle-event kick with a short delay can move an
+	// already-scheduled backoff retry's fire time earlier than the queue
+	// item's real DeliverAfter. deliver is then never invoked, so the
+	// retriesLeft-based reschedule below in deliver's own body never runs
+	// either — the retry would otherwise vanish until the coarser
+	// patrol-tick fallback rediscovers it. Re-arm it here from the item's
+	// actual DeliverAfter instead.
+	for _, info := range sessionBeads.OpenInfos() {
+		target := resolveNudgeTargetFromSessionInfo(d.cityPath, cfg, info)
+		if target.sessionName != sessionFilter {
+			continue
+		}
+		if remaining, requeued := queuedNudgeRetryRemaining(d.cityPath, target, time.Now()); requeued {
+			d.kickSessionAfter(sessionFilter, remaining+d.retryEpsilon, retriesLeft)
+		}
+		break
 	}
 }
 

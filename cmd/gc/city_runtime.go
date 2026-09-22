@@ -1209,12 +1209,22 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
+	// configChanged is read once, here, via the only Swap(false) in this
+	// tick. dirty is written from a separate watcher goroutine
+	// (controller.go), so a second, later Load()/Swap() could observe a
+	// different value than this one: reconcilePoolDeaths and the reload
+	// gate below must act on the SAME observation of "did a config change
+	// land for this tick", or a change landing between two reads of dirty
+	// can be treated as configChanged for the reload while runSessionPhases
+	// was computed as false, silently skipping the death scan for the tick
+	// that believes it just reconciled everything.
+	configChanged := dirty.Swap(false)
 	// Stretched session-phase patrol: when the provider streams session
 	// events, patrol-driven session scans may run at a longer cadence
 	// ([daemon].session_patrol_interval) — event pokes carry the real-time
 	// work and the patrol scan is the safety net. Non-patrol triggers and
 	// pending config changes always run the session phases.
-	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), time.Now())
+	runSessionPhases := cr.sessionPhasesDue(trigger, configChanged, time.Now())
 	// Detect pool instance deaths since last tick (session phase). Ordered
 	// ahead of the config reload so it compares against the config the
 	// deaths happened under.
@@ -1253,13 +1263,6 @@ func (cr *CityRuntime) tick(
 		cr.sendReloadReply(manualReload.doneCh, reply)
 		cr.clearActiveReloadIf(manualReload)
 	}()
-	configChanged := dirty.Swap(false)
-	if configChanged && !runSessionPhases {
-		// A config change that landed after the top-of-tick check still
-		// requires a full reconcile this tick. sessionPhasesLast is stamped
-		// only once the phases actually complete, below.
-		runSessionPhases = true
-	}
 	if configChanged {
 		dirtyCleared = true
 		source := reloadSourceWatch

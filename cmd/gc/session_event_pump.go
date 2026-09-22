@@ -28,6 +28,17 @@ import (
 const (
 	sessionEventResyncPokeDelay    = 15 * time.Second
 	sessionEventResyncPokeMaxDefer = time.Minute
+
+	// sessionEventFlowingStaleness bounds how long flowing() trusts its last
+	// observed event before reporting the stream as no longer actively
+	// delivering. The provider's own reconnect loop retries with a capped
+	// backoff and emits a fresh SessionEventResync on every (re)connect, so a
+	// healthy stream refreshes well inside this window; a sustained outage
+	// (the retry loop runs in the background without ever closing the
+	// channel, so forward's ctx.Done()/channel-closed reset paths never fire)
+	// ages the sticky "has ever delivered" bit out instead of reporting
+	// flowing() forever from one stale success.
+	sessionEventFlowingStaleness = 30 * time.Second
 )
 
 // sessionEventPump bridges a provider's push session-event stream
@@ -64,6 +75,12 @@ type sessionEventPump struct {
 	// successful Subscribe call may merely start a disconnected retry loop, so
 	// it is not sufficient evidence for stretching patrol liveness checks.
 	observedGen atomic.Int64
+	// lastEventAtNano is the UnixNano timestamp of the most recent event
+	// observed on the current stream (any gen). flowing() uses it to age out
+	// observedGen's sticky match once no event has arrived recently, rather
+	// than trusting a single past delivery for the subscription's whole
+	// lifetime.
+	lastEventAtNano atomic.Int64
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -95,6 +112,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.gen++
 	p.streamGen.Store(0)
 	p.observedGen.Store(0)
+	p.lastEventAtNano.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
@@ -128,7 +146,11 @@ func (p *sessionEventPump) streaming() bool {
 // least one event (normally its contract-required leading resync).
 func (p *sessionEventPump) flowing() bool {
 	gen := p.streamGen.Load()
-	return gen != 0 && p.observedGen.Load() == gen
+	if gen == 0 || p.observedGen.Load() != gen {
+		return false
+	}
+	last := p.lastEventAtNano.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < sessionEventFlowingStaleness
 }
 
 // forward pumps liveness events into the poke channel until the stream ends.
@@ -159,6 +181,7 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 			}
 			if p.streamGen.Load() == gen {
 				p.observedGen.Store(gen)
+				p.lastEventAtNano.Store(time.Now().UnixNano())
 			}
 			switch ev.Kind {
 			case runtime.SessionEventExited, runtime.SessionEventClosed:
