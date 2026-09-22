@@ -3,11 +3,14 @@ package beads
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -478,4 +481,323 @@ func TestNativeDoltStoreConcurrentReadersReopenOnce(t *testing.T) {
 	if got := atomic.LoadInt32(&reopens); got != 1 {
 		t.Fatalf("reopen called %d times, want exactly 1 (single-flight)", got)
 	}
+}
+
+// TestClassifyNativeDoltReadErrorOrder pins the classification ORDER, which is
+// the whole content of the table: every rung below is reachable by an error that
+// a LATER rung would also claim, so a reordering silently changes what the read
+// path does with it.
+func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want nativeReadDisposition
+		// verdict, when set, is the endpoint fact the class must name.
+		verdict ProxiedVerdict
+		why     string
+	}{
+		{
+			name: "an indeterminate commit wrapping a deadlock is NOT a serialization retry",
+			// The dangerous shape: rung 2's text signature ("Error 1213") is
+			// present, so a table that looked at text first would replay a
+			// write whose outcome nobody knows.
+			err:     fmt.Errorf("committing bead update: %w: Error 1213 (40001): deadlock found", beadslib.ErrCommitIndeterminate),
+			want:    nativeReadNonReplayable,
+			verdict: ProxiedVerdictWriteIndeterminate,
+			why:     "ErrCommitIndeterminate must outrank every retryable signature",
+		},
+		{
+			name:    "a bare serialization conflict is transient",
+			err:     errors.New("Error 1213 (40001): Deadlock found when trying to get lock"),
+			want:    nativeReadTransient,
+			verdict: ProxiedVerdictNone,
+		},
+		{
+			name: "an open circuit with no transient signature is a cooldown, not a return",
+			// This is the rung the text table could not express at all: the
+			// message says nothing a substring search recognizes, so before the
+			// classifier it was handed straight back to the caller.
+			err:     fmt.Errorf("reading beads: %w", beadslib.ErrCircuitOpen),
+			want:    nativeReadCircuitOpen,
+			verdict: ProxiedVerdictCircuitOpen,
+		},
+		{
+			name:    "MySQL 1049 is terminal and names database_gone",
+			err:     errors.New("begin read tx: Error 1049 (42000): Unknown database 'beads'"),
+			want:    nativeReadTerminal,
+			verdict: ProxiedVerdictDatabaseGone,
+		},
+		{
+			name:    "MySQL 1045 is terminal and names access_denied",
+			err:     errors.New("Error 1045 (28000): Access denied for user 'root'@'127.0.0.1'"),
+			want:    nativeReadTerminal,
+			verdict: ProxiedVerdictAccessDenied,
+		},
+		{
+			name: "a bare io.EOF is connection-level even though no substring matches",
+			err:  fmt.Errorf("reading greeting: %w", io.EOF),
+			want: nativeReadTransient,
+			why:  "the sentinel rung is what the substring table could not see",
+		},
+		{
+			name:    "ECONNREFUSED is connection-level",
+			err:     fmt.Errorf("dial: %w", syscall.ECONNREFUSED),
+			want:    nativeReadTransient,
+			verdict: ProxiedVerdictNone,
+		},
+		{
+			name: "the text table still backstops a driver string no sentinel carries",
+			err:  errors.New("begin read tx: invalid connection"),
+			want: nativeReadTransient,
+		},
+		{
+			name: "a context deadline is NOT an endpoint state",
+			err:  fmt.Errorf("read: %w", context.DeadlineExceeded),
+			want: nativeReadUnclassified,
+			why:  "IsIndeterminate guards the connection-level rung; our own clock says nothing about the proxy",
+		},
+		{
+			name: "ErrNotFound is not a connection problem",
+			err:  fmt.Errorf("bead %q: %w", "gc-1", ErrNotFound),
+			want: nativeReadUnclassified,
+		},
+		{
+			name: "a nil error classifies as nothing",
+			err:  nil,
+			want: nativeReadUnclassified,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyNativeDoltReadError(tc.err)
+			if got.disposition != tc.want {
+				t.Fatalf("disposition = %d, want %d (%s)", got.disposition, tc.want, tc.why)
+			}
+			if got.verdict != tc.verdict {
+				t.Errorf("verdict = %q, want %q", got.verdict, tc.verdict)
+			}
+			if tc.want == nativeReadCircuitOpen && got.cooldown != nativeReadCircuitCooldown {
+				t.Errorf("cooldown = %s, want %s", got.cooldown, nativeReadCircuitCooldown)
+			}
+		})
+	}
+}
+
+// TestNativeDoltReadTerminalEndpointFactStopsImmediately is the behavioral half
+// of rungs 4 and 5: a database that is not there must not cost the caller the
+// whole retry budget, and on a proxied handle it must arrive as a verdict the
+// wrapper can demote on.
+func TestNativeDoltReadTerminalEndpointFactStopsImmediately(t *testing.T) {
+	unknownDB := errors.New("begin read tx: Error 1049 (42000): Unknown database 'beads'")
+
+	t.Run("direct handle returns the driver error untouched", func(t *testing.T) {
+		var reopens int32
+		store := newNativeDoltStoreForTest(deadSearchStorage(unknownDB))
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return healthySearchStorage(), nil
+		}
+		store.readRetryBudgetOverride = 2 * time.Second
+
+		start := time.Now()
+		_, err := store.Get("gc-1")
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Get took %s; a terminal endpoint fact must not spend the budget", elapsed)
+		}
+		if !errors.Is(err, unknownDB) {
+			t.Fatalf("Get err = %v, want the driver error", err)
+		}
+		if _, ok := ProxiedVerdictOf(err); ok {
+			t.Fatalf("a DIRECT handle rendered a proxied verdict: %v", err)
+		}
+		if n := atomic.LoadInt32(&reopens); n != 0 {
+			t.Fatalf("reopens = %d, want 0 — a fresh pool asks the same question", n)
+		}
+	})
+
+	t.Run("proxied handle names database_gone", func(t *testing.T) {
+		store := newNativeDoltStoreForTest(deadSearchStorage(unknownDB))
+		store.proxiedReadVerdicts = true
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			return nil, errors.New("reopen must not be reached")
+		}
+
+		_, err := store.Get("gc-1")
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Get err = %v, want a *ProxiedVerdictError", err)
+		}
+		if verdict.Verdict != ProxiedVerdictDatabaseGone {
+			t.Errorf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictDatabaseGone)
+		}
+		if !verdict.Terminal() {
+			t.Error("database_gone must be terminal: the database is not coming back inside this handle's life")
+		}
+		if !errors.Is(err, unknownDB) {
+			t.Error("the driver error must survive as the cause")
+		}
+	})
+}
+
+// TestNativeDoltReadReturnsTypedVerdictFromReopen is the trap the plan's §1
+// names, in executable form: the reopen hook is where the proxied escalation
+// ladder runs, and the verdict it produces has to reach the caller on the FIRST
+// pass. Before the propagation rule, a typed refusal was wrapped, re-classified
+// as non-transient and returned — which happened to work — but a TRANSIENT-
+// looking verdict cause would have been looped on until the budget expired and
+// surfaced as nativeReadRetryBudgetError, which carries no verdict at all.
+func TestNativeDoltReadReturnsTypedVerdictFromReopen(t *testing.T) {
+	skew := NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "database main=67, binary pins 66")
+	var reopens int32
+	store := newNativeDoltStoreForTest(deadSearchStorage(errors.New("begin read tx: i/o timeout")))
+	store.proxiedReadVerdicts = true
+	store.readRetryBudgetOverride = 3 * time.Second
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		// The shape P2-12's hook produces: a re-admission that refused, with a
+		// cause whose own text ("connection refused") is transient, so nothing
+		// but the verdict can stop the loop.
+		return nil, fmt.Errorf("re-admitting the proxy: %w",
+			NewSchemaSkewVerdictError(skew.Lane, skew.Dir, skew.Detail))
+	}
+
+	start := time.Now()
+	_, err := store.Get("gc-1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Get took %s; the verdict must end the read on the first pass", elapsed)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 1 {
+		t.Fatalf("reopens = %d, want exactly 1", n)
+	}
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok {
+		t.Fatalf("Get err = %v, want a *ProxiedVerdictError recoverable through the reconnect wrap", err)
+	}
+	if verdict.Verdict != ProxiedVerdictSchemaSkew || verdict.Lane != ProxiedSkewLaneMain || verdict.Dir != ProxiedSkewDirAhead {
+		t.Errorf("verdict = %s/%s/%s, want schema_skew/main/ahead", verdict.Verdict, verdict.Lane, verdict.Dir)
+	}
+	if strings.Contains(err.Error(), "budget exhausted") {
+		t.Errorf("the verdict was buried under a budget error: %v", err)
+	}
+}
+
+// TestNativeDoltProxiedReadBudgetExhaustionIsANonTerminalVerdict is the other
+// half of the same trap. A read that cannot reach bd's proxy at all spends its
+// budget and returns nativeReadRetryBudgetError — an untyped error. The wrapper
+// demotes on errors.As(*ProxiedVerdictError), so without this the handle would
+// stay "native" and every subsequent read would pay the budget again.
+//
+// budget_exhausted is NON-terminal on purpose: running out of clock is a fact
+// about us, so the next open re-admits rather than being permanently demoted.
+func TestNativeDoltProxiedReadBudgetExhaustionIsANonTerminalVerdict(t *testing.T) {
+	store := newNativeDoltStoreForTest(deadSearchStorage(errors.New("dial tcp 127.0.0.1:45123: connect: connection refused")))
+	store.proxiedReadVerdicts = true
+	store.readRetryBudgetOverride = 150 * time.Millisecond
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		return nil, errors.New("dial tcp 127.0.0.1:45123: connect: connection refused")
+	}
+
+	_, err := store.Get("gc-1")
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok {
+		t.Fatalf("Get err = %v, want a *ProxiedVerdictError", err)
+	}
+	if verdict.Verdict != ProxiedVerdictBudgetExhausted {
+		t.Errorf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictBudgetExhausted)
+	}
+	if verdict.Terminal() {
+		t.Error("budget_exhausted must be non-terminal: the clock says nothing about the endpoint")
+	}
+	if !strings.Contains(err.Error(), "budget exhausted") {
+		t.Errorf("the original budget error must survive as the cause: %v", err)
+	}
+
+	t.Run("a direct handle keeps the untyped budget error", func(t *testing.T) {
+		direct := newNativeDoltStoreForTest(deadSearchStorage(errors.New("dial tcp: connection refused")))
+		direct.readRetryBudgetOverride = 150 * time.Millisecond
+		direct.reopen = func(context.Context) (beadslib.Storage, error) {
+			return nil, errors.New("dial tcp: connection refused")
+		}
+		_, err := direct.Get("gc-1")
+		if _, ok := ProxiedVerdictOf(err); ok {
+			t.Fatalf("a direct handle rendered a verdict: %v", err)
+		}
+		if !strings.Contains(err.Error(), "budget exhausted") {
+			t.Errorf("err = %v, want the pre-existing budget error", err)
+		}
+	})
+}
+
+// TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning pins rung 3's
+// behavior: before it, an ErrCircuitOpen with no transient substring was handed
+// straight to the caller, so a breaker that was about to re-arm read as a failed
+// read. The retry is bounded by the read's own budget, so a breaker that stays
+// open costs the budget and (on a proxied handle) demotes.
+func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
+	var reads, reopens int32
+	healthy := healthySearchStorage(&beadslib.Issue{
+		ID: "gc-1", Title: "after the breaker re-armed", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
+	})
+	flaky := &nativeDoltStorageSpy{
+		searchIssues: func(ctx context.Context, q string, f beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+			if atomic.AddInt32(&reads, 1) == 1 {
+				return nil, fmt.Errorf("beads read: %w", beadslib.ErrCircuitOpen)
+			}
+			return healthy.searchIssues(ctx, q, f)
+		},
+	}
+	store := newNativeDoltStoreForTest(flaky)
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return nil, errors.New("reopen must not be reached for an open circuit")
+	}
+	// Shrink the cooldown wait to the budget so the test does not sit out five
+	// real seconds; the read is expected to succeed on its second pass, which
+	// happens after the cooldown select returns.
+	store.readRetryBudgetOverride = 50 * time.Millisecond
+
+	_, err := store.Get("gc-1")
+	// The budget is shorter than the cooldown, so this read ends at the budget —
+	// what matters is that it did NOT return the circuit error directly and did
+	// NOT reconnect.
+	if errors.Is(err, beadslib.ErrCircuitOpen) && !strings.Contains(err.Error(), "budget exhausted") {
+		t.Fatalf("Get returned the circuit error without waiting: %v", err)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 0 {
+		t.Fatalf("reopens = %d, want 0 — an open circuit never reached a socket", n)
+	}
+
+	t.Run("a cooldown inside the budget lets the retry through", func(t *testing.T) {
+		// The production cooldown is 5s, which is a real five seconds per run;
+		// shrink it so the LOOP is what the test exercises rather than the clock.
+		previous := nativeReadCircuitCooldown
+		nativeReadCircuitCooldown = 20 * time.Millisecond
+		t.Cleanup(func() { nativeReadCircuitCooldown = previous })
+
+		atomic.StoreInt32(&reads, 0)
+		second := newNativeDoltStoreForTest(flaky)
+		second.reopen = func(context.Context) (beadslib.Storage, error) {
+			return nil, errors.New("reopen must not be reached for an open circuit")
+		}
+		second.readRetryBudgetOverride = 5 * time.Second
+
+		if _, err := second.Get("gc-1"); err != nil {
+			t.Fatalf("Get after the breaker re-armed: %v", err)
+		}
+		if n := atomic.LoadInt32(&reads); n != 2 {
+			t.Fatalf("reads = %d, want 2 — the circuit error then the retry", n)
+		}
+	})
+
+	t.Run("a handle with no reopen hook keeps fail-fast", func(t *testing.T) {
+		bare := newNativeDoltStoreForTest(deadSearchStorage(fmt.Errorf("beads read: %w", beadslib.ErrCircuitOpen)))
+		start := time.Now()
+		if _, err := bare.Get("gc-1"); !errors.Is(err, beadslib.ErrCircuitOpen) {
+			t.Fatalf("Get err = %v, want the circuit error returned immediately", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Get took %s; a hook-less handle must not spend a cooldown", elapsed)
+		}
+	})
 }

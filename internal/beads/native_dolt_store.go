@@ -400,6 +400,19 @@ type NativeDoltStore struct {
 	// than in a hand-written read-only leaf type.
 	readOnlyReason string
 
+	// proxiedReadVerdicts latches that this handle was opened against a
+	// database bd's proxy serves, so the read path may name an endpoint fact as
+	// a typed *ProxiedVerdictError for the ProxiedStore wrapper to demote on.
+	//
+	// It is set structurally by OpenNativeDoltStoreAtProxied rather than by a
+	// caller option: a proxied handle without it would classify its failures
+	// correctly and then hand the wrapper an untyped error, which is the one
+	// shape that makes a dead handle invisible. A direct or hosted handle leaves
+	// it false and its callers keep receiving byte-identical errors — the shared
+	// classification table still decides transient-vs-terminal for both lanes,
+	// but only this lane renders a verdict. See native_dolt_errors.go.
+	proxiedReadVerdicts bool
+
 	// condWritesStamp carries the factory-stamped conditional-writes mode. The
 	// pinned upstream Storage contract requires row-version checked update and
 	// close plus transactions; DeleteIfMatch composes the matching transaction
@@ -667,6 +680,13 @@ const (
 // reopen hook (test handle built directly from a storage value) keeps the prior
 // fail-fast behavior.
 //
+// What "transient" means is decided by classifyNativeDoltReadError, which runs
+// a typed table (indeterminate commit, serialization conflict, open circuit,
+// MySQL 1049/1045, sentinel connection-level failures) AHEAD of the substring
+// signatures, so a fact a retry cannot move stops the loop instead of being
+// returned as if it were an endpoint state. See native_dolt_errors.go for the
+// order and why each rung sits where it does.
+//
 // This closes the gap #4188 left: runBDTransientRead hardened the bd-CLI read
 // path (each bd subprocess re-resolves the port and restarts Dolt), but
 // factory.go prefers NativeDoltStore when native preflight passes, and that
@@ -698,33 +718,65 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nativeReadRetryBudgetError(ctxErr, opErr)
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, opErr))
 		}
 		reopen, closed := s.reopenState()
 		if closed {
 			return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 		}
-		if !isNativeDoltTransientReadError(opErr) || reopen == nil {
+		class := classifyNativeDoltReadError(opErr)
+		backoff := nativeReadRetryBackoff
+		switch class.disposition {
+		case nativeReadTerminal:
+			// The endpoint answered about the database or the credentials. A
+			// fresh pool would ask the same question and get the same answer.
+			return s.proxiedReadVerdict(class.verdict, opErr)
+		case nativeReadNonReplayable, nativeReadUnclassified:
 			return opErr
-		}
-		if rcErr := s.reconnect(ctx, gen); rcErr != nil {
-			reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
-			// A reconnect that itself fails transiently (server mid-restart) is
-			// worth another pass while the budget remains; a non-transient
-			// reconnect failure or an exhausted budget is terminal.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nativeReadRetryBudgetError(ctxErr, reconnectErr)
+		case nativeReadCircuitOpen:
+			// Nothing reached a socket, so there is nothing to reconnect: wait
+			// for the breaker to re-arm and ask the SAME handle again. The wait
+			// is inside the read's own budget, so a breaker that stays open
+			// costs the budget rather than an unbounded hold.
+			//
+			// A handle with no reopen hook keeps the documented fail-fast
+			// contract: a test store built straight from a storage value must
+			// not start spending a 90s budget on a cooldown loop.
+			if reopen == nil {
+				return opErr
 			}
-			if !isNativeDoltTransientReadError(rcErr) {
-				return reconnectErr
+			backoff = class.cooldown
+		case nativeReadTransient:
+			if reopen == nil {
+				return opErr
+			}
+			if rcErr := s.reconnect(ctx, gen); rcErr != nil {
+				reconnectErr := fmt.Errorf("native Dolt reconnect after transient read error (%w): %w", opErr, rcErr)
+				// A verdict the reopen hook produced is already the answer: the
+				// proxied ladder has been walked inside the hook, and looping
+				// here would bury a typed refusal under the budget error the
+				// wrapper cannot demote on. Return it on this pass, wrapped so
+				// the cause survives and errors.As still recovers the verdict.
+				if _, ok := ProxiedVerdictOf(rcErr); ok {
+					return reconnectErr
+				}
+				// A reconnect that itself fails transiently (server mid-restart) is
+				// worth another pass while the budget remains; a non-transient
+				// reconnect failure or an exhausted budget is terminal.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
+				}
+				if classifyNativeDoltReadError(rcErr).disposition != nativeReadTransient {
+					return reconnectErr
+				}
 			}
 		}
 		// Cancellable backoff: budget expiry during the wait aborts the chain
 		// instead of sleeping past the wall.
 		select {
 		case <-ctx.Done():
-			return nativeReadRetryBudgetError(ctx.Err(), opErr)
-		case <-time.After(nativeReadRetryBackoff):
+			return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctx.Err(), opErr))
+		case <-time.After(backoff):
 		}
 	}
 }

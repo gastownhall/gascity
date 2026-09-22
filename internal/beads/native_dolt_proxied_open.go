@@ -100,6 +100,12 @@ func OpenNativeDoltStoreAtProxied(parent context.Context, scopeRoot string, env 
 	}
 	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
 	store.localStrings = newLocalSidecar(filepath.Join(scopeRoot, ".beads", "local-strings.json"))
+	// Structural, not optional: every handle this function produces is serving a
+	// database bd's proxy owns, so its read path may name an endpoint fact as a
+	// typed verdict. A caller cannot forget to ask for it, because a proxied
+	// handle that classified its failures and then returned them untyped is
+	// exactly the shape that leaves the wrapper sitting on a dead pool.
+	store.proxiedReadVerdicts = true
 	for _, opt := range opts {
 		opt(store)
 	}
