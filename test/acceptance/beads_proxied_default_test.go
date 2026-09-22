@@ -399,7 +399,27 @@ func assertDoctorReportsBdOwnedProxiedStore(t *testing.T, city *helpers.City, la
 // a copy-edit breaks and a store swap does not.
 func readBeadsStorePayload(t *testing.T, env *helpers.Env, cityRoot, label string) (beadsStorePayloadDoc, doctorCheckResult) {
 	t.Helper()
-	out, err := helpers.RunGC(env, cityRoot, "doctor", "--json")
+	return readBeadsStorePayloadWith(t, env, cityRoot, label)
+}
+
+// readBeadsStorePayloadWith is readBeadsStorePayload with doctor scoped to a
+// subset of its checks.
+//
+// `--check beads-store` matters for the rows that mutate the database under the
+// lane: a full doctor run forks bd before it opens the store
+// (doctorBeadStorePreflight's `bd list --json --limit 1`), and a bd child holding
+// the operator's own BD_ALLOW_REMOTE_MIGRATE consent will REPAIR a
+// schema-migration cursor those rows deliberately removed — so the store open
+// that follows sees a healthy database and the row measures nothing. Scoping
+// doctor to the one check puts gc's store open first, which is where the verdict
+// under test is decided.
+func readBeadsStorePayloadWith(t *testing.T, env *helpers.Env, cityRoot, label string, checks ...string) (beadsStorePayloadDoc, doctorCheckResult) {
+	t.Helper()
+	args := []string{"doctor", "--json"}
+	for _, check := range checks {
+		args = append(args, "--check", check)
+	}
+	out, err := helpers.RunGC(env, cityRoot, args...)
 	if err != nil {
 		t.Fatalf("gc doctor --json exited non-zero on %s: %v\n%s", label, err, out)
 	}

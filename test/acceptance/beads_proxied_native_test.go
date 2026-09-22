@@ -46,7 +46,6 @@ import (
 // proxiedNativeCity is one proxied city plus the two instruments every row reads
 // it through.
 type proxiedNativeCity struct {
-	t        *testing.T
 	env      *helpers.Env
 	lane     *helpers.Env
 	calls    *helpers.RecordingBD
@@ -68,7 +67,6 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 	env, calls := proxiedEnvRecordingBD(t, bdPath, doltPath)
 	city := helpers.NewCity(t, env)
 	c := &proxiedNativeCity{
-		t:      t,
 		env:    env,
 		lane:   proxiedNativeLaneEnv(env),
 		calls:  calls,
