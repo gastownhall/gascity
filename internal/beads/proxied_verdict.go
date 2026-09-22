@@ -96,9 +96,12 @@ const (
 	// about the endpoint, so it is never terminal.
 	ProxiedVerdictBudgetExhausted ProxiedVerdict = "budget_exhausted"
 
-	// ProxiedVerdictHeadMoved reports that the database's HEAD commit hash
-	// changed across gc's own library open: the value the admitting probe
-	// session read is not the value a re-read sees once the open has returned.
+	// ProxiedVerdictHeadMoved reports that the database changed across gc's
+	// own library open: the HEAD hash the admitting probe session read is not
+	// the one a re-read sees once the open has returned — or, on the
+	// dolt_ignore'd plane HEAD cannot see, the ignored lane's effective cursor
+	// is no longer the one admission found (council pr2 E-S4). The detail
+	// says which.
 	//
 	// PR2's native lane serves reads only, so an open that moves HEAD may be
 	// gc writing to bd's database — the hazard the schema gate exists for, in
@@ -108,7 +111,7 @@ const (
 	// this scope. It is the one verdict logged at WARN, at every site that
 	// meets it — the factory, the read path's reopen and the guard's recovery
 	// (proxied_incident_log.go): it is an incident, not an expected refusal.
-	// See ProxiedHeadUnmoved.
+	// See ProxiedOpenUnmoved.
 	ProxiedVerdictHeadMoved ProxiedVerdict = "head_moved"
 
 	// ProxiedVerdictWriteIndeterminate is RESERVED and never produced in PR2.

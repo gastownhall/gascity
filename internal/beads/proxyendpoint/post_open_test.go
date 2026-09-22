@@ -3,6 +3,7 @@ package proxyendpoint
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint/proxyendpointtest"
@@ -58,6 +59,67 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 				"a failing statement does not advance the root, so the second answer would be as stale", got)
 		}
 	})
+
+	// Council pr2 E-S4: the same statement reads the ignored plane, in the
+	// library's order, AFTER the open.
+	for _, tc := range []struct {
+		name  string
+		after proxyendpointtest.State
+		want  PostOpenReport
+	}{
+		{
+			name:  "a healthy plane",
+			after: proxyendpointtest.State{Head: "h"},
+			want:  PostOpenReport{Head: "h", IgnoredCursorTable: true},
+		},
+		{
+			name: "a missing sentinel table floors at 0 and short-circuits the column",
+			after: proxyendpointtest.State{
+				Head: "h", AbsentTables: map[string]bool{"wisps": true},
+				AbsentColumns: map[string]bool{"leases.granted_node": true},
+			},
+			want: PostOpenReport{
+				Head: "h", IgnoredCursorTable: true,
+				Reality: CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: "wisps"},
+			},
+		},
+		{
+			name:  "a missing sentinel column floors at 11",
+			after: proxyendpointtest.State{Head: "h", AbsentColumns: map[string]bool{"leases.granted_node": true}},
+			want: PostOpenReport{
+				Head: "h", IgnoredCursorTable: true,
+				Reality: CursorReality{Limited: true, Floor: IgnoredSentinelColumnFloor, Missing: "leases.granted_node"},
+			},
+		},
+		{
+			name:  "a vanished cursor table",
+			after: proxyendpointtest.State{Head: "h", AbsentTables: map[string]bool{"ignored_schema_migrations": true}},
+			want:  PostOpenReport{Head: "h"},
+		},
+	} {
+		t.Run("the ignored plane: "+tc.name, func(t *testing.T) {
+			// The pre-open state is healthy in every row, so a reader that
+			// took the first statement's answer would report no change.
+			pool := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: "h"}, tc.after)
+			t.Cleanup(func() { _ = pool.DB.Close() })
+			report, err := ReadPostOpen(context.Background(), pool.DB)
+			if err != nil {
+				t.Fatalf("ReadPostOpen: %v", err)
+			}
+			if report != tc.want {
+				t.Fatalf("report = %+v, want %+v", report, tc.want)
+			}
+			// HEAD and the plane ride ONE statement (issued twice), not one
+			// statement per question.
+			for _, statement := range pool.Statements() {
+				if !strings.Contains(statement, "DOLT_HASHOF('HEAD')") ||
+					strings.Count(statement, "information_schema.tables") != len(ignoredSentinelTables)+1 ||
+					strings.Count(statement, "information_schema.columns") != 1 {
+					t.Fatalf("statement %q does not carry HEAD, the cursor table, every sentinel table and the column", statement)
+				}
+			}
+		})
+	}
 
 	t.Run("no pool is an error", func(t *testing.T) {
 		if _, err := ReadPostOpen(context.Background(), nil); !errors.Is(err, ErrPostOpenNoPool) {

@@ -241,7 +241,7 @@ type Pin struct {
 	// It is not admission evidence: no decision above is made from it, and a
 	// pin with no head is a perfectly good pin. It is carried so the OPENER can
 	// re-read the same value once the library open has returned and see whether
-	// the open moved HEAD. See ProxiedHeadUnmoved.
+	// the open moved HEAD. See ProxiedOpenUnmoved.
 	head string
 }
 
@@ -937,8 +937,15 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 //     is the case that matters — is checked by nobody on a memo hit, and the
 //     open replays ignored 0012-0025 against bd's database. Inside the window
 //     that hazard is bounded by the TTL cap and the tick above, and by nothing
-//     the library does. The HEAD observation (ProxiedHeadUnmoved) does not
-//     reach it either: a memoized pin carries no hash.
+//     the library does. The post-open observation (ProxiedOpenUnmoved) does
+//     not reach it either, and "a memoized pin carries no hash" — the reason
+//     this line used to give — understated why (council pr2 E-S4): the replay
+//     writes only the dolt_ignore'd plane, which is never committed, so HEAD
+//     would not move even if the pin carried one; and the observation's
+//     ignored-plane half cannot tell a replay that restored what it found
+//     missing from an untouched plane, because the plane has no history and
+//     the replay records its cursor with INSERT IGNORE. Carrying the hash
+//     into memo hits would close nothing.
 //
 // One thing the old sentence feared that does NOT happen: bd's documented
 // escape hatch BD_IGNORE_SCHEMA_SKEW=1 is read with os.Getenv inside the open,

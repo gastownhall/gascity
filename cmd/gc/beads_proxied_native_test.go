@@ -897,9 +897,10 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 				// control flow, and CloseStore is nil-safe by construction.
 				return nil, nil
 			},
-			leafHead: func(context.Context, *beads.NativeDoltStore) (string, error) {
+			leafObserve: func(context.Context, *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
 				n.reads++
-				return readHead()
+				head, err := readHead()
+				return observedHead(head), err
 			},
 		}
 	}
@@ -1014,8 +1015,8 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
 			return &closeCountingStorage{}, nil
 		}
-		opener.storageHead = func(context.Context, beads.NativeStorage) (string, error) {
-			return "", errors.New("invalid connection")
+		opener.storageObserve = func(context.Context, beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+			return proxyendpoint.PostOpenReport{}, errors.New("invalid connection")
 		}
 		beads.ForgetProxiedPin(f.scopeRoot, "beads")
 		if _, err := opener.reopen(false)(context.Background()); err != nil {
@@ -1036,9 +1037,9 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			return storage, nil
 		}
 		var readFrom beads.NativeStorage
-		opener.storageHead = func(_ context.Context, s beads.NativeStorage) (string, error) {
+		opener.storageObserve = func(_ context.Context, s beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
 			readFrom = s
-			return "after11111", nil
+			return observedHead("after11111"), nil
 		}
 
 		got, err := opener.reopen(false)(context.Background())
@@ -1056,7 +1057,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		}
 	})
 
-	// Council pr2 E-S3. The rows above inject storageHead, so none of them
+	// Council pr2 E-S3. The rows above inject storageObserve, so none of them
 	// could see what the PRODUCTION re-read actually observes on the reopen
 	// path: beads leaves the connection its open-time checks ran on pinned to
 	// the pre-open session root when MigrateUp commits without applying a
@@ -1065,7 +1066,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 	// The reopen issues no statement of its own before the check (the first
 	// open reads issue_prefix first, which masked this there), so a single
 	// DOLT_HASHOF('HEAD') was that first statement and a HEAD the open moved
-	// read as unmoved. This row leaves storageHead nil and hands the reopen a
+	// read as unmoved. This row leaves storageObserve nil and hands the reopen a
 	// pool that behaves that way.
 	t.Run("the reopen detects a HEAD its own open moved, through the production re-read", func(t *testing.T) {
 		f := newProxiedScopeFixture(t)
@@ -1079,7 +1080,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
 			return storage, nil
 		}
-		opener.storageHead = nil
+		opener.storageObserve = nil
 
 		got, err := opener.reopen(false)(context.Background())
 		verdict, typed := beads.ProxiedVerdictOf(err)
@@ -1106,6 +1107,46 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			t.Fatalf("a reopen that moved nothing was refused: %v", err)
 		}
 	})
+
+	// Council pr2 E-S4. The dolt_ignore'd plane is never committed, so HEAD
+	// cannot see a write to it; the same post-open statement reads the plane's
+	// sentinels. HEAD is unmoved here and a sentinel is absent after the open:
+	// a plane the next writable open replays, which this leaf must not serve.
+	t.Run("the reopen refuses an ignored plane the open left short of a sentinel, with HEAD unmoved", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"},
+			proxyendpointtest.State{Head: "before0000", AbsentColumns: map[string]bool{"leases.granted_node": true}})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		storage := &poolExportingStorage{db: pool.DB}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		opener.storageObserve = nil
+
+		got, err := opener.reopen(false)(context.Background())
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved || verdict.Terminal() {
+			t.Fatalf("reopen = (%v, %v), want the non-terminal head_moved verdict for the ignored plane", got, err)
+		}
+		for _, want := range []string{"ignored plane", "leases.granted_node", "cursor at 11"} {
+			if !strings.Contains(verdict.Detail, want) {
+				t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+			}
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+	})
+}
+
+// observedHead is a post-open report of a healthy ignored plane with the given
+// HEAD — the shape of every observation the rows that are about HEAD alone need.
+// The zero report is NOT that: it says the ignored cursor table is gone.
+func observedHead(head string) proxyendpoint.PostOpenReport {
+	return proxyendpoint.PostOpenReport{Head: head, IgnoredCursorTable: true}
 }
 
 // poolExportingStorage is a library handle whose real surface is the pool it

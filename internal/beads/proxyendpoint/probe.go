@@ -289,10 +289,10 @@ type ProbeResult struct {
 	//
 	// It is not schema evidence and no admission decision is made from it.
 	// It exists so a caller can re-read the same value AFTER opening the
-	// library and see whether the open moved HEAD — which is the only
-	// observation that catches a write the schema gate cannot see, because
-	// every write MigrateUp's un-numbered prologue can perform ends in a
-	// DOLT_COMMIT. See beads.ProxiedHeadUnmoved.
+	// library and see whether the open moved HEAD, which catches every write
+	// the schema gate cannot see THAT COMMITS. It sees nothing on the
+	// dolt_ignore'd plane, which is never committed (council pr2 E-S4); see
+	// ReadPostOpen and beads.ProxiedOpenUnmoved for the half that reads it.
 	Head string
 	// Err is the failure behind any outcome other than served.
 	Err error

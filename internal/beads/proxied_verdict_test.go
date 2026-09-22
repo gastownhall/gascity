@@ -92,7 +92,7 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 		// head_moved is a fact about the DATABASE, which would ordinarily be
 		// terminal — it is here because gc cannot attribute the commit to its
 		// own open, and another bd client's ordinary write must not pin a scope
-		// to the bd front door for the process. See ProxiedHeadUnmoved.
+		// to the bd front door for the process. See ProxiedOpenUnmoved.
 		ProxiedVerdictHeadMoved,
 	}
 	terminal := []ProxiedVerdict{

@@ -347,29 +347,36 @@ type poolStorage struct {
 
 func (s *poolStorage) UnderlyingDB() *sql.DB { return s.db }
 
-// TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool is council pr2 D-F3's
-// re-read half: the post-open HEAD comes from the handle the open just built,
-// and not from a session of gc's own, which would be one more accepted
-// connection on bd's proxy per open.
+// TestProxiedOpenedObservationReadsOverTheLibrarysOwnPool is council pr2
+// D-F3's re-read half: the post-open observation comes from the handle the open
+// just built, and not from a session of gc's own, which would be one more
+// accepted connection on bd's proxy per open.
 //
 // And council pr2 E-S3: the pool models beads' be-itm5 — a connection answers
 // its first statement from the pre-open root — so the observation must be the
 // SECOND statement on one pinned connection. A reader that trusted the first
 // answer reports "before0000" here, which is the hash the probe saw, and an
 // open that committed would pass the check.
-func TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool(t *testing.T) {
+//
+// And council pr2 E-S4: the same statement carries the ignored plane, which
+// HEAD cannot see; the row that drops a sentinel in the post-open state proves
+// it is read AFTER the open too.
+func TestProxiedOpenedObservationReadsOverTheLibrarysOwnPool(t *testing.T) {
 	pool := proxyendpointtest.NewPostOpenDB(
 		proxyendpointtest.State{Head: "before0000"},
-		proxyendpointtest.State{Head: " after11111\n"})
+		proxyendpointtest.State{Head: " after11111\n", AbsentTables: map[string]bool{"wisp_dependencies": true}})
 	t.Cleanup(func() { _ = pool.DB.Close() })
 
-	head, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: pool.DB})
+	report, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: pool.DB})
 	if err != nil {
-		t.Fatalf("ProxiedOpenedHead: %v", err)
+		t.Fatalf("ProxiedOpenedObservation: %v", err)
 	}
-	if head != "after11111" {
+	if report.Head != "after11111" {
 		t.Fatalf("head = %q, want the state AFTER the open, trimmed: the first statement on a connection "+
-			"the open's checks ran on reads the pre-open root (be-itm5)", head)
+			"the open's checks ran on reads the pre-open root (be-itm5)", report.Head)
+	}
+	if !report.IgnoredCursorTable || !report.Reality.Limited || report.Reality.Missing != "wisp_dependencies" {
+		t.Fatalf("report = %+v, want the post-open plane: cursor table present, wisp_dependencies missing", report)
 	}
 	if conns, statements := pool.Conns(), len(pool.Statements()); conns != 1 || statements != 2 {
 		t.Fatalf("the re-read used %d connection(s) and %d statement(s), want 1 and 2: "+
@@ -381,28 +388,28 @@ func TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool(t *testing.T) {
 		proxyendpointtest.State{Head: "before0000"}, proxyendpointtest.State{Head: "after11111"})
 	t.Cleanup(func() { _ = leafPool.DB.Close() })
 	leaf := newNativeDoltStoreForTest(&poolStorage{db: leafPool.DB})
-	if head, err := ProxiedLeafHead(context.Background(), leaf); err != nil || head != "after11111" {
-		t.Fatalf("ProxiedLeafHead = (%q, %v), want the leaf's own pool's post-open answer", head, err)
+	if report, err := ProxiedLeafObservation(context.Background(), leaf); err != nil || report.Head != "after11111" {
+		t.Fatalf("ProxiedLeafObservation = (%+v, %v), want the leaf's own pool's post-open answer", report, err)
 	}
 
-	// A handle that cannot answer is an error, never "": the caller must be
-	// able to tell "not observed" from a value.
-	if _, err := ProxiedOpenedHead(context.Background(), &nativeDoltStorageSpy{}); err == nil {
-		t.Fatal("a handle with no UnderlyingDB produced a HEAD")
+	// A handle that cannot answer is an error, never an empty report: the
+	// caller must be able to tell "not observed" from a value.
+	if _, err := ProxiedOpenedObservation(context.Background(), &nativeDoltStorageSpy{}); err == nil {
+		t.Fatal("a handle with no UnderlyingDB produced an observation")
 	}
 	failing := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{}, proxyendpointtest.State{}).
 		Failing(errors.New("invalid connection"))
 	t.Cleanup(func() { _ = failing.DB.Close() })
-	if _, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: failing.DB}); err == nil {
-		t.Fatal("a failed re-read produced a HEAD")
+	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: failing.DB}); err == nil {
+		t.Fatal("a failed re-read produced an observation")
 	}
 	empty := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: "x"}, proxyendpointtest.State{Head: ""})
 	t.Cleanup(func() { _ = empty.DB.Close() })
-	if _, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: empty.DB}); err == nil {
+	if _, err := ProxiedOpenedObservation(context.Background(), &poolStorage{db: empty.DB}); err == nil {
 		t.Fatal("an empty hash was reported as an observation instead of a failure to observe")
 	}
 	// A closed leaf is refused before anything is asked.
-	if _, err := ProxiedLeafHead(context.Background(), nil); err == nil {
-		t.Fatal("a nil leaf produced a HEAD")
+	if _, err := ProxiedLeafObservation(context.Background(), nil); err == nil {
+		t.Fatal("a nil leaf produced an observation")
 	}
 }

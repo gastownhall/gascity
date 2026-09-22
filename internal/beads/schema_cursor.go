@@ -64,12 +64,39 @@ import (
 // session's identity rather than to the GIT_AUTHOR pair gc projects — which is
 // also why nothing can tell gc's commit from another bd client's after the fact.
 //
-// ProxiedHeadUnmoved below is the belt-and-braces answer, and it is strictly
-// wider than the gate: every one of those paths ends in a DOLT_COMMIT, and a
-// commit moves HEAD. It DETECTS; it cannot prevent, because the write has
-// happened by the time the open returns. Closing the hole rather than detecting
-// it still needs a read-only open FROM BEADS: that is the standing ask,
-// alongside SchemaVersions().
+// ProxiedOpenUnmoved below is the belt-and-braces answer. It DETECTS; it cannot
+// prevent, because the write has happened by the time the open returns. And it
+// is NOT "strictly wider than the gate", which is what this paragraph used to
+// claim (council pr2 E-S4). The argument was "every one of those paths ends in
+// a DOLT_COMMIT, and a commit moves HEAD", and it fails on the dolt_ignore'd
+// plane, because that plane is never committed:
+//
+//   - MigrateUp stages through stageSchemaTables and
+//     existingCommittableTables, which filter on dolt_ignore
+//     (schema.go:1060, :1098, dirtyTables(..., excludeIgnored=true) at :1159);
+//     migrate() says the ignored source's "cursor and tables are never
+//     committed to shared history" (:1737-1740); and the terminal DOLT_COMMIT
+//     swallows "nothing to commit" (:851). So a pass whose only work is on the
+//     ignored plane moves no HEAD.
+//   - The third path above is one of them when the cursor table missing its
+//     content_hash column is the IGNORED one: ensureContentHashColumn (:1272)
+//     then ALTERs ignored_schema_migrations, a dolt_ignore pattern, and HEAD
+//     does not move. (A database at ignored=26 lacks that column only after
+//     out-of-band surgery — bootstrapSQL and the heal both carry it — but the
+//     claim was "every one of those paths".)
+//   - The ignored lane's REPLAY — 0012-0025 after the library clamps the
+//     cursor, the hazard A-F2 and D-F7 are about — touches only ignored
+//     tables (wisps, wisp_comments, leases, bd_events_journal/seq, events,
+//     local_metadata) and records its cursor with INSERT IGNORE. It moves no
+//     HEAD, and the cursor table does not change either.
+//
+// So the post-open observation reads the ignored plane as well, in the same
+// statement as HEAD: the ignored cursor table's existence and the library's
+// sentinel reality. What that half can and cannot conclude is stated on
+// ProxiedOpenUnmoved, and the short version is that it is narrower than it
+// sounds. Closing the hole rather than detecting some of it still needs a
+// read-only open FROM BEADS: that is the standing ask, alongside
+// SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
 	SchemaCursorMain = 66
@@ -175,25 +202,51 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 	}
 }
 
-// ProxiedHeadUnmoved reports whether gc's own library open left bd's database
+// ProxiedOpenUnmoved reports whether gc's own library open left bd's database
 // where it found it, and returns the head_moved verdict when it did not.
 //
 // # Why a HEAD hash and not another cursor read
 //
 // The gate above is a PRE-open check, and it is sound for what it covers: a
 // database it admits is one whose numbered ignored series does not replay. It
-// cannot cover the three commit paths in "The residual" above, because none of
-// them is a function of the cursors. A post-open MAX(version) re-read would be
-// no better — for an admitted database it is byte-identical by construction.
+// cannot cover the commit paths in "The residual" above, because none of them
+// is a function of the cursors. A post-open MAX(version) re-read would be no
+// better — for an admitted database it is byte-identical by construction.
 //
-// A HEAD hash is the moving evidence for all of it: every one of those paths
-// ends in a DOLT_COMMIT, and a healthy open moves nothing. The two halves cost
-// no session of their own: the pre-open hash is a second column on the probe
-// session's first statement (proxyendpoint's cursorExistsWithHeadQuery), and the
-// re-read is two statements on one pinned connection of the pool the library
-// open itself just built (ProxiedOpenedHead): the first advances a connection
+// A HEAD hash is the moving evidence for every one of those paths that
+// COMMITS, and a healthy open moves nothing. The two halves cost no session of
+// their own: the pre-open hash is a second column on the probe session's first
+// statement (proxyendpoint's cursorExistsWithHeadQuery), and the re-read is
+// two statements on one pinned connection of the pool the library open itself
+// just built (ProxiedOpenedObservation): the first advances a connection
 // beads left on the pre-open session root (be-itm5, council pr2 E-S3), and the
 // second is the observation.
+//
+// # The ignored plane, which HEAD cannot see (council pr2 E-S4)
+//
+// The same statement reads the ignored lane's cursor table and the library's
+// sentinel reality, and the verdict fires when the EFFECTIVE ignored cursor
+// they imply differs from the one admission found. An admitted pin's effective
+// ignored cursor is its raw one — admission requires effective == pinned, and
+// both floors sit below the pinned value — so the comparison is "is the plane
+// still at the admitted cursor, as the linked library would compute it".
+//
+// What that sees: an open that returns with a sentinel absent or the cursor
+// table gone. That is a database the NEXT writable open replays, and this leaf
+// must not serve it.
+//
+// What it does NOT see, stated so nobody reads it as replay detection: a
+// replay that completed. The library replays the ignored series only when it
+// finds a sentinel missing, and the replay RESTORES what it found missing and
+// records its cursor with INSERT IGNORE. The probe saw every sentinel present
+// (it admitted), so after a completed replay everything this observation reads
+// — the sentinels, the cursor table, HEAD — is what the probe saw. What the
+// replay also rewrote (0015, for one, recomputes wisp is_blocked) is data on a
+// plane with no history, which no cheap observation can attribute to this
+// open. So no post-open comparison can tell
+// "replayed and restored" from "untouched". This is the D-F7 residual's reach,
+// not a new hole: detecting that write, rather than its leftovers, needs the
+// read-only open from beads.
 //
 // # Why it is not terminal, and what it therefore does NOT claim
 //
@@ -213,24 +266,38 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 // is demoted to the bd front door it would otherwise have replaced. That is the
 // pre-PR2 path, so it costs forks, never correctness.
 //
-// # Both empty cases decline rather than agree
+// # An unobserved HEAD declines rather than agrees
 //
 // An unobserved hash on either side is "not observed", never "unchanged" — and
 // never "moved". A pin served from the admission memo carries no hash
 // (Pin.withoutHead), because comparing against a value up to the memo's TTL old
-// would make an unrelated write look like gc's; a re-read that produced nothing
-// has nothing to compare. Neither is a verdict, and neither is agreement.
-func ProxiedHeadUnmoved(pin Pin, observed string) error {
-	before, after := strings.TrimSpace(pin.Head()), strings.TrimSpace(observed)
-	if before == "" || after == "" || before == after {
+// would make an unrelated write look like gc's; the caller skips the whole
+// observation for such a pin. A report with no hash is not a report the
+// production reader returns (ReadPostOpen fails instead), and it is declined
+// here too.
+func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
+	before, after := strings.TrimSpace(pin.Head()), strings.TrimSpace(observed.Head)
+	if before == "" || after == "" {
 		return nil
 	}
-	return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-		"opening the linked library against database %q moved HEAD from %s to %s: "+
-			"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
-			"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
-			"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
-			"If another bd client committed in the same window this is that write and not gc's, "+
-			"which is why the verdict is non-terminal and the next open re-probes",
-		pin.Database(), before, after), nil)
+	if before != after {
+		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+			"opening the linked library against database %q moved HEAD from %s to %s: "+
+				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
+				"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
+				"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
+				"If another bd client committed in the same window this is that write and not gc's, "+
+				"which is why the verdict is non-terminal and the next open re-probes",
+			pin.Database(), before, after), nil)
+	}
+	admitted := pin.Cursors().Ignored
+	if now := observed.EffectiveIgnored(admitted); now != admitted {
+		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+			"opening the linked library against database %q left HEAD at %s but the ignored plane's effective "+
+				"cursor at %d where admission found %d (%s): the dolt_ignore'd plane is never committed, so HEAD "+
+				"cannot see it, and a plane the next writable open would replay is not one this leaf may serve; "+
+				"this open takes bd's front door and the next open re-probes",
+			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
+	}
+	return nil
 }

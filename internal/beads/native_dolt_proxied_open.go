@@ -170,48 +170,52 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 	return storage, prefix, nil
 }
 
-// ProxiedOpenedHead reads the database's HEAD commit hash over a library handle
-// gc has just opened, through that handle's OWN connection pool (council pr2
-// D-F3), once the open's own work has finished (council pr2 E-S3).
+// ProxiedOpenedObservation reads, over a library handle gc has just opened and
+// through that handle's OWN connection pool, the two things a library open can
+// change behind the schema gate's back: the database's HEAD commit hash (council
+// pr2 D-F3) and the ignored lane's sentinel reality, which HEAD cannot see
+// (council pr2 E-S4) — once the open's own work has finished (council pr2
+// E-S3).
 //
-// It is the post-open half of the HEAD observation, and the reason it goes
-// through the library's pool rather than through a probe session is the cost:
-// the pool already holds a connection the open used, so the re-read is two
-// statements on it, with no dial, no handshake and no accepted connection on
-// bd's proxy that bd's idle watcher would have to count.
+// It is the post-open half of the observation, and the reason it goes through
+// the library's pool rather than through a probe session is the cost: the pool
+// already holds a connection the open used, so the re-read is two statements on
+// it, with no dial, no handshake and no accepted connection on bd's proxy that
+// bd's idle watcher would have to count.
 //
 // TWO statements, on one pinned connection, because one is not an observation
 // of the post-open state (proxyendpoint.ReadPostOpen): the connection the
 // library's open-time checks ran on stays pinned to the pre-open session root
 // after a non-numbered MigrateUp commit (be-itm5), so its first statement
-// answers the hash from BEFORE the open. It used to be
+// answers from BEFORE the open. It used to be
 // VersionControlReader.GetCurrentCommit — one SELECT DOLT_HASHOF('HEAD') on the
 // pool — which on the read path's reopen was exactly that first statement.
 //
 // The pool is reached through UnderlyingDB, which every server-mode open's
 // *dolt.DoltStore exports (beads v1.3.0 internal/storage/dolt/store.go:3162,
 // the accessor bd's own doctor and `bd sql` use). A handle that does not
-// export it is reported as an error, not as "": the caller logs an
-// unobservable open rather than treating it as an unchanged one.
-func ProxiedOpenedHead(ctx context.Context, storage NativeStorage) (string, error) {
+// export it is reported as an error, not as an empty report: the caller logs
+// an unobservable open rather than treating it as an unchanged one.
+func ProxiedOpenedObservation(ctx context.Context, storage NativeStorage) (proxyendpoint.PostOpenReport, error) {
 	accessor, ok := storage.(interface{ UnderlyingDB() *sql.DB })
 	if !ok {
-		return "", fmt.Errorf("read HEAD after the proxied open: the linked library's %T exports no UnderlyingDB", storage)
+		return proxyendpoint.PostOpenReport{}, fmt.Errorf(
+			"observe the database after the proxied open: the linked library's %T exports no UnderlyingDB", storage)
 	}
 	report, err := proxyendpoint.ReadPostOpen(ctx, accessor.UnderlyingDB())
 	if err != nil {
-		return "", fmt.Errorf("read HEAD after the proxied open: %w", err)
+		return proxyendpoint.PostOpenReport{}, fmt.Errorf("observe the database after the proxied open: %w", err)
 	}
-	return report.Head, nil
+	return report, nil
 }
 
-// ProxiedLeafHead is ProxiedOpenedHead for a leaf the open has already wrapped in
-// a NativeDoltStore.
-func ProxiedLeafHead(ctx context.Context, store *NativeDoltStore) (string, error) {
+// ProxiedLeafObservation is ProxiedOpenedObservation for a leaf the open has
+// already wrapped in a NativeDoltStore.
+func ProxiedLeafObservation(ctx context.Context, store *NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
 	storage, release, err := store.acquireStorage()
 	if err != nil {
-		return "", err
+		return proxyendpoint.PostOpenReport{}, err
 	}
 	defer release()
-	return ProxiedOpenedHead(ctx, storage)
+	return ProxiedOpenedObservation(ctx, storage)
 }

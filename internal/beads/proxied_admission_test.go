@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1167,7 +1168,7 @@ func TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers(t *testing.T) {
 	}
 }
 
-// TestProxiedHeadUnmovedDeclinesRatherThanAgrees is council pr2 D-F3's unit
+// TestProxiedOpenUnmovedDeclinesRatherThanAgrees is council pr2 D-F3's unit
 // half.
 //
 // Both "did not move" and "could not tell" are legitimate answers, and the whole
@@ -1175,17 +1176,22 @@ func TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers(t *testing.T) {
 // read degrades to "" rather than failing its session, and a memoized pin
 // carries none, so an empty-means-equal comparison would report every one of
 // those as a clean open and the check would quietly stop existing.
-func TestProxiedHeadUnmovedDeclinesRatherThanAgrees(t *testing.T) {
-	pinAt := func(head string) Pin { return Pin{admitted: true, database: "beads", head: head} }
+func TestProxiedOpenUnmovedDeclinesRatherThanAgrees(t *testing.T) {
+	pinAt := func(head string) Pin {
+		return Pin{admitted: true, database: "beads", head: head, cursors: pinnedCursors()}
+	}
+	observed := func(head string) proxyendpoint.PostOpenReport {
+		return proxyendpoint.PostOpenReport{Head: head, IgnoredCursorTable: true}
+	}
 
 	t.Run("an unchanged head admits", func(t *testing.T) {
-		if err := ProxiedHeadUnmoved(pinAt("abc123"), "abc123"); err != nil {
+		if err := ProxiedOpenUnmoved(pinAt("abc123"), observed("abc123")); err != nil {
 			t.Fatalf("a healthy open was refused: %v", err)
 		}
 	})
 
 	t.Run("a moved head is the head_moved verdict", func(t *testing.T) {
-		err := ProxiedHeadUnmoved(pinAt("abc123"), "def456")
+		err := ProxiedOpenUnmoved(pinAt("abc123"), observed("def456"))
 		verdict, typed := ProxiedVerdictOf(err)
 		if !typed {
 			t.Fatalf("err = %v, want a typed verdict", err)
@@ -1204,11 +1210,71 @@ func TestProxiedHeadUnmovedDeclinesRatherThanAgrees(t *testing.T) {
 		{"neither side was observed", "", ""},
 	} {
 		t.Run(tc.name+" concludes nothing", func(t *testing.T) {
-			if err := ProxiedHeadUnmoved(pinAt(tc.before), tc.after); err != nil {
+			if err := ProxiedOpenUnmoved(pinAt(tc.before), observed(tc.after)); err != nil {
 				t.Fatalf("an unobserved hash was read as evidence: %v", err)
 			}
 		})
 	}
+}
+
+// TestProxiedOpenUnmovedReadsTheIgnoredPlane is council pr2 E-S4.
+//
+// The dolt_ignore'd plane is never committed, so HEAD cannot see a write to it.
+// The post-open observation reads the plane's cursor table and the library's
+// sentinel reality in the same statement as HEAD, and the verdict fires when the
+// effective ignored cursor they imply is not the admitted one — with HEAD
+// unmoved in every row, which is the point: before E-S4 each of these was a
+// clean open.
+func TestProxiedOpenUnmovedReadsTheIgnoredPlane(t *testing.T) {
+	pin := Pin{admitted: true, database: "beads", head: "abc123", cursors: pinnedCursors()}
+
+	for _, tc := range []struct {
+		name     string
+		observed proxyendpoint.PostOpenReport
+		want     int
+	}{
+		{
+			name: "a sentinel table absent after the open floors the lane at 0",
+			observed: proxyendpoint.PostOpenReport{Head: "abc123", IgnoredCursorTable: true, Reality: proxyendpoint.CursorReality{
+				Limited: true, Floor: proxyendpoint.IgnoredSentinelTableFloor, Missing: "wisps",
+			}},
+			want: proxyendpoint.IgnoredSentinelTableFloor,
+		},
+		{
+			name: "the sentinel column absent after the open floors the lane at 11",
+			observed: proxyendpoint.PostOpenReport{Head: "abc123", IgnoredCursorTable: true, Reality: proxyendpoint.CursorReality{
+				Limited: true, Floor: proxyendpoint.IgnoredSentinelColumnFloor, Missing: "leases.granted_node",
+			}},
+			want: proxyendpoint.IgnoredSentinelColumnFloor,
+		},
+		{
+			name:     "a vanished cursor table is the cursor the library reads as 0",
+			observed: proxyendpoint.PostOpenReport{Head: "abc123"},
+			want:     0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ProxiedOpenUnmoved(pin, tc.observed)
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+				t.Fatalf("err = %v, want the head_moved verdict with HEAD unmoved", err)
+			}
+			if verdict.Terminal() {
+				t.Error("the ignored-plane arm must be non-terminal, like the HEAD arm it shares a verdict with")
+			}
+			for _, want := range []string{"ignored plane", fmt.Sprintf("cursor at %d", tc.want), fmt.Sprint(SchemaCursorIgnored)} {
+				if !strings.Contains(verdict.Detail, want) {
+					t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+				}
+			}
+		})
+	}
+
+	t.Run("a healthy plane with an unmoved head admits", func(t *testing.T) {
+		if err := ProxiedOpenUnmoved(pin, proxyendpoint.PostOpenReport{Head: "abc123", IgnoredCursorTable: true}); err != nil {
+			t.Fatalf("a healthy open was refused: %v", err)
+		}
+	})
 }
 
 // TestAdmitCarriesTheProbesHeadButNotTheMemos is the

@@ -13,16 +13,77 @@ import (
 type PostOpenReport struct {
 	// Head is the database's HEAD commit hash as of the observation.
 	Head string
+	// IgnoredCursorTable reports whether the ignored lane's cursor table
+	// exists. The library reads an absent one as version 0.
+	IgnoredCursorTable bool
+	// Reality is the ignored lane's sentinel reality as of the observation,
+	// read exactly as the probe reads it (council pr2 E-S4).
+	Reality CursorReality
 }
 
-// postOpenHeadQuery is the observation's statement.
+// EffectiveIgnored is the ignored-lane cursor the linked library would compute
+// from the observed plane, given the raw cursor the admitting probe read. The
+// raw MAX(version) is not re-read — it cannot share the statement, because a
+// SELECT against an absent table fails the whole statement — so it is taken
+// from the pin, and a cursor table that has vanished reads as 0, which is what
+// the library would read.
+func (r PostOpenReport) EffectiveIgnored(pinnedRaw int) int {
+	if !r.IgnoredCursorTable {
+		return 0
+	}
+	return r.Reality.EffectiveIgnored(pinnedRaw)
+}
+
+// IgnoredPlaneReason names what lowers the observed ignored plane's effective
+// cursor, for a message an operator can act on, or "" when nothing does.
+func (r PostOpenReport) IgnoredPlaneReason() string {
+	if !r.IgnoredCursorTable {
+		return "the ignored lane's cursor table " + cursorTableIgnored + " is absent"
+	}
+	return r.Reality.String()
+}
+
+// postOpenHeadQuery is HEAD alone: the observation's first column, and the
+// statement a single-column read would issue.
 const postOpenHeadQuery = "SELECT DOLT_HASHOF('HEAD')"
+
+// postOpenTables are the tables the observation asks about, in order: the
+// ignored lane's cursor table, then the library's sentinel tables in the
+// library's own probing order.
+func postOpenTables() []string {
+	return append([]string{cursorTableIgnored}, ignoredSentinelTables...)
+}
+
+// postOpenQuery is the observation's ONE statement: HEAD, then one
+// information_schema COUNT(*) per table in postOpenTables, then one for the
+// sentinel column. Scalar sub-selects against information_schema cannot fail
+// on an absent object — they count zero — so the statement always answers, and
+// HEAD and the ignored plane are read at the same instant on the same
+// connection.
+func postOpenQuery() (string, []any) {
+	var b strings.Builder
+	var args []any
+	b.WriteString(postOpenHeadQuery)
+	for _, table := range postOpenTables() {
+		b.WriteString(", (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?)")
+		args = append(args, table)
+	}
+	b.WriteString(", (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?)")
+	args = append(args, IgnoredSentinelColumnTable, IgnoredSentinelColumnName)
+	return b.String(), args
+}
 
 // ErrPostOpenNoPool reports a post-open read handed no pool.
 var ErrPostOpenNoPool = errors.New("proxyendpoint: post-open read has no pool")
 
 // ReadPostOpen observes the database over db — the pool the linked library's
 // open built — AFTER the library's open-time work, and not before it.
+//
+// It observes two things, in one statement: HEAD, which every committed write
+// moves, and the ignored lane's cursor table plus its sentinel reality, which
+// HEAD cannot see at all — the dolt_ignore'd plane is never committed, so a
+// write to it moves no hash (council pr2 E-S4). What a caller may conclude from
+// the second half, and what it may not, is on beads.ProxiedOpenUnmoved.
 //
 // "After" is not what a single statement on that pool gives you, and that is
 // council pr2 E-S3. beads v1.3.0 runs its open-time checks (Ping,
@@ -72,14 +133,41 @@ func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
 // A NULL or empty hash is an error rather than "": the caller reads "" as "not
 // observed", and a statement that ran and returned nothing is a failure to
 // observe, which the caller must be able to log as one.
+//
+// The sentinel reality is derived in the library's order, as readIgnoredReality
+// derives it: the first absent sentinel TABLE floors the lane at
+// IgnoredSentinelTableFloor and nothing after it can lower that, and only with
+// every table present does the sentinel column's absence floor it at
+// IgnoredSentinelColumnFloor.
 func readPostOpenOnce(ctx context.Context, conn *sql.Conn) (PostOpenReport, error) {
+	query, args := postOpenQuery()
+	tables := postOpenTables()
 	var head sql.NullString
-	if err := conn.QueryRowContext(ctx, postOpenHeadQuery).Scan(&head); err != nil {
+	counts := make([]int, len(tables)+1)
+	dest := []any{&head}
+	for i := range counts {
+		dest = append(dest, &counts[i])
+	}
+	if err := conn.QueryRowContext(ctx, query, args...).Scan(dest...); err != nil {
 		return PostOpenReport{}, err
 	}
 	trimmed := strings.TrimSpace(head.String)
 	if !head.Valid || trimmed == "" {
 		return PostOpenReport{}, errors.New("DOLT_HASHOF('HEAD') returned no hash")
 	}
-	return PostOpenReport{Head: trimmed}, nil
+	report := PostOpenReport{Head: trimmed, IgnoredCursorTable: counts[0] > 0}
+	for i, table := range ignoredSentinelTables {
+		if counts[i+1] == 0 {
+			report.Reality = CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}
+			return report, nil
+		}
+	}
+	if counts[len(counts)-1] == 0 {
+		report.Reality = CursorReality{
+			Limited: true,
+			Floor:   IgnoredSentinelColumnFloor,
+			Missing: IgnoredSentinelColumnTable + "." + IgnoredSentinelColumnName,
+		}
+	}
+	return report, nil
 }

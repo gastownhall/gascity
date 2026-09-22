@@ -175,14 +175,16 @@ type proxiedNativeOpener struct {
 	openNative        func(ctx context.Context, scopeRoot string, env map[string]string, opts ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error)
 	openNativeStorage func(ctx context.Context, scopeRoot string, env map[string]string) (beads.NativeStorage, error)
 
-	// leafHead and storageHead are the POST-open half of the HEAD observation:
-	// two statements on one pinned connection of the pool the library open
-	// just built (the first advances a connection beads left on the pre-open
-	// root, be-itm5), so the re-read costs round trips on a connection gc
-	// already holds and never a session of its own. Injected for the same reason as the two opens; nil means the
-	// production readers, so omitting them cannot switch the check off.
-	leafHead    func(ctx context.Context, native *beads.NativeDoltStore) (string, error)
-	storageHead func(ctx context.Context, storage beads.NativeStorage) (string, error)
+	// leafObserve and storageObserve are the POST-open half of the
+	// observation: HEAD and the ignored plane's sentinel reality, in one
+	// statement issued twice on one pinned connection of the pool the library
+	// open just built (the first advances a connection beads left on the
+	// pre-open root, be-itm5), so the re-read costs round trips on a
+	// connection gc already holds and never a session of its own. Injected for
+	// the same reason as the two opens; nil means the production readers, so
+	// omitting them cannot switch the check off.
+	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error)
+	storageObserve func(ctx context.Context, storage beads.NativeStorage) (proxyendpoint.PostOpenReport, error)
 
 	// logger receives the post-open check's WARN when the re-read itself
 	// fails. Nil is slog.Default(): the composition roots build this opener
@@ -206,8 +208,8 @@ func newProxiedNativeOpener(cityPath, scopeRoot string, cfg *config.City, openBd
 		recovered:         proxiedRecoveredGenerations,
 		openNative:        beads.OpenNativeDoltStoreAtProxied,
 		openNativeStorage: beads.OpenNativeStorageAtProxied,
-		leafHead:          beads.ProxiedLeafHead,
-		storageHead:       beads.ProxiedOpenedHead,
+		leafObserve:       beads.ProxiedLeafObservation,
+		storageObserve:    beads.ProxiedOpenedObservation,
 	}
 }
 
@@ -358,29 +360,34 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 	if err != nil {
 		return nil, fmt.Errorf("open native store over bd's proxy at %s: %w", o.scopeRoot, err)
 	}
-	leafHead := o.leafHead
-	if leafHead == nil {
-		leafHead = beads.ProxiedLeafHead
+	leafObserve := o.leafObserve
+	if leafObserve == nil {
+		leafObserve = beads.ProxiedLeafObservation
 	}
-	if verdict := o.headUnmoved(ctx, pin, site, func(ctx context.Context) (string, error) { return leafHead(ctx, native) }); verdict != nil {
+	if verdict := o.openUnmoved(ctx, pin, site, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
+		return leafObserve(ctx, native)
+	}); verdict != nil {
 		closeProxiedLeafQuietly(native)
 		return nil, verdict
 	}
 	return native, nil
 }
 
-// headUnmoved is the post-open half of the HEAD observation (council pr2 D-F3).
+// openUnmoved is the post-open half of the observation (council pr2 D-F3,
+// E-S4).
 //
 // The library open gc just performed is WRITABLE — beads exports no read-only
 // open to an embedder at v1.3.0 — and on a database the schema gate admits it
 // can still seed dolt_ignore, heal the tracked cursor table or add a
-// content_hash column, each ending in a DOLT_COMMIT (see beads/schema_cursor.go,
-// "The residual"). No cursor comparison can see any of that. A HEAD hash sees
-// all of it, because every one of those writes ends in a commit.
+// content_hash column (see beads/schema_cursor.go, "The residual"). No cursor
+// comparison can see any of that. A HEAD hash sees each of those writes that
+// COMMITS; the dolt_ignore'd plane is never committed, so the same statement
+// also reads that plane's cursor table and sentinel reality, and what that half
+// can and cannot conclude is on beads.ProxiedOpenUnmoved.
 //
 // The pre-open hash came free with the probe session's first statement; the
-// re-read is read(), over the library's own pool (beads.ProxiedOpenedHead: the
-// SECOND statement on one pinned connection, because the first answers from
+// re-read is read(), over the library's own pool (beads.ProxiedOpenedObservation:
+// the SECOND statement on one pinned connection, because the first answers from
 // the pre-open root on a connection the open's checks ran on). A pin served
 // from the admission memo carries no hash, so it spends nothing and concludes
 // nothing. A re-read that fails concludes nothing either: the pool that just
@@ -398,16 +405,16 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 // On a verdict the memoized admission is forgotten. Otherwise the next open in
 // this process would be served from the memo — which carries no hash — and walk
 // past the one check that just fired.
-func (o *proxiedNativeOpener) headUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (string, error)) error {
+func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (proxyendpoint.PostOpenReport, error)) error {
 	if pin.Head() == "" {
 		return nil
 	}
-	head, err := read(ctx)
+	observed, err := read(ctx)
 	if err != nil {
 		beads.LogProxiedPostOpenUnobserved(o.logger, o.scopeRoot, site, err)
 		return nil
 	}
-	verdict := beads.ProxiedHeadUnmoved(pin, head)
+	verdict := beads.ProxiedOpenUnmoved(pin, observed)
 	if verdict != nil {
 		beads.ForgetProxiedPin(o.scopeRoot, pin.Database())
 	}
@@ -550,14 +557,16 @@ func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 		if err != nil {
 			return nil, err
 		}
-		// This is a library open like any other, so it takes the same post-open
-		// HEAD observation. A verdict returned from here ends the read on its
-		// first pass and the wrapper stands the handle down.
-		storageHead := o.storageHead
-		if storageHead == nil {
-			storageHead = beads.ProxiedOpenedHead
+		// This is a library open like any other, so it takes the same
+		// post-open observation. A verdict returned from here ends the read on
+		// its first pass and the wrapper stands the handle down.
+		storageObserve := o.storageObserve
+		if storageObserve == nil {
+			storageObserve = beads.ProxiedOpenedObservation
 		}
-		if verdict := o.headUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (string, error) { return storageHead(ctx, storage) }); verdict != nil {
+		if verdict := o.openUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
+			return storageObserve(ctx, storage)
+		}); verdict != nil {
 			_ = storage.Close()
 			return nil, verdict
 		}
