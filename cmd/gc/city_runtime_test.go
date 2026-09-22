@@ -4388,6 +4388,91 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickFiresOnDeathBeforeConfigReloadReplacesHandlers proves the
+// tick() ordering fix: a pool death that happened before a same-tick config
+// reload must still fire its on_death hook, even though the reload is about
+// to replace cr.poolDeathHandlers with a map computed from the new config
+// (which here has dropped the pool entirely). Checking only the stale
+// pre-configChanged-swap peek of runSessionPhases left a gap where the death
+// hook silently never fired once the reload landed first.
+func TestCityRuntimeTickFiresOnDeathBeforeConfigReloadReplacesHandlers(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	outFile := filepath.Join(cityPath, "on-death.txt")
+
+	writeConfig := func(includeAgent bool) {
+		var buf strings.Builder
+		buf.WriteString("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n")
+		if includeAgent {
+			fmt.Fprintf(&buf, "\n[[agent]]\nname = \"worker\"\ndir = \"demo\"\nmin_active_sessions = 0\nmax_active_sessions = 1\non_death = \"printf fired > %s\"\n", shellQuotePath(outFile))
+		}
+		if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(true)
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	fake := runtime.NewFake()
+	handlers := computePoolDeathHandlers(cfg, "test-city", cityPath, fake, io.Discard)
+	if len(handlers) == 0 {
+		t.Fatal("computePoolDeathHandlers returned no handlers")
+	}
+	prevPoolRunning := map[string]bool{}
+	for sn := range handlers {
+		prevPoolRunning[sn] = true
+	}
+
+	// The next reload must see a config with the pool removed, so the
+	// replacement handler map (line ~2300) no longer contains this session
+	// and could never fire the hook itself.
+	writeConfig(false)
+
+	var stderr bytes.Buffer
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		tomlPath:            tomlPath,
+		configName:          "test-city",
+		cfg:                 cfg,
+		sp:                  fake,
+		dops:                newDrainOps(fake),
+		standaloneCityStore: beads.NewMemStore(),
+		sessionDrains:       newDrainTracker(),
+		poolDeathHandlers:   handlers,
+		rec:                 events.Discard,
+		logPrefix:           "gc test",
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		buildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+	}
+	cs := newControllerState(context.Background(), cfg, fake, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = cr.standaloneCityStore
+	cr.setControllerState(cs)
+
+	dirty := &atomic.Bool{}
+	dirty.Store(true)
+	lastProviderName := "fake"
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "manual", false)
+
+	if _, statErr := os.Stat(outFile); statErr != nil {
+		t.Fatalf("on_death hook did not fire before the reload replaced poolDeathHandlers: %v\nstderr=%s", statErr, stderr.String())
+	}
+	if len(cr.poolDeathHandlers) != 0 {
+		t.Fatalf("poolDeathHandlers after reload = %#v, want empty (agent removed from config)", cr.poolDeathHandlers)
+	}
+}
+
 func TestControlDispatcherOnlyConfig_IncludesRigScopedDispatchers(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{

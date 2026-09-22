@@ -1205,12 +1205,6 @@ func (cr *CityRuntime) tick(
 	// work and the patrol scan is the safety net. Non-patrol triggers and
 	// pending config changes always run the session phases.
 	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), time.Now(), forceSessionPhases)
-	// Detect pool instance deaths since last tick (session phase). Ordered
-	// ahead of the config reload so it compares against the config the
-	// deaths happened under.
-	if runSessionPhases {
-		cr.reconcilePoolDeaths(prevPoolRunning)
-	}
 
 	var manualReload *reloadRequest
 	var manualReply reloadControlReply
@@ -1249,6 +1243,19 @@ func (cr *CityRuntime) tick(
 		// requires a full reconcile this tick.
 		runSessionPhases = true
 		cr.sessionPhasesLast = time.Now()
+	}
+	// Detect pool instance deaths since last tick (session phase). Gated on
+	// the FINAL runSessionPhases/configChanged state (not the pre-swap
+	// peek) and ordered ahead of the config reload below, so a reload that
+	// is about to replace cr.poolDeathHandlers can never erase a pool's
+	// death-handler entry before this tick has had a chance to compare it
+	// against the outgoing config. Checking only the stale peek left a gap:
+	// a death occurring during a stretch-skipped tick, followed by a reload
+	// that dropped or replaced that pool's config before the next
+	// non-skipped tick ran, meant the new handler map's iteration never
+	// visited that pool again and its on_death hook silently never fired.
+	if runSessionPhases {
+		cr.reconcilePoolDeaths(prevPoolRunning)
 	}
 	if configChanged {
 		dirtyCleared = true
