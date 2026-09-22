@@ -828,21 +828,33 @@ func TestStartGuardIsIdempotentPerStore(t *testing.T) {
 	t.Setenv(proxiedGuardIntervalEnv, "1s")
 	f := newGuardFixture(t)
 
+	// The baseline is taken BEFORE the first StartGuard (council pr2 D-F14). It
+	// used to be sampled after all three calls, so leaked guard goroutines were
+	// already inside it: CloseStore joins exactly one guard, "after" came out
+	// below "before" whether or not the others had leaked, and the assertion
+	// could not fail.
+	before := runtime.NumGoroutine()
+
 	f.store.StartGuard()
 	f.store.StartGuard()
 	f.store.StartGuard()
 
 	// CloseStore joins the installed guard. If a previous call had leaked one,
 	// its goroutine would outlive the store and keep probing.
-	before := runtime.NumGoroutine()
 	if err := f.store.CloseStore(); err != nil {
 		t.Fatalf("CloseStore: %v", err)
 	}
-	// One join is synchronous; give any leaked ticker a chance to show itself.
-	time.Sleep(1500 * time.Millisecond)
-	if after := runtime.NumGoroutine(); after > before {
-		t.Fatalf("goroutines went %d -> %d across CloseStore; a second StartGuard leaked the first "+
-			"guard's ticker, and every leaked guard is a probe session per interval against bd's proxy",
-			before, after)
+	// One join is synchronous; poll briefly so a goroutine that is merely
+	// slow to exit is not mistaken for a leak, while a leaked ticker — which
+	// never exits — still is.
+	after := runtime.NumGoroutine()
+	for deadline := time.Now().Add(3 * time.Second); after > before && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		after = runtime.NumGoroutine()
+	}
+	if after > before {
+		t.Fatalf("goroutines went %d -> %d across three StartGuards and a CloseStore; a later StartGuard "+
+			"leaked an earlier guard's ticker, and every leaked guard is a probe session per interval "+
+			"against bd's proxy", before, after)
 	}
 }
