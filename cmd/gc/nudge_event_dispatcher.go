@@ -326,6 +326,7 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	if store.Store == nil {
 		return
 	}
+	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	// Session-class reads route through the session store, resolved from the
 	// city's raw work store rather than store.Store: store.Store has already
 	// been routed to the NUDGES class (openNudgeBeadStore), so reusing it as

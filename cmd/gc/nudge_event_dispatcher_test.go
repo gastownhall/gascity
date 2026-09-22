@@ -338,6 +338,59 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 	}
 }
 
+// countingCloseNudgesStore wraps a shared backing beads.Store and counts
+// CloseStore calls instead of actually closing the backing store, so a test
+// can reuse one real store across many simulated "opens" and still observe
+// whether each caller closed the handle it was handed.
+type countingCloseNudgesStore struct {
+	beads.Store
+	closes *int32
+}
+
+func (s countingCloseNudgesStore) CloseStore() error { //nolint:unparam // signature fixed by the interface closeBeadStoreHandle asserts on
+	*s.closes++
+	return nil
+}
+
+// TestNudgeEventDispatcherRunPassClosesBeadStore reproduces the #4968 leak:
+// runPass opened a nudges-class store via openNudgeBeadStore on every pass
+// but never closed it, leaking one store handle per dispatch pass on a
+// long-running controller. It mints an independent counting wrapper per open
+// over one shared backing store and asserts opens and closes stay balanced
+// across the dispatcher's background resync passes.
+func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+
+	backing := openNudgeBeadStore(dir)
+	var opens, closes int32
+	orig := openNudgeBeadStore
+	openNudgeBeadStore = func(_ string) beads.NudgesStore {
+		opens++
+		return beads.NudgesStore{Store: countingCloseNudgesStore{Store: backing.Store, closes: &closes}}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = orig })
+
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	fake.emit(runtime.SessionEvent{Kind: runtime.SessionEventAgentIdle, Session: info.SessionName, Time: time.Now()})
+
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("queued nudge not delivered; state=%+v calls=%v", queueStateSnapshot(t, dir), fake.SnapshotCalls())
+	}
+
+	if opens == 0 {
+		t.Fatalf("expected runPass to open at least one nudges store, opened=%d", opens)
+	}
+	if closes != opens {
+		t.Fatalf("runPass leaked store handles: opened=%d closed=%d", opens, closes)
+	}
+	_ = d
+}
+
 // TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges
 // reproduces gc-08u54r finding #5: runPass used to derive the session-class
 // store by handing store.Store (already routed to the NUDGES class) to
