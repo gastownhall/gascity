@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -459,5 +460,61 @@ func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
 	}
 	if idle {
 		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
+	}
+}
+
+// fakeEventProvider adds a controllable SessionEventProvider to runtime.Fake
+// so tests can drive both backends' streams independently.
+type fakeEventProvider struct {
+	*runtime.Fake
+	ch chan runtime.SessionEvent
+}
+
+func newFakeEventProvider() *fakeEventProvider {
+	return &fakeEventProvider{Fake: runtime.NewFake(), ch: make(chan runtime.SessionEvent, 4)}
+}
+
+func (f *fakeEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	return f.ch, nil
+}
+
+var _ runtime.SessionEventProvider = (*fakeEventProvider)(nil)
+
+// Both backends being event-capable must not mean only one is heard from:
+// EventCapableRoute is checked per session, so a session routed to either
+// backend needs its events to actually arrive.
+func TestSubscribeSessionEvents_MergesBothEventCapableBackends(t *testing.T) {
+	local := newFakeEventProvider()
+	remote := newFakeEventProvider()
+	h := New(local, remote, isRemote)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, err := h.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	local.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "local-sess"}
+	remote.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "remote-agent-1"}
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case ev := <-merged:
+			seen[ev.Session] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for merged events, got %v", seen)
+		}
+	}
+	if !seen["local-sess"] || !seen["remote-agent-1"] {
+		t.Errorf("merged events = %v, want both local-sess and remote-agent-1", seen)
+	}
+}
+
+func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
+	h := New(runtime.NewFake(), runtime.NewFake(), isRemote)
+	if _, err := h.SubscribeSessionEvents(context.Background()); err == nil {
+		t.Fatal("SubscribeSessionEvents = nil error, want error when neither backend is event-capable")
 	}
 }

@@ -684,3 +684,80 @@ func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
 		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
 	}
 }
+
+// fakeEventProvider adds a controllable SessionEventProvider to runtime.Fake
+// so tests can drive both backends' streams independently.
+type fakeEventProvider struct {
+	*runtime.Fake
+	ch chan runtime.SessionEvent
+}
+
+func newFakeEventProvider() *fakeEventProvider {
+	return &fakeEventProvider{Fake: runtime.NewFake(), ch: make(chan runtime.SessionEvent, 4)}
+}
+
+func (f *fakeEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	return f.ch, nil
+}
+
+var _ runtime.SessionEventProvider = (*fakeEventProvider)(nil)
+
+// Both backends being event-capable must not mean only one is heard from:
+// EventCapableRoute is checked per session, so a session routed to either
+// backend needs its events to actually arrive.
+func TestSubscribeSessionEvents_MergesBothEventCapableBackends(t *testing.T) {
+	def := newFakeEventProvider()
+	acp := newFakeEventProvider()
+	p := New(def, acp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	acp.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"}
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case ev := <-merged:
+			seen[ev.Session] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for merged events, got %v", seen)
+		}
+	}
+	if !seen["default-sess"] || !seen["acp-sess"] {
+		t.Errorf("merged events = %v, want both default-sess and acp-sess", seen)
+	}
+}
+
+func TestSubscribeSessionEvents_SingleBackendForwardsDirectly(t *testing.T) {
+	def := newFakeEventProvider()
+	p := New(def, runtime.NewFake())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	select {
+	case ev := <-ch:
+		if ev.Session != "default-sess" {
+			t.Errorf("event.Session = %q, want default-sess", ev.Session)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forwarded event")
+	}
+}
+
+func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
+	p := New(runtime.NewFake(), runtime.NewFake())
+	if _, err := p.SubscribeSessionEvents(context.Background()); err == nil {
+		t.Fatal("SubscribeSessionEvents = nil error, want error when neither backend is event-capable")
+	}
+}
