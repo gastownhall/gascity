@@ -192,9 +192,18 @@ func (o proxiedGuardOptions) withDefaults() proxiedGuardOptions {
 
 // proxiedGuard is one long-lived store's guard.
 type proxiedGuard struct {
-	store *ProxiedStore
-	opts  proxiedGuardOptions
-	done  chan struct{}
+	store  *ProxiedStore
+	opts   proxiedGuardOptions
+	cancel context.CancelFunc
+	// done is closed when run returns: after stop, the guard has made its
+	// last tick and holds nothing.
+	done chan struct{}
+}
+
+// stop cancels the guard and joins its goroutine.
+func (g *proxiedGuard) stop() {
+	g.cancel()
+	<-g.done
 }
 
 // StartGuard starts the guard tick for a LONG-LIVED proxied store.
@@ -211,21 +220,17 @@ func (s *ProxiedStore) StartGuard() {
 }
 
 func (s *ProxiedStore) startGuard(opts proxiedGuardOptions) *proxiedGuard {
-	guard := &proxiedGuard{store: s, opts: opts.withDefaults(), done: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
-	stop := func() {
-		cancel()
-		<-guard.done
-	}
+	guard := &proxiedGuard{store: s, opts: opts.withDefaults(), cancel: cancel, done: make(chan struct{})}
 
 	s.mu.Lock()
-	previous := s.stopGuard
-	s.stopGuard = stop
+	previous := s.guard
+	s.guard = guard
 	s.mu.Unlock()
 	// Outside the lock: a previous guard's goroutine takes mu itself, so joining
 	// it while holding mu would deadlock.
 	if previous != nil {
-		previous()
+		previous.stop()
 	}
 
 	go guard.run(ctx)

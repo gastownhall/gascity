@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -978,37 +977,68 @@ func TestStartGuardArmsARealTicker(t *testing.T) {
 // second call stops the first guard before installing its own, so a re-open
 // path cannot accumulate tickers — each of which is a goroutine and a probe
 // session per interval against bd's proxy.
+//
+// It asserts the join itself, deterministically, rather than a goroutine count
+// after a wait. The count was process-wide, needed a baseline taken before the
+// first StartGuard (council pr2 D-F14) and a polling sleep to let a joined
+// goroutine finish exiting — a fixed sleep the resource census counts. What the
+// contract actually promises is that each replaced guard's run has RETURNED by
+// the time the next StartGuard returns (done is closed only by run's return,
+// and stop waits for it), and that CloseStore does the same for the last one.
+// Both are channel facts with no timing in them: a guard whose stop was skipped
+// never closes done, so the non-blocking check below fails at once instead of
+// after a deadline.
 func TestStartGuardIsIdempotentPerStore(t *testing.T) {
 	t.Setenv(proxiedGuardIntervalEnv, "1s")
 	f := newGuardFixture(t)
+	installed := func() *proxiedGuard {
+		f.store.mu.RLock()
+		defer f.store.mu.RUnlock()
+		return f.store.guard
+	}
+	joined := func(g *proxiedGuard) bool {
+		select {
+		case <-g.done:
+			return true
+		default:
+			return false
+		}
+	}
 
-	// The baseline is taken BEFORE the first StartGuard (council pr2 D-F14). It
-	// used to be sampled after all three calls, so leaked guard goroutines were
-	// already inside it: CloseStore joins exactly one guard, "after" came out
-	// below "before" whether or not the others had leaked, and the assertion
-	// could not fail.
-	before := runtime.NumGoroutine()
+	// The production call, three times.
+	var guards []*proxiedGuard
+	for i := 0; i < 3; i++ {
+		f.store.StartGuard()
+		g := installed()
+		if g == nil {
+			t.Fatalf("StartGuard #%d installed no guard", i+1)
+		}
+		for _, earlier := range guards {
+			if earlier == g {
+				t.Fatalf("StartGuard #%d reinstalled an earlier guard instead of a fresh one", i+1)
+			}
+		}
+		guards = append(guards, g)
+	}
+	for i, g := range guards[:2] {
+		if !joined(g) {
+			t.Fatalf("guard #%d was still running after StartGuard #%d returned: a later StartGuard "+
+				"leaked an earlier guard's ticker, and every leaked guard is a probe session per "+
+				"interval against bd's proxy", i+1, i+2)
+		}
+	}
+	if joined(guards[2]) {
+		t.Fatal("the installed guard exited before anything stopped it; this test would pass vacuously")
+	}
 
-	f.store.StartGuard()
-	f.store.StartGuard()
-	f.store.StartGuard()
-
-	// CloseStore joins the installed guard. If a previous call had leaked one,
-	// its goroutine would outlive the store and keep probing.
+	// CloseStore joins the installed guard.
 	if err := f.store.CloseStore(); err != nil {
 		t.Fatalf("CloseStore: %v", err)
 	}
-	// One join is synchronous; poll briefly so a goroutine that is merely
-	// slow to exit is not mistaken for a leak, while a leaked ticker — which
-	// never exits — still is.
-	after := runtime.NumGoroutine()
-	for deadline := time.Now().Add(3 * time.Second); after > before && time.Now().Before(deadline); {
-		time.Sleep(50 * time.Millisecond)
-		after = runtime.NumGoroutine()
+	if !joined(guards[2]) {
+		t.Fatal("CloseStore returned with the installed guard still running")
 	}
-	if after > before {
-		t.Fatalf("goroutines went %d -> %d across three StartGuards and a CloseStore; a later StartGuard "+
-			"leaked an earlier guard's ticker, and every leaked guard is a probe session per interval "+
-			"against bd's proxy", before, after)
+	if installed() != nil {
+		t.Fatal("CloseStore left a guard installed")
 	}
 }

@@ -145,9 +145,10 @@ type ProxiedStore struct {
 	// They are copied out of the pin so the bracket never takes mu.
 	root     string
 	database string
-	// stopGuard stops the long-lived guard ticker. Nil for a one-shot store and
-	// until P2-11 installs one.
-	stopGuard func()
+	// guard is the long-lived guard ticker, stopped by CloseStore and replaced
+	// (after stopping the old one) by a second StartGuard. Nil for a one-shot
+	// store.
+	guard *proxiedGuard
 	// reopenNative is the ONLY recovery path a non-terminally demoted handle
 	// has. See NativeLeafReopener.
 	reopenNative NativeLeafReopener
@@ -768,13 +769,13 @@ func (s *ProxiedStore) CloseStore() error {
 	s.mu.Lock()
 	native := s.native
 	s.native = nil
-	stop := s.stopGuard
-	s.stopGuard = nil
+	guard := s.guard
+	s.guard = nil
 	bd := s.bd
 	s.mu.Unlock()
 
-	if stop != nil {
-		stop()
+	if guard != nil {
+		guard.stop()
 	}
 	var nativeErr error
 	if native != nil {
