@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"io"
+	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -469,13 +471,31 @@ func TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore(t *testing.
 // openCityStoreAt). That store is always a fresh one-shot handle -- never
 // routed through cliStorageRoutes' memoized entries -- so runPass
 // unconditionally owns it and must close it on every pass, unlike the
-// conditionally-owned nudges-class store above. Calls runPass directly (no
-// background goroutine) so the counters need no synchronization.
+// conditionally-owned nudges-class store above.
+//
+// Built directly rather than via newNudgeDispatcherFixture, and without
+// driving update()'s resubscribe path, for the same reason documented on
+// TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore: the
+// fixture's fake session stream leads with a buffered resync frame that the
+// forward goroutine turns into an async kickAll/runPass the moment
+// update(..., true) subscribes, which races this test's own unsynchronized
+// swap of the package-level openRawCityStoreForSessionResolution var (opens
+// and closes are already atomic.Int32 and safe; the var swap itself is not).
+// Calling runPass directly with no live worker/subscription means the
+// counters need no synchronization beyond the atomics already in use.
 func TestNudgeEventDispatcherRunPassClosesRawSessionStore(t *testing.T) {
-	fake := newNudgeEventedFake()
-	dir, d, _ := newNudgeDispatcherFixture(t, fake)
-
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
 	backing := openNudgeBeadStore(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d.mu.Lock()
+	d.cfg = &config.City{}
+	d.sp = newNudgeEventedFake()
+	d.mu.Unlock()
+
 	var opens, closes atomic.Int32
 	orig := openRawCityStoreForSessionResolution
 	openRawCityStoreForSessionResolution = func(_ string) (beads.Store, error) {
@@ -672,32 +692,66 @@ func TestMaybeStartNudgePollerSuppressedForEventCapableProvider(t *testing.T) {
 		sessionName: "gc-worker",
 	}
 
+	// No dispatcher is hosting the wake socket yet: even an event-capable
+	// provider must not suppress the poller, since nothing else guarantees
+	// delivery.
 	maybeStartNudgePoller(target, newNudgeEventedFake())
-	if spawns != 0 {
-		t.Fatalf("spawns = %d, want 0 for an event-capable provider", spawns)
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1 for an event-capable provider with no live dispatcher", spawns)
+	}
+
+	// Once a dispatcher is actually hosting the wake socket, the
+	// event-capable provider's poller is suppressed.
+	if err := os.MkdirAll(filepath.Dir(nudgequeue.WakeSocketPath(dir)), 0o755); err != nil {
+		t.Fatalf("creating wake socket dir: %v", err)
+	}
+	wakeLis, err := net.Listen("unix", nudgequeue.WakeSocketPath(dir))
+	if err != nil {
+		t.Fatalf("listening on wake socket: %v", err)
+	}
+	t.Cleanup(func() { _ = wakeLis.Close() })
+
+	maybeStartNudgePoller(target, newNudgeEventedFake())
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1 for an event-capable provider with a live dispatcher", spawns)
 	}
 
 	maybeStartNudgePoller(target, runtime.NewFake())
-	if spawns != 1 {
-		t.Fatalf("spawns = %d, want 1 for a plain provider", spawns)
+	if spawns != 2 {
+		t.Fatalf("spawns = %d, want 2 for a plain provider", spawns)
 	}
 
 	// Callers without a resolved provider fail open to today's behavior.
 	maybeStartNudgePoller(target, nil)
-	if spawns != 2 {
-		t.Fatalf("spawns = %d, want 2 for a nil provider", spawns)
+	if spawns != 3 {
+		t.Fatalf("spawns = %d, want 3 for a nil provider", spawns)
 	}
 }
 
 func TestProviderRetiresNudgePollers(t *testing.T) {
-	if providerRetiresNudgePollers(nil) {
+	dir := t.TempDir()
+
+	if providerRetiresNudgePollers(nil, dir) {
 		t.Fatal("nil provider must not retire pollers")
 	}
-	if providerRetiresNudgePollers(runtime.NewFake()) {
+	if providerRetiresNudgePollers(runtime.NewFake(), dir) {
 		t.Fatal("plain provider must not retire pollers")
 	}
-	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
-		t.Fatal("event-capable provider must retire pollers")
+	if providerRetiresNudgePollers(newNudgeEventedFake(), dir) {
+		t.Fatal("event-capable provider must not retire pollers when no dispatcher is hosting the wake socket")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(nudgequeue.WakeSocketPath(dir)), 0o755); err != nil {
+		t.Fatalf("creating wake socket dir: %v", err)
+	}
+	wakeLis, err := net.Listen("unix", nudgequeue.WakeSocketPath(dir))
+	if err != nil {
+		t.Fatalf("listening on wake socket: %v", err)
+	}
+	t.Cleanup(func() { _ = wakeLis.Close() })
+
+	if !providerRetiresNudgePollers(newNudgeEventedFake(), dir) {
+		t.Fatal("event-capable provider must retire pollers once a dispatcher is hosting the wake socket")
 	}
 }
 

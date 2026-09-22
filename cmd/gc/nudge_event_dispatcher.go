@@ -446,11 +446,18 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 // sidecar poller class: the supervisor-hosted event dispatcher owns queued
 // delivery for such providers (in both nudge_dispatcher modes), so a spawned
 // poller would only race it. A nil provider fails open — callers without a
-// resolved provider keep today's spawn behavior.
-func providerRetiresNudgePollers(sp runtime.Provider) bool {
+// resolved provider keep today's spawn behavior. Capability alone is not
+// enough: an event-capable provider still needs a poller when no dispatcher
+// is actually hosting the wake socket (controller crashed, listener down),
+// so this also probes nudgequeue.DispatcherIsHosting -- the same liveness
+// signal the deferred-submit fallback path checks -- and fails open (keeps
+// the poller) when nothing answers.
+func providerRetiresNudgePollers(sp runtime.Provider, cityPath string) bool {
 	if sp == nil {
 		return false
 	}
-	_, ok := sp.(runtime.SessionEventProvider)
-	return ok
+	if _, ok := sp.(runtime.SessionEventProvider); !ok {
+		return false
+	}
+	return nudgequeue.DispatcherIsHosting(cityPath)
 }
