@@ -333,8 +333,11 @@ func (s *ProxiedStore) writeLeaf() Store {
 //     the rest of the process.
 //
 // The native handle is closed detached (closeStorageQuietly's reason: a handle
-// whose server was hard-killed can wedge on Close), and the pointer is dropped
-// under mu so no reader can still be holding it.
+// whose server was hard-killed can wedge on Close). The pointer is dropped
+// under mu, which is what makes the DECISION atomic; it does not mean no reader
+// holds it — readLeaf and nativeLeaf hand the pointer out and release the lock
+// before the call, so a read already in flight keeps its own reference. See
+// classifyReadError for what that read's follow-on error is worth.
 func (s *ProxiedStore) standDown(verdict *ProxiedVerdictError) {
 	if verdict == nil {
 		return
@@ -342,7 +345,18 @@ func (s *ProxiedStore) standDown(verdict *ProxiedVerdictError) {
 	s.mu.Lock()
 	native := s.native
 	s.native = nil
-	s.verdict = verdict
+	// The recorded REASON is latched with the handle (council A-F8). standDown
+	// used to write s.verdict unconditionally and only OR the terminal flag, so
+	// a later non-terminal stand-down overwrote the fact that had already
+	// decided this handle's fate — reachable from withMutation's bracket, which
+	// still runs after a demotion because it does not consult s.native, and from
+	// checkGeneration's markPoolStale arm. The handle stayed demoted either way,
+	// so this was never a resurrection; what it was is LiveProxiedDiagnostic and
+	// the doctor payload telling an operator "verdict=proxy_gone
+	// terminal=false" for a city that actually failed the schema gate.
+	if !s.terminal {
+		s.verdict = verdict
+	}
 	if verdict.Terminal() {
 		s.terminal = true
 	}

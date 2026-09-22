@@ -1018,3 +1018,41 @@ func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
 		t.Fatalf("ConditionalWriterFor resolved to %T, want the bracketing adapter", writer)
 	}
 }
+
+// TestStandDownKeepsTheTerminalReason is council A-F8.
+//
+// standDown wrote s.verdict unconditionally and only OR-ed the terminal flag,
+// so a later NON-terminal stand-down overwrote the reason that had already
+// decided the handle's fate. Both later paths are reachable: withMutation's
+// generation bracket still runs after a demotion (it does not consult s.native)
+// and checkGeneration's markPoolStale arm produces a non-terminal proxy_gone.
+//
+// The handle stays demoted either way, so this was never a resurrection. What
+// it was is LiveProxiedDiagnostic and the doctor payload reporting
+// "verdict=proxy_gone terminal=false" for a city that actually failed the
+// schema gate — an operator told to wait for a proxy to come back, about a
+// database whose schema moved.
+func TestStandDownKeepsTheTerminalReason(t *testing.T) {
+	store, _, _ := newSplitFixture(t)
+
+	store.standDown(NewSchemaSkewVerdictError(ProxiedSkewLaneIgnored, ProxiedSkewDirBehind,
+		"the pinned database moved while this handle was open"))
+	store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone,
+		"the proxy generation changed across create", nil))
+
+	verdict := store.Verdict()
+	if verdict == nil {
+		t.Fatal("the store reports no verdict after two stand-downs")
+	}
+	if verdict.Verdict != ProxiedVerdictSchemaSkew {
+		t.Fatalf("verdict = %q, want schema_skew: the terminal fact that demoted this handle was "+
+			"overwritten, so doctor tells an operator to wait for a proxy that is not the problem",
+			verdict.Verdict)
+	}
+	if !verdict.Terminal() {
+		t.Error("the recorded verdict lost its terminality")
+	}
+	if !store.Demoted() {
+		t.Error("the store promoted itself")
+	}
+}
