@@ -37,9 +37,13 @@ import (
 // Rows 1 and 2 are answered by RE-PINNING, not by demoting (design U22,
 // 648-654): a bd proxy restart is ordinary operation, and a store that fell to
 // the bd front door for the rest of the process on every restart would make the
-// whole lane worthless on a Finite-idle city. Row 3 is the one demotion the
-// design asks for (563-565), because a cursor pair that moved is a fact about
-// the database that re-pinning cannot change.
+// whole lane worthless on a Finite-idle city. When the new generation does not
+// admit on the tick that sees it, the handle stands down NON-terminally and the
+// next tick's recovery re-pins it (council pr2 E-S1): on row 2 the old socket
+// keeps serving the moved database, so "leave it and ask again" was serving the
+// wrong database for an interval. Row 3 is the one demotion the design asks for
+// (563-565), because a cursor pair that moved is a fact about the database that
+// re-pinning cannot change.
 //
 // # Why the tick does not open the library WHILE THE LEAF IS SERVING
 //
@@ -385,9 +389,8 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		// long-lived shape with the REAL clock, so a new generation that
 		// refused ran the 60s drain on the tick goroutine, re-probing every 2s,
 		// and a silent one walked the three-attempt ladder with 1s sleeps.
-		// Undecided is the right answer to both: the next tick asks again, and
-		// a reader that needs the new generation sooner re-pins through the
-		// reopen hook.
+		// What a refusal on this one session does to the HANDLE is decided
+		// below, and it is not "wait for the next tick".
 		ProbeOnce: true,
 	})
 	if err != nil {
@@ -397,31 +400,42 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 			g.store.standDown(verdict)
 			return proxiedGuardStoodDown
 		}
-		// Council A-F1. Everything else is UNDECIDED, and the distinction is the
-		// whole difference between "bd restarted its proxy" and "this store forks
-		// bd for the rest of the process".
+		// Everything else stands the native leaf down NON-terminally, and the
+		// next tick's recovery (recoverNative) re-admits it. This arm used to
+		// leave the pin and the leaf alone and report Undecided, and that was
+		// wrong on the one shape this file exists for (council pr2 E-S1).
 		//
-		// A non-terminal verdict is, by its own definition, the endpoint in
-		// motion or a budget that ran out — budget_exhausted, draining,
-		// proxy_gone, a backend still warming up. The probe is built so its own
-		// 2s clock can never conclude anything about an endpoint
-		// (proxyendpoint.IsIndeterminate, and ProbeUnknown's doc: "never a
-		// conclusion about the proxy"), and on a loaded box that is the ordinary
-		// outcome of a re-admission. Handing it to standDown demoted a
-		// long-lived controller store permanently for one slow probe, which is
-		// the exact regression design U22 (648-654) and the plan's "demotes only
-		// on cursor drift" forbid.
+		// The record has just said the pinned generation was REPLACED. On a
+		// proxy restart (row 1 of the header) the old pool's socket is dead, so
+		// reads fail on their own and nothing is served from it. On a root move
+		// (row 2) the OLD proxy is still alive, still serving the MOVED
+		// database on the socket this pool holds, while the new one is not yet
+		// accepting — bd writes its record before it binds. Every read on the
+		// old socket succeeds, so no read ever reaches the reopen hook: the
+		// Undecided arm kept serving the moved database until a tick found the
+		// new generation serving, which is one full guard interval at best and
+		// has no upper bound at all (GC_BEADS_PROXIED_GUARD_INTERVAL has no
+		// ceiling). The old comment's escape hatch — "a reader that needs the
+		// new generation sooner re-pins through the reopen hook" — cannot fire
+		// on that shape, because the hook is reached only through a failed or
+		// stale-marked read.
 		//
-		// An UNTYPED error lands here too, for the reason it always did:
-		// admission names every outcome it reaches, so an untyped error is a bug
-		// rather than a fact about the endpoint.
+		// Standing down is what A-F1 forbade, and A-F1 was right at the time:
+		// with no recovery path a non-terminal stand-down was permanent. That
+		// is no longer true. A non-terminally stood-down long-lived handle is
+		// recovered by the next tick through the NativeLeafReopener (one probe
+		// session, no fork, see recoverNative), so the cost of this arm is the
+		// bd front door for at most one interval, and the thing it buys is that
+		// no read is served from a generation the record says is gone.
 		//
-		// Leave the pin and the native leaf alone and ask again next tick. The
-		// handle keeps serving from the generation it is still pinned to, which
-		// is the generation the record says has been replaced — so the next tick
-		// re-runs exactly this comparison and re-admits. That is a re-pin
-		// deferred, not a re-pin skipped.
-		return proxiedGuardUndecided
+		// The typed verdict is kept when there is one (draining,
+		// budget_exhausted, backend_unreachable, proxy_gone), with the
+		// generation move in its detail, so doctor says why. An UNTYPED error —
+		// admission names every outcome it reaches, so it is a bug — stands down
+		// as proxy_gone for the same reason: the pinned generation is gone
+		// whatever the re-admission could not say.
+		g.store.standDown(repinRefusedVerdict(pin, record, err))
+		return proxiedGuardStoodDown
 	}
 
 	// The re-pin, in two moves that are deliberately NOT a library open:
@@ -439,6 +453,24 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		return proxiedGuardStoodDown
 	}
 	return proxiedGuardRepinned
+}
+
+// repinRefusedVerdict is the NON-terminal stand-down for a generation change
+// whose fresh admission did not admit on this tick (council pr2 E-S1). It keeps
+// the admission's own verdict when it has one and says, in the detail, which
+// generation replaced which.
+func repinRefusedVerdict(pin Pin, record proxyendpoint.Record, err error) *ProxiedVerdictError {
+	moved := fmt.Sprintf("the proxy generation moved (%s -> %s) and the new generation did not admit on this tick; "+
+		"standing down until the next tick's recovery rather than serving the replaced generation",
+		pin.Generation(), proxyendpoint.NewPoolKey(record, pin.Database()).Generation())
+	if verdict, ok := ProxiedVerdictOf(err); ok {
+		detail := moved
+		if verdict.Detail != "" {
+			detail += ": " + verdict.Detail
+		}
+		return NewNonTerminalProxiedVerdictError(verdict.Verdict, detail, err)
+	}
+	return NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, moved, err)
 }
 
 // checkCursors re-reads the database's two migration cursors and compares them

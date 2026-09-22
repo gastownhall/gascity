@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -524,22 +525,42 @@ func TestProxiedOpenFiniteIdleLongLivedFallsToBdStore(t *testing.T) {
 	}
 }
 
-// TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission is council A-F1.
+// installRecovery gives the fixture's store the recovery a production
+// long-lived handle has: a ONE-session re-admission (ProbeOnce, no Ops) against
+// whatever the record names now, and a fresh leaf over it. It is what
+// cmd/gc's recoverNativeLeaf does, minus the library open.
+func (f *guardFixture) installRecovery() {
+	f.recover = func(ctx context.Context) (*NativeDoltStore, Pin, error) {
+		in := f.admissionInput(true)
+		in.ProbeOnce = true
+		pin, err := Admit(ctx, in)
+		if err != nil {
+			return nil, Pin{}, err
+		}
+		leaf := newNativeDoltStoreForTest(&nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}})
+		leaf.idPrefix = "prx"
+		return leaf, pin, nil
+	}
+}
+
+// TestProxiedGuardTickStandsDownNonTerminallyWhenTheNewGenerationDoesNotAdmit
+// is council A-F1 as amended by council pr2 E-S1.
 //
 // bd replacing its proxy is ORDINARY operation — an operator `bd dolt stop`, an
-// idle expiry, a crash-restart — and this file's own header says so. The tick
-// answers it by RE-PINNING (design U22, 648-654). The re-pin is an admission,
-// and an admission's probe has a 2s budget of its own; on a loaded box it
-// routinely runs out. proxyendpoint is built so that outcome can never be a
-// conclusion about the endpoint (ProbeUnknown: "never a conclusion about the
-// proxy"), and admission spells it budget_exhausted, NON-terminal.
+// idle expiry, a crash-restart — and the tick answers it by RE-PINNING (design
+// U22, 648-654). The re-pin is an admission, and on a loaded box its one probe
+// session routinely learns nothing (budget_exhausted, NON-terminal).
 //
-// Handing any typed verdict to standDown converted that into a permanent
-// demotion of a controller store: the leaf is nil, so every read is on bd, the
-// reopen hook is unreachable, and nothing ever promotes. The tick must stay
-// UNDECIDED and ask again.
-func TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission(t *testing.T) {
+// A-F1's point stands: that outcome must never demote the handle for good. What
+// changed is how "not for good" is achieved. The tick used to leave the pin and
+// the old pool in place and report Undecided; E-S1 showed that serves the
+// REPLACED generation for as long as the new one does not admit, which on a
+// root move is the moved database. Now the handle stands down NON-terminally —
+// reads go to bd, not to the replaced generation — and the next tick's recovery
+// re-pins it once the new generation admits.
+func TestProxiedGuardTickStandsDownNonTerminallyWhenTheNewGenerationDoesNotAdmit(t *testing.T) {
 	f := newGuardFixture(t)
+	f.installRecovery()
 	f.start()
 	before := f.store.Pin()
 
@@ -553,17 +574,33 @@ func TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission(t *testing.T) {
 		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeUnknown, Err: context.DeadlineExceeded}
 	}
 
-	for pass := 0; pass < 3; pass++ {
+	if step := f.tick(); step != proxiedGuardStoodDown {
+		t.Fatalf("an indeterminate re-admission of a MOVED generation reported %s, want stood-down: "+
+			"the old pool must not keep serving a generation the record says is gone", step)
+	}
+	if !f.store.Demoted() {
+		t.Fatal("the tick kept the native leaf serving the replaced generation")
+	}
+	verdict := f.store.Verdict()
+	if verdict == nil || verdict.Terminal() {
+		t.Fatalf("verdict = %v, want a NON-terminal one: the probe's own clock is not evidence about the proxy, "+
+			"and a terminal stand-down is the permanent demotion A-F1 forbids", verdict)
+	}
+	if verdict.Verdict != ProxiedVerdictBudgetExhausted {
+		t.Errorf("verdict = %q, want the re-admission's own budget_exhausted kept for doctor", verdict.Verdict)
+	}
+	if !strings.Contains(verdict.Detail, before.Generation()) {
+		t.Errorf("the verdict detail does not name the replaced generation %s: %s", before.Generation(), verdict.Detail)
+	}
+
+	// While the box stays loaded, the recovery asks once per tick and the
+	// handle stays on bd. Nothing is permanent and nothing is served natively.
+	for pass := 0; pass < 2; pass++ {
 		if step := f.tick(); step != proxiedGuardUndecided {
-			t.Fatalf("pass %d: an indeterminate re-admission reported %s, want undecided: "+
-				"the probe's own clock is not evidence about the proxy", pass, step)
+			t.Fatalf("pass %d: a recovery that learned nothing reported %s, want undecided", pass, step)
 		}
-		if f.store.Demoted() {
-			t.Fatalf("pass %d: the tick demoted a long-lived store over a probe that learned nothing; "+
-				"this is the regression U22 forbids", pass)
-		}
-		if verdict := f.store.Verdict(); verdict != nil {
-			t.Fatalf("pass %d: the tick recorded verdict %v for an undecided pass", pass, verdict)
+		if !f.store.Demoted() {
+			t.Fatalf("pass %d: the store promoted itself on a recovery that did not admit", pass)
 		}
 	}
 
@@ -571,14 +608,92 @@ func TestProxiedGuardTickDoesNotDemoteOnANonTerminalReAdmission(t *testing.T) {
 	// record has been naming all along.
 	f.probeResult = nil
 	if step := f.tick(); step != proxiedGuardRepinned {
-		t.Fatalf("a healthy re-admission after the indeterminate ones reported %s, want repinned", step)
+		t.Fatalf("a healthy recovery after the indeterminate ones reported %s, want repinned", step)
 	}
 	if f.store.Demoted() {
-		t.Fatal("the re-pin left the store demoted")
+		t.Fatal("the recovery left the store demoted")
+	}
+	if f.store.Verdict() != nil {
+		t.Fatalf("the recovery left the stand-down verdict in place: %v", f.store.Verdict())
 	}
 	if after := f.store.Pin(); after.PoolKey().PID != 6004 {
 		t.Fatalf("re-pinned to pid %d, want the replacement proxy 6004 (was %d)",
 			after.PoolKey().PID, before.PoolKey().PID)
+	}
+}
+
+// TestProxiedGuardTickDoesNotServeAMovedRootWhileTheNewProxyRefuses is council
+// pr2 E-S1, on the shape the tick header calls "the hazard no read can see".
+//
+// The scope root was moved and recreated at the same path. bd's new proxy
+// wrote its record and has not bound its listener yet, so the one probe session
+// the tick may spend is REFUSED. The old proxy is alive and still serving the
+// MOVED database on the socket this handle's pool holds, so every read on it
+// succeeds and none of them reaches the reopen hook.
+//
+// Before E-S1 the tick reported Undecided and left the pool alone: the next
+// read was served from the moved database, and so was every read until a tick
+// found the new proxy serving. The rows assert what a READER sees after the
+// tick, and that the recovery re-pins once the new proxy binds — each tick on
+// one probe session.
+func TestProxiedGuardTickDoesNotServeAMovedRootWhileTheNewProxyRefuses(t *testing.T) {
+	f := newGuardFixture(t)
+	f.installRecovery()
+	f.start()
+
+	// The moved root's replacement proxy: a new pid, a new birth, the same
+	// path-derived root identity.
+	f.admitted.writeRecord(6020, "20202020")
+	refusing := true
+	f.probeResult = func() proxyendpoint.ProbeResult {
+		if refusing {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+		}
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+	}
+
+	probes := f.probes
+	if step := f.tick(); step != proxiedGuardStoodDown {
+		t.Fatalf("a replaced generation whose new proxy refuses reported %s, want stood-down", step)
+	}
+	if got := f.probes - probes; got != 1 {
+		t.Fatalf("the tick spent %d probe session(s), want exactly 1", got)
+	}
+	verdict := f.store.Verdict()
+	if verdict == nil || verdict.Verdict != ProxiedVerdictDraining || verdict.Terminal() {
+		t.Fatalf("verdict = %v, want a non-terminal draining", verdict)
+	}
+
+	// A reader right after the tick. The old pool is the moved database's, so
+	// the only acceptable server of this read is the bd leaf.
+	f.bd.took()
+	if _, err := f.store.List(ListQuery{AllowScan: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("List after the stand-down: %v", err)
+	}
+	if calls := f.bd.took(); len(calls) != 1 || calls[0] != "List" {
+		t.Fatalf("the read after the tick reached the bd leaf as %v, want [List]: "+
+			"anything else is a read served from the replaced generation's pool", calls)
+	}
+	select {
+	case <-f.reopens:
+		t.Fatal("the stood-down handle reconnected its old pool instead of leaving the read to bd")
+	default:
+	}
+
+	// The new proxy binds. The next tick's recovery re-pins onto it.
+	refusing = false
+	probes = f.probes
+	if step := f.tick(); step != proxiedGuardRepinned {
+		t.Fatalf("the tick after the new proxy bound reported %s, want repinned", step)
+	}
+	if got := f.probes - probes; got != 1 {
+		t.Fatalf("the recovery tick spent %d probe session(s), want exactly 1", got)
+	}
+	if f.store.Demoted() {
+		t.Fatal("the recovery left the store on the bd leaf")
+	}
+	if pid := f.store.Pin().PoolKey().PID; pid != 6020 {
+		t.Fatalf("re-pinned to pid %d, want the moved root's new proxy 6020", pid)
 	}
 }
 
@@ -730,7 +845,9 @@ func TestProxiedGuardTickSpendsOneSessionPerTick(t *testing.T) {
 	// refused ran the 60s drain on the tick goroutine (this fixture's 5s step
 	// timeout fires first), and a silent one walked three probes with 1s
 	// sleeps. Either way the tick spent more than the one session its header
-	// promises; the next tick is the retry.
+	// promises. Since council pr2 E-S1 the handle also stands down
+	// NON-terminally on that one session, so each row gets its own fixture:
+	// a stood-down store's next tick is a recovery, not a re-pin.
 	for i, tc := range []struct {
 		name    string
 		outcome proxyendpoint.ProbeOutcome
@@ -739,16 +856,20 @@ func TestProxiedGuardTickSpendsOneSessionPerTick(t *testing.T) {
 		{name: "a re-pin against a new generation that never greets costs one session", outcome: proxyendpoint.ProbeAcceptedNoGreeting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newGuardFixture(t)
+			f.start()
 			f.probeResult = func() proxyendpoint.ProbeResult { return proxyendpoint.ProbeResult{Outcome: tc.outcome} }
-			t.Cleanup(func() { f.probeResult = nil })
 			before := f.probes
 			f.admitted.corrupt(func(rec *proxyendpoint.Record) {
 				rec.PID = 6010 + i
 				rec.Birth = proxyendpoint.BirthToken("boot-fixture", fmt.Sprintf("feed%04d", i))
 			})
 
-			if step := f.tick(); step != proxiedGuardUndecided {
-				t.Fatalf("the re-pin reported %s, want undecided: a proxy in motion is not a fact about the database", step)
+			if step := f.tick(); step != proxiedGuardStoodDown {
+				t.Fatalf("the re-pin reported %s, want stood-down: the replaced generation must not keep serving", step)
+			}
+			if verdict := f.store.Verdict(); verdict == nil || verdict.Terminal() {
+				t.Fatalf("verdict = %v, want a non-terminal one: a proxy in motion is not a fact about the database", verdict)
 			}
 			if got := f.probes - before; got != 1 {
 				t.Fatalf("the re-pin ran %d probe session(s), want exactly 1: the tick's budget is one "+
