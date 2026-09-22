@@ -1036,14 +1036,27 @@ func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
 //     no verdict, and a handle every other read would have demoted stayed
 //     "native".
 //
-// Every arm below drives the read path to a decision BEFORE the storage call,
-// which is also what keeps the test honest: beadslib.Storage.GetStatistics
-// returns a type from beads' internal package, so no in-process fixture can
-// implement it (the same constraint G3 recorded as P2-09 deviation 5). What is
-// asserted is therefore the routing, which is the whole finding.
+// The hardening is PROXIED-LANE ONLY, and that is the second half of the
+// finding rather than a detail (council pr2 D-F1). poolStale is only ever
+// marked by the proxied guard tick, and proxiedReadVerdict is a no-op off the
+// proxied lane, so neither reason above applies to a direct or hosted handle —
+// while the cost does: rung 7's substring table matches "dial tcp" and
+// "connection refused" on BOTH lanes, so an unconditionally routed Ping turned
+// every flag-off ping failure into reconnect-and-retry through the managed-Dolt
+// restart hook, on an uncancellable 90s budget, underneath three poll loops
+// built on Ping failing fast. The direct rows below therefore assert what those
+// callers see — the verbatim error, one upstream call, zero reopens, no wall
+// time — because any one of those alone passes on the broken code.
+//
+// beadslib.Storage.GetStatistics returns a type from beads' internal package,
+// so no in-process fixture can implement it (the constraint G3 recorded as
+// P2-09 deviation 5); the rows that need a failing upstream read substitute
+// Ping's single upstream call through the store's pingUpstream seam and drive
+// the real Ping.
 func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 	t.Run("a stale mark is honored before the ping is served", func(t *testing.T) {
 		store := newNativeDoltStoreForTest(healthySearchStorage())
+		store.proxiedReadVerdicts = true
 		var reopens int32
 		refused := errors.New("the re-admission refused this generation")
 		store.reopen = func(context.Context) (beadslib.Storage, error) {
@@ -1088,18 +1101,80 @@ func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 		}
 	})
 
-	t.Run("a direct ping is still untyped", func(t *testing.T) {
+	// The two rows below are mirror images over one error, so a direct row
+	// cannot be satisfied by disabling Ping's hardening outright.
+	refusedDial := errors.New("begin read tx: dial tcp 127.0.0.1:3307: connect: connection refused")
+
+	t.Run("a direct ping returns the refused dial the way main does", func(t *testing.T) {
+		var pings, reopens int32
 		store := newNativeDoltStoreForTest(healthySearchStorage())
-		store.readRetryBudgetOverride = 150 * time.Millisecond
-		store.reopen = func(context.Context) (beadslib.Storage, error) {
-			return nil, errors.New("dial tcp 127.0.0.1:3307: i/o timeout")
+		store.pingUpstream = func(context.Context, beadslib.Storage) error {
+			atomic.AddInt32(&pings, 1)
+			return refusedDial
 		}
-		if !store.markPoolStale() {
-			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		// Short, so a regression reads as a spent budget rather than as a
+		// 90-second test. Production has no override on this lane at all.
+		store.readRetryBudgetOverride = 400 * time.Millisecond
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return healthySearchStorage(), nil
 		}
 
-		if _, typed := ProxiedVerdictOf(store.Ping()); typed {
-			t.Fatal("a DIRECT handle rendered a proxied verdict from a ping")
+		start := time.Now()
+		err := store.Ping()
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, refusedDial) {
+			t.Fatalf("Ping err = %v, want the upstream error itself", err)
+		}
+		if strings.Contains(err.Error(), "retry budget exhausted") {
+			t.Fatalf("the direct lane spent its budget and rewrote the error: %v", err)
+		}
+		if _, typed := ProxiedVerdictOf(err); typed {
+			t.Fatalf("a DIRECT handle rendered a proxied verdict from a ping: %v", err)
+		}
+		if n := atomic.LoadInt32(&pings); n != 1 {
+			t.Fatalf("the direct lane made %d upstream ping call(s), want 1: waitForRigStoreAccessible and "+
+				"waitForBeadsScopeReadyAfterRecovery poll Ping every 250ms and check their deadline AFTER it", n)
+		}
+		if n := atomic.LoadInt32(&reopens); n != 0 {
+			t.Fatalf("a direct ping called the reopen hook %d time(s); on a hosted city that hook re-resolves "+
+				"the managed port with recovery enabled and can restart a healthy server", n)
+		}
+		if elapsed > 100*time.Millisecond {
+			t.Fatalf("a direct ping spent %s; on main it returned on the first pass, and gc doctor's "+
+				"--check-timeout is built on that", elapsed)
+		}
+	})
+
+	t.Run("a proxied ping still retries the same refused dial", func(t *testing.T) {
+		var pings, reopens int32
+		store := newNativeDoltStoreForTest(healthySearchStorage())
+		store.proxiedReadVerdicts = true
+		store.pingUpstream = func(context.Context, beadslib.Storage) error {
+			atomic.AddInt32(&pings, 1)
+			return refusedDial
+		}
+		store.readRetryBudgetOverride = 300 * time.Millisecond
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return healthySearchStorage(), nil
+		}
+
+		err := store.Ping()
+		verdict, typed := ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("the proxied lane returned an untyped ping error the wrapper cannot demote on: %v", err)
+		}
+		if verdict.Verdict != ProxiedVerdictBudgetExhausted {
+			t.Errorf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictBudgetExhausted)
+		}
+		if n := atomic.LoadInt32(&pings); n < 2 {
+			t.Fatalf("the proxied lane made %d upstream ping call(s), want more than one: the gate is on the "+
+				"lane, not on the hardening", n)
+		}
+		if n := atomic.LoadInt32(&reopens); n == 0 {
+			t.Fatal("the proxied lane never reconnected for a refused dial")
 		}
 	})
 }

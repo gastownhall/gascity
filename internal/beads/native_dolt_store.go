@@ -429,6 +429,20 @@ type NativeDoltStore struct {
 	// should demote to the bd leaf in seconds rather than hold a caller
 	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
+	// pingUpstream is the single upstream read Ping performs. Nil in
+	// production, where Ping calls beadslib.Storage.GetStatistics directly.
+	//
+	// It exists because GetStatistics returns a type from beads' INTERNAL
+	// package, so no in-process fixture can implement it (the constraint G3
+	// recorded as P2-09 deviation 5) — which left Ping's lane gate untestable
+	// at the only level that matters. Council pr2 D-F1 was exactly that gap:
+	// the routing regression was invisible to a test that could assert nothing
+	// past "no typed verdict", while the three production loops that poll Ping
+	// care about the error they receive, how many times the reopen hook fired,
+	// and how long the call took. Substituting the one upstream call lets a
+	// test drive a refused dial through the REAL Ping, on both lanes, and
+	// measure those.
+	pingUpstream func(context.Context, beadslib.Storage) error
 
 	// readOnlyReason, when non-empty, latches this handle read-only: every
 	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
@@ -2186,11 +2200,56 @@ func (s *NativeDoltStore) Delete(id string) error {
 // before PR2 it was BdStore.Ping — a `bd list --limit 0` carrying bd's own
 // transient-read recovery. Swapping a hardened read for an unhardened one on
 // that path is the trade this fixes.
+//
+// # The lane gate, and why Ping needs its own (council pr2 D-F1)
+//
+// Both reasons above are about the PROXIED lane, and routing Ping through
+// withReadRetry unconditionally reintroduced on Ping the exact flag-off
+// regression the lane gate on rungs 2 and 3 exists to prevent. Rung 7's
+// substring table contains "dial tcp" and "connection refused" and applies on
+// BOTH lanes, so a failing Ping on a direct/hosted handle became
+// nativeReadTransient → reconnect → the injected reopen hook, which re-resolves
+// the managed env with recovery enabled and can restart a city's Dolt server —
+// looping on a context.Background()-derived 90s budget no caller deadline can
+// cancel. On main a Ping was one acquireStorage plus one GetStatistics and
+// returned on the first pass.
+//
+// Three shipping callers are built on that fail-fast:
+// waitForRigStoreAccessible (cmd/gc/cmd_rig.go) and
+// waitForBeadsScopeReadyAfterRecovery (cmd/gc/beads_provider_lifecycle.go) both
+// poll `Ping(); if time.Now().After(deadline) { ... }; sleep(250ms)` — the
+// deadline is checked AFTER the ping, so one failing iteration would cost up to
+// 90s and hundreds of managed-Dolt restart attempts — and internal/doctor's
+// BeadsStoreCheck would block 90s past --check-timeout, per scope. The second
+// loop returns early for proxied scopes, so it is the flag-off lane by
+// construction.
+//
+// So the ROUTING is gated, the same way the classifier's rungs are. A direct or
+// hosted handle takes main's path verbatim; poolStale is only ever marked by the
+// proxied guard tick, and proxiedReadVerdict is a no-op off the proxied lane, so
+// the direct lane gives up nothing by skipping the wrapper.
 func (s *NativeDoltStore) Ping() error {
-	return s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
-		_, err := storage.GetStatistics(ctx)
-		return err
-	})
+	if s.readLane() == directNativeLane {
+		storage, release, err := s.acquireStorage()
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx, cancel := nativeDoltOperationContext(context.TODO())
+		defer cancel()
+		return s.pingUpstreamRead(ctx, storage)
+	}
+	return s.withReadRetry(s.pingUpstreamRead)
+}
+
+// pingUpstreamRead is the one upstream call a Ping makes. See pingUpstream for
+// why the substitution seam exists.
+func (s *NativeDoltStore) pingUpstreamRead(ctx context.Context, storage beadslib.Storage) error {
+	if s != nil && s.pingUpstream != nil {
+		return s.pingUpstream(ctx, storage)
+	}
+	_, err := storage.GetStatistics(ctx)
+	return err
 }
 
 // DepAdd records a dependency between two beads.
