@@ -266,7 +266,15 @@ func (d *nudgeEventDispatcher) worker(ctx context.Context) {
 		var dueBudget []int
 		var nextDue time.Time
 		for name, kick := range d.pending {
-			if full || !kick.dueAt.After(now) {
+			// A full pass covers every session via runPass("", ...) below
+			// regardless of each kick's dueAt, but must not clear a kick
+			// that is not yet due: runPass only delivers to queue items
+			// whose own DeliverAfter has arrived (deliverPendingQueuedNudges),
+			// so an unconditional delete here would silently drop the
+			// scheduled retry for any session still in its backoff window,
+			// leaving redelivery to the coarser patrol-tick fallback instead
+			// of this kick's own timer.
+			if !kick.dueAt.After(now) {
 				due = append(due, name)
 				dueBudget = append(dueBudget, kick.retriesLeft)
 				delete(d.pending, name)

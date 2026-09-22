@@ -513,6 +513,46 @@ func TestNudgeEventDispatcherRunPassClosesRawSessionStore(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherWorkerFullPassPreservesFutureKick reproduces a
+// retry-schedule drop: worker() used to delete every entry in d.pending on a
+// full pass (kickAll), including kicks not yet due. A full pass's own
+// runPass("", ...) only delivers to queue items whose DeliverAfter has
+// already arrived (deliverPendingQueuedNudges), so a session still in its
+// kickSessionAfter backoff window had its scheduled retry silently erased
+// with nothing left to re-fire it, other than the coarser patrol-tick
+// fallback. The fix keeps not-yet-due kicks in d.pending across a full pass.
+func TestNudgeEventDispatcherWorkerFullPassPreservesFutureKick(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d.mu.Lock()
+	d.cfg = &config.City{}
+	d.sp = newNudgeEventedFake()
+	d.mu.Unlock()
+
+	const target = "gc-worker-not-yet-due"
+	d.kickSessionAfter(target, time.Hour, 2)
+	d.kickAll()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.mu.Lock()
+		_, stillPending := d.pending[target]
+		fullDone := !d.fullPassDue
+		d.mu.Unlock()
+		if stillPending && fullDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("kick for %q was dropped by the full pass instead of being preserved for its own retry timer", target)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges
 // reproduces gc-08u54r finding #5: runPass used to derive the session-class
 // store by handing store.Store (already routed to the NUDGES class) to
