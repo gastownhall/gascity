@@ -33,27 +33,25 @@ import (
 //     those are load-bearing and are documented at their (absent) place below:
 //     graph-apply (H4) and CachingStore's dependency-snapshot shortcut.
 var (
-	_ Store                                 = (*ProxiedStore)(nil)
-	_ AtomicTxStore                         = (*ProxiedStore)(nil)
-	_ BatchDeleter                          = (*ProxiedStore)(nil)
-	_ ConditionalAssignmentReleaser         = (*ProxiedStore)(nil)
-	_ ConditionalWriterHandleProvider       = (*ProxiedStore)(nil)
-	_ ConditionalWritesResolveTargeter      = (*ProxiedStore)(nil)
-	_ Counter                               = (*ProxiedStore)(nil)
-	_ DepMetadataReader                     = (*ProxiedStore)(nil)
-	_ ForeignIDCreator                      = (*ProxiedStore)(nil)
-	_ GraphApplyHandleProvider              = (*ProxiedStore)(nil)
-	_ MetadataCASWriterHandleProvider       = (*ProxiedStore)(nil)
-	_ AtomicConditionalCloserHandleProvider = (*ProxiedStore)(nil)
-	_ ParentProjectionWaiter                = (*ProxiedStore)(nil)
-	_ RowWitness                            = (*ProxiedStore)(nil)
-	_ StorageCreateStore                    = (*ProxiedStore)(nil)
-	_ conditionalWritesModeCarrier          = (*ProxiedStore)(nil)
-	_ listDependencyCompletenessStore       = (*ProxiedStore)(nil)
-	_ readyProjectionEnrichmentStore        = (*ProxiedStore)(nil)
-	_ interface{ IDPrefix() string }        = (*ProxiedStore)(nil)
-	_ interface{ Backing() Store }          = (*ProxiedStore)(nil)
-	_ interface{ CloseStore() error }       = (*ProxiedStore)(nil)
+	_ Store                            = (*ProxiedStore)(nil)
+	_ AtomicTxStore                    = (*ProxiedStore)(nil)
+	_ BatchDeleter                     = (*ProxiedStore)(nil)
+	_ ConditionalAssignmentReleaser    = (*ProxiedStore)(nil)
+	_ ConditionalWriterHandleProvider  = (*ProxiedStore)(nil)
+	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)
+	_ Counter                          = (*ProxiedStore)(nil)
+	_ DepMetadataReader                = (*ProxiedStore)(nil)
+	_ ForeignIDCreator                 = (*ProxiedStore)(nil)
+	_ GraphApplyHandleProvider         = (*ProxiedStore)(nil)
+	_ ParentProjectionWaiter           = (*ProxiedStore)(nil)
+	_ RowWitness                       = (*ProxiedStore)(nil)
+	_ StorageCreateStore               = (*ProxiedStore)(nil)
+	_ conditionalWritesModeCarrier     = (*ProxiedStore)(nil)
+	_ listDependencyCompletenessStore  = (*ProxiedStore)(nil)
+	_ readyProjectionEnrichmentStore   = (*ProxiedStore)(nil)
+	_ interface{ IDPrefix() string }   = (*ProxiedStore)(nil)
+	_ interface{ Backing() Store }     = (*ProxiedStore)(nil)
+	_ interface{ CloseStore() error }  = (*ProxiedStore)(nil)
 	_ interface {
 		DepListBatch(ids []string) (map[string][]Dep, error)
 	} = (*ProxiedStore)(nil)
@@ -247,14 +245,24 @@ func (s *ProxiedStore) GraphApplyHandle() (GraphApplyStore, bool) {
 // without a false claim — and BRACKETS it, which is council B-F3.
 //
 // The handle used to be the bd leaf itself, so a caller that resolved it drove
-// the leaf directly and never re-entered the wrapper: UpdateIfMatch,
-// CloseIfMatch, DeleteIfMatch, CloseWithMetadataIfMatch and
-// CompareAndSetMetadataKey were mutations outside H6's generation bracket. The
-// hazard is the ordinary one H6 exists for: the bd child finds the proxy
-// stopped and restarts it as a NEW generation on a new port, the wrapper is
-// never told, ForgetProxiedPin is never called, and on a one-shot store there
-// is no guard tick either — so every later read on that handle is served from a
-// pool pointed at the previous generation.
+// the leaf directly and never re-entered the wrapper. The hazard is the ordinary
+// one H6 exists for: the bd child finds the proxy stopped and restarts it as a
+// NEW generation on a new port, the wrapper is never told, ForgetProxiedPin is
+// never called, and on a one-shot store there is no guard tick either — so every
+// later read on that handle is served from a pool pointed at the previous
+// generation.
+//
+// What this bracket reaches is exactly one lookup, and it is stated precisely
+// because the previous statement of it was not (council pr2 D-F8):
+// beads.ConditionalWriterFor called on the *ProxiedStore ITSELF, which does not
+// follow the resolve target. Through it, UpdateIfMatch, CloseIfMatch,
+// DeleteIfMatch and CompareAndSetMetadataKey are bracketed. Every other route
+// to a conditional write resolves past this wrapper to the bd leaf first and is
+// NOT bracketed: ResolveConditionalWriter (internal/molecule,
+// internal/dispatch, cmd/gc/api_state.go), MetadataCASWriterFor
+// (ApplyMetadataCAS, internal/storebinding's CAS), AtomicConditionalCloserFor,
+// and every conditional method of a CachingStore wrapping this one, which goes
+// through conditionalBacking(). See the H6 note on ProxiedStore.
 //
 // H9 (the revision token a CAS sends came from a NATIVE Get, and the write that
 // carries it runs on bd) is pinned by an integration row rather than by code
@@ -268,29 +276,19 @@ func (s *ProxiedStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
 	return proxiedConditionalWriter{store: s, writer: writer}, true
 }
 
-// MetadataCASWriterHandle forwards the write leaf's metadata compare-and-swap,
-// bracketed. See ConditionalWriterHandle.
-func (s *ProxiedStore) MetadataCASWriterHandle() (MetadataCASWriter, bool) {
-	writer, ok := MetadataCASWriterFor(s.writeLeaf())
-	if !ok {
-		return nil, false
-	}
-	return proxiedMetadataCASWriter{store: s, writer: writer}, true
-}
-
-// AtomicConditionalCloserHandle forwards the write leaf's atomic terminal
-// write, bracketed. See ConditionalWriterHandle.
-func (s *ProxiedStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
-	closer, ok := AtomicConditionalCloserFor(s.writeLeaf())
-	if !ok {
-		return nil, false
-	}
-	return proxiedAtomicConditionalCloser{store: s, closer: closer}, true
-}
-
-// The bracketing adapters. Each is the leaf's own capability, run inside
+// The bracketing adapter. It is the leaf's own capability, run inside
 // withMutation, so the 200-byte record read that surrounds every other mutation
 // surrounds these too.
+//
+// There used to be two more — for MetadataCASWriterHandle and
+// AtomicConditionalCloserHandle — and they were deleted because nothing could
+// reach them (council pr2 D-F8): MetadataCASWriterFor and
+// AtomicConditionalCloserFor follow ConditionalWritesResolveTarget BEFORE they
+// ask for a handle, and this wrapper's target is the bd leaf, so both resolvers
+// always answered with the leaf's own capability. An adapter only a direct
+// method call reaches, which no production code makes, bracketed nothing and
+// let the H6 register list two capabilities as inside the bracket that were
+// not.
 //
 // They are values rather than pointers and hold no state of their own: the
 // bracket's state is the wrapper's, and an adapter that could outlive or
@@ -329,36 +327,6 @@ func (w proxiedConditionalWriter) CompareAndSetMetadataKey(id, key, expected, ne
 	return swapped, err
 }
 
-type proxiedMetadataCASWriter struct {
-	store  *ProxiedStore
-	writer MetadataCASWriter
-}
-
-func (w proxiedMetadataCASWriter) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	var swapped bool
-	err := w.store.withMutation("compare-and-set-metadata "+id, func(Store) error {
-		var err error
-		swapped, err = w.writer.CompareAndSetMetadataKey(id, key, expected, next)
-		return err
-	})
-	return swapped, err
-}
-
-type proxiedAtomicConditionalCloser struct {
-	store  *ProxiedStore
-	closer AtomicConditionalCloser
-}
-
-func (c proxiedAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
-	var closed Bead
-	err := c.store.withMutation("close-with-metadata-if-match "+id, func(Store) error {
-		var err error
-		closed, err = c.closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
-		return err
-	})
-	return closed, err
-}
-
 // ConditionalWritesResolveTarget declares the WRITE leaf as the
 // conditional-writes resolution target.
 //
@@ -367,21 +335,25 @@ func (c proxiedAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, expe
 // capability whose loss does not fail loudly — and under `require` it is the
 // exact silent fallback the seam exists to make inexpressible.
 //
-// It is also the one bracket gap this file does NOT close, and the reason is
-// structural rather than an oversight (council B-F3). CachingStore's
-// conditionalBacking() is followConditionalWritesResolveTarget(c.backing), so a
-// cached city store resolves PAST this wrapper to the bd leaf and drives it
-// directly — the handles above are not in that path at all. Making the wrapper
-// the target instead would require it to carry the conditional-writes STAMP
+// It is also the bracket gap this file does NOT close, and the reason is
+// structural rather than an oversight (council B-F3). Every resolver except a
+// bare ConditionalWriterFor follows this target before it looks for a
+// capability — ResolveConditionalWriter, MetadataCASWriterFor,
+// AtomicConditionalCloserFor, and CachingStore's conditionalBacking(), which is
+// followConditionalWritesResolveTarget(c.backing) — so each of them resolves
+// PAST this wrapper to the bd leaf and drives it directly; the handle above is
+// not in any of those paths. Making the wrapper the target instead would
+// require it to carry the conditional-writes STAMP
 // (conditionalWritesModeCarrier), the capability prober and the state
 // inspector as well as the three writer interfaces, i.e. a hand-written
 // capability leaf — the exact shape splittest/strict_store.go's package doc
 // warns about and the reason this store is a wrapper. The exposure is the H6
 // bracket only: the routing is correct (every such write is still the bd
 // leaf's), the read-only latch still refuses a native write, and what is lost
-// is the staleness half — a CAS through a CACHED proxied store that restarts
-// bd's proxy leaves this handle's pool on the previous generation until a
-// guard tick or a bracketed mutation notices. See the H6 note on ProxiedStore.
+// is the staleness half — a conditional write through any of those resolvers
+// that restarts bd's proxy leaves this handle's pool on the previous
+// generation until a guard tick or a bracketed mutation notices. See the H6
+// note on ProxiedStore.
 func (s *ProxiedStore) ConditionalWritesResolveTarget() Store {
 	return s.writeLeaf()
 }

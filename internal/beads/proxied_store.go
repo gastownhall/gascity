@@ -80,25 +80,41 @@ import (
 //     is bracketed by a 200-byte record read, and a generation change stands the
 //     native leaf down. See withMutation.
 //
-//     "A mutation", not "every mutation", and the difference is council B-F3.
-//     The bracket covers every method on the beads.Store surface, and — since
-//     B-F3 — the three capability HANDLES this wrapper hands out
-//     (ConditionalWriterHandle, MetadataCASWriterHandle,
-//     AtomicConditionalCloserHandle), which are wrapped in bracketing adapters
-//     rather than being the bd leaf itself.
+//     "A mutation", not "every mutation", and the difference is council B-F3
+//     and, one level finer, council pr2 D-F8.
 //
-//     Two paths remain outside it, both deliberately and both named where they
-//     live. GraphApplyHandle must hand out the bd leaf's own applier, because
-//     H4 forbids this wrapper claiming any graph-apply interface and
+//     INSIDE the bracket: every method on the beads.Store surface; every write
+//     capability this wrapper implements as a method (ReleaseIfCurrent,
+//     DeleteBatch, CreateWithForeignID, CreateWithStorage, …); and ONE
+//     capability handle, ConditionalWriterHandle — but only when it is reached
+//     by beads.ConditionalWriterFor on the *ProxiedStore itself, through which
+//     UpdateIfMatch, CloseIfMatch, DeleteIfMatch and CompareAndSetMetadataKey
+//     are bracketed.
+//
+//     OUTSIDE it, deliberately: every conditional write reached through a
+//     resolver that follows ConditionalWritesResolveTarget first. That is
+//     ResolveConditionalWriter (internal/molecule, internal/dispatch,
+//     cmd/gc/api_state.go), MetadataCASWriterFor (ApplyMetadataCAS,
+//     internal/storebinding's metadata CAS), AtomicConditionalCloserFor — so
+//     CloseWithMetadataIfMatch is outside on EVERY path — and every
+//     conditional method of a CachingStore over this wrapper, via
+//     conditionalBacking(). The target must stay the bd leaf: a wrapper that
+//     answered "me" would have to carry the conditional-writes stamp, the
+//     capability prober and the state inspector too — a hand-written
+//     capability leaf, which is the shape this store is a wrapper to avoid.
+//     B-F3 added bracketing adapters for MetadataCASWriterHandle and
+//     AtomicConditionalCloserHandle as well; no resolver could reach them, so
+//     they were deleted rather than left to be counted as coverage. Also
+//     outside: GraphApplyHandle, which must hand out the bd leaf's own applier,
+//     because H4 forbids this wrapper claiming any graph-apply interface and
 //     cmd/gc's wrapStoreWithBeadPolicies caches the applier at WRAP time.
-//     ConditionalWritesResolveTarget must stay the bd leaf, because
-//     CachingStore.conditionalBacking() follows it and a wrapper that answered
-//     "me" would have to carry the conditional-writes stamp, the capability
-//     prober and the state inspector too — a hand-written capability leaf, which
-//     is the shape this store is a wrapper to avoid. On both, the ROUTING is
-//     correct (the write is the bd leaf's) and the read-only latch still refuses
-//     a native write; what is lost is the staleness half, bounded by the guard
-//     tick on a long-lived store and by the next bracketed mutation otherwise.
+//
+//     On every path outside, the ROUTING is correct (the write is the bd
+//     leaf's) and the read-only latch still refuses a native write; what is
+//     lost is the staleness half, bounded by the guard tick on a long-lived
+//     store and by the next bracketed mutation otherwise.
+//     TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap pins both
+//     lists.
 //
 // # Demotion
 //
