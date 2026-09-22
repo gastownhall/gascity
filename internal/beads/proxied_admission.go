@@ -304,6 +304,22 @@ type AdmissionInput struct {
 	// tick sets it: a tick that re-admitted out of the memo it populated would
 	// be asserting that nothing changed by reading its own answer.
 	SkipMemo bool
+
+	// ProbeOnce caps this call at ONE probe session and no waiting: a single
+	// pass, no drain wait on a refused port, no no-greeting ladder on a silent
+	// one, and no re-run after a changed answer. Every one of those comes back
+	// as the same non-terminal verdict the ladder would have started from.
+	//
+	// It is the guard tick's recovery shape (council pr2 D-F5). The ladder's
+	// waits exist for a caller who needs an answer NOW; a background tick
+	// does not, because the tick itself is the retry — it runs again one
+	// interval later. Without the cap a recovery against a proxy that accepts
+	// and stays silent cost up to nine probe sessions and ~6s of sleeps per
+	// tick (three outer passes x the three-attempt ladder), and one against a
+	// refusing port ran the whole 60s drain ceiling, forever, on a timer —
+	// each session an accepted connection bd's idle watcher counts, on a proxy
+	// bd may be trying to retire.
+	ProbeOnce bool
 }
 
 const (
@@ -379,7 +395,12 @@ func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 	// counters (Observed, Recovered) are what bound it, not this number; the
 	// cap exists so a pathological record that keeps changing under us cannot
 	// spin.
-	const maxRungs = 4
+	maxRungs := 4
+	if in.ProbeOnce {
+		// One pass: a retry is a second probe session, and the caller's next
+		// tick is the retry.
+		maxRungs = 1
+	}
 	var lastErr error
 	for attempt := 0; attempt < maxRungs; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -535,6 +556,10 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
 			"data port refused; a one-shot open takes the bd front door rather than waiting", nil)
 	}
+	if in.ProbeOnce {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+			"data port refused; a background recovery does not wait out a drain, its next tick asks again", nil)
+	}
 	deadline := in.Now().Add(admissionDrainCeiling)
 	for poll := 1; in.Now().Before(deadline); poll++ {
 		if err := in.Sleep(ctx, admissionDrainPoll); err != nil {
@@ -587,6 +612,12 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // bd has been asked to fix it and has not, and gc's remaining options are all
 // somebody else's to exercise.
 func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
+	if in.ProbeOnce {
+		// The first rung is "ask again", and a background tick asks again by
+		// running again. It could not spend the escalation rungs anyway.
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets; a background recovery does not walk the no-greeting ladder, its next tick asks again", ep.Err)
+	}
 	for attempt := 1; attempt < admissionNoGreetingAttempts; attempt++ {
 		if err := in.Sleep(ctx, admissionNoGreetingSpacing); err != nil {
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,

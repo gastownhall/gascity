@@ -1202,3 +1202,80 @@ func TestAdmitCarriesTheProbesHeadButNotTheMemos(t *testing.T) {
 			"memo TTL old would accuse another bd client's write of being gc's", memoized.Head())
 	}
 }
+
+// TestAdmitProbeOnceSpendsOneSessionAndNeverWaits is council pr2 D-F5's
+// admission half: the guard recovery's shape is one pass, at most one probe
+// session and no sleeps, whatever the endpoint says. The rows without
+// ProbeOnce are the control — they are what a recovery tick used to cost, on a
+// virtual clock, and they are why the cap matters.
+func TestAdmitProbeOnceSpendsOneSessionAndNeverWaits(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		outcome     proxyendpoint.ProbeOutcome
+		probeOnce   bool
+		wantProbes  int
+		wantSleeps  int
+		wantVerdict ProxiedVerdict
+	}{
+		{
+			name: "a silent proxy, capped", outcome: proxyendpoint.ProbeAcceptedNoGreeting, probeOnce: true,
+			wantProbes: 1, wantVerdict: ProxiedVerdictBackendUnreachable,
+		},
+		{
+			name: "a refusing port, capped", outcome: proxyendpoint.ProbeRefused, probeOnce: true,
+			wantProbes: 1, wantVerdict: ProxiedVerdictDraining,
+		},
+		{
+			name: "a served database, capped", outcome: proxyendpoint.ProbeServed, probeOnce: true,
+			wantProbes: 1,
+		},
+		// The controls: the same endpoints on the ordinary long-lived shape.
+		{
+			name: "a silent proxy, uncapped", outcome: proxyendpoint.ProbeAcceptedNoGreeting,
+			wantProbes: admissionNoGreetingAttempts, wantSleeps: admissionNoGreetingAttempts - 1,
+			wantVerdict: ProxiedVerdictBackendUnreachable,
+		},
+		{
+			name: "a refusing port, uncapped", outcome: proxyendpoint.ProbeRefused,
+			wantProbes:  1 + int(admissionDrainCeiling/admissionDrainPoll)/admissionDrainProbesEvery,
+			wantSleeps:  int(admissionDrainCeiling / admissionDrainPoll),
+			wantVerdict: ProxiedVerdictDraining,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdmissionFixture(t, "-1")
+			in := baseAdmissionInput(f, nil)
+			in.Ops = nil // the recovery holds no provider ops
+			in.LongLived = true
+			in.ProbeOnce = tc.probeOnce
+			clock := time.Unix(1_700_000_000, 0)
+			probes, sleeps := 0, 0
+			in.Now = func() time.Time { return clock }
+			in.Sleep = func(_ context.Context, d time.Duration) error {
+				sleeps++
+				clock = clock.Add(d)
+				return nil
+			}
+			in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				probes++
+				return proxyendpoint.ProbeResult{Outcome: tc.outcome, Cursors: pinnedCursors()}
+			}
+
+			_, err := Admit(context.Background(), in)
+			if probes != tc.wantProbes || sleeps != tc.wantSleeps {
+				t.Fatalf("admission spent %d probe session(s) and %d sleep(s), want %d and %d",
+					probes, sleeps, tc.wantProbes, tc.wantSleeps)
+			}
+			if tc.wantVerdict == ProxiedVerdictNone {
+				if err != nil {
+					t.Fatalf("a served database was refused: %v", err)
+				}
+				return
+			}
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed || verdict.Verdict != tc.wantVerdict || verdict.Terminal() {
+				t.Fatalf("err = %v, want the non-terminal %s verdict the next tick can retry", err, tc.wantVerdict)
+			}
+		})
+	}
+}

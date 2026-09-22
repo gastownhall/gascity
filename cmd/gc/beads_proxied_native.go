@@ -409,11 +409,21 @@ func (o *proxiedNativeOpener) headUnmoved(ctx context.Context, pin beads.Pin, re
 // has a guard: the finite-idle rule must apply to the replacement exactly as it
 // applied to the original, or a re-pin would quietly acquire a resident handle
 // on a proxy bd is going to retire.
+//
+// And it re-runs admission ONCE, with ProbeOnce (council pr2 D-F5): one pass,
+// at most one probe session, no sleeps. The ordinary long-lived shape — three
+// outer passes, each able to walk the three-attempt no-greeting ladder or the
+// 60s drain — is for a caller that needs an answer now. The tick is not one:
+// it runs again one interval later, which IS the retry. Without the cap a
+// demoted controller on a silent proxy spent up to nine probe sessions and ~6s
+// of sleeps every interval, on a proxy bd may be trying to retire.
 func (o *proxiedNativeOpener) recoverNativeLeaf() beads.NativeLeafReopener {
 	return func(parent context.Context) (*beads.NativeDoltStore, beads.Pin, error) {
 		ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(true))
 		defer cancel()
-		pin, err := o.admitWith(ctx, true, nil)
+		in := o.admissionInput(true, nil)
+		in.ProbeOnce = true
+		pin, err := beads.Admit(ctx, in)
 		if err != nil {
 			return nil, beads.Pin{}, err
 		}
@@ -449,21 +459,10 @@ func (o *proxiedNativeOpener) admit(ctx context.Context, longLived bool) (beads.
 // means the ladder cannot escalate, which is what the guard tick's recovery
 // passes: a tick never forks bd.
 func (o *proxiedNativeOpener) admitWith(ctx context.Context, longLived bool, ops beads.ProviderOps) (beads.Pin, error) {
-	database := o.scopeDatabase()
+	in := o.admissionInput(longLived, ops)
 	var lastErr error
 	for pass := 0; pass < proxiedAdmissionPasses; pass++ {
-		pin, err := beads.Admit(ctx, beads.AdmissionInput{
-			ScopeRoot:    o.scopeRoot,
-			Database:     database,
-			ProcessTable: o.processTable,
-			Probe:        o.probe,
-			Ops:          ops,
-			LongLived:    longLived,
-			Observed:     o.observed,
-			Recovered:    o.recovered,
-			Now:          o.now,
-			Sleep:        o.sleep,
-		})
+		pin, err := beads.Admit(ctx, in)
 		if err == nil {
 			return pin, nil
 		}
@@ -481,6 +480,24 @@ func (o *proxiedNativeOpener) admitWith(ctx context.Context, longLived bool, ops
 		}
 	}
 	return beads.Pin{}, lastErr
+}
+
+// admissionInput is the one place the opener's admission shape is assembled,
+// so the ordinary ladder and the guard recovery cannot drift apart on anything
+// but the field the recovery sets on purpose.
+func (o *proxiedNativeOpener) admissionInput(longLived bool, ops beads.ProviderOps) beads.AdmissionInput {
+	return beads.AdmissionInput{
+		ScopeRoot:    o.scopeRoot,
+		Database:     o.scopeDatabase(),
+		ProcessTable: o.processTable,
+		Probe:        o.probe,
+		Ops:          ops,
+		LongLived:    longLived,
+		Observed:     o.observed,
+		Recovered:    o.recovered,
+		Now:          o.now,
+		Sleep:        o.sleep,
+	}
 }
 
 // reopen is the read path's re-pin: re-run admission, re-project the CURRENT

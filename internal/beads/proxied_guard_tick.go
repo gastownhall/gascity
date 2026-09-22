@@ -68,6 +68,17 @@ import (
 // /proc read. It holds NO ProviderOps: a tick never forks bd. An escalation rung
 // is the read path's to spend, through the reopen hook, where a caller is waiting
 // for an answer and the cost is attributable.
+//
+// A RECOVERY tick (recoverNative, for a handle that stood down non-terminally)
+// is held to the same session budget, and that is a contract on the installed
+// NativeLeafReopener rather than something this file can enforce: cmd/gc's
+// re-admits with AdmissionInput.ProbeOnce — one pass, at most ONE probe session,
+// no sleeps, no drain wait and no no-greeting ladder, because the next tick is
+// the retry (council pr2 D-F5). Only when that admits does the tick also open
+// the library, inside the hermetic window, plus the single HEAD re-read
+// statement on the new pool. Before the cap it could cost nine probe sessions
+// and ~6s of sleeps per tick against a silent proxy, and the full 60s drain
+// against a refusing one, every interval.
 
 const (
 	// proxiedGuardOwnerEvery is how often the socket-owner join runs, counted in
@@ -492,7 +503,8 @@ func cursorDriftAgainst(pinned, observed proxyendpoint.Cursors) (lane, dir strin
 // tick's "never forks bd" invariant survives: a recovery that needs bd to make
 // its proxy healthy comes back non-terminal, the tick stays Undecided, and the
 // rung is spent later by the read path's reopen hook, where a caller is waiting
-// and the cost is attributable.
+// and the cost is attributable. And it spends at most ONE probe session: see
+// "What the tick may spend" above.
 func (g *proxiedGuard) recoverNative(ctx context.Context) proxiedGuardStep {
 	reopen := g.store.nativeReopener()
 	if reopen == nil {

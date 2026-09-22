@@ -486,6 +486,99 @@ func TestProxiedGuardRecoveryAdmitsWithoutForkingBd(t *testing.T) {
 	})
 }
 
+// TestProxiedGuardRecoverySpendsAtMostOneProbeSession is council pr2 D-F5: the
+// guard tick's documented budget is one probe session per tick, and the
+// recovery of a non-terminally demoted handle is a tick.
+//
+// It drives the REAL recoverNativeLeaf on a virtual clock. Before the cap the
+// recovery was the ordinary long-lived ladder — three outer passes, each able
+// to walk the three-attempt no-greeting ladder or the 60s drain — so a demoted
+// controller on a proxy that accepts and stays silent spent nine probe
+// sessions and ~6s of sleeps every interval, and one on a refusing port ran
+// the drain, forever. The ordinary admission row is the control: it must still
+// walk the ladder, or the cap has been applied to the wrong caller.
+func TestProxiedGuardRecoverySpendsAtMostOneProbeSession(t *testing.T) {
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, outcome proxyendpoint.ProbeOutcome, probes, sleeps *int) *proxiedNativeOpener {
+		t.Helper()
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+		clock := time.Unix(1_700_000_000, 0)
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				*probes++
+				return proxyendpoint.ProbeResult{Outcome: outcome, Cursors: f.pinnedCursors()}
+			},
+			observed:  beads.NewGenerationSet(),
+			recovered: beads.NewGenerationSet(),
+			now:       func() time.Time { return clock },
+			sleep: func(_ context.Context, d time.Duration) error {
+				*sleeps++
+				clock = clock.Add(d)
+				return nil
+			},
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				return nil, nil
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		outcome proxyendpoint.ProbeOutcome
+	}{
+		{name: "a proxy that accepts and stays silent", outcome: proxyendpoint.ProbeAcceptedNoGreeting},
+		{name: "a port that refuses", outcome: proxyendpoint.ProbeRefused},
+		{name: "a probe that learned nothing", outcome: proxyendpoint.ProbeUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProxiedScopeFixture(t)
+			var probes, sleeps int
+			opener := newOpener(t, f, tc.outcome, &probes, &sleeps)
+
+			_, _, err := opener.recoverNativeLeaf()(context.Background())
+			verdict, typed := beads.ProxiedVerdictOf(err)
+			if !typed {
+				t.Fatalf("the recovery returned %v, want a typed verdict the tick can classify", err)
+			}
+			if tc.outcome != proxyendpoint.ProbeUnknown && verdict.Terminal() {
+				t.Errorf("a recovery the next tick can retry came back terminal: %v", verdict)
+			}
+			if probes != 1 || sleeps != 0 {
+				t.Fatalf("one recovery tick spent %d probe session(s) and %d sleep(s), want 1 and 0: "+
+					"the tick's budget is one session, and the next tick is the retry", probes, sleeps)
+			}
+		})
+	}
+
+	t.Run("a served database spends its one session and opens", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var probes, sleeps int
+		opener := newOpener(t, f, proxyendpoint.ProbeServed, &probes, &sleeps)
+		if _, pin, err := opener.recoverNativeLeaf()(context.Background()); err != nil || !pin.Admitted() {
+			t.Fatalf("recovery = (%+v, %v), want an admitted pin", pin, err)
+		}
+		if probes != 1 || sleeps != 0 {
+			t.Fatalf("a healthy recovery spent %d probe session(s) and %d sleep(s), want 1 and 0", probes, sleeps)
+		}
+	})
+
+	t.Run("control: the ordinary long-lived admission still walks the ladder", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var probes, sleeps int
+		opener := newOpener(t, f, proxyendpoint.ProbeAcceptedNoGreeting, &probes, &sleeps)
+		if _, err := opener.admitWith(context.Background(), true, nil); err == nil {
+			t.Fatal("a silent proxy admitted")
+		}
+		if probes <= 1 {
+			t.Fatalf("the ordinary long-lived admission spent %d probe session(s); the cap leaked into the caller that needs the ladder", probes)
+		}
+	})
+}
+
 // TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot is the wiring assertion.
 //
 // Every earlier group built machinery that nothing calls; this is the commit
