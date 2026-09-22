@@ -1,0 +1,636 @@
+package beads
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+)
+
+// ProviderOps is the ENTIRE bd-verb surface admission may reach for.
+//
+// Two verbs, both of them provider-owned lifecycle operations gc already runs
+// elsewhere. The narrowness is the point: bd owns the proxy and its Dolt child,
+// so admission's escalation ladder must be expressible as "ask bd to make its
+// proxy healthy" and nothing else. An interface with a third method would be an
+// invitation to reach for a bd read, and a bd read is the fork this whole lane
+// exists to remove.
+//
+// Neither verb may spawn anything gc owns. Ping is bd's own `ping`, which
+// adopts or restarts bd's proxy; Recover is the provider's `recover`. gc never
+// execs dolt, and never starts a proxy itself.
+type ProviderOps interface {
+	// Ping asks bd to make the scope's proxy healthy, and reports whether it
+	// could.
+	Ping(ctx context.Context, scopeRoot string) error
+	// Recover asks bd to retire and re-establish a proxy that is listening but
+	// not answering.
+	Recover(ctx context.Context, scopeRoot string) error
+}
+
+// GenerationSet is a process-local set of proxy generations.
+//
+// Two of them bound the escalation ladder across the many opens a single gc
+// command performs: one records generations a ping has already proven healthy,
+// so a later open in the same process does not buy the same answer twice, and
+// one records generations a recover has already been spent on, so a proxy that
+// stays sick is declared a zombie instead of being recovered in a loop.
+//
+// It is a set of generation STRINGS rather than of PoolKeys because the
+// question is about a proxy process, and one proxy legitimately serves several
+// databases — a rig sharing its city's proxy root differs from the city in the
+// database alone, and recovering for the rig would otherwise look unrecovered
+// to the city.
+type GenerationSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// NewGenerationSet returns an empty set.
+func NewGenerationSet() *GenerationSet {
+	return &GenerationSet{seen: map[string]struct{}{}}
+}
+
+// Add records a generation and reports whether it was NEW, which is how a
+// caller spends an escalation rung exactly once.
+func (s *GenerationSet) Add(generation string) bool {
+	if s == nil || generation == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]struct{}{}
+	}
+	if _, ok := s.seen[generation]; ok {
+		return false
+	}
+	s.seen[generation] = struct{}{}
+	return true
+}
+
+// Has reports whether a generation is already in the set.
+func (s *GenerationSet) Has(generation string) bool {
+	if s == nil || generation == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.seen[generation]
+	return ok
+}
+
+// The process-local defaults, used when a caller supplies no sets. They are
+// package-level because "once per process" is exactly the scope the design
+// asks for, and a per-call set would silently turn "recover once per
+// generation" into "recover on every open".
+var (
+	defaultObservedGenerations  = NewGenerationSet()
+	defaultRecoveredGenerations = NewGenerationSet()
+)
+
+// Pin is an admission pass: proof that a specific proxy generation was found
+// healthy, serving the named database, at cursors equal to this binary's.
+//
+// Every field is unexported and there is no exported constructor, so the only
+// way to hold a non-zero Pin is to have called Admit and had it succeed. That
+// is deliberate: the proxied opener takes a Pin, so a caller cannot reach the
+// opener without passing the gate, and "somebody built the env map by hand"
+// stops being a reachable state rather than a reviewed one.
+type Pin struct {
+	admitted bool
+	key      proxyendpoint.PoolKey
+	root     string
+	database string
+	idle     proxyendpoint.IdlePolicy
+	cursors  proxyendpoint.Cursors
+	evidence proxyendpoint.Evidence
+}
+
+// Admitted reports whether this is a real pass rather than the zero value.
+func (p Pin) Admitted() bool { return p.admitted }
+
+// PoolKey is the generation-and-database identity this pin admitted.
+func (p Pin) PoolKey() proxyendpoint.PoolKey { return p.key }
+
+// Root is bd's proxy root the record was read from.
+func (p Pin) Root() string { return p.root }
+
+// Database is the Dolt database the pin admitted.
+func (p Pin) Database() string { return p.database }
+
+// Port is the proxy's loopback data port.
+func (p Pin) Port() int { return p.key.Port }
+
+// Generation renders the proxy process generation.
+func (p Pin) Generation() string { return p.key.Generation() }
+
+// IdlePolicy is the resolved idle rule of the proxy this pin admitted.
+func (p Pin) IdlePolicy() proxyendpoint.IdlePolicy { return p.idle }
+
+// Cursors are the migration cursors the probe read straight off disk.
+func (p Pin) Cursors() proxyendpoint.Cursors { return p.cursors }
+
+// Evidence is the strongest liveness proof the inspection obtained.
+func (p Pin) Evidence() proxyendpoint.Evidence { return p.evidence }
+
+// Report projects the pin onto the factory's diagnostic shape, so the opener
+// does not restate facts admission already established.
+func (p Pin) Report() ProxiedOpenReport {
+	return ProxiedOpenReport{
+		Endpoint: ProxiedEndpointStamp{
+			Port:       p.key.Port,
+			PID:        p.key.PID,
+			Generation: p.key.Generation(),
+		},
+		Evidence:   p.evidence.String(),
+		IdlePolicy: p.idle.String(),
+		Cursors:    p.cursors,
+	}
+}
+
+// AdmissionInput is everything Admit needs, with every effect that is not a
+// plain file read injected.
+//
+// The file reads are NOT injected, on purpose. ProviderRoot, ReadOwnership,
+// ReadSidecar and Inspect are the parity contract with bd: they resolve the
+// same root bd resolves and decode the record bd wrote, and a test that stubbed
+// them would prove gc agrees with a fake. The three effects that are injected
+// are the ones a test cannot afford to perform — a process table, a TCP
+// session, and a bd fork — and the clock.
+type AdmissionInput struct {
+	// ScopeRoot is the workspace whose proxy is being admitted.
+	ScopeRoot string
+	// Database is the Dolt database to admit. It is required: the cursors are
+	// DATABASE()-scoped, so a probe with none selected reports served with both
+	// cursors at zero, which would pass the gate against nothing at all.
+	Database string
+
+	// ProcessTable answers the liveness half of the inspection.
+	ProcessTable proxyendpoint.ProcessTable
+	// Probe runs one session against the proxy's data port.
+	Probe func(ctx context.Context, ep proxyendpoint.Endpoint, database string) proxyendpoint.ProbeResult
+	// Ops is the bd-verb surface. A nil Ops means the ladder cannot escalate,
+	// which is a legitimate configuration (a caller that wants admission to be
+	// read-only); the affected verdicts simply come back unescalated.
+	Ops ProviderOps
+
+	// LongLived says the store will be held for the process lifetime. It
+	// decides two things: whether a finite idle policy is admissible at all,
+	// and whether a draining proxy is waited out or refused immediately.
+	LongLived bool
+
+	// Observed records generations a ping has already proven healthy, and
+	// Recovered records generations a recover has already been spent on. Nil
+	// uses the process-local defaults.
+	Observed  *GenerationSet
+	Recovered *GenerationSet
+
+	// Now and Sleep are the clock. Sleep must return the context's error when
+	// the budget expires rather than sleeping through it.
+	Now   func() time.Time
+	Sleep func(ctx context.Context, d time.Duration) error
+
+	// SkipMemo bypasses the process-local pin memo for this call. The guard
+	// tick sets it: a tick that re-admitted out of the memo it populated would
+	// be asserting that nothing changed by reading its own answer.
+	SkipMemo bool
+}
+
+const (
+	// admissionNoGreetingAttempts is how many probe sessions a silent endpoint
+	// gets before gc spends a bd verb on it.
+	admissionNoGreetingAttempts = 3
+	// admissionNoGreetingSpacing spaces those attempts so the ladder spans at
+	// least two seconds. A proxy mid-restart accepts and stays silent for a
+	// beat, and escalating inside that beat would fork bd for a proxy that was
+	// about to answer.
+	admissionNoGreetingSpacing = time.Second
+	// admissionDrainPoll is the drain re-probe cadence.
+	admissionDrainPoll = 250 * time.Millisecond
+	// admissionDrainCeiling caps the drain wait however long the caller's
+	// context is. A proxy that has been draining for a minute is not draining.
+	admissionDrainCeiling = 60 * time.Second
+)
+
+// Admit decides whether gc may open the linked library against the database bd
+// serves for this scope, and pins the generation it may open against.
+//
+// The order is the order the evidence gets more expensive, and it matters:
+//
+//  1. resolve bd's proxy root the way bd resolves it;
+//  2. read the ownership record, then the sidecar — file reads, no dial;
+//  3. inspect: decode, validate, and ask the process table. A record that fails
+//     validation (a foreign root_id, a pre-schema-2 document) is refused HERE,
+//     with no dial ever spent on it;
+//  4. resolve the idle policy, because a finite-idle proxy cannot host a
+//     long-lived handle whatever its health;
+//  5. probe, once, for a live endpoint;
+//  6. gate the probe's raw on-disk cursors against this binary's pinned pair.
+//
+// Step 6 runs BEFORE the library open and not after, and that is the whole
+// reason the cursors come from the probe rather than from a library read: the
+// linked library runs CheckForwardDrift at every open, so a mismatch discovered
+// after the open would be the library's untyped error — on a database gc had
+// already connected to and might already have migrated. Discovered here it is
+// gc's typed verdict, and nothing was opened.
+func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
+	in = in.withDefaults()
+	if in.ScopeRoot == "" {
+		return Pin{}, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "admission was given no scope root", nil)
+	}
+	if in.Database == "" {
+		// The cursors are DATABASE()-scoped. A probe with none selected reads
+		// zeros and calls them evidence.
+		return Pin{}, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "admission was given no database name", nil)
+	}
+
+	root, err := proxyendpoint.ProviderRoot(in.ScopeRoot)
+	if err != nil {
+		return Pin{}, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "resolving bd's proxy root", err)
+	}
+	beadsDir := filepath.Join(in.ScopeRoot, ".beads")
+
+	if !in.SkipMemo {
+		if pin, ok := lookupProxiedPin(in.ScopeRoot, in.Database, root, beadsDir, in.Now()); ok {
+			return pin, nil
+		}
+	}
+
+	// The ladder re-runs admission after each escalation rung. The rung
+	// counters (Observed, Recovered) are what bound it, not this number; the
+	// cap exists so a pathological record that keeps changing under us cannot
+	// spin.
+	const maxRungs = 4
+	var lastErr error
+	for attempt := 0; attempt < maxRungs; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Pin{}, NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+				"admission budget expired", ctxErr)
+		}
+		pin, retry, admitErr := admitOnce(ctx, in, root, beadsDir)
+		if admitErr == nil {
+			if !in.SkipMemo {
+				storeProxiedPin(in.ScopeRoot, in.Database, root, beadsDir, pin, in.Now())
+			}
+			return pin, nil
+		}
+		lastErr = admitErr
+		if !retry {
+			return Pin{}, admitErr
+		}
+	}
+	return Pin{}, lastErr
+}
+
+// admitOnce is one pass of the ladder. retry reports that an escalation rung
+// was spent and the caller should re-read everything from disk: a rung that
+// worked changed the very record the decision was made from.
+func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (Pin, bool, error) {
+	own, err := proxyendpoint.ReadOwnership(root)
+	switch {
+	case errors.Is(err, proxyendpoint.ErrNoProxy):
+		// bd removes the record on an orderly exit, so an absent one is a
+		// stopped proxy rather than a fault. This is one of the four states
+		// worth a bd verb.
+		return in.escalateWithPing(ctx, "", "no proxy record", err)
+	case err != nil:
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "reading the ownership record", err)
+	case own.Kind != proxyendpoint.RecordKind:
+		// The dolt-backend record bd writes beside the proxy's own. Reading it
+		// as the proxy record would dial bd's Dolt child directly.
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord,
+			fmt.Sprintf("ownership record kind is %q, want %q", own.Kind, proxyendpoint.RecordKind), nil)
+	}
+
+	sidecar, err := proxyendpoint.ReadSidecar(beadsDir)
+	if err != nil {
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "reading the proxied sidecar", err)
+	}
+
+	ep := proxyendpoint.Inspect(root, in.ProcessTable)
+	key := proxyendpoint.NewPoolKey(ep.Record, in.Database)
+	switch ep.Verdict {
+	case proxyendpoint.VerdictLive:
+		// Fall through to the idle rule and the probe.
+	case proxyendpoint.VerdictLegacySchema:
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictLegacySchema,
+			"the proxy record predates the schema that carries a birth token, so no generation can be established", ep.Err)
+	case proxyendpoint.VerdictNotOurs, proxyendpoint.VerdictForeignProcess:
+		// Decided from the record and the process table alone. No dial is ever
+		// spent on a record that does not validate for this root: that is the
+		// whole protection against a copied proxy.pid pointing gc at somebody
+		// else's database.
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictNotOurs, ep.Verdict.String(), ep.Err)
+	case proxyendpoint.VerdictMalformed:
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictNoOwnershipRecord, "malformed proxy record", ep.Err)
+	case proxyendpoint.VerdictDead, proxyendpoint.VerdictBirthMismatch:
+		return in.escalateWithPing(ctx, key.Generation(), ep.Verdict.String(), ep.Err)
+	default:
+		// VerdictUndetermined: a read the proof depends on failed. gc declines
+		// rather than guesses, and spends nothing: a ping cannot make an argv
+		// readable, and a dial on an unproven record is the one thing this
+		// package refuses to do. Non-terminal, so the next open re-inspects.
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone,
+			"proxy liveness undetermined: "+ep.Verdict.String(), ep.Err)
+	}
+
+	idle := proxyendpoint.ResolveIdlePolicy(sidecar, ep.Liveness.IdlePolicy)
+	if idle.Kind == proxyendpoint.IdleFinite && in.LongLived {
+		// The deliberate, doctor-visible PR2 deviation. bd retires a
+		// finite-idle proxy AND its Dolt child after a quiet window, so a
+		// handle gc held across one would be pinned to a process bd has
+		// decided to stop. The design's answer is a store re-opened per
+		// reconcile pass; PR2's is to keep BdStore for such a scope and say so
+		// in the payload.
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictIdlePolicyFinite,
+			"long-lived native open refused: proxy idle policy is "+idle.String(), nil)
+	}
+
+	probe := in.Probe(ctx, ep, in.Database)
+	switch probe.Outcome {
+	case proxyendpoint.ProbeServed:
+		ok, lane, dir := CursorsMatchPinned(probe.Cursors)
+		if !ok {
+			return Pin{}, false, NewSchemaSkewVerdictError(lane, dir,
+				fmt.Sprintf("database %s, this binary pins main=%d ignored=%d",
+					probe.Cursors, SchemaCursorMain, SchemaCursorIgnored))
+		}
+		return Pin{
+			admitted: true,
+			key:      key,
+			root:     root,
+			database: in.Database,
+			idle:     idle,
+			cursors:  probe.Cursors,
+			evidence: ep.Liveness.Evidence,
+		}, false, nil
+
+	case proxyendpoint.ProbeRefused:
+		return in.drain(ctx, root, key)
+
+	case proxyendpoint.ProbeAcceptedNoGreeting:
+		return in.escalateZombie(ctx, root, ep, key)
+
+	default:
+		// ProbeUnknown. IsIndeterminate is consulted before anything else,
+		// because the probe's own deadline and the caller's cancellation are
+		// facts about US: neither is evidence about a proxy, and classifying
+		// one as an endpoint state is how a loaded box demotes a healthy city.
+		if proxyendpoint.IsIndeterminate(probe.Err) {
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+				"the probe's own clock ended the session; nothing was learned about the endpoint", probe.Err)
+		}
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictBackendUnreachable, "probe outcome unknown", probe.Err)
+	}
+}
+
+// drain handles a data port the kernel refused.
+//
+// Refused on a record that is STILL live and still the same generation is a
+// proxy on its way down: the supervisor has closed its listener and has not yet
+// removed the record. A long-lived open waits it out, because the alternative
+// is demoting a controller store for a two-second shutdown. A one-shot does
+// not: the command in front of it would rather run on BdStore now.
+//
+// Expiry returns draining NON-TERMINAL, and that is B's trap made safe. The
+// budget running out says nothing about the proxy, so a terminal verdict here
+// would permanently demote a handle over a slow box.
+func (in AdmissionInput) drain(ctx context.Context, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
+	if !in.LongLived {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+			"data port refused; a one-shot open takes the bd front door rather than waiting", nil)
+	}
+	deadline := in.Now().Add(admissionDrainCeiling)
+	for in.Now().Before(deadline) {
+		if err := in.Sleep(ctx, admissionDrainPoll); err != nil {
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+				"the drain wait ran out of budget", err)
+		}
+		current, err := proxyendpoint.Read(root)
+		if err != nil || !proxyendpoint.NewPoolKey(current, in.Database).SameGeneration(key) {
+			// The record is gone or the generation moved: the drain finished.
+			// Re-run from the top rather than probing a generation nobody has
+			// validated.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+				"the draining generation was replaced; re-admitting", err)
+		}
+	}
+	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+		"the proxy is still refusing after the drain ceiling", nil)
+}
+
+// escalateZombie handles an endpoint that accepts a connection and then never
+// greets.
+//
+// The ladder is deliberately slow to spend anything. A proxy mid-restart
+// accepts and stays silent for a beat, so the first rung is simply asking
+// again, three times across at least two seconds. Only then does gc fork bd,
+// and only once per generation does it ask for a recover. A second silent pass
+// after a recover has already been spent on this generation is terminal:
+// bd has been asked to fix it and has not, and gc's remaining options are all
+// somebody else's to exercise.
+func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
+	for attempt := 1; attempt < admissionNoGreetingAttempts; attempt++ {
+		if err := in.Sleep(ctx, admissionNoGreetingSpacing); err != nil {
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the no-greeting ladder ran out of budget", err)
+		}
+		probe := in.Probe(ctx, ep, in.Database)
+		if probe.Outcome != proxyendpoint.ProbeAcceptedNoGreeting {
+			// Something changed. Re-run from the top: the record may have moved
+			// under us, and this pass's endpoint is no longer the evidence.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the endpoint's answer changed during the no-greeting ladder", probe.Err)
+		}
+	}
+
+	generation := key.Generation()
+	if in.Ops == nil {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets, and admission has no provider ops to escalate with", ep.Err)
+	}
+
+	// One ping per generation. The observed set is what makes "a later open in
+	// the same process skips its ping" true: a generation gc has already asked
+	// bd about does not get asked again just because a second scope opened.
+	if in.Observed.Add(generation) {
+		if err := in.Ops.Ping(ctx, in.ScopeRoot); err == nil {
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"pinged the provider; re-admitting", nil)
+		} else if !in.sameGeneration(root, key) {
+			// The ping failed but the generation moved anyway, which is bd
+			// replacing its proxy. Re-admit against whatever is there now.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the generation moved during the ping; re-admitting", err)
+		}
+	}
+
+	// One recover per generation, ever.
+	if in.Recovered.Add(generation) {
+		if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
+			return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+				"the endpoint accepts and never greets, and the provider could not recover it", err)
+		}
+		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"recovered the provider; re-admitting", nil)
+	}
+
+	return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+		"the endpoint still accepts and never greets after a recover was already spent on generation "+generation, ep.Err)
+}
+
+// escalateWithPing spends the single ping a stopped or stale record is worth.
+//
+// This is the "absent/dead" half of the four states the design says may cost a
+// bd fork. It is ONE ping: bd either adopts or restarts its proxy, and the
+// caller re-admits against whatever bd produced. It never spawns anything —
+// asking bd to start bd's proxy is the only lifecycle move gc has.
+func (in AdmissionInput) escalateWithPing(ctx context.Context, generation, detail string, cause error) (Pin, bool, error) {
+	const verdict = ProxiedVerdictProxyGone
+	if in.Ops == nil {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
+			detail+"; admission has no provider ops to escalate with", cause)
+	}
+	// An absent record has no generation to key on, so it is keyed on the scope
+	// instead: the question "have we already asked bd about this scope's
+	// missing proxy in this process" has the same shape and the same answer.
+	key := generation
+	if key == "" {
+		key = "scope:" + in.ScopeRoot
+	}
+	if !in.Observed.Add(key) {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
+			detail+"; the provider was already pinged for this generation in this process", cause)
+	}
+	if err := in.Ops.Ping(ctx, in.ScopeRoot); err != nil {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
+			detail+"; the provider ping failed", err)
+	}
+	return Pin{}, true, NewNonTerminalProxiedVerdictError(verdict, detail+"; pinged the provider, re-admitting", cause)
+}
+
+// sameGeneration re-reads the record and reports whether it still names the
+// generation the caller was working with.
+func (in AdmissionInput) sameGeneration(root string, key proxyendpoint.PoolKey) bool {
+	current, err := proxyendpoint.Read(root)
+	if err != nil {
+		return false
+	}
+	return proxyendpoint.NewPoolKey(current, in.Database).SameGeneration(key)
+}
+
+func (in AdmissionInput) withDefaults() AdmissionInput {
+	if in.ProcessTable.Alive == nil {
+		in.ProcessTable = proxyendpoint.DefaultProcessTable()
+	}
+	if in.Probe == nil {
+		in.Probe = proxyendpoint.ProbeEndpoint
+	}
+	if in.Now == nil {
+		in.Now = time.Now
+	}
+	if in.Sleep == nil {
+		in.Sleep = sleepWithContext
+	}
+	if in.Observed == nil {
+		in.Observed = defaultObservedGenerations
+	}
+	if in.Recovered == nil {
+		in.Recovered = defaultRecoveredGenerations
+	}
+	return in
+}
+
+// sleepWithContext waits, and reports the context's error instead of sleeping
+// through an expired budget.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// The process-local pin memo.
+//
+// It exists because a single gc command opens a scope many times — `gc doctor`
+// alone opens 17+ — and admission's cheapest healthy path still costs one
+// probe SESSION against bd's proxy. Seventeen sessions per run is seventeen
+// accepted TCP connections bd's idle watcher counts, for an answer that cannot
+// have changed.
+//
+// It is keyed on the two files the answer is derived from, not on time alone: a
+// proxy.pid or a sidecar that changed invalidates the entry immediately,
+// whatever the TTL says. The TTL is the guard interval, so the memo can never
+// hold an answer longer than the tick that would have re-checked it.
+var proxiedPinMemo = struct {
+	mu      sync.Mutex
+	entries map[string]proxiedPinMemoEntry
+}{entries: map[string]proxiedPinMemoEntry{}}
+
+type proxiedPinMemoEntry struct {
+	pin     Pin
+	stamp   string
+	expires time.Time
+}
+
+func proxiedPinMemoKey(scopeRoot, database string) string {
+	return scopeRoot + "\x00" + database
+}
+
+// proxiedPinStamp fingerprints the two files admission's answer depends on.
+// An unreadable file yields a stamp nothing matches, so the memo misses and
+// admission re-derives rather than trusting a stale pass.
+func proxiedPinStamp(root, beadsDir string, now time.Time) string {
+	stamp := func(path string) string {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Sprintf("%s:absent:%d", path, now.UnixNano())
+		}
+		return fmt.Sprintf("%s:%d:%d", path, info.Size(), info.ModTime().UnixNano())
+	}
+	return stamp(proxyendpoint.PIDPath(root)) + "|" + stamp(proxyendpoint.SidecarPath(beadsDir))
+}
+
+func lookupProxiedPin(scopeRoot, database, root, beadsDir string, now time.Time) (Pin, bool) {
+	proxiedPinMemo.mu.Lock()
+	defer proxiedPinMemo.mu.Unlock()
+	entry, ok := proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database)]
+	if !ok || now.After(entry.expires) {
+		return Pin{}, false
+	}
+	if entry.stamp != proxiedPinStamp(root, beadsDir, now) {
+		return Pin{}, false
+	}
+	return entry.pin, true
+}
+
+func storeProxiedPin(scopeRoot, database, root, beadsDir string, pin Pin, now time.Time) {
+	proxiedPinMemo.mu.Lock()
+	defer proxiedPinMemo.mu.Unlock()
+	proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database)] = proxiedPinMemoEntry{
+		pin:     pin,
+		stamp:   proxiedPinStamp(root, beadsDir, now),
+		expires: now.Add(proxiedGuardInterval()),
+	}
+}
+
+// ForgetProxiedPin drops a scope's memoized admission pass.
+//
+// The guard tick calls it on a generation change: the memo's whole contract is
+// that the answer cannot have changed, and a tick that just proved otherwise
+// must not leave the contradiction in place for the next open to read.
+func ForgetProxiedPin(scopeRoot, database string) {
+	proxiedPinMemo.mu.Lock()
+	defer proxiedPinMemo.mu.Unlock()
+	delete(proxiedPinMemo.entries, proxiedPinMemoKey(scopeRoot, database))
+}

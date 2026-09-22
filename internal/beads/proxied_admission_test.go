@@ -1,0 +1,663 @@
+package beads
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+)
+
+// admissionFixture is a real proxied scope on disk: bd's metadata binding, its
+// sidecar, and a schema-2 proxy record.
+//
+// The files are real because admission's file reads are its parity contract
+// with bd -- ProviderRoot resolves the root bd resolves, Read and Validate
+// decode the document bd wrote. A test that stubbed those would prove gc agrees
+// with a fake. Only the three effects a test cannot afford are injected: the
+// process table, the TCP session, and the bd fork.
+type admissionFixture struct {
+	t         *testing.T
+	scopeRoot string
+	root      string
+	record    proxyendpoint.Record
+
+	alive bool
+	argv  []string
+}
+
+func newAdmissionFixture(t *testing.T, idleTimeout string) *admissionFixture {
+	t.Helper()
+	// bd's own environment arms must not decide the root under test.
+	t.Setenv(proxyendpoint.RootPathEnv, "")
+	t.Setenv(proxyendpoint.DoltDataDirEnv, "")
+	t.Setenv(proxyendpoint.SharedServerModeEnv, "")
+	t.Setenv(proxyendpoint.SharedServerDirEnv, "")
+
+	scopeRoot := t.TempDir()
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	root := filepath.Join(beadsDir, proxyendpoint.DefaultRootDirName)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"beads"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := `{"root_path":"dolt","port":44561`
+	if idleTimeout != "" {
+		sidecar += `,"idle_timeout":` + idleTimeout
+	}
+	sidecar += `}`
+	if err := os.WriteFile(proxyendpoint.SidecarPath(beadsDir), []byte(sidecar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &admissionFixture{t: t, scopeRoot: scopeRoot, root: root, alive: true}
+	f.argv = []string{"/opt/beads/bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, root}
+	f.writeRecord(6001, "44556677")
+	return f
+}
+
+func (f *admissionFixture) writeRecord(pid int, start string) {
+	f.t.Helper()
+	rootID, err := proxyendpoint.RootID(f.root)
+	if err != nil {
+		f.t.Fatalf("RootID(%s): %v", f.root, err)
+	}
+	f.record = proxyendpoint.Record{
+		PID:         pid,
+		Port:        44561,
+		UpstreamID:  "upstream",
+		Schema:      proxyendpoint.SchemaV2,
+		Kind:        proxyendpoint.RecordKind,
+		Birth:       proxyendpoint.BirthToken("boot-fixture", start),
+		RootID:      rootID,
+		ControlPort: 44562,
+	}
+	f.persist()
+}
+
+// corrupt rewrites the record after mutate has edited it, for the arms that
+// need a document that fails validation.
+func (f *admissionFixture) corrupt(mutate func(*proxyendpoint.Record)) {
+	f.t.Helper()
+	mutate(&f.record)
+	f.persist()
+}
+
+func (f *admissionFixture) persist() {
+	f.t.Helper()
+	body, err := json.Marshal(f.record)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.PIDPath(f.root), body, 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *admissionFixture) removeRecord() {
+	f.t.Helper()
+	if err := os.Remove(proxyendpoint.PIDPath(f.root)); err != nil && !os.IsNotExist(err) {
+		f.t.Fatal(err)
+	}
+}
+
+// processTable reports the fixture's recorded pid as bd's live supervisor for
+// this root, when the fixture says it is alive.
+func (f *admissionFixture) processTable() proxyendpoint.ProcessTable {
+	return proxyendpoint.ProcessTable{
+		Alive: func(pid int) bool { return f.alive && pid == f.record.PID },
+		Argv: func(pid int) ([]string, error) {
+			if !f.alive || pid != f.record.PID {
+				return nil, errors.New("no such process")
+			}
+			return f.argv, nil
+		},
+		Birth: func(pid int) (string, error) {
+			if !f.alive || pid != f.record.PID {
+				return "", errors.New("no such process")
+			}
+			return f.record.Birth, nil
+		},
+	}
+}
+
+// admissionOps counts the bd verbs admission spent.
+type admissionOps struct {
+	mu       sync.Mutex
+	pings    int
+	recovers int
+	onPing   func() error
+	onRecov  func() error
+}
+
+func (o *admissionOps) Ping(context.Context, string) error {
+	o.mu.Lock()
+	o.pings++
+	hook := o.onPing
+	o.mu.Unlock()
+	if hook != nil {
+		return hook()
+	}
+	return nil
+}
+
+func (o *admissionOps) Recover(context.Context, string) error {
+	o.mu.Lock()
+	o.recovers++
+	hook := o.onRecov
+	o.mu.Unlock()
+	if hook != nil {
+		return hook()
+	}
+	return nil
+}
+
+func (o *admissionOps) counts() (int, int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.pings, o.recovers
+}
+
+// servedProbe answers with the cursors this binary pins, which is the only
+// cursor pair that passes the gate.
+func servedProbe(cursors proxyendpoint.Cursors, calls *int) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+	return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		*calls++
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: cursors}
+	}
+}
+
+func pinnedCursors() proxyendpoint.Cursors {
+	main, ignored := PinnedSchemaCursors()
+	return proxyendpoint.Cursors{Main: main, Ignored: ignored}
+}
+
+// openIfAdmitted stands in for the library open the opener would perform. It is
+// reachable ONLY through an admitted Pin, which is what makes "the gate cannot
+// be bypassed" an assertion rather than a claim: Pin's fields are unexported
+// and only Admit mints a non-zero one.
+func openIfAdmitted(pin Pin, opened *int) {
+	if pin.Admitted() {
+		*opened++
+	}
+}
+
+func baseAdmissionInput(f *admissionFixture, ops *admissionOps) AdmissionInput {
+	return AdmissionInput{
+		ScopeRoot:    f.scopeRoot,
+		Database:     "beads",
+		ProcessTable: f.processTable(),
+		Ops:          ops,
+		Observed:     NewGenerationSet(),
+		Recovered:    NewGenerationSet(),
+		Now:          time.Now,
+		Sleep:        func(context.Context, time.Duration) error { return nil },
+		SkipMemo:     true,
+	}
+}
+
+// TestAdmitTable is the admission decision table.
+//
+// Every row asserts a verdict AND a cost, because the two are the point
+// together: admission exists to decide without forking bd, and a row that
+// reached the right answer by spending a fork would pass a verdict-only test
+// while destroying the lane's reason to exist.
+func TestAdmitTable(t *testing.T) {
+	t.Run("served and equal cursors pins with no bd verbs", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes, opened := 0, 0
+
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.Probe = servedProbe(pinnedCursors(), &probes)
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		openIfAdmitted(pin, &opened)
+		if opened != 1 {
+			t.Fatalf("a healthy admission did not yield an openable pin")
+		}
+		if probes != 1 {
+			t.Errorf("probe sessions = %d, want exactly 1: a healthy endpoint costs bd one session, not two", probes)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("bd verbs on a healthy proxy = %d ping / %d recover, want 0/0", pings, recovers)
+		}
+		if pin.Port() != 44561 || pin.PoolKey().PID != 6001 {
+			t.Errorf("pin = %+v, want the recorded endpoint", pin.PoolKey())
+		}
+		if pin.IdlePolicy().Kind != proxyendpoint.IdleNever {
+			t.Errorf("idle policy = %s, want never for a sidecar that says -1", pin.IdlePolicy())
+		}
+		if pin.Evidence() != proxyendpoint.EvidenceArgvBirth {
+			t.Errorf("evidence = %s, want argv+birth", pin.Evidence())
+		}
+		if pin.Cursors() != pinnedCursors() {
+			t.Errorf("pinned cursors = %v, want the probed pair", pin.Cursors())
+		}
+		// The report the factory diagnostic is built from comes from the pin,
+		// so a refusal and a pass describe the same endpoint the same way.
+		if got := pin.Report(); got.Endpoint.Generation != pin.Generation() || got.IdlePolicy != "never(sidecar)" {
+			t.Errorf("Report() = %+v, want the pin's own account", got)
+		}
+	})
+
+	t.Run("main lane ahead refuses without opening anything", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes, opened := 0, 0
+		cursors := pinnedCursors()
+		cursors.Main++
+
+		in := baseAdmissionInput(f, ops)
+		in.Probe = servedProbe(cursors, &probes)
+
+		pin, err := Admit(context.Background(), in)
+		openIfAdmitted(pin, &opened)
+		if opened != 0 {
+			t.Fatal("a schema-skewed database yielded an openable pin; the library would have migrated it on open")
+		}
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictSchemaSkew || verdict.Lane != ProxiedSkewLaneMain || verdict.Dir != ProxiedSkewDirAhead {
+			t.Fatalf("verdict = %+v, want schema_skew{main,ahead}", verdict)
+		}
+		if !verdict.Terminal() {
+			t.Error("schema_skew must be terminal: a retry cannot move a migration cursor")
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a cursor mismatch spent %d ping / %d recover, want 0/0", pings, recovers)
+		}
+	})
+
+	t.Run("ignored lane behind refuses", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		probes := 0
+		cursors := pinnedCursors()
+		cursors.Ignored--
+
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = servedProbe(cursors, &probes)
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictSchemaSkew || verdict.Lane != ProxiedSkewLaneIgnored || verdict.Dir != ProxiedSkewDirBehind {
+			t.Fatalf("verdict = %+v, want schema_skew{ignored,behind}", verdict)
+		}
+	})
+
+	t.Run("dead record costs one ping then pins", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		f.alive = false
+		probes := 0
+		ops := &admissionOps{onPing: func() error {
+			// bd adopted its proxy: the recorded process is live again.
+			f.alive = true
+			return nil
+		}}
+
+		in := baseAdmissionInput(f, ops)
+		in.Probe = servedProbe(pinnedCursors(), &probes)
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit after a dead record: %v", err)
+		}
+		if !pin.Admitted() {
+			t.Fatal("Admit returned no error and no pin")
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 0 {
+			t.Errorf("bd verbs = %d ping / %d recover, want exactly 1/0", pings, recovers)
+		}
+		if probes != 1 {
+			t.Errorf("probe sessions = %d, want 1: the dead pass never reached the wire", probes)
+		}
+	})
+
+	t.Run("refused on a live same generation drains then re-pins", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes, sleeps := 0, 0
+
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.Sleep = func(context.Context, time.Duration) error {
+			sleeps++
+			// The drain finishes: bd's replacement proxy publishes a new
+			// generation at the same root.
+			f.writeRecord(6002, "88990011")
+			return nil
+		}
+		in.ProcessTable = f.processTable()
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			if probes == 1 {
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		}
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit across a drain: %v", err)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Errorf("re-pinned generation = %s, want the replacement proxy", pin.Generation())
+		}
+		if sleeps != 1 {
+			t.Errorf("drain polls = %d, want 1", sleeps)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a drain spent %d ping / %d recover, want 0/0: a proxy on its way down needs waiting out, not a bd fork", pings, recovers)
+		}
+	})
+
+	t.Run("a one-shot refuses a draining proxy instead of waiting", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.LongLived = false
+		in.Sleep = func(context.Context, time.Duration) error {
+			t.Error("a one-shot open waited out a drain; the command in front of it would rather run on BdStore now")
+			return nil
+		}
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+		}
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictDraining || verdict.Terminal() {
+			t.Fatalf("verdict = %+v, want a NON-terminal draining", verdict)
+		}
+	})
+
+	t.Run("budget expiry mid drain is draining and non terminal", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.LongLived = true
+		in.Sleep = func(context.Context, time.Duration) error { return context.DeadlineExceeded }
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+		}
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictDraining {
+			t.Fatalf("verdict = %q, want draining", verdict.Verdict)
+		}
+		if verdict.Terminal() {
+			t.Fatal("a budget that expired says nothing about the proxy, so it must never demote a handle permanently")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("the refusal lost its cause: %v", err)
+		}
+	})
+
+	t.Run("zombie ladder spends one ping and one recover per generation", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes := 0
+
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("verdict = %+v, want a terminal proxy_zombie", verdict)
+		}
+		pings, recovers := ops.counts()
+		if pings != 1 || recovers != 1 {
+			t.Fatalf("the ladder spent %d ping / %d recover, want exactly 1/1", pings, recovers)
+		}
+
+		// A second admission on the same generation must not buy either rung
+		// again: bd has been asked and has not fixed it.
+		_, err = Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie {
+			t.Fatalf("second admission = %v, want proxy_zombie", err)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Errorf("a second zombie pass spent more verbs: %d ping / %d recover, want 1/1", pings, recovers)
+		}
+	})
+
+	t.Run("a foreign root id refuses without dialing", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		f.corrupt(func(rec *proxyendpoint.Record) {
+			rec.RootID = "0000000000000000000000000000000000000000000000000000000000000000"
+		})
+		ops := &admissionOps{}
+
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			t.Fatal("admission dialed an endpoint whose record does not validate for this root")
+			return proxyendpoint.ProbeResult{}
+		}
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictNotOurs || !verdict.Terminal() {
+			t.Fatalf("verdict = %+v, want a terminal not_ours", verdict)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a foreign record spent %d ping / %d recover, want 0/0", pings, recovers)
+		}
+	})
+
+	t.Run("a pre schema 2 record refuses as legacy without dialing", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		f.corrupt(func(rec *proxyendpoint.Record) { rec.Schema = 1 })
+
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			t.Fatal("admission dialed a record with no birth token, so no generation could be established")
+			return proxyendpoint.ProbeResult{}
+		}
+
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictLegacySchema {
+			t.Fatalf("Admit error = %v, want legacy_schema", err)
+		}
+	})
+
+	t.Run("an absent record costs one ping per process", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		f.removeRecord()
+		ops := &admissionOps{}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			t.Fatal("admission dialed a scope with no proxy record")
+			return proxyendpoint.ProbeResult{}
+		}
+
+		if _, err := Admit(context.Background(), in); err == nil {
+			t.Fatal("Admit succeeded with no proxy record")
+		}
+		if pings, _ := ops.counts(); pings != 1 {
+			t.Fatalf("an absent record spent %d pings, want exactly 1", pings)
+		}
+		// The second open in the same process must not buy the same answer.
+		if _, err := Admit(context.Background(), in); err == nil {
+			t.Fatal("Admit succeeded with no proxy record")
+		}
+		if pings, _ := ops.counts(); pings != 1 {
+			t.Errorf("a second open on the same missing proxy spent %d pings, want still 1", pings)
+		}
+	})
+
+	t.Run("a finite idle policy refuses a long lived open", func(t *testing.T) {
+		// bd's provider substitutes a 30s window for a sidecar with no
+		// idle_timeout, so this is the shape an OPERATOR-initialized proxied
+		// scope has -- and the one gc must not hold a resident handle against.
+		f := newAdmissionFixture(t, "")
+		ops := &admissionOps{}
+		probes := 0
+
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.Probe = servedProbe(pinnedCursors(), &probes)
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictIdlePolicyFinite || !verdict.Terminal() {
+			t.Fatalf("verdict = %+v, want a terminal idle_policy_finite", verdict)
+		}
+		if probes != 0 {
+			t.Errorf("the idle rule dialed %d times; it is decided from the sidecar and argv alone", probes)
+		}
+
+		// The SAME scope is fine for a one-shot: nothing is held across the
+		// idle window.
+		in.LongLived = false
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("a one-shot open on a finite-idle proxy: %v", err)
+		}
+		if pin.IdlePolicy().Kind != proxyendpoint.IdleFinite {
+			t.Errorf("idle policy = %s, want finite", pin.IdlePolicy())
+		}
+	})
+
+	t.Run("the live supervisor argv outranks the sidecar", func(t *testing.T) {
+		// An operator edited the sidecar to say never under a proxy bd started
+		// with a finite window. Only the argv describes the running process.
+		f := newAdmissionFixture(t, "-1")
+		f.argv = append(f.argv, proxyendpoint.IdleTimeoutFlag, "30s")
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.ProcessTable = f.processTable()
+		in.LongLived = true
+		probes := 0
+		in.Probe = servedProbe(pinnedCursors(), &probes)
+
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictIdlePolicyFinite {
+			t.Fatalf("Admit error = %v, want idle_policy_finite from the supervisor's own argv", err)
+		}
+	})
+}
+
+// TestAdmitMemoHoldsRepeatedOpensToOneProbeSession pins the memo's reason to
+// exist: `gc doctor` opens a scope 17+ times in one run, and admission's
+// cheapest healthy path still costs one probe SESSION -- an accepted TCP
+// connection bd's idle watcher counts, which cannot arm while one is open.
+//
+// It is keyed on the two files the answer derives from, so a proxy that moved
+// invalidates the entry immediately whatever the TTL says. That is the half
+// worth testing: a time-only memo would keep serving a generation that no
+// longer exists.
+func TestAdmitMemoHoldsRepeatedOpensToOneProbeSession(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { ForgetProxiedPin(f.scopeRoot, "beads") })
+
+	probes := 0
+	in := baseAdmissionInput(f, &admissionOps{})
+	in.SkipMemo = false
+	in.Probe = servedProbe(pinnedCursors(), &probes)
+
+	for i := 0; i < 5; i++ {
+		if _, err := Admit(context.Background(), in); err != nil {
+			t.Fatalf("Admit #%d: %v", i, err)
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("five opens cost %d probe sessions, want 1", probes)
+	}
+
+	// A new generation at the same root must miss: the record's stamp changed.
+	time.Sleep(10 * time.Millisecond)
+	f.writeRecord(6002, "88990011")
+	in.ProcessTable = f.processTable()
+	pin, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit after a generation change: %v", err)
+	}
+	if probes != 2 {
+		t.Errorf("probe sessions after a generation change = %d, want 2: the memo served a proxy that no longer exists", probes)
+	}
+	if pin.PoolKey().PID != 6002 {
+		t.Errorf("pin = %s, want the new generation", pin.Generation())
+	}
+
+	// SkipMemo is what the guard tick uses: a tick that re-admitted out of the
+	// memo it populated would be reading its own answer back.
+	in.SkipMemo = true
+	if _, err := Admit(context.Background(), in); err != nil {
+		t.Fatalf("Admit with SkipMemo: %v", err)
+	}
+	if probes != 3 {
+		t.Errorf("probe sessions with SkipMemo = %d, want 3", probes)
+	}
+}
+
+// TestAdmitRefusesWithoutADatabaseName pins the one input that would make the
+// gate pass against nothing. The cursors are DATABASE()-scoped, so a probe with
+// no database selected reports SERVED with both cursors at zero -- which
+// compares unequal to the pinned pair today, and would compare EQUAL against a
+// library pinned at zero. The refusal is here rather than in a comment.
+func TestAdmitRefusesWithoutADatabaseName(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	in := baseAdmissionInput(f, &admissionOps{})
+	in.Database = ""
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		t.Fatal("admission probed with no database selected")
+		return proxyendpoint.ProbeResult{}
+	}
+
+	_, err := Admit(context.Background(), in)
+	if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictNoOwnershipRecord {
+		t.Fatalf("Admit with no database = %v, want a typed refusal", err)
+	}
+}
+
+// TestZeroPinCannotBeOpened is the structural half of the gate.
+//
+// Pin's fields are unexported and only Admit mints a non-zero one, so a caller
+// cannot reach the proxied opener by constructing a pin -- "somebody built the
+// env map by hand" is unreachable rather than merely reviewed.
+func TestZeroPinCannotBeOpened(t *testing.T) {
+	var pin Pin
+	opened := 0
+	openIfAdmitted(pin, &opened)
+	if opened != 0 {
+		t.Fatal("the zero Pin reports itself admitted")
+	}
+	if pin.Port() != 0 || pin.Generation() != "0:" || pin.Root() != "" || pin.Database() != "" {
+		t.Errorf("the zero Pin carries an endpoint: %+v", pin.PoolKey())
+	}
+}
