@@ -31,10 +31,27 @@ import (
 // code with different semantics, and the plan's hazard register enumerates where.
 // Each bound is implemented here and named at its call site:
 //
-//   - H1 wisps: the native Get does not set IncludeEphemeral, so a wisp-tier
-//     bead is invisible to it. A native MISS on a bead-shaped id falls through to
-//     the bd leaf's Get, which has the `bd query --ephemeral` fallback. One fork,
-//     only on a miss. See Get.
+//   - H1 wisps: a native MISS on a bead-shaped id falls through to the bd leaf's
+//     Get, which has the `bd query --ephemeral` fallback. One fork, only on a
+//     miss.
+//
+//     The MECHANISM this register used to state was wrong, and correcting it
+//     matters because PR3 inherits the model (council B-F6). It said "the
+//     native Get does not set IncludeEphemeral, so a wisp-tier bead is
+//     invisible to it". IncludeEphemeral is not a field of types.IssueFilter at
+//     all — it belongs to types.WorkFilter, GetReadyWork's filter, which is why
+//     Ready is the only native path that sets it. SearchIssues routes on
+//     filter.Ephemeral and filter.SkipWisps, and the native Get
+//     (native_dolt_store.go's Get: IDs plus IncludeDependencies) sets NEITHER,
+//     so searchInTx takes the nil-Ephemeral branch and MERGES the wisps table.
+//     gc never sets SkipWisps anywhere outside a test.
+//
+//     So H1 is not a regression on this lane: the native Get can see a wisp,
+//     and the fallback below is a safe no-op on a hit and matches BdStore's own
+//     behavior on a miss. It is kept because it costs nothing when the native
+//     read answers, and because "the bd leaf can answer a not-found that the
+//     native leaf could not" stays true for reasons other than wisps — a
+//     relocated class, a bead the pool's generation cannot see. See Get.
 //
 //   - H2 one sidecar: localSidecar.ensureLoadedLocked latches loaded=true on
 //     first use and never re-reads, so two instances over one file diverge for the
@@ -503,20 +520,25 @@ func (s *ProxiedStore) scopeRootForPin() string {
 // Reads. Native while it is serving, bd after a stand-down.
 // ---------------------------------------------------------------------------
 
-// Get reads one bead, with H1's wisp bound.
-//
-// The native leaf's Get is SearchIssues over the issues table with no
-// IncludeEphemeral (native_dolt_store.go), so a wisp — an auto-handoff mail, a
-// molecule step materialized into the wisps table — is invisible to it. The bd
-// leaf's Get falls back to `bd query --ephemeral` for a bead-shaped id, and a
-// proxied scope reads through BdStore TODAY, so losing that would be a regression
-// on this lane rather than parity inherited from the direct one.
+// Get reads one bead, with H1's fallback.
 //
 // The fallback is gated on a MISS and on the same id shape BdStore gates its own
 // wisp query on (isWispQueryableID), so the cost is one fork on a not-found and
-// nothing at all on a hit. Setting IncludeEphemeral on the shared native Get
-// instead would change every DIRECT scope's semantics too, which is a beads-side
-// question (plan Q2) and not a license this lane has.
+// nothing at all on a hit.
+//
+// What it is NOT is a fix for a native Get that cannot see wisps, and this
+// comment used to say it was (council B-F6). At beads v1.3.0 the native Get
+// builds IssueFilter{IDs, IncludeDependencies} and sets neither Ephemeral nor
+// SkipWisps, so issueops.searchInTx takes its `filter.Ephemeral == nil` branch
+// and merges the wisps table: a wisp IS visible to it. IncludeEphemeral, the
+// field the old comment named, is on types.WorkFilter — GetReadyWork's filter —
+// which is why Ready is the only native path in this package that sets one.
+//
+// The fallback stays because it costs nothing on a hit and because a bd leaf
+// can still answer a not-found the native leaf could not for reasons that have
+// nothing to do with wisps. What goes is the false premise: H1 is not a
+// regression this lane introduces, and a reader — or PR3 — must not inherit the
+// belief that the native read path is blind to the wisps plane.
 func (s *ProxiedStore) Get(id string) (Bead, error) {
 	native := s.nativeLeaf()
 	if native == nil {

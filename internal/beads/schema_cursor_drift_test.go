@@ -3,6 +3,7 @@ package beads_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -270,4 +271,79 @@ func latestMigration(t *testing.T, dir string) int {
 		t.Fatalf("no %s migrations under %s; the pin would silently read as 0", migrationSuffix, dir)
 	}
 	return latest
+}
+
+// TestNativeGetFilterShapeMatchesTheH1Claim is council B-F6, made executable.
+//
+// The wrapper's H1 register and its Get doc both asserted that the native Get
+// "does not set IncludeEphemeral, so a wisp-tier bead is invisible to it". Two
+// things are wrong with that at beads v1.3.0, and the second one is load-bearing
+// twice over — it is cited as the justification for the bd fallback AND used to
+// argue H1 is a regression on this lane:
+//
+//   - IncludeEphemeral is not a field of types.IssueFilter. It belongs to
+//     types.WorkFilter, GetReadyWork's filter.
+//   - issueops.searchInTx routes on Ephemeral/SkipWisps, and with Ephemeral nil
+//     and SkipWisps unset it MERGES the wisps table.
+//
+// A comment cannot be compiled, so this asserts the two facts the corrected
+// comment rests on, against the pinned module's own source. A beads release
+// that moves IncludeEphemeral onto IssueFilter, or that stops merging the wisps
+// plane for a nil-Ephemeral filter, breaks this test rather than silently
+// making the old claim true again by accident.
+func TestNativeGetFilterShapeMatchesTheH1Claim(t *testing.T) {
+	moduleDir := beadstest.PinnedBeadsModuleDir(t)
+
+	types, err := os.ReadFile(filepath.Join(moduleDir, filepath.FromSlash("internal/types/types.go")))
+	if err != nil {
+		t.Fatalf("read the pinned library's types: %v", err)
+	}
+	if !regexp.MustCompile(`(?m)^\s*IncludeEphemeral\s+bool`).Match(types) {
+		t.Fatal("the pinned library no longer declares IncludeEphemeral at all; re-read the H1 note " +
+			"on ProxiedStore before trusting it")
+	}
+	// The field lives on WorkFilter, not IssueFilter. Asserted by position: the
+	// declaration must fall inside the WorkFilter struct.
+	if !declaredInStruct(string(types), "WorkFilter", "IncludeEphemeral") {
+		t.Error("IncludeEphemeral is no longer a WorkFilter field; the H1 note on ProxiedStore says it is")
+	}
+	if declaredInStruct(string(types), "IssueFilter", "IncludeEphemeral") {
+		t.Error("IncludeEphemeral is now an IssueFilter field, so the native Get COULD set it; " +
+			"the H1 note on ProxiedStore is written on the opposite assumption")
+	}
+
+	search, err := os.ReadFile(filepath.Join(moduleDir,
+		filepath.FromSlash("internal/storage/issueops/search.go")))
+	if err != nil {
+		t.Fatalf("read the pinned library's search: %v", err)
+	}
+	if !strings.Contains(string(search), "if filter.Ephemeral == nil || !*filter.Ephemeral {") {
+		t.Fatal("searchInTx no longer merges the wisps table for a nil-Ephemeral filter; the native " +
+			"Get's visibility of the wisps plane is the fact H1's corrected note rests on")
+	}
+}
+
+// declaredInStruct reports whether field is declared inside the named struct
+// type. It scans by brace balance from the type declaration, which is enough
+// for a flat Go struct and does not need a parser for a file this test only
+// reads.
+func declaredInStruct(source, structName, field string) bool {
+	start := strings.Index(source, "type "+structName+" struct {")
+	if start < 0 {
+		return false
+	}
+	depth := 0
+	for i := start; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				body := source[start:i]
+				return regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(field) + `\s`).MatchString(body)
+			}
+		}
+	}
+	return false
 }
