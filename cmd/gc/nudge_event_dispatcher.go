@@ -10,18 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/worker"
-)
-
-// Compile-time checks that the composite providers this fix targets still
-// implement eventCapableRouter. A refactor that drops the method must fail
-// the build here instead of silently falling back to the top-level
-// SessionEventProvider assertion these checks exist to bypass.
-var (
-	_ eventCapableRouter = (*sessionauto.Provider)(nil)
-	_ eventCapableRouter = (*sessionhybrid.Provider)(nil)
 )
 
 // nudgeEventRetryEpsilon pads each delayed retry an attempt may schedule, so

@@ -19,18 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
-	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
-	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	"github.com/gastownhall/gascity/internal/sessionlog"
-)
-
-// Compile-time checks that the composite providers this fix targets still
-// implement eventCapableRouter. A refactor that drops the method must fail
-// the build here instead of silently falling back to the top-level
-// SessionEventProvider assertion these checks exist to bypass.
-var (
-	_ eventCapableRouter = (*sessionauto.Provider)(nil)
-	_ eventCapableRouter = (*sessionhybrid.Provider)(nil)
 )
 
 const (

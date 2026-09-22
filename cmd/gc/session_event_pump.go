@@ -61,13 +61,10 @@ type sessionEventPump struct {
 	// a late close from a replaced subscription cannot mask a live one.
 	streamGen atomic.Int64
 
-	// deliveredGen holds the generation of the stream that has delivered at
-	// least one event, 0 when none. Distinct from streamGen: a subscribe
-	// call can succeed and return a channel before the provider actually
-	// connects (herdr retries the connection behind the channel forever),
-	// so streamGen alone cannot tell an established-but-silent stream from
-	// one that is actively delivering.
-	deliveredGen atomic.Int64
+	// observedGen is set only after the current stream delivers an event. A
+	// successful Subscribe call may merely start a disconnected retry loop, so
+	// it is not sufficient evidence for stretching patrol liveness checks.
+	observedGen atomic.Int64
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -98,7 +95,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	}
 	p.gen++
 	p.streamGen.Store(0)
-	p.deliveredGen.Store(0)
+	p.observedGen.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
@@ -128,12 +125,11 @@ func (p *sessionEventPump) streaming() bool {
 	return p.streamGen.Load() != 0
 }
 
-// delivering reports whether the current stream has delivered at least one
-// event. Unlike streaming, this is safe to use for reducing polling cadence:
-// it only goes true once a real event has arrived on the channel, which
-// rules out the connect-behind-the-channel case streaming's doc warns about.
-func (p *sessionEventPump) delivering() bool {
-	return p.deliveredGen.Load() != 0
+// flowing reports whether the current subscription has actually delivered at
+// least one event (normally its contract-required leading resync).
+func (p *sessionEventPump) flowing() bool {
+	gen := p.streamGen.Load()
+	return gen != 0 && p.observedGen.Load() == gen
 }
 
 // forward pumps liveness events into the poke channel until the stream ends.
@@ -149,7 +145,7 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 		select {
 		case <-ctx.Done():
 			p.streamGen.CompareAndSwap(gen, 0)
-			p.deliveredGen.CompareAndSwap(gen, 0)
+			p.observedGen.CompareAndSwap(gen, 0)
 			return
 		case <-resyncTimer.C:
 			resyncArmed = false
@@ -159,10 +155,12 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 				if p.streamGen.CompareAndSwap(gen, 0) && ctx.Err() == nil {
 					fmt.Fprintf(p.stderr, "%s: session-event stream ended; session liveness falls back to patrol polling\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 				}
-				p.deliveredGen.CompareAndSwap(gen, 0)
+				p.observedGen.CompareAndSwap(gen, 0)
 				return
 			}
-			p.deliveredGen.Store(gen)
+			if p.streamGen.Load() == gen {
+				p.observedGen.Store(gen)
+			}
 			switch ev.Kind {
 			case runtime.SessionEventExited, runtime.SessionEventClosed:
 				// Only attributed deaths poke. Unattributed pane events are

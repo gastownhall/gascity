@@ -1129,7 +1129,7 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 // phases (pool death detection, corpse sweeps, demand/desired state, bead
 // reconcile). Always true except on patrol ticks in stretched mode: with
 // [daemon].session_patrol_interval longer than patrol_interval and the
-// provider's session-event stream delivering, patrol-driven session scans
+// provider's session-event stream flowing, patrol-driven session scans
 // run at the stretched cadence — event pokes carry the real-time work and
 // the patrol scan is the safety net. A pending config change always runs
 // the phases (a reload must reconcile fully).
@@ -1147,17 +1147,17 @@ func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now 
 
 // sessionPhaseStretchActive reports whether the stretched session-phase
 // patrol is in effect: configured longer than the patrol interval AND a
-// session-event stream currently DELIVERING. streaming() alone is not
+// session-event stream currently FLOWING. streaming() alone is not
 // enough — a subscribe call can succeed and return a channel before the
 // provider actually connects behind it (herdr retries forever with capped
 // backoff), so an established-but-silent stream would otherwise stretch the
 // patrol cadence with no event pokes ever arriving to cover it. Without a
-// delivering stream (tmux, subscribe failure, still connecting) the stretch
+// flowing stream (tmux, subscribe failure, still connecting) the stretch
 // is ignored so session liveness never degrades below the patrol cadence.
 func (cr *CityRuntime) sessionPhaseStretchActive() bool {
 	stretch := cr.cfg.Daemon.SessionPatrolIntervalDuration()
 	return stretch > cr.cfg.Daemon.PatrolIntervalDuration() &&
-		cr.sessionEvents != nil && cr.sessionEvents.delivering()
+		cr.sessionEvents != nil && cr.sessionEvents.flowing()
 }
 
 // tick performs one reconciliation tick: pool death detection, config
