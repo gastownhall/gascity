@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -28,12 +29,12 @@ import (
 func TestProbeSessionClosesEveryConnectionItOpens(t *testing.T) {
 	t.Run("a served session", func(t *testing.T) {
 		fake := &fakeProbeConnector{cursors: map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26}}
-		cursors, err := readCursorsOver(context.Background(), fake)
+		report, err := readCursorsOver(context.Background(), fake)
 		if err != nil {
 			t.Fatalf("readCursorsOver: %v", err)
 		}
-		if cursors != (Cursors{Main: 66, Ignored: 26}) {
-			t.Fatalf("cursors = %v, want main=66 ignored=26", cursors)
+		if report.Cursors != (Cursors{Main: 66, Ignored: 26}) {
+			t.Fatalf("cursors = %v, want main=66 ignored=26", report.Cursors)
 		}
 		if got := fake.opened.Load(); got != 1 {
 			t.Fatalf("the probe opened %d connection(s), want exactly 1", got)
@@ -294,8 +295,15 @@ type fakeProbeConnector struct {
 	connectErr error
 	pingErr    error
 	queryErr   error
-	opened     atomic.Int64
-	closed     atomic.Int64
+	// absentTables and absentColumns are the schema objects this database does
+	// NOT have, keyed by table name and "table.column". Everything not named
+	// here exists, which keeps a healthy fixture a zero value.
+	absentTables  map[string]bool
+	absentColumns map[string]bool
+	opened        atomic.Int64
+	closed        atomic.Int64
+	mu            sync.Mutex
+	issued        []string
 }
 
 func (c *fakeProbeConnector) Connect(context.Context) (driver.Conn, error) {
@@ -307,6 +315,26 @@ func (c *fakeProbeConnector) Connect(context.Context) (driver.Conn, error) {
 }
 
 func (c *fakeProbeConnector) Driver() driver.Driver { return fakeProbeDriver{} }
+
+// record appends the statement a session issued, with its arguments rendered
+// inline, so a test can assert WHICH evidence a probe actually read rather than
+// only what it concluded.
+func (c *fakeProbeConnector) record(query string, args []driver.NamedValue) {
+	rendered := query
+	for _, arg := range args {
+		rendered += " | " + fmt.Sprint(arg.Value)
+	}
+	c.mu.Lock()
+	c.issued = append(c.issued, rendered)
+	c.mu.Unlock()
+}
+
+// statements returns the statements a session issued.
+func (c *fakeProbeConnector) statements() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.issued...)
+}
 
 // fakeProbeDriver exists only because driver.Connector requires one; nothing
 // opens a connection through a DSN here.
@@ -338,11 +366,23 @@ func (c *fakeProbeConn) Ping(context.Context) error { return c.connector.pingErr
 
 // QueryContext answers the existence probe and both cursor reads, which is the
 // whole statement surface readCursors uses.
-func (c *fakeProbeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.connector.record(query, args)
 	if c.connector.queryErr != nil && query != cursorExistsQuery {
 		return nil, c.connector.queryErr
 	}
 	if query == cursorExistsQuery {
+		table := namedArg(args, 0)
+		if c.connector.absentTables[table] {
+			return &fakeProbeRows{value: 0}, nil
+		}
+		return &fakeProbeRows{value: 1}, nil
+	}
+	if query == columnExistsQuery {
+		key := namedArg(args, 0) + "." + namedArg(args, 1)
+		if c.connector.absentColumns[key] {
+			return &fakeProbeRows{value: 0}, nil
+		}
 		return &fakeProbeRows{value: 1}, nil
 	}
 	value, ok := c.connector.cursors[query]
@@ -350,6 +390,14 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, _ []driver
 		return nil, errors.New("proxyendpoint: the probe fixture has no answer for " + query)
 	}
 	return &fakeProbeRows{value: value}, nil
+}
+
+// namedArg renders the nth bound argument, or "" when it is absent.
+func namedArg(args []driver.NamedValue, n int) string {
+	if n >= len(args) {
+		return ""
+	}
+	return fmt.Sprint(args[n].Value)
 }
 
 // fakeProbeRows is one row of one integer column, which is the shape of every

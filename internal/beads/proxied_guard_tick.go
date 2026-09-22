@@ -465,6 +465,14 @@ func (g *proxiedGuard) checkOwner(ctx context.Context, pin Pin) proxiedGuardStep
 // exist yet, over a handle that retains no idle connection for bd's idle watcher
 // to count. The cost is what the design asked for (one connection per tick) and
 // the numbers are the same numbers.
+//
+// The pair it returns is the EFFECTIVE pair — the raw main cursor and the
+// ignored cursor after the library's reality floor — for the same reason
+// admission gates on the effective pair (council A-F2): the raw ignored number
+// is not what the linked library acts on, and a sentinel that disappears under a
+// live handle moves the library's answer without moving the number on disk.
+// Admission proved effective == raw == pinned at open, so comparing an effective
+// re-read against the pin's raw pair is comparing like with like.
 func proxiedGuardReadCursors(ctx context.Context, pin Pin) (proxyendpoint.Cursors, error) {
 	result := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(pin.Port(), pin.Database()))
 	if result.Outcome != proxyendpoint.ProbeServed {
@@ -473,7 +481,10 @@ func proxiedGuardReadCursors(ctx context.Context, pin Pin) (proxyendpoint.Cursor
 		}
 		return proxyendpoint.Cursors{}, fmt.Errorf("guard cursor read: probe outcome %s", result.Outcome)
 	}
-	return result.Cursors, nil
+	return proxyendpoint.Cursors{
+		Main:    result.Cursors.Main,
+		Ignored: result.Reality.EffectiveIgnored(result.Cursors.Ignored),
+	}, nil
 }
 
 // proxiedGuardSocketOwner joins the pinned port's listening socket to the pinned

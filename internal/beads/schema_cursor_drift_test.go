@@ -59,6 +59,42 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 	}
 }
 
+// TestIgnoredSentinelsMatchPinnedBeads is the sentinel half of the cursor drift
+// pin.
+//
+// The floors and the sentinel names are the LIBRARY's, restated here because
+// beads exports none of them. A constant only ever compared against itself
+// proves nothing, so — exactly as TestSchemaCursorsMatchPinnedBeads does for
+// the two cursors — they are compared against the pinned module's own source in
+// the go module cache. A beads release that renumbers the replay floor or
+// renames a sentinel breaks this test rather than silently returning gc's gate
+// to the shape that let a read path migrate somebody else's database.
+func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
+	source := filepath.Join(beadstest.PinnedBeadsModuleDir(t),
+		filepath.FromSlash("internal/storage/schema/schema.go"))
+	body, err := os.ReadFile(source) //nolint:gosec // a path derived from the module cache
+	if err != nil {
+		t.Fatalf("read the pinned library's schema source %s: %v", source, err)
+	}
+	text := string(body)
+
+	for _, table := range proxyendpoint.IgnoredSentinelTables() {
+		if !strings.Contains(text, strconv.Quote(table)) {
+			t.Errorf("the pinned library no longer names the ignored-lane sentinel table %q; "+
+				"re-read ignoredSource in %s and update proxyendpoint.IgnoredSentinelTables()", table, source)
+		}
+	}
+	want := "{table: " + strconv.Quote(proxyendpoint.IgnoredSentinelColumnTable) +
+		", column: " + strconv.Quote(proxyendpoint.IgnoredSentinelColumnName) +
+		", replayFloor: " + strconv.Itoa(proxyendpoint.IgnoredSentinelColumnFloor) + "}"
+	if !strings.Contains(text, want) {
+		t.Fatalf("the pinned library's ignoredSource no longer declares %s.\n"+
+			"gc's proxied schema gate computes the library's own effective ignored cursor from these "+
+			"values; a stale copy either refuses every healthy scope or admits one the library would migrate.\n"+
+			"Re-read ignoredSource in %s.", want, source)
+	}
+}
+
 // TestPinnedSchemaCursorsProjectsBothConstants pins the accessor's order as well
 // as its values: it returns two bare ints, and a caller that swapped them would
 // compare the ignored lane against the main constant and read as healthy.
@@ -94,6 +130,7 @@ func TestCursorsMatchPinnedReportsLaneAndDirection(t *testing.T) {
 	cases := []struct {
 		name     string
 		cursors  proxyendpoint.Cursors
+		reality  proxyendpoint.CursorReality
 		wantOK   bool
 		wantLane string
 		wantDir  string
@@ -143,17 +180,57 @@ func TestCursorsMatchPinnedReportsLaneAndDirection(t *testing.T) {
 			wantLane: beads.ProxiedSkewLaneMain,
 			wantDir:  beads.ProxiedSkewDirBehind,
 		},
+		{
+			// Council A-F2. The cursor ON DISK is equal on both lanes, and this
+			// gate used to pass it. The linked library does not read that
+			// number: with `leases.granted_node` absent it computes
+			// min(26, 11) = 11, decides the ignored lane is behind, and
+			// MigrateUp replays ignored 0012-0025 against a database bd owns —
+			// from a handle gc opened purely to read. A clamped lane is behind,
+			// and the gate must say so BEFORE the open.
+			name:     "a clamped ignored lane is behind however the cursor reads",
+			cursors:  proxyendpoint.Cursors{Main: main, Ignored: ignored},
+			reality:  proxyendpoint.CursorReality{Limited: true, Floor: 11, Missing: "leases.granted_node"},
+			wantLane: beads.ProxiedSkewLaneIgnored,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+		{
+			// A missing sentinel TABLE floors the lane at zero, which is the
+			// harsher half of the same shape.
+			name:     "a missing sentinel table floors the ignored lane at zero",
+			cursors:  proxyendpoint.Cursors{Main: main, Ignored: ignored},
+			reality:  proxyendpoint.CursorReality{Limited: true, Floor: 0, Missing: "wisp_dependencies"},
+			wantLane: beads.ProxiedSkewLaneIgnored,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
+		{
+			// A floor at or above the cursor changes nothing: the library
+			// believes the cursor as read, and so does the gate.
+			name:    "a floor above the cursor is not a clamp",
+			cursors: proxyendpoint.Cursors{Main: main, Ignored: ignored},
+			reality: proxyendpoint.CursorReality{Limited: true, Floor: ignored, Missing: "leases.granted_node"},
+			wantOK:  true,
+		},
+		{
+			// The main lane drifting still outranks a clamped ignored lane, so
+			// the operator is told the thing bd's own gate would also refuse.
+			name:     "both drift reports main even when the ignored lane is clamped",
+			cursors:  proxyendpoint.Cursors{Main: main - 1, Ignored: ignored},
+			reality:  proxyendpoint.CursorReality{Limited: true, Floor: 11, Missing: "leases.granted_node"},
+			wantLane: beads.ProxiedSkewLaneMain,
+			wantDir:  beads.ProxiedSkewDirBehind,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, lane, dir := beads.CursorsMatchPinned(tc.cursors)
+			ok, lane, dir := beads.CursorsMatchPinned(tc.cursors, tc.reality)
 			if ok != tc.wantOK {
-				t.Fatalf("CursorsMatchPinned(%v) ok = %v, want %v", tc.cursors, ok, tc.wantOK)
+				t.Fatalf("CursorsMatchPinned(%v, %+v) ok = %v, want %v", tc.cursors, tc.reality, ok, tc.wantOK)
 			}
 			if lane != tc.wantLane || dir != tc.wantDir {
-				t.Errorf("CursorsMatchPinned(%v) = lane %q dir %q, want lane %q dir %q",
-					tc.cursors, lane, dir, tc.wantLane, tc.wantDir)
+				t.Errorf("CursorsMatchPinned(%v, %+v) = lane %q dir %q, want lane %q dir %q",
+					tc.cursors, tc.reality, lane, dir, tc.wantLane, tc.wantDir)
 			}
 		})
 	}

@@ -161,8 +161,10 @@ func TestClassifyProbeOutcomeTable(t *testing.T) {
 func TestProbeRunsTheSessionFirst(t *testing.T) {
 	dials := 0
 	got := Probe(context.Background(), ProbeIO{
-		Session: func(context.Context) (Cursors, error) { return Cursors{Main: 66, Ignored: 26}, nil },
-		Dial:    func(context.Context) error { dials++; return nil },
+		Session: func(context.Context) (CursorReport, error) {
+			return CursorReport{Cursors: Cursors{Main: 66, Ignored: 26}}, nil
+		},
+		Dial: func(context.Context) error { dials++; return nil },
 	})
 	if got.Outcome != ProbeServed {
 		t.Fatalf("Probe outcome = %v, want served", got.Outcome)
@@ -181,7 +183,7 @@ func TestProbeConfirmsWithOneDial(t *testing.T) {
 	t.Run("connection-level failure confirms", func(t *testing.T) {
 		dials := 0
 		got := Probe(context.Background(), ProbeIO{
-			Session: func(context.Context) (Cursors, error) { return Cursors{}, io.EOF },
+			Session: func(context.Context) (CursorReport, error) { return CursorReport{}, io.EOF },
 			Dial:    func(context.Context) error { dials++; return nil },
 		})
 		if got.Outcome != ProbeAcceptedNoGreeting {
@@ -198,8 +200,10 @@ func TestProbeConfirmsWithOneDial(t *testing.T) {
 	t.Run("a statement-level failure does not confirm", func(t *testing.T) {
 		dials := 0
 		got := Probe(context.Background(), ProbeIO{
-			Session: func(context.Context) (Cursors, error) { return Cursors{}, errors.New("Error 1049: Unknown database") },
-			Dial:    func(context.Context) error { dials++; return nil },
+			Session: func(context.Context) (CursorReport, error) {
+				return CursorReport{}, errors.New("Error 1049: Unknown database")
+			},
+			Dial: func(context.Context) error { dials++; return nil },
 		})
 		if got.Outcome != ProbeUnknown {
 			t.Fatalf("Probe outcome = %v, want unknown", got.Outcome)
@@ -334,7 +338,7 @@ func TestProbeNeverConcludesFromItsOwnDeadline(t *testing.T) {
 			fake := tc.build()
 			dials := 0
 			got := Probe(context.Background(), ProbeIO{
-				Session: func(ctx context.Context) (Cursors, error) { return readCursorsOver(ctx, fake) },
+				Session: func(ctx context.Context) (CursorReport, error) { return readCursorsOver(ctx, fake) },
 				Dial:    func(context.Context) error { dials++; return nil },
 			})
 			if got.Outcome != ProbeUnknown {
@@ -365,9 +369,9 @@ func TestProbeReadsItsOwnBudgetRatherThanTheDriversSpelling(t *testing.T) {
 	for _, spelling := range []error{mysql.ErrInvalidConn, io.EOF, syscall.ECONNRESET} {
 		dials := 0
 		got := probeWithBudget(context.Background(), ProbeIO{
-			Session: func(ctx context.Context) (Cursors, error) {
+			Session: func(ctx context.Context) (CursorReport, error) {
 				<-ctx.Done()
-				return Cursors{}, spelling
+				return CursorReport{}, spelling
 			},
 			Dial: func(context.Context) error { dials++; return nil },
 		}, 20*time.Millisecond)

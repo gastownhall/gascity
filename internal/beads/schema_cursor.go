@@ -22,6 +22,22 @@ import "github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 //
 // They are deleted when beads exports SchemaVersions(), which is the standing
 // ask; the drift test goes with them.
+//
+// # The residual, stated rather than implied (council A-F2)
+//
+// The gate below is what keeps the linked library from applying a NUMBERED
+// migration to a database bd owns: it compares the pair migrationSource.atLatest
+// computes, so a database it admits is one whose migrate() returns at
+// `current >= target` before it opens a migration file. It is not a read-only
+// open, because beads exports none to an embedder at v1.3.0 — OpenBestAvailable
+// goes to NewFromConfigWithOptions(ctx, beadsDir, nil), and Config.ReadOnly and
+// Config.Gateway are both unreachable from outside internal/storage/dolt. So a
+// writable open still runs MigrateUp's idempotent, UNnumbered tail against the
+// database (the bootstrap CREATE TABLE IF NOT EXISTS, ensureContentHashColumn's
+// guarded ALTER, dolt_ignore re-assertion) exactly as every bd open does. That
+// is bd's own behavior on its own database rather than a replay of somebody
+// else's series, and closing it needs a read-only open FROM BEADS: that is the
+// standing ask, alongside SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
 	SchemaCursorMain = 66
@@ -75,25 +91,50 @@ func PinnedSchemaCursors() (main, ignored int) {
 // old-shape SQL against. Neither is gc's to fix through a store it opened to
 // read.
 //
+// # Why the reality argument exists (council A-F2)
+//
+// The raw number in ignored_schema_migrations is not the number the library
+// acts on. migrationSource.currentVersion clamps a cursor the live schema
+// contradicts down to a "reality floor" — min(raw, 11) when
+// `leases.granted_node` is missing, and 0 when `wisps`/`wisp_dependencies` are
+// — and beads documents both shapes as real in the field. Comparing the RAW
+// cursor therefore proved nothing: a database at raw ignored=26 with the
+// sentinel absent passed this gate, the proxied open is WRITABLE
+// (OpenBestAvailable -> NewFromConfigWithOptions(..., nil), and the library
+// exports no read-only open to an embedder at v1.3.0), bd's own shared-store
+// migrate gate consults the MAIN lane only and so returns nil, and MigrateUp
+// then replayed ignored 0012-0025 against a database bd owns — from a handle gc
+// opened purely to read.
+//
+// Gating on reality.EffectiveIgnored is what closes it, and it closes it by
+// construction rather than by prediction: the effective pair is exactly what
+// migrationSource.atLatest computes, so a database this function admits is one
+// for which migrate() returns at `current >= target` before it opens a
+// migration file. A clamped lane reads as ignored/behind, which is the true
+// statement — the library believes that database is behind.
+//
 // Both lanes are checked and the main lane is reported first when both drift,
 // because that is the one bd's own shared-store migration gate consults: a
 // reader who sees "main" knows bd would have refused too, where "ignored" is
-// drift only a reader comparing both lanes can see at all.
+// drift only a reader comparing both lanes can see at all. The main lane needs
+// no reality argument: mainSource declares no sentinels, so its raw cursor and
+// its effective cursor are the same number.
 //
 // lane and dir are spelled with the ProxiedSkew* constants rather than a second
 // private vocabulary, because the one consumer of a mismatch is the schema_skew
 // verdict and two spellings of "ignored" is how a payload field and a matcher
 // drift apart.
-func CursorsMatchPinned(c proxyendpoint.Cursors) (ok bool, lane, dir string) {
+func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorReality) (ok bool, lane, dir string) {
 	main, ignored := PinnedSchemaCursors()
+	effectiveIgnored := reality.EffectiveIgnored(c.Ignored)
 	switch {
 	case c.Main > main:
 		return false, ProxiedSkewLaneMain, ProxiedSkewDirAhead
 	case c.Main < main:
 		return false, ProxiedSkewLaneMain, ProxiedSkewDirBehind
-	case c.Ignored > ignored:
+	case effectiveIgnored > ignored:
 		return false, ProxiedSkewLaneIgnored, ProxiedSkewDirAhead
-	case c.Ignored < ignored:
+	case effectiveIgnored < ignored:
 		return false, ProxiedSkewLaneIgnored, ProxiedSkewDirBehind
 	default:
 		return true, "", ""

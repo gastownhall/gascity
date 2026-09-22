@@ -66,6 +66,53 @@ const (
 	cursorTableMain    = "schema_migrations"
 	cursorTableIgnored = "ignored_schema_migrations"
 	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+	columnExistsQuery  = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
+)
+
+// The IGNORED lane's sentinels, mirrored from the linked library.
+//
+// They are here because the number in ignored_schema_migrations is NOT the
+// number the library acts on. beads' migrationSource.currentVersion applies a
+// "cursor reality floor": before it believes a cursor it asks whether the live
+// schema corroborates it, and when a sentinel is missing it clamps the cursor
+// down (beads v1.3.0 internal/storage/schema/schema.go, currentVersion ->
+// cursorRealityFloor, and ignoredSource's sentinelTables/sentinelColumns at
+// :290-311). beads documents both contradicted shapes as real in the field: a
+// historical ignored-v16 ordinal collision leaves `leases` present without the
+// column 0016 adds, and a database materialized out of band can be missing the
+// wisps tables altogether.
+//
+// A reader that compares only the raw MAX therefore compares a number the
+// library does not use. On a database at raw ignored=26 with `leases.
+// granted_node` absent the library computes min(26, 11) = 11, decides the
+// ignored lane is not at latest, and MigrateUp replays 0012-0025 — against a
+// database bd owns, from a handle an embedder opened to read.
+//
+// The floor values are the library's, not gc's. They are EXPORTED so the drift
+// pin can live in internal/beads beside the cursor pin — this package cannot
+// import beadstest without a cycle — and because they are part of the gate's
+// stated contract rather than an implementation detail of the session.
+var ignoredSentinelTables = []string{"wisps", "wisp_dependencies"}
+
+// IgnoredSentinelTables returns the ignored lane's sentinel TABLES, copied so a
+// caller cannot edit the library's facts.
+func IgnoredSentinelTables() []string {
+	return append([]string(nil), ignoredSentinelTables...)
+}
+
+const (
+	// IgnoredSentinelColumnTable is the table carrying the ignored lane's
+	// single sentinel COLUMN.
+	IgnoredSentinelColumnTable = "leases"
+	// IgnoredSentinelColumnName is that sentinel column.
+	IgnoredSentinelColumnName = "granted_node"
+	// IgnoredSentinelColumnFloor is beads' replayFloor for that sentinel: the
+	// highest ignored version still believable when the column is absent.
+	IgnoredSentinelColumnFloor = 11
+	// IgnoredSentinelTableFloor is the floor for a missing sentinel TABLE. The
+	// library floors those at zero: the absence of ignored/0001's own tables is
+	// evidence against the whole series.
+	IgnoredSentinelTableFloor = 0
 )
 
 // ErrNoDatabase reports a probe asked to read cursors without naming a database.
@@ -155,11 +202,67 @@ func (c Cursors) String() string {
 	return "main=" + strconv.Itoa(c.Main) + " ignored=" + strconv.Itoa(c.Ignored)
 }
 
+// CursorReality is how much of a database's IGNORED-lane cursor the live schema
+// corroborates — the embedder-side mirror of beads' cursorRealityFloor.
+//
+// It is a separate type rather than a field on Cursors on purpose. Cursors is
+// the pair a diagnostic REPORTS (it is serialized into the doctor payload and
+// the OpenAPI schema), and the raw on-disk numbers are what an operator needs to
+// see there. The reality is what the GATE must decide on, and conflating the two
+// would either hide the disk truth from the payload or move a private clamp into
+// a public schema.
+//
+// Limited false means nothing was missing: believe the cursor as read, which is
+// the shape of every healthy database.
+type CursorReality struct {
+	// Limited reports that a sentinel the library probes is absent, so the
+	// library will disbelieve the cursor down to Floor.
+	Limited bool
+	// Floor is the highest ignored-lane version still believable.
+	Floor int
+	// Missing names the sentinel whose absence set the floor, for a message an
+	// operator can act on.
+	Missing string
+}
+
+// EffectiveIgnored is the ignored-lane cursor the LINKED LIBRARY will compute
+// from this database, which is not always the number on disk.
+//
+// This is the number a schema gate must compare, because it is the number
+// migrationSource.atLatest asks about and therefore the number that decides
+// whether MigrateUp replays the ignored series.
+func (r CursorReality) EffectiveIgnored(raw int) int {
+	if r.Limited && r.Floor < raw {
+		return r.Floor
+	}
+	return raw
+}
+
+// String renders the clamp for a message, or "" when nothing was missing.
+func (r CursorReality) String() string {
+	if !r.Limited {
+		return ""
+	}
+	return "the ignored lane's sentinel " + r.Missing +
+		" is absent, so the linked library believes that cursor only up to " + strconv.Itoa(r.Floor)
+}
+
+// CursorReport is everything one probe session reads about a database's schema:
+// the two cursors as they sit on disk, and how much of the ignored one the live
+// schema corroborates.
+type CursorReport struct {
+	Cursors Cursors
+	Reality CursorReality
+}
+
 // ProbeResult is one probe's outcome plus whatever it learned.
 type ProbeResult struct {
 	Outcome ProbeOutcome
 	// Cursors are meaningful only for ProbeServed.
 	Cursors Cursors
+	// Reality is the ignored lane's cursor reality, meaningful only for
+	// ProbeServed. A gate must read it: see CursorReality.
+	Reality CursorReality
 	// Err is the failure behind any outcome other than served.
 	Err error
 }
@@ -169,9 +272,9 @@ type ProbeResult struct {
 // listener or a database anywhere in the test binary: the classification is the
 // part with the bugs, and it is pure.
 type ProbeIO struct {
-	// Session performs the MySQL handshake and reads both cursors over one
-	// pinned connection.
-	Session func(ctx context.Context) (Cursors, error)
+	// Session performs the MySQL handshake and reads both cursors — and the
+	// ignored lane's cursor reality — over one pinned connection.
+	Session func(ctx context.Context) (CursorReport, error)
 	// Dial is a bare TCP connect-and-close, used only to disambiguate a failed
 	// session: something that accepts is a live proxy, and something that
 	// refuses is not listening at all.
@@ -200,10 +303,10 @@ func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration)
 	sessionCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	started := time.Now()
-	cursors, sessionErr := probeIO.Session(sessionCtx)
+	report, sessionErr := probeIO.Session(sessionCtx)
 	spent := time.Since(started)
 	if sessionErr == nil {
-		return ProbeResult{Outcome: ProbeServed, Cursors: cursors}
+		return ProbeResult{Outcome: ProbeServed, Cursors: report.Cursors, Reality: report.Reality}
 	}
 	// The budget expiring is a fact this function owns, and it outranks every
 	// spelling the driver may have put on the error. go-sql-driver turns a socket
@@ -414,7 +517,7 @@ func DefaultProbeIO(port int, database string) ProbeIO {
 func probeIOWithDriverTimeout(port int, database string, driverTimeout time.Duration) ProbeIO {
 	addr := net.JoinHostPort(Host, strconv.Itoa(port))
 	return ProbeIO{
-		Session: func(ctx context.Context) (Cursors, error) {
+		Session: func(ctx context.Context) (CursorReport, error) {
 			return readCursors(ctx, port, database, driverTimeout)
 		},
 		Dial: func(ctx context.Context) error {
@@ -448,14 +551,14 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // (internal/storage/schema/schema.go) and exists for the harsher version of the
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
-func readCursors(ctx context.Context, port int, database string, driverTimeout time.Duration) (Cursors, error) {
+func readCursors(ctx context.Context, port int, database string, driverTimeout time.Duration) (CursorReport, error) {
 	if strings.TrimSpace(database) == "" {
 		// Cursors read against no database are zeros, not evidence.
-		return Cursors{}, ErrNoDatabase
+		return CursorReport{}, ErrNoDatabase
 	}
 	connector, err := probeConnector(port, database, driverTimeout)
 	if err != nil {
-		return Cursors{}, err
+		return CursorReport{}, err
 	}
 	return readCursorsOver(ctx, connector)
 }
@@ -498,8 +601,8 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 // which nothing else holds and so cannot outlive this call. A caller's canceled
 // or expired context reaches the same returns through db.Conn and the queries,
 // so a probe the caller has already abandoned still closes its session here.
-func readCursorsOver(ctx context.Context, connector driver.Connector) (Cursors, error) {
-	var cursors Cursors
+func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorReport, error) {
+	var report CursorReport
 	db := sql.OpenDB(connector)
 	// One connection, never idle: the probe needs exactly one session, and it
 	// must leave nothing behind for anything to reuse.
@@ -508,19 +611,69 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (Cursors, 
 	defer db.Close() //nolint:errcheck // the probe's own handle, closed on every path
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return cursors, err
+		return report, err
 	}
 	defer conn.Close() //nolint:errcheck // closes the socket: this handle retains no idle connection
 	if err := conn.PingContext(ctx); err != nil {
-		return cursors, err
+		return report, err
 	}
-	if cursors.Main, err = readCursor(ctx, conn, cursorTableMain, mainCursorQuery); err != nil {
-		return cursors, err
+	if report.Cursors.Main, err = readCursor(ctx, conn, cursorTableMain, mainCursorQuery); err != nil {
+		return report, err
 	}
-	if cursors.Ignored, err = readCursor(ctx, conn, cursorTableIgnored, ignoredCursorQuery); err != nil {
-		return cursors, err
+	if report.Cursors.Ignored, err = readCursor(ctx, conn, cursorTableIgnored, ignoredCursorQuery); err != nil {
+		return report, err
 	}
-	return cursors, nil
+	// The reality check is skipped for a cursor of zero, exactly as the library
+	// skips it: currentVersion returns before cursorRealityFloor when the cursor
+	// is 0, because there is no claim to contradict.
+	if report.Cursors.Ignored > 0 {
+		if report.Reality, err = readIgnoredReality(ctx, conn); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+// readIgnoredReality asks the live schema how much of the ignored lane's cursor
+// it corroborates, over the SAME pinned connection as the cursor reads.
+//
+// The order is the library's: sentinel TABLES first, because they floor at zero
+// and short-circuit — no column probe could lower that answer — and the sentinel
+// COLUMN after. Both are point reads against information_schema, which always
+// succeed, so neither can poison the session's catalog snapshot the way a bare
+// SELECT against an absent table would.
+func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, error) {
+	for _, table := range ignoredSentinelTables {
+		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, table)
+		if err != nil {
+			return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel table %s: %w", table, err)
+		}
+		if exists == 0 {
+			return CursorReality{Limited: true, Floor: IgnoredSentinelTableFloor, Missing: table}, nil
+		}
+	}
+	exists, err := readExistsCount(ctx, conn, columnExistsQuery, IgnoredSentinelColumnTable, IgnoredSentinelColumnName)
+	if err != nil {
+		return CursorReality{}, fmt.Errorf("probing ignored-lane sentinel column %s.%s: %w",
+			IgnoredSentinelColumnTable, IgnoredSentinelColumnName, err)
+	}
+	if exists == 0 {
+		return CursorReality{
+			Limited: true,
+			Floor:   IgnoredSentinelColumnFloor,
+			Missing: IgnoredSentinelColumnTable + "." + IgnoredSentinelColumnName,
+		}, nil
+	}
+	return CursorReality{}, nil
+}
+
+// readExistsCount runs one information_schema COUNT(*) and returns it.
+func readExistsCount(ctx context.Context, conn *sql.Conn, query string, args ...any) (int, error) {
+	var count int
+	if err := conn.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // readCursor reads one cursor table's highest applied version, treating a table

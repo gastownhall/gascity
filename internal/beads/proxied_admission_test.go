@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,6 +176,17 @@ func servedProbe(cursors proxyendpoint.Cursors, calls *int) func(context.Context
 	}
 }
 
+// servedProbeWithReality answers with a served endpoint whose ignored-lane
+// cursor the live schema contradicts. It is the shape council A-F2 is about: the
+// number ON DISK is the pinned one, and the number the linked library acts on is
+// not.
+func servedProbeWithReality(cursors proxyendpoint.Cursors, reality proxyendpoint.CursorReality, calls *int) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+	return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		*calls++
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: cursors, Reality: reality}
+	}
+}
+
 func pinnedCursors() proxyendpoint.Cursors {
 	main, ignored := PinnedSchemaCursors()
 	return proxyendpoint.Cursors{Main: main, Ignored: ignored}
@@ -299,6 +311,52 @@ func TestAdmitTable(t *testing.T) {
 		}
 		if verdict.Verdict != ProxiedVerdictSchemaSkew || verdict.Lane != ProxiedSkewLaneIgnored || verdict.Dir != ProxiedSkewDirBehind {
 			t.Fatalf("verdict = %+v, want schema_skew{ignored,behind}", verdict)
+		}
+	})
+
+	// Council A-F2. The cursors on disk are EQUAL on both lanes and this row
+	// used to admit. The linked library does not read those numbers: with
+	// `leases.granted_node` absent it computes min(26, 11) = 11, decides the
+	// ignored lane is behind, and — because the proxied open is writable, bd's
+	// own shared-store migrate gate consults the MAIN lane only, and MigrateUp
+	// then calls ignoredSource.migrate unconditionally — replays ignored
+	// 0012-0025 against a database bd owns, from a handle gc opened purely to
+	// read. Nothing may be openable here.
+	t.Run("a clamped ignored lane refuses at equal on-disk cursors", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes, opened := 0, 0
+		reality := proxyendpoint.CursorReality{
+			Limited: true,
+			Floor:   proxyendpoint.IgnoredSentinelColumnFloor,
+			Missing: proxyendpoint.IgnoredSentinelColumnTable + "." + proxyendpoint.IgnoredSentinelColumnName,
+		}
+
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.Probe = servedProbeWithReality(pinnedCursors(), reality, &probes)
+
+		pin, err := Admit(context.Background(), in)
+		openIfAdmitted(pin, &opened)
+		if opened != 0 {
+			t.Fatal("a database whose ignored lane the library disbelieves yielded an openable pin; " +
+				"the library would have replayed ignored 0012-0025 against bd's database on open")
+		}
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictSchemaSkew || verdict.Lane != ProxiedSkewLaneIgnored || verdict.Dir != ProxiedSkewDirBehind {
+			t.Fatalf("verdict = %+v, want schema_skew{ignored,behind}", verdict)
+		}
+		if !verdict.Terminal() {
+			t.Error("a clamped lane is a fact about the database, so the refusal must be terminal")
+		}
+		if !strings.Contains(verdict.Error(), "leases.granted_node") {
+			t.Errorf("the refusal does not name the missing sentinel, so an operator cannot act on it: %v", verdict)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a cursor-reality mismatch spent %d ping / %d recover, want 0/0", pings, recovers)
 		}
 	})
 

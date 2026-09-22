@@ -365,11 +365,18 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 	probe := in.Probe(ctx, ep, in.Database)
 	switch probe.Outcome {
 	case proxyendpoint.ProbeServed:
-		ok, lane, dir := CursorsMatchPinned(probe.Cursors)
+		// The gate reads the probe's REALITY as well as its cursors: the raw
+		// ignored cursor is not the number the linked library acts on, and a
+		// gate that compared it admitted databases the library would migrate.
+		// See CursorsMatchPinned (council A-F2).
+		ok, lane, dir := CursorsMatchPinned(probe.Cursors, probe.Reality)
 		if !ok {
-			return Pin{}, false, NewSchemaSkewVerdictError(lane, dir,
-				fmt.Sprintf("database %s, this binary pins main=%d ignored=%d",
-					probe.Cursors, SchemaCursorMain, SchemaCursorIgnored))
+			detail := fmt.Sprintf("database %s, this binary pins main=%d ignored=%d",
+				probe.Cursors, SchemaCursorMain, SchemaCursorIgnored)
+			if clamp := probe.Reality.String(); clamp != "" {
+				detail += "; " + clamp
+			}
+			return Pin{}, false, NewSchemaSkewVerdictError(lane, dir, detail)
 		}
 		return Pin{
 			admitted:  true,
