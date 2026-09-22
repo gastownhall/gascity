@@ -344,6 +344,13 @@ func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 		}
 		pin, retry, admitErr := admitOnce(ctx, in, root, beadsDir)
 		if admitErr == nil {
+			// The scope admitted, so whatever incident the absent-record rung
+			// was spent on is OVER. Releasing it is what makes that rung "once
+			// per incident" rather than once per process (council A-F6): a
+			// missing record has no generation to key on, so without this the
+			// SECOND `bd dolt stop` in a long-running process was never
+			// recovered.
+			in.Observed.Release(absentRecordPingKey(in.ScopeRoot))
 			if !in.SkipMemo {
 				storeProxiedPin(in.ScopeRoot, in.Database, in.LongLived, root, beadsDir, pin, in.Now())
 			}
@@ -589,21 +596,39 @@ func (in AdmissionInput) escalateWithPing(ctx context.Context, generation, detai
 	}
 	// An absent record has no generation to key on, so it is keyed on the scope
 	// instead: the question "have we already asked bd about this scope's
-	// missing proxy in this process" has the same shape and the same answer.
+	// missing proxy" has the same shape and the same answer.
+	//
+	// It is bounded by the INCIDENT, not by the process (council A-F6). The
+	// design's rule is once per generation, and a missing generation was being
+	// treated as a permanent one: the first open of a scope whose proxy is
+	// stopped spent the ping, and every later open in that process returned
+	// proxy_gone and spent nothing — for ever, whether the first ping had
+	// succeeded or failed. Two things bound it now: Admit releases this key the
+	// moment the scope admits again, because an incident that ended is not a
+	// rung this one has spent, and the ledger's own TTL expires it anyway.
 	key := generation
 	if key == "" {
-		key = "scope:" + in.ScopeRoot
+		key = absentRecordPingKey(in.ScopeRoot)
 	}
 	if !in.Observed.Add(key) {
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
-			detail+"; the provider was already pinged for this generation in this process", cause)
+			detail+"; the provider was already pinged for this generation", cause)
 	}
 	if err := in.Ops.Ping(ctx, in.ScopeRoot); err != nil {
+		// The rung bought nothing, so it is not spent. A ping that failed on
+		// gc's own lifecycle semaphore must not poison the scope for the next
+		// open, which may well find the semaphore free.
+		in.Observed.Release(key)
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
 			detail+"; the provider ping failed", err)
 	}
 	return Pin{}, true, NewNonTerminalProxiedVerdictError(verdict, detail+"; pinged the provider, re-admitting", cause)
 }
+
+// absentRecordPingKey is the ledger key for a scope with no proxy record at
+// all. It is namespaced so it can never collide with a real generation, which
+// is a {pid, birth} pair.
+func absentRecordPingKey(scopeRoot string) string { return "scope:" + scopeRoot }
 
 // sameGeneration re-reads the record and reports whether it still names the
 // generation the caller was working with.

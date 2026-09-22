@@ -946,3 +946,71 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 			"reason must not count as the rung", pings)
 	}
 }
+
+// TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess is council A-F6.
+//
+// escalateWithPing has no generation for an absent record, so it keys the rung
+// on the scope. The ledger was never-expiring and the key was never released,
+// so the FIRST open of a scope whose proxy is stopped spent the ping and every
+// later open in that process returned proxy_gone having spent nothing —
+// whether the first ping had succeeded or failed.
+//
+// For a controller that is the difference between the P2-15 acceptance row
+// ("one `bd dolt stop` costs one ping and a re-pin") and "the second stop in
+// this process is never recovered": the guard leaves an absent record
+// undecided, the reads fail transiently, the reopen hook re-admits, and
+// admission declines to ask.
+func TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	observed := NewGenerationSet()
+	probes := 0
+
+	var pingErr error
+	ops := &admissionOps{onPing: func() error {
+		if pingErr != nil {
+			return pingErr
+		}
+		// bd restarted its proxy.
+		f.writeRecord(6100, "11223344")
+		return nil
+	}}
+
+	in := baseAdmissionInput(f, ops)
+	in.Observed = observed
+	in.Probe = servedProbe(pinnedCursors(), &probes)
+
+	// Incident 1, and the ping fails on something of gc's own.
+	f.removeRecord()
+	pingErr = errors.New("provider op timed out waiting on the lifecycle semaphore")
+	if _, err := Admit(context.Background(), in); err == nil {
+		t.Fatal("Admit succeeded with no proxy record and a failing ping")
+	}
+	if pings, _ := ops.counts(); pings != 1 {
+		t.Fatalf("the first open spent %d ping(s), want 1", pings)
+	}
+
+	// The next open must be able to ask again: the failed ping bought nothing.
+	pingErr = nil
+	pin, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("the second open could not re-ask: %v", err)
+	}
+	if pin.PoolKey().PID != 6100 {
+		t.Fatalf("admitted pid %d, want the proxy the ping produced (6100)", pin.PoolKey().PID)
+	}
+	if pings, _ := ops.counts(); pings != 2 {
+		t.Fatalf("the second open spent %d ping(s) in total, want 2: a ping that failed for gc's own "+
+			"reason must not poison the scope", pings)
+	}
+
+	// Incident 2: the operator stops the proxy again, in the same process.
+	// This is the case that could never be recovered.
+	f.removeRecord()
+	if _, err := Admit(context.Background(), in); err != nil {
+		t.Fatalf("the second incident was not recovered: %v", err)
+	}
+	if pings, _ := ops.counts(); pings != 3 {
+		t.Fatalf("the second `bd dolt stop` in this process spent %d ping(s) in total, want 3; "+
+			"the scope was poisoned for the process lifetime", pings)
+	}
+}
