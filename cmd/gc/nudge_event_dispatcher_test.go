@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,11 +345,11 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 // whether each caller closed the handle it was handed.
 type countingCloseNudgesStore struct {
 	beads.Store
-	closes *int32
+	closes *atomic.Int32
 }
 
 func (s countingCloseNudgesStore) CloseStore() error { //nolint:unparam // signature fixed by the interface closeBeadStoreHandle asserts on
-	*s.closes++
+	s.closes.Add(1)
 	return nil
 }
 
@@ -363,10 +364,10 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 	dir, d, info := newNudgeDispatcherFixture(t, fake)
 
 	backing := openNudgeBeadStore(dir)
-	var opens, closes int32
+	var opens, closes atomic.Int32
 	orig := openNudgeBeadStore
 	openNudgeBeadStore = func(_ string) beads.NudgesStore {
-		opens++
+		opens.Add(1)
 		return beads.NudgesStore{Store: countingCloseNudgesStore{Store: backing.Store, closes: &closes}}
 	}
 	t.Cleanup(func() { openNudgeBeadStore = orig })
@@ -382,11 +383,27 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 		t.Fatalf("queued nudge not delivered; state=%+v calls=%v", queueStateSnapshot(t, dir), fake.SnapshotCalls())
 	}
 
-	if opens == 0 {
-		t.Fatalf("expected runPass to open at least one nudges store, opened=%d", opens)
+	// waitForDeliveredNudge observes queue/provider state only, so delivery can
+	// become visible before runPass's deferred close has run; poll until the
+	// counts settle instead of asserting immediately after delivery.
+	deadline := time.Now().Add(2 * time.Second)
+	var gotOpens, gotCloses int32
+	for {
+		gotOpens, gotCloses = opens.Load(), closes.Load()
+		if gotOpens > 0 && gotCloses == gotOpens {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if closes != opens {
-		t.Fatalf("runPass leaked store handles: opened=%d closed=%d", opens, closes)
+
+	if gotOpens == 0 {
+		t.Fatalf("expected runPass to open at least one nudges store, opened=%d", gotOpens)
+	}
+	if gotCloses != gotOpens {
+		t.Fatalf("runPass leaked store handles: opened=%d closed=%d", gotOpens, gotCloses)
 	}
 	_ = d
 }
@@ -402,17 +419,34 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 // and calls runPass directly (an empty queue, so deliverPendingQueuedNudges /
 // nudgeMaintenanceStore never opens) to isolate runPass's own close-guard
 // behavior from that separate, pre-existing, unconditional-close code path.
+//
+// Built directly rather than via newNudgeDispatcherFixture, and without
+// driving update()'s resubscribe path: the fixture's fake session stream
+// leads with a buffered resync frame that the forward goroutine turns into
+// an async kickAll/runPass the moment update(..., true) subscribes, which
+// raced this test's own direct entry.routes mutation and runPass call under
+// -race (both read/write cliStorageRoutes concurrently with no
+// synchronization between the two runPass callers).
 func TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore(t *testing.T) {
-	fake := newNudgeEventedFake()
-	dir, d, _ := newNudgeDispatcherFixture(t, fake)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	openNudgeBeadStore(dir)
 
-	var closes int32
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test")
+	d.mu.Lock()
+	d.cfg = &config.City{}
+	d.sp = newNudgeEventedFake()
+	d.mu.Unlock()
+
+	var closes atomic.Int32
 	shared := countingCloseNudgesStore{Store: beads.NewMemStore(), closes: &closes}
 
 	// Relocate the NUDGES class to the shared, counting-close store, mirroring
 	// TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges's
 	// direct-mutation approach: cliStorageRoutes(dir) has already resolved (and
-	// cached) to nil via the fixture's own openNudgeBeadStore call.
+	// cached) to nil via the openNudgeBeadStore call above.
 	entry := cliStorageRoutesEntryFor(filepath.Clean(dir))
 	entry.routes = &storageRoutes{
 		stores: map[coordclass.Class]beads.Store{
@@ -424,8 +458,38 @@ func TestNudgeEventDispatcherRunPassDoesNotCloseRelocatedSharedStore(t *testing.
 
 	d.runPass("", 0)
 
-	if closes != 0 {
-		t.Fatalf("runPass closed the shared relocated-class store %d time(s); it does not own that handle and must never close it", closes)
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("runPass closed the shared relocated-class store %d time(s); it does not own that handle and must never close it", got)
+	}
+}
+
+// TestNudgeEventDispatcherRunPassClosesRawSessionStore reproduces the #4968
+// leak in the OTHER handle runPass opens: the raw city store it resolves for
+// session-class reads (openRawCityStoreForSessionResolution, wired to
+// openCityStoreAt). That store is always a fresh one-shot handle -- never
+// routed through cliStorageRoutes' memoized entries -- so runPass
+// unconditionally owns it and must close it on every pass, unlike the
+// conditionally-owned nudges-class store above. Calls runPass directly (no
+// background goroutine) so the counters need no synchronization.
+func TestNudgeEventDispatcherRunPassClosesRawSessionStore(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, _ := newNudgeDispatcherFixture(t, fake)
+
+	backing := openNudgeBeadStore(dir)
+	var opens, closes atomic.Int32
+	orig := openRawCityStoreForSessionResolution
+	openRawCityStoreForSessionResolution = func(_ string) (beads.Store, error) {
+		opens.Add(1)
+		return countingCloseNudgesStore{Store: backing.Store, closes: &closes}, nil
+	}
+	t.Cleanup(func() { openRawCityStoreForSessionResolution = orig })
+
+	d.runPass("", 0)
+
+	if gotOpens := opens.Load(); gotOpens == 0 {
+		t.Fatalf("expected runPass to open the raw session store, opened=%d", gotOpens)
+	} else if gotCloses := closes.Load(); gotCloses != gotOpens {
+		t.Fatalf("runPass leaked the raw session store handle: opened=%d closed=%d", gotOpens, gotCloses)
 	}
 }
 

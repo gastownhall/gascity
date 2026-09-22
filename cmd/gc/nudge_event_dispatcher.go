@@ -14,6 +14,12 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
+// openRawCityStoreForSessionResolution is a test seam over openCityStoreAt
+// (mirrors openNudgeBeadStore) so tests can substitute a counting-close
+// wrapper and assert runPass closes the raw store handle it opens for
+// session-class resolution on every pass.
+var openRawCityStoreForSessionResolution = openCityStoreAt
+
 // nudgeEventRetryEpsilon pads each delayed retry an attempt may schedule, so
 // the re-check lands just past the quiescence boundary rather than exactly on
 // it. nudgeEventRetryBudget bounds how many such retries one kick may earn:
@@ -345,11 +351,19 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 	// ([beads.classes.nudges] set, [beads.classes.sessions] left default).
 	// cliSessionStore only diverges from its input when sessions themselves
 	// relocate, so an unrelocated raw store here is required for correctness.
-	rawStore, err := openCityStoreAt(d.cityPath)
+	rawStore, err := openRawCityStoreForSessionResolution(d.cityPath)
 	if err != nil {
 		fmt.Fprintf(d.stderr, "%s: nudge event dispatch: opening city store for session resolution: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
 		return
 	}
+	// Unlike store.Store above, rawStore is always a fresh one-shot handle
+	// from openCityStoreAt (not routed through cliStorageRoutes' memoized
+	// entries), so this pass unconditionally owns it and must always close it.
+	defer func() {
+		if err := closeBeadStoreHandle(rawStore); err != nil {
+			fmt.Fprintf(d.stderr, "%s: nudge event dispatch: closing city store: %v\n", d.logPrefix, err) //nolint:errcheck // best-effort stderr
+		}
+	}()
 	sessStore := cliSessionStore(rawStore, cfg, d.cityPath)
 	sessionBeads, err := loadSessionBeadSnapshot(sessStore)
 	if err != nil {
