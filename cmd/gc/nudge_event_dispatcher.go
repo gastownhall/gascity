@@ -289,6 +289,17 @@ func (d *nudgeEventDispatcher) worker(ctx context.Context) {
 		switch {
 		case full:
 			d.runPass("", nudgeEventRetryBudget)
+			// A full pass's own re-arm coverage is all-or-nothing: it has no
+			// per-session view of which of these deliverInvoked, so it cannot
+			// re-arm a specific due-but-not-yet-delivered session (runPass
+			// only re-arms for sessionFilter != ""). Run each due targeted
+			// kick through its own filtered pass too, so it keeps its
+			// individual re-arm-from-DeliverAfter coverage even when a full
+			// pass fires in the same cycle; the full pass having already
+			// delivered it makes the repeat call a cheap no-op query.
+			for i, name := range due {
+				d.runPass(name, dueBudget[i])
+			}
 		case len(due) > 0:
 			for i, name := range due {
 				d.runPass(name, dueBudget[i])
