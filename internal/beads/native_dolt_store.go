@@ -135,9 +135,24 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	keys := nativeDoltOpenEnvKeys
+	return withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+}
+
+// withProjectedOpenEnvLocked is the projection itself, parameterised by the key
+// list it decides.
+//
+// The list is a parameter rather than the package-level default because the
+// proxied-native window projects a DIFFERENT set (see
+// proxiedNativeOpenEnvKeys): it must reach the author pair and explicitly unset
+// bd's migration unlocks, neither of which belongs in the list every direct and
+// hosted open uses. Growing the shared list instead would change what a
+// flag-off open does — a key listed here but absent from env is UNSET, so
+// adding GIT_AUTHOR_NAME would silently strip an operator's git identity from
+// every direct native open in the process.
+func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, credentialCommand string) (func(), error) {
+	keys := openEnvKeys
 	if credentialCommand != "" {
-		keys = append(append([]string(nil), nativeDoltOpenEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
+		keys = append(append([]string(nil), openEnvKeys...), "BEADS_DOLT_CREDENTIAL_COMMAND")
 	}
 	previous := make(map[string]*string, len(keys))
 	for _, key := range keys {
@@ -206,7 +221,26 @@ func withWithheldBeadsEnv() (func(), error) {
 // nativeDoltOpenEnvMu is already held. Keeping this operation on the same lock
 // as snapshots and ordinary native opens makes the process environment appear
 // atomic to every caller that uses the guarded helpers.
+//
+// It withholds BEADS_ and nothing else, on purpose. Direct and hosted opens are
+// the callers, and their contract is unchanged by the proxied lane: a second
+// prefix here would alter what every one of them projects.
 func withWithheldBeadsEnvLocked() (func(), error) {
+	return withWithheldPrefixesLocked(beadsEnvPrefix)
+}
+
+// withWithheldPrefixesLocked unsets every ambient variable under any of the
+// given prefixes and returns the restore, with nativeDoltOpenEnvMu already
+// held.
+//
+// It is prefix-parameterised rather than fixed at BEADS_ because the
+// proxied-native window has a second namespace to answer for: bd's own BD_
+// variables configure migration and schema-gate behavior that gc must not
+// inherit from whatever shell it was launched from when it opens the linked
+// library against a database bd owns. A restore is registered per key before
+// any unset fails, so a partial withholding cannot leave the process env in a
+// state no caller asked for.
+func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
 	type withheld struct{ key, value string }
 	var previous []withheld
 	restore := func() {
@@ -214,9 +248,17 @@ func withWithheldBeadsEnvLocked() (func(), error) {
 			_ = os.Setenv(entry.key, entry.value)
 		}
 	}
+	hasPrefix := func(key string) bool {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(key, prefix) {
+				return true
+			}
+		}
+		return false
+	}
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(key, beadsEnvPrefix) {
+		if !ok || !hasPrefix(key) {
 			continue
 		}
 		previous = append(previous, withheld{key: key, value: value})
@@ -339,8 +381,16 @@ type NativeDoltStore struct {
 	// of installing it after the store is permanently closed.
 	closed bool
 	// readRetryBudgetOverride, when non-zero, replaces nativeReadRetryBudget as the
-	// single wall-clock bound on a read's whole reconnect-and-retry chain. Only
-	// tests set it (to exercise budget exhaustion without a real 90s wait).
+	// single wall-clock bound on a read's whole reconnect-and-retry chain.
+	//
+	// Tests set it directly to exercise budget exhaustion without a real 90s
+	// wait. Production sets it through WithNativeReadRetryBudget on the
+	// proxied-native path, where the 90s default is the wrong number by an
+	// order of magnitude: that budget exists to span a MANAGED Dolt hard-kill
+	// and rebind, which gc performs itself and can therefore wait out. A
+	// bd-owned proxy is not gc's to restart, so a read that cannot reach it
+	// should demote to the bd leaf in seconds rather than hold a caller
+	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
 
 	// condWritesStamp carries the factory-stamped conditional-writes mode. The
@@ -370,6 +420,28 @@ type NativeDoltStoreOption func(*NativeDoltStore)
 // fresh storage handle. See NativeDoltStore.reopen.
 func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.reopen = reopen }
+}
+
+// WithNativeReadRetryBudget replaces the 90s default wall-clock bound on one
+// read's whole reconnect-and-retry chain.
+//
+// It is a production option, not a test hook. The default is sized for a
+// managed-Dolt rebind gc performs itself: a read that spans one should recover
+// rather than fail, so it waits out ~40-56s of mysql i/o timeouts plus the
+// restart. A proxied-native handle is in the opposite situation — bd owns the
+// proxy and its Dolt child, gc never restarts either, and the recovery for an
+// unreachable endpoint is to demote this handle to the bd leaf. Holding a
+// caller for 90s first buys nothing and hides the demotion behind a timeout
+// nobody can attribute.
+//
+// A non-positive duration is ignored, so a misread knob leaves the default
+// rather than producing a store whose every read fails instantly.
+func WithNativeReadRetryBudget(budget time.Duration) NativeDoltStoreOption {
+	return func(s *NativeDoltStore) {
+		if budget > 0 {
+			s.readRetryBudgetOverride = budget
+		}
+	}
 }
 
 // WithNativeDoltStoreReservedIDPrefixes fences Create to the id namespaces the
