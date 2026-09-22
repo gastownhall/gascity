@@ -719,11 +719,7 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("store open failed: %v", err)
 		return r
 	}
-	if err := result.Store.Ping(); err != nil {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("store ping failed: %v", err)
-		return r
-	}
+	pingErr := result.Store.Ping()
 	// The structured half of the answer, for the consumers that must not parse
 	// the message below. On a proxied scope it carries gc's read-only account
 	// of bd's proxy — the record, the liveness verdict and its evidence, the
@@ -756,6 +752,22 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		PreflightReason: result.Diagnostic.PreflightReason,
 		Proxied:         proxied,
 	})
+	// The ping is reported AFTER the payload is built, not instead of it
+	// (council B-F2). Returning on the ping error dropped the whole proxied
+	// diagnostic block — the generation, the verdict, whether the handle has
+	// stood down — on precisely the failure it exists to explain, and left an
+	// operator with one line of driver text. The failure is still an error; it
+	// now arrives with the evidence attached.
+	//
+	// It is read after LiveProxiedDiagnostic as well as after newStore, because
+	// on the proxied lane a failing Ping is itself a demotion trigger: it runs
+	// through withReadRetry, so its verdict stands the native leaf down, and the
+	// diagnostic must be the account the handle gives once that has happened.
+	if pingErr != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("store ping failed: %v", pingErr)
+		return r
+	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameNativeDoltStore && proxied != nil {
 		// The proxied-native lane. The store name is NativeDoltStore because that
 		// is what serves the reads (design 5.3); the message is what tells an

@@ -1006,3 +1006,90 @@ func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
 		t.Fatalf("poolStale = %d after a lone mark, want 0", got)
 	}
 }
+
+// TestNativeDoltStorePingGoesThroughTheReadPath is council B-F2.
+//
+// P2-09 deliberately re-points ProxiedStore.Ping at the native leaf so doctor's
+// per-scope health check costs zero forks. That made Ping the lane's
+// most-repeated read — and it was the one read that reached acquireStorage
+// directly instead of going through withReadRetry, so it sat outside both
+// mechanisms the proxied lane depends on:
+//
+//  1. It did not honor poolStale. The guard tick's re-pin is adoptPin plus
+//     markPoolStale, and the property the root-move row asserts is that no read
+//     is served from the old generation before the mark is honored. On the H7
+//     shape the old socket is still alive and serving the MOVED database, so an
+//     unhardened Ping answered cleanly and doctor reported the scope healthy
+//     after the tick already knew the generation had changed.
+//  2. Its failures could never be classified, so a Ping against a dead proxy
+//     returned a raw driver error, ProxiedStore.Ping's classifyReadError found
+//     no verdict, and a handle every other read would have demoted stayed
+//     "native".
+//
+// Every arm below drives the read path to a decision BEFORE the storage call,
+// which is also what keeps the test honest: beadslib.Storage.GetStatistics
+// returns a type from beads' internal package, so no in-process fixture can
+// implement it (the same constraint G3 recorded as P2-09 deviation 5). What is
+// asserted is therefore the routing, which is the whole finding.
+func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
+	t.Run("a stale mark is honored before the ping is served", func(t *testing.T) {
+		store := newNativeDoltStoreForTest(healthySearchStorage())
+		var reopens int32
+		refused := errors.New("the re-admission refused this generation")
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return nil, refused
+		}
+
+		// The guard tick saw the generation move.
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		}
+		err := store.Ping()
+		if got := atomic.LoadInt32(&reopens); got != 1 {
+			t.Fatalf("Ping re-pointed the pool %d time(s), want 1: it was served from the OLD generation, "+
+				"which on a moved root is a clean answer about the wrong database", got)
+		}
+		if !errors.Is(err, refused) {
+			t.Fatalf("Ping err = %v, want the re-pin's refusal", err)
+		}
+	})
+
+	t.Run("a proxied ping that spends its budget is a verdict", func(t *testing.T) {
+		store := newNativeDoltStoreForTest(healthySearchStorage())
+		store.proxiedReadVerdicts = true
+		store.readRetryBudgetOverride = 150 * time.Millisecond
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			return nil, errors.New("dial tcp 127.0.0.1:44561: i/o timeout")
+		}
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		}
+
+		verdict, ok := ProxiedVerdictOf(store.Ping())
+		if !ok {
+			t.Fatal("a ping that spent its whole budget produced no verdict, so the wrapper cannot demote on it")
+		}
+		if verdict.Verdict != ProxiedVerdictBudgetExhausted {
+			t.Errorf("verdict = %q, want %q", verdict.Verdict, ProxiedVerdictBudgetExhausted)
+		}
+		if verdict.Terminal() {
+			t.Error("a spent budget says nothing about the endpoint, so it must be non-terminal")
+		}
+	})
+
+	t.Run("a direct ping is still untyped", func(t *testing.T) {
+		store := newNativeDoltStoreForTest(healthySearchStorage())
+		store.readRetryBudgetOverride = 150 * time.Millisecond
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			return nil, errors.New("dial tcp 127.0.0.1:3307: i/o timeout")
+		}
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		}
+
+		if _, typed := ProxiedVerdictOf(store.Ping()); typed {
+			t.Fatal("a DIRECT handle rendered a proxied verdict from a ping")
+		}
+	})
+}

@@ -2161,16 +2161,36 @@ func (s *NativeDoltStore) Delete(id string) error {
 }
 
 // Ping verifies that the upstream storage is reachable.
+//
+// It goes through withReadRetry like every other read on this store, and that
+// is load-bearing rather than tidy (council B-F2). A Ping that reached
+// acquireStorage directly sat outside BOTH mechanisms the proxied lane depends
+// on:
+//
+//   - It did not honor poolStale. The guard tick's re-pin is adoptPin plus
+//     markPoolStale, and the property the root-move row asserts is that no read
+//     is served from the old generation before the mark is honored. A Ping is a
+//     read, and it was served from the old generation's pool — so on the H7
+//     root-move shape, where the old socket is still alive and serving the MOVED
+//     database, `gc doctor` pinged the moved database, got a clean answer, and
+//     reported the scope healthy after the tick already knew the generation had
+//     changed.
+//   - Its failures were never classified. proxiedReadVerdict and
+//     proxiedReadBudgetVerdict are reached only from withReadRetry, so a Ping
+//     against a dead proxy returned a raw driver error, ProxiedStore.Ping's
+//     classifyReadError found no verdict, and a handle every other read would
+//     have demoted stayed "native".
+//
+// It is also the lane's most-repeated read: P2-09 re-points ProxiedStore.Ping
+// at this method so doctor's per-scope health check costs zero forks, where
+// before PR2 it was BdStore.Ping — a `bd list --limit 0` carrying bd's own
+// transient-read recovery. Swapping a hardened read for an unhardened one on
+// that path is the trade this fixes.
 func (s *NativeDoltStore) Ping() error {
-	storage, release, err := s.acquireStorage()
-	if err != nil {
+	return s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		_, err := storage.GetStatistics(ctx)
 		return err
-	}
-	defer release()
-	ctx, cancel := nativeDoltOperationContext(context.TODO())
-	defer cancel()
-	_, err = storage.GetStatistics(ctx)
-	return err
+	})
 }
 
 // DepAdd records a dependency between two beads.
