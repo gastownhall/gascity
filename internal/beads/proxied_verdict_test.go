@@ -7,6 +7,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,14 +140,14 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 	}
 	for name, verdict := range declared {
 		if !covered[verdict] {
-			t.Errorf("%s (%q) is declared in proxied_verdict.go and is in neither half of this table.\n"+
+			t.Errorf("%s (%q) is declared in this package and is in neither half of this table.\n"+
 				"Add it, and decide its terminality deliberately: Terminal()'s default arm returns TRUE, "+
 				"so a verdict nobody classified becomes a permanent demotion to the bd CLI.", name, verdict)
 		}
 		delete(covered, verdict)
 	}
 	for verdict := range covered {
-		t.Errorf("the table classifies %q, which proxied_verdict.go no longer declares", verdict)
+		t.Errorf("the table classifies %q, which this package no longer declares", verdict)
 	}
 
 	// The one override the design needs: admission's bounded drain expiring
@@ -250,30 +251,58 @@ func TestProxiedKnobsDefaultAndFloor(t *testing.T) {
 	}
 }
 
-// declaredProxiedVerdicts reads every ProxiedVerdict constant out of
-// proxied_verdict.go, keyed by its Go name.
+// declaredProxiedVerdicts reads every ProxiedVerdict constant declared anywhere
+// in this package's non-test source, keyed by its Go name.
 //
 // It parses the source rather than listing the constants, because a list is the
 // thing the guard above is trying not to be: Go has no enumeration for a named
 // string type, so the only source of truth that cannot drift from production is
 // production's own declaration.
+//
+// It walks EVERY non-test file, not proxied_verdict.go alone (council pr2
+// D-F15): a seventeenth verdict declared in a sibling file was invisible to a
+// one-file guard, and Terminal()'s `default: return true` then made it a
+// permanent demotion — the hazard the guard exists for. It also recognizes the
+// conversion spelling, `X = ProxiedVerdict("x")`, which carries no declared
+// type for the block-type tracking to see.
 func declaredProxiedVerdicts(t *testing.T) map[string]ProxiedVerdict {
 	t.Helper()
-	const source = "proxied_verdict.go"
-	fileSet := token.NewFileSet()
-	parsed, err := parser.ParseFile(fileSet, source, nil, 0)
+	sources, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse %s: %v", source, err)
+		t.Fatalf("list the package's sources: %v", err)
 	}
-
+	fileSet := token.NewFileSet()
 	declared := map[string]ProxiedVerdict{}
+	sawVerdictFile := false
+	for _, source := range sources {
+		if strings.HasSuffix(source, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fileSet, source, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", source, err)
+		}
+		if source == "proxied_verdict.go" {
+			sawVerdictFile = true
+		}
+		collectProxiedVerdicts(t, source, parsed, declared)
+	}
+	if !sawVerdictFile || len(declared) == 0 {
+		t.Fatalf("found no ProxiedVerdict constants (proxied_verdict.go seen: %v); the guard is broken, not satisfied", sawVerdictFile)
+	}
+	return declared
+}
+
+// collectProxiedVerdicts adds one file's ProxiedVerdict constants to declared.
+func collectProxiedVerdicts(t *testing.T, source string, parsed *ast.File, declared map[string]ProxiedVerdict) {
+	t.Helper()
 	for _, decl := range parsed.Decls {
 		general, ok := decl.(*ast.GenDecl)
 		if !ok || general.Tok != token.CONST {
 			continue
 		}
 		// A const block states its type once, on the first spec; the rest
-		// inherit it. Tracking it is what keeps the sibling blocks in this file
+		// inherit it. Tracking it is what keeps the sibling blocks
 		// (ProxiedSkewLane*, which are untyped strings) out of the set.
 		typeName := ""
 		for _, spec := range general.Specs {
@@ -286,14 +315,23 @@ func declaredProxiedVerdicts(t *testing.T) map[string]ProxiedVerdict {
 			} else if value.Type != nil {
 				typeName = ""
 			}
-			if typeName != "ProxiedVerdict" {
-				continue
-			}
 			for i, name := range value.Names {
 				if i >= len(value.Values) {
 					continue
 				}
-				literal, ok := value.Values[i].(*ast.BasicLit)
+				expr := value.Values[i]
+				if typeName != "ProxiedVerdict" {
+					// The conversion spelling declares no type on the spec.
+					call, ok := expr.(*ast.CallExpr)
+					if !ok || len(call.Args) != 1 {
+						continue
+					}
+					if fun, ok := call.Fun.(*ast.Ident); !ok || fun.Name != "ProxiedVerdict" {
+						continue
+					}
+					expr = call.Args[0]
+				}
+				literal, ok := expr.(*ast.BasicLit)
 				if !ok || literal.Kind != token.STRING {
 					t.Fatalf("%s: %s is not a string literal; this guard cannot read it", source, name.Name)
 				}
@@ -305,8 +343,4 @@ func declaredProxiedVerdicts(t *testing.T) map[string]ProxiedVerdict {
 			}
 		}
 	}
-	if len(declared) == 0 {
-		t.Fatalf("%s declared no ProxiedVerdict constants; the guard is broken, not satisfied", source)
-	}
-	return declared
 }
