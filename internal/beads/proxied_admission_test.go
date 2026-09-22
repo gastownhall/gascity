@@ -583,7 +583,13 @@ func TestAdmitTable(t *testing.T) {
 		ops := &admissionOps{}
 		probes := 0
 
+		// The memo is LIVE here (council C-F2). Every test that pinned this
+		// refusal used to set SkipMemo, which is the mechanism production does
+		// not have -- and the one the refusal was being bypassed through.
+		ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { ForgetProxiedPin(f.scopeRoot, "beads") })
 		in := baseAdmissionInput(f, ops)
+		in.SkipMemo = false
 		in.LongLived = true
 		in.Probe = servedProbe(pinnedCursors(), &probes)
 
@@ -608,6 +614,18 @@ func TestAdmitTable(t *testing.T) {
 		}
 		if pin.IdlePolicy().Kind != proxyendpoint.IdleFinite {
 			t.Errorf("idle policy = %s, want finite", pin.IdlePolicy())
+		}
+
+		// And the one-shot's memoized pass must not become the long-lived
+		// answer. This is the ORDER production runs it in --
+		// cmd/gc/main.go's openStoreAtForCity is longLived=false and
+		// cmd/gc/api_state.go is LongLived=true, in one binary.
+		in.LongLived = true
+		_, err = Admit(context.Background(), in)
+		verdict, ok = ProxiedVerdictOf(err)
+		if !ok || verdict.Verdict != ProxiedVerdictIdlePolicyFinite {
+			t.Fatalf("a long-lived open after a one-shot memoized its pass = %v, want idle_policy_finite; "+
+				"gc would hold a resident handle on a proxy bd is going to retire", err)
 		}
 	})
 
@@ -680,6 +698,39 @@ func TestAdmitMemoHoldsRepeatedOpensToOneProbeSession(t *testing.T) {
 	}
 	if probes != 3 {
 		t.Errorf("probe sessions with SkipMemo = %d, want 3", probes)
+	}
+
+	// The lane is part of the key (council C-F2), so a one-shot's entry is not
+	// a long-lived open's answer. That costs one extra session per scope per
+	// lane, which is the price of the memo answering the question it was asked:
+	// the doctor run the memo exists for opens one lane, so its 17-to-1 saving
+	// is untouched.
+	in.SkipMemo = false
+	in.LongLived = true
+	if _, err := Admit(context.Background(), in); err != nil {
+		t.Fatalf("Admit(long-lived): %v", err)
+	}
+	if probes != 4 {
+		t.Fatalf("a long-lived open read a ONE-SHOT memo entry (probe sessions = %d, want 4)", probes)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := Admit(context.Background(), in); err != nil {
+			t.Fatalf("Admit(long-lived) #%d: %v", i, err)
+		}
+	}
+	if probes != 4 {
+		t.Fatalf("the long-lived lane is not memoized at all (probe sessions = %d, want 4)", probes)
+	}
+
+	// And a generation change forgets BOTH lanes: the contradiction the tick
+	// just proved is not one lane's.
+	ForgetProxiedPin(f.scopeRoot, "beads")
+	in.LongLived = false
+	if _, err := Admit(context.Background(), in); err != nil {
+		t.Fatalf("Admit after ForgetProxiedPin: %v", err)
+	}
+	if probes != 5 {
+		t.Fatalf("ForgetProxiedPin left the one-shot lane memoized (probe sessions = %d, want 5)", probes)
 	}
 }
 

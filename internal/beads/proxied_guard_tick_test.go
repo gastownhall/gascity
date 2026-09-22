@@ -448,6 +448,11 @@ func TestProxiedGuardStartIsIdempotentPerStore(t *testing.T) {
 func TestProxiedOpenFiniteIdleLongLivedFallsToBdStore(t *testing.T) {
 	f := newAdmissionFixture(t, "30")
 	probes := 0
+	// The memo is LIVE (council C-F2). Production does not set SkipMemo, and
+	// with a lane-blind memo key the one-shot admission below would hand its
+	// pass to the long-lived open at the end of this test.
+	ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { ForgetProxiedPin(f.scopeRoot, "beads") })
 	input := AdmissionInput{
 		ScopeRoot:    f.scopeRoot,
 		Database:     "beads",
@@ -456,7 +461,6 @@ func TestProxiedOpenFiniteIdleLongLivedFallsToBdStore(t *testing.T) {
 		Observed:     NewGenerationSet(),
 		Recovered:    NewGenerationSet(),
 		Sleep:        func(context.Context, time.Duration) error { return nil },
-		SkipMemo:     true,
 	}
 
 	input.LongLived = true

@@ -267,7 +267,7 @@ func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 	beadsDir := filepath.Join(in.ScopeRoot, ".beads")
 
 	if !in.SkipMemo {
-		if pin, ok := lookupProxiedPin(in.ScopeRoot, in.Database, root, beadsDir, in.Now()); ok {
+		if pin, ok := lookupProxiedPin(in.ScopeRoot, in.Database, in.LongLived, root, beadsDir, in.Now()); ok {
 			return pin, nil
 		}
 	}
@@ -286,7 +286,7 @@ func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 		pin, retry, admitErr := admitOnce(ctx, in, root, beadsDir)
 		if admitErr == nil {
 			if !in.SkipMemo {
-				storeProxiedPin(in.ScopeRoot, in.Database, root, beadsDir, pin, in.Now())
+				storeProxiedPin(in.ScopeRoot, in.Database, in.LongLived, root, beadsDir, pin, in.Now())
 			}
 			return pin, nil
 		}
@@ -590,6 +590,22 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // proxy.pid or a sidecar that changed invalidates the entry immediately,
 // whatever the TTL says. The TTL is the guard interval, so the memo can never
 // hold an answer longer than the tick that would have re-checked it.
+//
+// It is ALSO keyed on the lane — LongLived — and that is council C-F2. Admit
+// consults the memo before admitOnce, and the finite-idle refusal (the Q1
+// deviation) lives inside admitOnce, after it. With a lane-blind key a one-shot
+// open of an operator-initialized finite-idle scope admitted, memoized its pass,
+// and a LONG-LIVED open of the same scope inside the TTL got that pass back —
+// so gc held a resident native handle across a window in which bd retires the
+// proxy and its Dolt child, which is the exact outcome Q1 says PR2 refuses.
+// Production takes that path: cmd/gc/main.go's openStoreAtForCity is
+// longLived=false and cmd/gc/api_state.go is LongLived=true, in one binary.
+//
+// Keying on the lane rather than moving the idle rule ahead of the memo is the
+// smaller change and the more honest one: "may this scope be served natively"
+// is a DIFFERENT question for a handle held for 40ms and one held for the
+// process lifetime, and a memo keyed on less than the question is a memo that
+// answers a question nobody asked.
 var proxiedPinMemo = struct {
 	mu      sync.Mutex
 	entries map[string]proxiedPinMemoEntry
@@ -601,8 +617,12 @@ type proxiedPinMemoEntry struct {
 	expires time.Time
 }
 
-func proxiedPinMemoKey(scopeRoot, database string) string {
-	return scopeRoot + "\x00" + database
+func proxiedPinMemoKey(scopeRoot, database string, longLived bool) string {
+	lane := "one-shot"
+	if longLived {
+		lane = "long-lived"
+	}
+	return scopeRoot + "\x00" + database + "\x00" + lane
 }
 
 // proxiedPinStamp fingerprints the two files admission's answer depends on.
@@ -619,10 +639,10 @@ func proxiedPinStamp(root, beadsDir string, now time.Time) string {
 	return stamp(proxyendpoint.PIDPath(root)) + "|" + stamp(proxyendpoint.SidecarPath(beadsDir))
 }
 
-func lookupProxiedPin(scopeRoot, database, root, beadsDir string, now time.Time) (Pin, bool) {
+func lookupProxiedPin(scopeRoot, database string, longLived bool, root, beadsDir string, now time.Time) (Pin, bool) {
 	proxiedPinMemo.mu.Lock()
 	defer proxiedPinMemo.mu.Unlock()
-	entry, ok := proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database)]
+	entry, ok := proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database, longLived)]
 	if !ok || now.After(entry.expires) {
 		return Pin{}, false
 	}
@@ -632,23 +652,28 @@ func lookupProxiedPin(scopeRoot, database, root, beadsDir string, now time.Time)
 	return entry.pin, true
 }
 
-func storeProxiedPin(scopeRoot, database, root, beadsDir string, pin Pin, now time.Time) {
+func storeProxiedPin(scopeRoot, database string, longLived bool, root, beadsDir string, pin Pin, now time.Time) {
 	proxiedPinMemo.mu.Lock()
 	defer proxiedPinMemo.mu.Unlock()
-	proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database)] = proxiedPinMemoEntry{
+	proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database, longLived)] = proxiedPinMemoEntry{
 		pin:     pin,
 		stamp:   proxiedPinStamp(root, beadsDir, now),
 		expires: now.Add(proxiedGuardInterval()),
 	}
 }
 
-// ForgetProxiedPin drops a scope's memoized admission pass.
+// ForgetProxiedPin drops a scope's memoized admission passes — BOTH lanes.
 //
 // The guard tick calls it on a generation change: the memo's whole contract is
 // that the answer cannot have changed, and a tick that just proved otherwise
-// must not leave the contradiction in place for the next open to read.
+// must not leave the contradiction in place for the next open to read. The
+// generation moving invalidates the one-shot answer and the long-lived answer
+// alike, so forgetting only the caller's own lane would leave the other half of
+// the contradiction behind.
 func ForgetProxiedPin(scopeRoot, database string) {
 	proxiedPinMemo.mu.Lock()
 	defer proxiedPinMemo.mu.Unlock()
-	delete(proxiedPinMemo.entries, proxiedPinMemoKey(scopeRoot, database))
+	for _, longLived := range []bool{false, true} {
+		delete(proxiedPinMemo.entries, proxiedPinMemoKey(scopeRoot, database, longLived))
+	}
 }
