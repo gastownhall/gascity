@@ -4,8 +4,13 @@
 
 - Deploy bead: `ga-j7r5gu`
 - Reviewed source: `2eff32228e37166e8a8b7353395297688859fadf`
+- Amended source: `22984097e4ac28e27b42c1af2abd3f338073c3f1`. The criterion-3
+  full-suite evidence below was collected at the reviewed source and has not
+  been re-collected at the current tip. The delta is
+  `build(hybrid): add conformance_test.go to the bazel go_test rule` plus this
+  gate record itself; it changes no Go source and no test the suite executes.
 - Base: `origin/main@42d46228da8488e2315d92002f15658f482ce338`
-- Diff: four files, `+43/-3`
+- Diff at that amended source: six files, `+91/-3` (four at the reviewed source, plus the Bazel rule fix and this gate record; subsequent edits to this record itself add to the insertion count)
 - Gate date: 2026-09-22
 
 ## Criteria
@@ -39,8 +44,8 @@
 
 4. **PASS — No high-severity review findings open.** Reviewer findings record zero unresolved HIGH findings and no security findings.
 
-5. **PASS — Final branch clean.** The reviewed source was clean before branch creation; the only deployer-authored addition is this committed gate record. The isolated deploy branch is clean after that commit.
+5. **PASS — Final branch clean.** The reviewed source was clean before branch creation; the deployer-authored additions are this committed gate record and the `internal/runtime/hybrid` Bazel `go_test` srcs/deps fix. The isolated deploy branch is clean after both commits.
 
 6. **PASS — Branch diverges cleanly from main.** After a fresh fetch, `git merge-tree --write-tree origin/main 2eff32228e37166e8a8b7353395297688859fadf` exited 0 and produced tree `987af9cb3691b5dbf3c71f02cd11258d6f754ff0` against `origin/main@42d46228da8488e2315d92002f15658f482ce338`.
 
-7. **PASS — Single feature theme.** Both commits and all four changed files account for one boundary: scoped conformance coverage and generated-ledger documentation for the hybrid runtime composition.
+7. **PASS — Single feature theme.** All commits and all six changed files account for one boundary: scoped conformance coverage and generated-ledger documentation for the hybrid runtime composition.
