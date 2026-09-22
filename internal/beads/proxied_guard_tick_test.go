@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -761,5 +762,87 @@ func TestProxiedGuardTickForgetsTheMemoOnCursorDrift(t *testing.T) {
 	if _, ok := lookupProxiedPin(pin.ScopeRoot(), pin.Database(), false, root, beadsDir, now); ok {
 		t.Fatal("the tick stood this handle down for schema drift and left the memoized pass in place, " +
 			"so the next open in this process opens the library against the moved database without the gate")
+	}
+}
+
+// TestStartGuardArmsARealTicker is council C-F8.
+//
+// `if longLived { store.StartGuard() }` in cmd/gc is the one line that arms the
+// guard in production, and StartGuard itself had no test: every guard test
+// called the unexported s.startGuard(opts) with an injected ticker channel and
+// scripted effects. So all 486 lines of this file passed with StartGuard's body
+// emptied, and a controller store would hold a native leaf with no generation
+// or cursor watch for the whole process — including the moved-root hazard this
+// file's header says no read can detect.
+//
+// This drives the EXPORTED entry point with the real time.Ticker, the real
+// defaults and the knob an operator actually sets, and asserts an effect only a
+// live tick can produce. The effect is chosen so the test needs no proxy and no
+// socket: a record that fails Validate for this root is refused from the record
+// alone — "no dial is ever spent on it" is the checkGeneration contract — so
+// the whole path is two file reads and the ticker this test exists to prove
+// exists.
+func TestStartGuardArmsARealTicker(t *testing.T) {
+	t.Setenv(proxiedGuardIntervalEnv, "1s")
+	if got := proxiedGuardInterval(); got != time.Second {
+		t.Fatalf("proxiedGuardInterval() = %s, want 1s: this test is not driving the knob", got)
+	}
+
+	f := newGuardFixture(t)
+
+	// The production call, not the test seam.
+	f.store.StartGuard()
+
+	// Somebody put a foreign proxy record at the pinned root. Nothing else in
+	// this test touches the store.
+	f.admitted.corrupt(func(rec *proxyendpoint.Record) {
+		rec.RootID = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	})
+
+	deadline := time.After(20 * time.Second)
+	for {
+		if verdict := f.store.Verdict(); verdict != nil {
+			if verdict.Verdict != ProxiedVerdictNotOurs {
+				t.Fatalf("verdict = %v, want not_ours", verdict)
+			}
+			if !f.store.Demoted() {
+				t.Fatal("the guard recorded a terminal verdict and kept serving natively")
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("StartGuard armed no ticker: 20s after a foreign record appeared at the pinned " +
+				"root the store is still native, so a controller would hold an unwatched native leaf " +
+				"for the process lifetime")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// TestStartGuardIsIdempotentPerStore pins the other half of its contract: a
+// second call stops the first guard before installing its own, so a re-open
+// path cannot accumulate tickers — each of which is a goroutine and a probe
+// session per interval against bd's proxy.
+func TestStartGuardIsIdempotentPerStore(t *testing.T) {
+	t.Setenv(proxiedGuardIntervalEnv, "1s")
+	f := newGuardFixture(t)
+
+	f.store.StartGuard()
+	f.store.StartGuard()
+	f.store.StartGuard()
+
+	// CloseStore joins the installed guard. If a previous call had leaked one,
+	// its goroutine would outlive the store and keep probing.
+	before := runtime.NumGoroutine()
+	if err := f.store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	// One join is synchronous; give any leaked ticker a chance to show itself.
+	time.Sleep(1500 * time.Millisecond)
+	if after := runtime.NumGoroutine(); after > before {
+		t.Fatalf("goroutines went %d -> %d across CloseStore; a second StartGuard leaked the first "+
+			"guard's ticker, and every leaked guard is a probe session per interval against bd's proxy",
+			before, after)
 	}
 }

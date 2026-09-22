@@ -623,3 +623,75 @@ func TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity(t *testing.T) {
 		t.Errorf("proxiedScopeDatabase(a directory with no beads scope) = %q, want \"\"", got)
 	}
 }
+
+// TestProxiedOpenArmsTheGuardForALongLivedStore is the cmd/gc half of council
+// C-F8.
+//
+// `if longLived { store.StartGuard() }` is the sole production call site, and
+// deleting it leaves every controller store holding a native leaf with no
+// generation or cursor watch for the process lifetime — the moved-root hazard
+// proxied_guard_tick.go's header says no read can detect. Nothing failed:
+// TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot asserts only that
+// OpenProxiedStore is non-nil, and P2-15 states the tick is undrivable from a
+// one-shot CLI.
+//
+// Driving open() to that line needs a real library open, i.e. Dolt, so the
+// behavioral proof is the acceptance lifecycle row (now wired into CI by the
+// C-F1 fix) and beads' own TestStartGuardArmsARealTicker, which drives the
+// exported entry point with a real ticker. What is left for a unit test is the
+// WIRING, and this asserts it on the source: the long-lived arm arms the guard,
+// and the one-shot arm does not.
+//
+// A source assertion is the weaker instrument and it is chosen deliberately
+// over adding an exported accessor to ProxiedStore purely so a test could see
+// the ticker — the finding is about a line that can be deleted unnoticed, and
+// this notices.
+func TestProxiedOpenArmsTheGuardForALongLivedStore(t *testing.T) {
+	body, err := os.ReadFile("beads_proxied_native.go")
+	if err != nil {
+		t.Fatalf("read beads_proxied_native.go: %v", err)
+	}
+	source := string(body)
+
+	openBody, ok := functionBody(source, "func (o *proxiedNativeOpener) open(")
+	if !ok {
+		t.Fatal("proxiedNativeOpener.open not found; this guard cannot see what it is guarding")
+	}
+	if !strings.Contains(openBody, "store.StartGuard()") {
+		t.Fatal("proxiedNativeOpener.open no longer calls store.StartGuard(): every long-lived store " +
+			"would hold a native leaf with no generation or cursor watch for the process lifetime, " +
+			"including the moved-root hazard no read can detect")
+	}
+	guardLine := strings.Index(openBody, "store.StartGuard()")
+	longLivedArm := strings.LastIndex(openBody[:guardLine], "if longLived {")
+	if longLivedArm < 0 {
+		t.Fatal("store.StartGuard() is no longer inside an `if longLived` arm: a one-shot store lives " +
+			"for 40ms, and a ticker plus a probe session on it is bought for nothing")
+	}
+}
+
+// functionBody returns the body of the first function whose declaration starts
+// with prefix, by brace balance from the opening brace of the declaration.
+func functionBody(source, prefix string) (string, bool) {
+	start := strings.Index(source, prefix)
+	if start < 0 {
+		return "", false
+	}
+	open := strings.Index(source[start:], "{")
+	if open < 0 {
+		return "", false
+	}
+	depth := 0
+	for i := start + open; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return source[start+open : i], true
+			}
+		}
+	}
+	return "", false
+}
