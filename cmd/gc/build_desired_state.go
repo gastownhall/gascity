@@ -1813,6 +1813,10 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 	}
 	if cfg != nil {
 		cityName := config.EffectiveCityName(cfg, "")
+		// One batched read for every configured named session's closed-phantom
+		// lookup below, instead of the store.List-per-identity loop this
+		// replaced (ga-0t7qjl: 109 serial bd calls, +155s, on this city).
+		closedIdx := buildClosedNamedSessionBeadIndex(cityStore)
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
@@ -1824,7 +1828,7 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// its runtime session name (#5231's assignee form), not the
 			// qualified identity above — enumerate that form too, or it is
 			// never queried and the work never re-materializes a session.
-			if _, ok := findClosedNamedSessionBead(cityStore, identity); ok {
+			if _, ok := closedIdx.Find(identity); ok {
 				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
 			}
 		}
