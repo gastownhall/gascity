@@ -1,10 +1,13 @@
 package beads_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/scanner"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -91,18 +94,29 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //   - ignoredSource.sentinelColumns is exactly the one column gc reads, with
 //     the same replay floor;
 //   - cursorRealityFloor's missing-table arm floors at gc's table floor.
+//
+// And, since council pr2 E-S5 / E-I3, the shapes that version still skipped:
+//
+//   - every migrationSource literal is read wherever it sits — by pointer, as
+//     an element of a slice, array or map of sources, or inside a function —
+//     not only `var x = migrationSource{…}`;
+//   - a sentinel field other than the two gc reads is an error, and
+//     migrationSource's field set is pinned, so a new sentinel KIND cannot
+//     arrive unread;
+//   - a reference to a sentinel field outside cursorRealityFloor (an init()
+//     append, a reassignment) is a problem, because it changes the set without
+//     changing the literal;
+//   - cursorRealityFloor itself is pinned by a digest of its tokens, so a new
+//     clamp arm fails the pin even when every literal is unchanged.
 func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 	dir := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash("internal/storage/schema"))
 	sources := readGoSources(t, dir)
 
-	declared, err := declaredSentinels(sources)
-	if err != nil {
-		t.Fatalf("read the pinned library's sentinel declarations under %s: %v", dir, err)
-	}
+	declared, problems := readSentinelPin(sources)
 	if _, ok := declared["mainSource"]; !ok {
-		t.Fatalf("found no mainSource literal under %s; the pin is broken, not satisfied (saw %v)", dir, declared)
+		t.Fatalf("found no mainSource literal under %s; the pin is broken, not satisfied (saw %v, problems %q)", dir, declared, problems)
 	}
-	for _, problem := range sentinelDrift(declared) {
+	for _, problem := range problems {
 		t.Errorf("%s.\ngc's proxied schema gate computes the library's own effective ignored cursor from "+
 			"proxyendpoint's sentinel list; a stale copy either refuses every healthy scope or admits one "+
 			"the library would migrate. Re-read the migrationSource literals under %s.", problem, dir)
@@ -115,7 +129,27 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 	if floor != proxyendpoint.IgnoredSentinelTableFloor {
 		t.Errorf("the pinned library floors a missing sentinel table at %d, gc at %d", floor, proxyendpoint.IgnoredSentinelTableFloor)
 	}
+
+	parsed, err := parseSources(sources)
+	if err != nil {
+		t.Fatalf("parse %s: %v", dir, err)
+	}
+	digest, err := cursorRealityFloorDigest(parsed)
+	if err != nil {
+		t.Fatalf("digest cursorRealityFloor under %s: %v", dir, err)
+	}
+	if digest != pinnedCursorRealityFloorDigest {
+		t.Errorf("cursorRealityFloor changed at the pinned beads (token digest %s, pinned %s).\n"+
+			"A new clamp arm or a read of a new field changes which ignored cursor the library acts on, and "+
+			"proxyendpoint's reality derivation (readIgnoredReality, ReadPostOpen) mirrors this function by hand. "+
+			"Re-read it under %s, bring the mirror and the sentinel constants into line, then update "+
+			"pinnedCursorRealityFloorDigest.", digest, pinnedCursorRealityFloorDigest, dir)
+	}
 }
+
+// pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
+// beads (v1.3.0, internal/storage/schema/schema.go).
+const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -187,6 +221,45 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 				`replayFloor: 11}`, `replayFloor: 12}`, 1)},
 			want: "sentinelColumns",
 		},
+		// Council pr2 E-S5 / E-I3: the shapes the D-F4 pin still skipped.
+		{
+			name: "a new sentinel KIND on ignoredSource",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`cursorTable:     "ignored_schema_migrations",`,
+				`cursorTable:     "ignored_schema_migrations",
+		sentinelIndexes: []string{"idx_wisps_lease"},`, 1)},
+			want: "unknown sentinel field sentinelIndexes",
+		},
+		{
+			name: "a new field on migrationSource itself",
+			sources: map[string]string{"schema.go": strings.Replace(header,
+				`sentinelColumns []schemaSentinelColumn }`, `sentinelColumns []schemaSentinelColumn; realityIndexes []string }`, 1) + pinned},
+			want: "migrationSource gained field realityIndexes",
+		},
+		{
+			name: "a pointer literal third source",
+			sources: map[string]string{
+				"schema.go":  header + pinned,
+				"sibling.go": "package schema\n\nvar thirdSource = &migrationSource{sentinelTables: []string{\"x\"}}\n",
+			},
+			want: "thirdSource",
+		},
+		{
+			name: "a slice of sources",
+			sources: map[string]string{
+				"schema.go":  header + pinned,
+				"sibling.go": "package schema\n\nvar extra = []migrationSource{{sentinelTables: []string{\"x\"}}}\n",
+			},
+			want: "extra[0]",
+		},
+		{
+			name: "an init-time append in a sibling file",
+			sources: map[string]string{
+				"schema.go":  header + pinned,
+				"sibling.go": "package schema\n\nfunc init() {\n\tignoredSource.sentinelTables = append(ignoredSource.sentinelTables, \"wisp_events\")\n}\n",
+			},
+			want: "sibling.go:4 references .sentinelTables outside cursorRealityFloor",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,11 +267,8 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 			for name, body := range tc.sources {
 				sources[name] = []byte(body)
 			}
-			declared, err := declaredSentinels(sources)
-			if err != nil {
-				t.Fatalf("declaredSentinels: %v", err)
-			}
-			problems := strings.Join(sentinelDrift(declared), "\n")
+			_, found := readSentinelPin(sources)
+			problems := strings.Join(found, "\n")
 			if tc.want == "" {
 				if problems != "" {
 					t.Fatalf("the pinned shape reported drift:\n%s", problems)
@@ -209,6 +279,59 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 				t.Fatalf("the pin did not see this drift (want a problem naming %q), got:\n%s", tc.want, problems)
 			}
 		})
+	}
+}
+
+// TestCursorRealityFloorDigestSeesAClampArm proves the digest half of the pin
+// (council pr2 E-S5): a new clamp arm changes it, and a comment or a reflow does
+// not, so it fails on the beads bumps that matter and not on the ones that do
+// not.
+func TestCursorRealityFloorDigestSeesAClampArm(t *testing.T) {
+	const base = `package schema
+
+func (m migrationSource) cursorRealityFloor(ctx context.Context, db DBConn) (int, bool, error) {
+	for _, table := range m.sentinelTables {
+		present, err := sentinelTableExists(ctx, db, table)
+		if err != nil {
+			return 0, false, err
+		}
+		if !present {
+			return 0, true, nil
+		}
+	}
+	return 0, false, nil
+}
+`
+	digestOf := func(t *testing.T, body string) string {
+		t.Helper()
+		parsed, err := parseSources(map[string][]byte{"schema.go": []byte(body)})
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		digest, err := cursorRealityFloorDigest(parsed)
+		if err != nil {
+			t.Fatalf("digest: %v", err)
+		}
+		return digest
+	}
+	pinned := digestOf(t, base)
+
+	reflowed := strings.Replace(base, "\t\tif !present {\n\t\t\treturn 0, true, nil\n\t\t}",
+		"\t\t// A comment the digest must not see.\n\t\tif !present { return 0, true, nil }", 1)
+	if reflowed == base {
+		t.Fatal("the reflow row edited nothing")
+	}
+	if got := digestOf(t, reflowed); got != pinned {
+		t.Errorf("a comment and a reflow changed the digest (%s -> %s); it would fail on edits that change nothing", pinned, got)
+	}
+
+	clamped := strings.Replace(base, "\treturn 0, false, nil\n}",
+		"\tif m.cursorTable == \"ignored_schema_migrations\" {\n\t\treturn 20, true, nil\n\t}\n\treturn 0, false, nil\n}", 1)
+	if clamped == base {
+		t.Fatal("the clamp row edited nothing")
+	}
+	if got := digestOf(t, clamped); got == pinned {
+		t.Error("a new clamp arm left the digest unchanged; the pin cannot see the library clamping a database gc admits")
 	}
 }
 
@@ -251,21 +374,78 @@ func readGoSources(t *testing.T, dir string) map[string][]byte {
 	return sources
 }
 
-// declaredSentinels returns, for every package-level var initialized with a
-// migrationSource composite literal, the sentinels that literal declares.
-//
-// A sentinel field whose value is anything other than a literal gc can read is
-// an error, not an omission: a pin that skipped what it could not parse would be
-// the one-directional pin again.
-func declaredSentinels(sources map[string][]byte) (map[string]sentinelDecl, error) {
-	fileSet := token.NewFileSet()
-	declared := map[string]sentinelDecl{}
-	for name, body := range sources {
-		parsed, err := parser.ParseFile(fileSet, name, body, 0)
+// knownMigrationSourceFields is migrationSource's field set at the pinned
+// beads. A field outside it is how a new sentinel KIND would arrive (council
+// pr2 E-S5 / E-I3), so the pin refuses any addition until someone has re-read
+// what cursorRealityFloor does with it.
+var knownMigrationSourceFields = map[string]bool{
+	"files": true, "dir": true, "cursorTable": true, "sentinelTables": true, "sentinelColumns": true,
+}
+
+// knownSentinelFields are the two sentinel kinds gc's probe reads.
+var knownSentinelFields = map[string]bool{"sentinelTables": true, "sentinelColumns": true}
+
+// parsedSources is the pinned package, parsed once, in a stable file order.
+type parsedSources struct {
+	fileSet *token.FileSet
+	names   []string
+	files   map[string]*ast.File
+	bodies  map[string][]byte
+}
+
+func parseSources(sources map[string][]byte) (parsedSources, error) {
+	parsed := parsedSources{fileSet: token.NewFileSet(), files: map[string]*ast.File{}, bodies: sources}
+	for name := range sources {
+		parsed.names = append(parsed.names, name)
+	}
+	sort.Strings(parsed.names)
+	for _, name := range parsed.names {
+		file, err := parser.ParseFile(parsed.fileSet, name, sources[name], 0)
 		if err != nil {
-			return nil, err
+			return parsed, err
 		}
-		for _, decl := range parsed.Decls {
+		parsed.files[name] = file
+	}
+	return parsed, nil
+}
+
+// readSentinelPin runs every structural check of the pin over sources and
+// returns what the library declares plus one problem per disagreement or
+// shape the pin cannot read. A shape it cannot read is a problem, never a skip:
+// a pin that skipped what it could not parse is the one-directional pin again.
+func readSentinelPin(sources map[string][]byte) (map[string]sentinelDecl, []string) {
+	parsed, err := parseSources(sources)
+	if err != nil {
+		return nil, []string{"parse: " + err.Error()}
+	}
+	declared, problems := declaredSentinels(parsed)
+	problems = append(problems, migrationSourceFieldProblems(parsed)...)
+	problems = append(problems, sentinelMutationProblems(parsed)...)
+	problems = append(problems, sentinelDrift(declared)...)
+	return declared, problems
+}
+
+// declaredSentinels returns the sentinels of EVERY migrationSource literal in
+// the package, wherever it sits: a package-level var (by value or by pointer),
+// an element of a []migrationSource / [N]migrationSource / map[K]migrationSource
+// literal with the type elided, or an assignment in a function body. The first
+// version read only `var x = migrationSource{…}`, so a pointer literal or a slice
+// of sources declared sentinels the pin never saw (council pr2 E-I3).
+func declaredSentinels(parsed parsedSources) (map[string]sentinelDecl, []string) {
+	declared := map[string]sentinelDecl{}
+	var problems []string
+	record := func(literal *ast.CompositeLit, name string) {
+		d, err := sentinelsOf(literal)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
+			return
+		}
+		declared[name] = d
+	}
+	for _, fileName := range parsed.names {
+		file := parsed.files[fileName]
+		bound := map[*ast.CompositeLit]string{}
+		for _, decl := range file.Decls {
 			general, ok := decl.(*ast.GenDecl)
 			if !ok || general.Tok != token.VAR {
 				continue
@@ -276,26 +456,197 @@ func declaredSentinels(sources map[string][]byte) (map[string]sentinelDecl, erro
 					continue
 				}
 				for i, ident := range value.Names {
-					if i >= len(value.Values) {
-						continue
+					if i < len(value.Values) {
+						if literal := unwrapLiteral(value.Values[i]); literal != nil {
+							bound[literal] = ident.Name
+						}
 					}
-					literal, ok := value.Values[i].(*ast.CompositeLit)
-					if !ok || !isIdent(literal.Type, "migrationSource") {
-						continue
-					}
-					d, err := sentinelsOf(literal)
-					if err != nil {
-						return nil, fmt.Errorf("%s: %s: %w", name, ident.Name, err)
-					}
-					declared[ident.Name] = d
 				}
 			}
 		}
+		nameOf := func(literal *ast.CompositeLit) string {
+			if name, ok := bound[literal]; ok {
+				return name
+			}
+			position := parsed.fileSet.Position(literal.Pos())
+			return fmt.Sprintf("a migrationSource literal at %s:%d", filepath.Base(position.Filename), position.Line)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			switch {
+			case isIdent(literal.Type, "migrationSource"):
+				record(literal, nameOf(literal))
+			case isSourceCollection(literal.Type):
+				for i, element := range literal.Elts {
+					value := element
+					if kv, ok := element.(*ast.KeyValueExpr); ok {
+						value = kv.Value
+					}
+					if inner := unwrapLiteral(value); inner != nil && inner.Type == nil {
+						record(inner, fmt.Sprintf("%s[%d]", nameOf(literal), i))
+					}
+				}
+			}
+			return true
+		})
 	}
-	return declared, nil
+	return declared, problems
 }
 
-// sentinelsOf reads the sentinel fields of one migrationSource literal.
+// unwrapLiteral returns the composite literal expr is, or points to.
+func unwrapLiteral(expr ast.Expr) *ast.CompositeLit {
+	switch value := expr.(type) {
+	case *ast.CompositeLit:
+		return value
+	case *ast.UnaryExpr:
+		if value.Op == token.AND {
+			if literal, ok := value.X.(*ast.CompositeLit); ok {
+				return literal
+			}
+		}
+	}
+	return nil
+}
+
+// isSourceCollection reports a slice, array or map type whose elements are
+// migrationSource values or pointers.
+func isSourceCollection(expr ast.Expr) bool {
+	isSource := func(elem ast.Expr) bool {
+		if star, ok := elem.(*ast.StarExpr); ok {
+			elem = star.X
+		}
+		return isIdent(elem, "migrationSource")
+	}
+	switch collection := expr.(type) {
+	case *ast.ArrayType:
+		return isSource(collection.Elt)
+	case *ast.MapType:
+		return isSource(collection.Value)
+	}
+	return false
+}
+
+// migrationSourceFieldProblems pins migrationSource's field set.
+func migrationSourceFieldProblems(parsed parsedSources) []string {
+	var problems []string
+	found := false
+	for _, fileName := range parsed.names {
+		ast.Inspect(parsed.files[fileName], func(node ast.Node) bool {
+			spec, ok := node.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "migrationSource" {
+				return true
+			}
+			structType, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				problems = append(problems, "migrationSource is no longer a struct")
+				return false
+			}
+			found = true
+			for _, field := range structType.Fields.List {
+				for _, name := range field.Names {
+					if !knownMigrationSourceFields[name.Name] {
+						problems = append(problems, fmt.Sprintf("migrationSource gained field %s: a new field is how a "+
+							"new sentinel kind arrives, and gc's probe reads only sentinelTables and sentinelColumns; "+
+							"re-read cursorRealityFloor", name.Name))
+					}
+				}
+				if len(field.Names) == 0 {
+					problems = append(problems, "migrationSource gained an embedded field; re-read cursorRealityFloor")
+				}
+			}
+			return false
+		})
+	}
+	if !found {
+		problems = append(problems, "the library declares no migrationSource struct")
+	}
+	return problems
+}
+
+// sentinelMutationProblems finds every reference to a sentinel field outside
+// cursorRealityFloor, which is the only place the pinned library reads them.
+// Anywhere else it is a write the literal pin cannot see — an init() that
+// appends a table, a helper that reassigns the list — so it is a problem to
+// re-read, not a detail (council pr2 E-S5).
+func sentinelMutationProblems(parsed parsedSources) []string {
+	var problems []string
+	for _, fileName := range parsed.names {
+		file := parsed.files[fileName]
+		var allowed []*ast.BlockStmt
+		for _, decl := range file.Decls {
+			if function, ok := decl.(*ast.FuncDecl); ok && function.Name.Name == "cursorRealityFloor" && function.Body != nil {
+				allowed = append(allowed, function.Body)
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			selector, ok := node.(*ast.SelectorExpr)
+			if !ok || !knownSentinelFields[selector.Sel.Name] {
+				return true
+			}
+			for _, body := range allowed {
+				if selector.Pos() >= body.Pos() && selector.End() <= body.End() {
+					return true
+				}
+			}
+			position := parsed.fileSet.Position(selector.Pos())
+			problems = append(problems, fmt.Sprintf("%s:%d references .%s outside cursorRealityFloor; a write there "+
+				"changes the sentinel set without changing the literal this pin reads",
+				filepath.Base(position.Filename), position.Line, selector.Sel.Name))
+			return true
+		})
+	}
+	return problems
+}
+
+// cursorRealityFloorDigest is a digest of cursorRealityFloor's TOKENS, comments
+// and layout excluded. The literal pin cannot see a new clamp arm
+// (`return 20, true, nil` on some new condition) or a read of a field it does
+// not know, and both change which cursor the library acts on; the digest
+// changes with any of them, and with nothing a gofmt or a comment edit does.
+func cursorRealityFloorDigest(parsed parsedSources) (string, error) {
+	for _, fileName := range parsed.names {
+		for _, decl := range parsed.files[fileName].Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Name.Name != "cursorRealityFloor" || function.Body == nil {
+				continue
+			}
+			start := parsed.fileSet.Position(function.Pos()).Offset
+			end := parsed.fileSet.Position(function.End()).Offset
+			source := parsed.bodies[fileName][start:end]
+			var tokens strings.Builder
+			var scan scanner.Scanner
+			scanFiles := token.NewFileSet()
+			scan.Init(scanFiles.AddFile(fileName, -1, len(source)), source, nil, 0)
+			for {
+				_, tok, literal := scan.Scan()
+				if tok == token.EOF {
+					break
+				}
+				if tok == token.SEMICOLON {
+					// Automatic semicolons follow line breaks, so they are
+					// layout, not logic: `if c { return x }` and its three-line
+					// form must digest alike.
+					continue
+				}
+				tokens.WriteString(tok.String())
+				tokens.WriteByte(' ')
+				tokens.WriteString(literal)
+				tokens.WriteByte('\n')
+			}
+			sum := sha256.Sum256([]byte(tokens.String()))
+			return hex.EncodeToString(sum[:]), nil
+		}
+	}
+	return "", errors.New("no cursorRealityFloor function")
+}
+
+// sentinelsOf reads the sentinel fields of one migrationSource literal. A
+// field whose name says "sentinel" and is neither of the two gc reads is an
+// error: the old switch had no default arm, so a new sentinel kind was skipped
+// in silence (council pr2 E-S5 / E-I3).
 func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 	var d sentinelDecl
 	for _, element := range literal.Elts {
@@ -348,6 +699,10 @@ func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 					}
 				}
 				d.columns = append(d.columns, c)
+			}
+		default:
+			if name := keyName(field.Key); strings.Contains(strings.ToLower(name), "sentinel") {
+				return d, fmt.Errorf("unknown sentinel field %s: gc's probe reads only sentinelTables and sentinelColumns", name)
 			}
 		}
 	}
