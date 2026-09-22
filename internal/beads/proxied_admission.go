@@ -70,22 +70,34 @@ type ProviderOps interface {
 // that an hours-old ping is not mistaken for a rung this incident has spent.
 type GenerationSet struct {
 	mu   sync.Mutex
-	seen map[string]time.Time
+	seen map[string]generationEntry
 	ttl  time.Duration
 	now  func() time.Time
+}
+
+// generationEntry is one spent rung: when it stops counting, and whether the
+// verb that spent it FAILED (see Backoff).
+type generationEntry struct {
+	expires time.Time
+	failed  bool
 }
 
 // generationMemoTTL is how long a spent rung stays spent. See GenerationSet.
 const generationMemoTTL = 5 * time.Minute
 
+// failedPingBackoff is how long a provider ping that FAILED keeps its rung
+// before a later open may fork bd for it again. See Backoff.
+const failedPingBackoff = 30 * time.Second
+
 // NewGenerationSet returns an empty set with the default TTL.
 func NewGenerationSet() *GenerationSet {
-	return &GenerationSet{seen: map[string]time.Time{}, ttl: generationMemoTTL, now: time.Now}
+	return &GenerationSet{seen: map[string]generationEntry{}, ttl: generationMemoTTL, now: time.Now}
 }
 
 // Add records a generation and reports whether it was NEW — absent, or recorded
-// longer ago than the TTL — which is how a caller spends an escalation rung
-// exactly once per incident rather than once per process.
+// longer ago than its TTL — which is how a caller spends an escalation rung
+// exactly once per incident rather than once per process. A rung under a failed
+// verb's backoff is not new either.
 func (s *GenerationSet) Add(generation string) bool {
 	if s == nil || generation == "" {
 		return false
@@ -93,22 +105,23 @@ func (s *GenerationSet) Add(generation string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.seen == nil {
-		s.seen = map[string]time.Time{}
+		s.seen = map[string]generationEntry{}
 	}
 	now := s.clock()
-	if at, ok := s.seen[generation]; ok && !s.expired(at, now) {
+	if entry, ok := s.seen[generation]; ok && now.Before(entry.expires) {
 		return false
 	}
-	s.seen[generation] = now
+	s.seen[generation] = generationEntry{expires: now.Add(s.memoTTL())}
 	return true
 }
 
-// Release drops a generation, so the rung it stood for may be spent again.
+// Release drops a generation, so the rung it stood for may be spent again at
+// once.
 //
-// It is what keeps a rung that did not actually buy anything from counting: a
-// provider verb that failed for a reason of gc's own — the lifecycle semaphore,
-// the op budget — learned nothing about the proxy, and recording it would poison
-// the scope for the rest of the TTL on the strength of gc's own contention.
+// It is for an incident that is OVER — Admit releases the absent-record key the
+// moment the scope admits (council A-F6). It is NOT for a verb that failed: see
+// Backoff: a failed ping used to be released, and that removed the bound
+// entirely.
 func (s *GenerationSet) Release(generation string) {
 	if s == nil || generation == "" {
 		return
@@ -118,6 +131,52 @@ func (s *GenerationSet) Release(generation string) {
 	delete(s.seen, generation)
 }
 
+// Backoff records that the verb spent on a generation FAILED, and keeps its rung
+// for d rather than for the full TTL (council pr2 D-F9).
+//
+// A provider verb can fail for a reason of gc's own — the lifecycle semaphore,
+// the op budget — which says nothing about the proxy, so the rung must not stay
+// spent for the whole TTL on the strength of gc's own contention (council
+// A-F5). But releasing it outright, which is what this replaced, removed the
+// bound entirely: a refusal is never memoized, so every later open re-walked
+// the ladder and re-forked `bd ping` — `gc doctor`'s seventeen opens of one
+// scope cost seventeen forks where main cost one — and the failure the ping is
+// most likely to have hit, lifecycle-semaphore contention on a loaded box, is
+// made worse by every extra bd child. A short backoff keeps the ask
+// retryable and makes it bounded.
+//
+// While it holds, the rung is neither spendable (Add reports false) nor spent
+// successfully: BackingOff tells the ladder to decline without escalating,
+// because a failed ping is no evidence that bd has been asked and could not
+// help.
+func (s *GenerationSet) Backoff(generation string, d time.Duration) {
+	if s == nil || generation == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]generationEntry{}
+	}
+	s.seen[generation] = generationEntry{expires: s.clock().Add(d), failed: true}
+}
+
+// BackingOff reports whether a generation's last verb failed and its backoff
+// has not yet run out, and how long remains.
+func (s *GenerationSet) BackingOff(generation string) (time.Duration, bool) {
+	if s == nil || generation == "" {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.seen[generation]
+	if !ok || !entry.failed {
+		return 0, false
+	}
+	remaining := entry.expires.Sub(s.clock())
+	return remaining, remaining > 0
+}
+
 // Has reports whether a generation is in the set and has not expired.
 func (s *GenerationSet) Has(generation string) bool {
 	if s == nil || generation == "" {
@@ -125,8 +184,8 @@ func (s *GenerationSet) Has(generation string) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	at, ok := s.seen[generation]
-	return ok && !s.expired(at, s.clock())
+	entry, ok := s.seen[generation]
+	return ok && s.clock().Before(entry.expires)
 }
 
 func (s *GenerationSet) clock() time.Time {
@@ -136,12 +195,11 @@ func (s *GenerationSet) clock() time.Time {
 	return s.now()
 }
 
-func (s *GenerationSet) expired(at, now time.Time) bool {
-	ttl := s.ttl
-	if ttl <= 0 {
-		ttl = generationMemoTTL
+func (s *GenerationSet) memoTTL() time.Duration {
+	if s.ttl <= 0 {
+		return generationMemoTTL
 	}
-	return now.Sub(at) >= ttl
+	return s.ttl
 }
 
 // The process-local defaults, used when a caller supplies no sets. They are
@@ -638,6 +696,15 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			"the endpoint accepts and never greets, and admission has no provider ops to escalate with", ep.Err)
 	}
 
+	// A ping that failed recently is not re-forked on every open, and is not
+	// escalated on either (council pr2 D-F9): see GenerationSet.Backoff.
+	if remaining, backing := in.Observed.BackingOff(generation); backing {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			fmt.Sprintf("the endpoint accepts and never greets, and the provider ping for this generation failed; "+
+				"not re-forking bd for another %s, and not escalating to a recover on a failure that says nothing about the proxy",
+				remaining.Round(time.Second)), ep.Err)
+	}
+
 	// One ping per generation. The observed set is what makes "a later open in
 	// the same process skips its ping" true: a generation gc has already asked
 	// bd about does not get asked again just because a second scope opened.
@@ -656,10 +723,12 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// The ping failed and nothing moved. That is not evidence that bd
 			// cannot fix this proxy — the failure is as likely to be gc's own
 			// lifecycle semaphore or op budget — so it does NOT cascade into a
-			// `bd dolt stop` in the same pass (council A-F5). The rung is
-			// released so a later open may ask again, and the answer is
-			// non-terminal so the next open re-admits from the top.
-			in.Observed.Release(generation)
+			// `bd dolt stop` in the same pass (council A-F5), nor in a later
+			// one while the backoff holds. The rung is held for
+			// failedPingBackoff rather than released, so a later open asks
+			// again once it runs out and not on every open before then
+			// (council pr2 D-F9). The answer is non-terminal.
+			in.Observed.Backoff(generation, failedPingBackoff)
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the endpoint accepts and never greets, and the provider ping failed; "+
 					"not escalating to a recover on a failure that says nothing about the proxy", err)
@@ -701,22 +770,31 @@ func (in AdmissionInput) escalateWithPing(ctx context.Context, generation, detai
 	// treated as a permanent one: the first open of a scope whose proxy is
 	// stopped spent the ping, and every later open in that process returned
 	// proxy_gone and spent nothing — for ever, whether the first ping had
-	// succeeded or failed. Two things bound it now: Admit releases this key the
-	// moment the scope admits again, because an incident that ended is not a
-	// rung this one has spent, and the ledger's own TTL expires it anyway.
+	// succeeded or failed. Three things bound it now: Admit releases this key
+	// the moment the scope admits again, because an incident that ended is not
+	// a rung this one has spent; a FAILED ping holds it only for
+	// failedPingBackoff (council pr2 D-F9 — it used to release it, which let
+	// every open re-fork); and the ledger's own TTL expires a successful one.
 	key := generation
 	if key == "" {
 		key = absentRecordPingKey(in.ScopeRoot)
+	}
+	if remaining, backing := in.Observed.BackingOff(key); backing {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
+			fmt.Sprintf("%s; the provider ping failed and is not re-forked for another %s",
+				detail, remaining.Round(time.Second)), cause)
 	}
 	if !in.Observed.Add(key) {
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
 			detail+"; the provider was already pinged for this generation", cause)
 	}
 	if err := in.Ops.Ping(ctx, in.ScopeRoot); err != nil {
-		// The rung bought nothing, so it is not spent. A ping that failed on
-		// gc's own lifecycle semaphore must not poison the scope for the next
-		// open, which may well find the semaphore free.
-		in.Observed.Release(key)
+		// The rung bought nothing, so it must not stay spent for the whole
+		// TTL: a ping that failed on gc's own lifecycle semaphore must not
+		// poison the scope. But it is held for failedPingBackoff rather than
+		// released, because a release let every later open re-fork the ping
+		// with no bound at all (council pr2 D-F9).
+		in.Observed.Backoff(key, failedPingBackoff)
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(verdict,
 			detail+"; the provider ping failed", err)
 	}

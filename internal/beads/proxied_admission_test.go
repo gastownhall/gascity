@@ -887,7 +887,7 @@ func TestGenerationSetRungsExpire(t *testing.T) {
 			"skips the ping and escalates straight to `bd dolt stop`", generationMemoTTL)
 	}
 
-	// Release is the other half: a rung that bought nothing does not count.
+	// Release is for an incident that is over: it frees the rung at once.
 	if !set.Add("7001:beef") {
 		t.Fatal("the first Add of a fresh generation did not report it as new")
 	}
@@ -897,6 +897,26 @@ func TestGenerationSetRungsExpire(t *testing.T) {
 	set.Release("7001:beef")
 	if !set.Add("7001:beef") {
 		t.Fatal("Release did not free the rung")
+	}
+
+	// Backoff is for a verb that FAILED (council pr2 D-F9): the rung is held,
+	// briefly, and it is marked as a failure rather than as a spend.
+	set.Backoff("7001:beef", failedPingBackoff)
+	if remaining, backing := set.BackingOff("7001:beef"); !backing || remaining != failedPingBackoff {
+		t.Fatalf("BackingOff = (%s, %v), want (%s, true)", remaining, backing, failedPingBackoff)
+	}
+	if set.Add("7001:beef") {
+		t.Fatal("a failed verb's rung was spendable again at once; every open would re-fork bd")
+	}
+	now = now.Add(failedPingBackoff)
+	if _, backing := set.BackingOff("7001:beef"); backing {
+		t.Fatal("the backoff did not run out")
+	}
+	if !set.Add("7001:beef") {
+		t.Fatal("a failed verb's rung was still held after its backoff; the scope is poisoned")
+	}
+	if _, backing := set.BackingOff("7001:beef"); backing {
+		t.Fatal("a fresh spend still reads as a failed one")
 	}
 }
 
@@ -916,6 +936,8 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
 	}
+	clock := time.Now()
+	in.Observed.now = func() time.Time { return clock }
 
 	_, err := Admit(context.Background(), in)
 	verdict, ok := ProxiedVerdictOf(err)
@@ -935,15 +957,32 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 		t.Errorf("the ladder spent %d ping(s), want 1", pings)
 	}
 
-	// The rung was released, so a later open — when the semaphore is free — may
-	// ask bd again instead of finding the scope poisoned.
+	// The rung is held for a short backoff, not released (council pr2 D-F9).
+	// `gc doctor` opens one scope seventeen times; with a release each of them
+	// re-forked the failing ping — on a box whose lifecycle semaphore was the
+	// likely reason it failed. Inside the backoff: no ping, no recover, and a
+	// non-terminal answer.
+	for open := 2; open <= 17; open++ {
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Terminal() {
+			t.Fatalf("open %d inside the backoff = %v, want a non-terminal verdict", open, err)
+		}
+	}
+	if pings, recovers := ops.counts(); pings != 1 || recovers != 0 {
+		t.Fatalf("seventeen opens inside the backoff spent %d ping(s) and %d recover(s), want 1 and 0: "+
+			"a failed ping must be neither re-forked on every open nor escalated on", pings, recovers)
+	}
+
+	// Once it runs out, a later open — when the semaphore is free — may ask
+	// bd again instead of finding the scope poisoned.
+	clock = clock.Add(failedPingBackoff)
 	ops.onPing = nil
 	if _, err := Admit(context.Background(), in); err == nil {
-		t.Fatal("the second admission admitted a proxy that still never greets")
+		t.Fatal("the admission after the backoff admitted a proxy that still never greets")
 	}
 	if pings, _ := ops.counts(); pings != 2 {
-		t.Fatalf("the second open spent %d ping(s) in total, want 2: a ping that failed for gc's own "+
-			"reason must not count as the rung", pings)
+		t.Fatalf("the open after the backoff spent %d ping(s) in total, want 2: a ping that failed for gc's own "+
+			"reason must not hold the rung for the whole TTL", pings)
 	}
 }
 
@@ -963,6 +1002,8 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 func TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess(t *testing.T) {
 	f := newAdmissionFixture(t, "-1")
 	observed := NewGenerationSet()
+	clock := time.Now()
+	observed.now = func() time.Time { return clock }
 	probes := 0
 
 	var pingErr error
@@ -989,8 +1030,19 @@ func TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess(t *testing.T) {
 		t.Fatalf("the first open spent %d ping(s), want 1", pings)
 	}
 
-	// The next open must be able to ask again: the failed ping bought nothing.
+	// Inside the failed ping's backoff the next open does NOT re-fork it
+	// (council pr2 D-F9)...
 	pingErr = nil
+	if _, err := Admit(context.Background(), in); err == nil {
+		t.Fatal("an open inside the failed ping's backoff admitted with no proxy record")
+	}
+	if pings, _ := ops.counts(); pings != 1 {
+		t.Fatalf("an open inside the backoff spent %d ping(s) in total, want 1: every open re-forked the failing ping", pings)
+	}
+
+	// ...and once it runs out, the next open asks again: the failed ping
+	// bought nothing, and it must not poison the scope for the whole TTL.
+	clock = clock.Add(failedPingBackoff)
 	pin, err := Admit(context.Background(), in)
 	if err != nil {
 		t.Fatalf("the second open could not re-ask: %v", err)
