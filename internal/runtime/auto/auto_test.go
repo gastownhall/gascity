@@ -761,3 +761,57 @@ func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
 		t.Fatal("SubscribeSessionEvents = nil error, want error when neither backend is event-capable")
 	}
 }
+
+// A healthy backend's continuing traffic must not mask the other backend
+// going silent: without per-source staleness tracking, the merged stream
+// looks alive forever off "a" alone, hiding "b"'s outage from every
+// consumer computing liveness off the single merged channel.
+func TestMergeSessionEvents_ClosesWhenOneSourceGoesStaleWhileOtherKeepsFlowing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := make(chan runtime.SessionEvent)
+	b := make(chan runtime.SessionEvent)
+	const staleAfter = 30 * time.Millisecond
+	merged := mergeSessionEvents(ctx, a, b, staleAfter)
+
+	// b delivers once, then goes silent (transport wedged, channel never
+	// closed — herdr's actual behavior on a broken transport).
+	b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess"}
+	if ev := <-merged; ev.Session != "b-sess" {
+		t.Fatalf("first event = %q, want b-sess", ev.Session)
+	}
+
+	// a keeps producing well past staleAfter; merged must still close
+	// because b, not a, is the one that went stale.
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
+				case <-stop:
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-merged:
+			if !ok {
+				return // merged closed despite a's continuing traffic: correct.
+			}
+		case <-deadline:
+			t.Fatal("merged stream did not close after one source went stale")
+		}
+	}
+}
