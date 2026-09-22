@@ -2150,3 +2150,55 @@ func TestEnsureCanonicalMetadataScrubsAnUnusableServerBindingFragment(t *testing
 		}
 	}
 }
+
+// TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps pins the difference between
+// the two readers of one key.
+//
+// metadata.json IS bd's config file (configfile.ConfigFileName), and
+// Config.GetDoltDataDir hands DatabasePath the value JSON decoded, untrimmed. A
+// reader resolving the directory bd serves from must therefore not trim; a
+// reader comparing the value against a path gc itself wrote may, because
+// SetMetadataDoltDataDir trims on the way in.
+func TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    string
+		wantRaw  string
+		wantTidy string
+		wantOK   bool
+	}{
+		{name: "no padding: the readers agree", value: `"elsewhere/dolt"`, wantRaw: "elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a leading space is a directory name", value: `" elsewhere/dolt"`, wantRaw: " elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a trailing space too", value: `"elsewhere/dolt "`, wantRaw: "elsewhere/dolt ", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "whitespace only is no claim either way", value: `"  "`, wantRaw: "  ", wantTidy: "", wantOK: false},
+		{name: "absent", value: "", wantRaw: "", wantTidy: "", wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			body := `{"dolt_mode":"proxied-server"}`
+			if tc.value != "" {
+				body = `{"dolt_mode":"proxied-server","dolt_data_dir":` + tc.value + `}`
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			raw, rawOK, err := ReadMetadataDoltDataDirRaw(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDirRaw: %v", err)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("ReadMetadataDoltDataDirRaw = %q, want %q (beads resolves the value as decoded)", raw, tc.wantRaw)
+			}
+			if rawOK != (tc.wantRaw != "") {
+				t.Errorf("ReadMetadataDoltDataDirRaw ok = %v, want %v", rawOK, tc.wantRaw != "")
+			}
+			tidy, tidyOK, err := ReadMetadataDoltDataDir(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDir: %v", err)
+			}
+			if tidy != tc.wantTidy || tidyOK != tc.wantOK {
+				t.Errorf("ReadMetadataDoltDataDir = %q/%v, want %q/%v", tidy, tidyOK, tc.wantTidy, tc.wantOK)
+			}
+		})
+	}
+}

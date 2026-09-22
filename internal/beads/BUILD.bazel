@@ -119,6 +119,7 @@ go_test(
         "ready_context_internal_test.go",
         "runview_lifecycle_test.go",
         "runview_roundtrip_test.go",
+        "schema_cursor_drift_test.go",
         "sqlite_sequence_floor_lock_test.go",
         "sqlite_store_closed_test.go",
         "sqlite_store_conformance_test.go",
