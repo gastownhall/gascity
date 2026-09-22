@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "timingsummary",
+    srcs = [
+        "history.go",
+        "historydb.go",
+        "summary.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/timingsummary",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "timingsummary_test",
+    srcs = [
+        "history_test.go",
+        "historydb_test.go",
+        "summary_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":timingsummary"],
+    deps = ["//internal/testenv"],
+)

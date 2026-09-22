@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "orderdispatch",
+    srcs = ["dispatch.go"],
+    importpath = "github.com/gastownhall/gascity/internal/orderdispatch",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/orders"],
+)

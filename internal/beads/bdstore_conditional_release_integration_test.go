@@ -75,7 +75,7 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 //
 // It is homed on the contract matrix's "current" cell, whose bd is built from
 // deps.env BD_CURRENT_REF. That is a choice, not a capability limit: deps.env
-// BD_VERSION is v1.3.0-rc.2, which carries the flags, so the shards that
+// BD_VERSION is v1.3.0, which carries the flags, so the shards that
 // install BD_VERSION could run this row too. It stays here as the single home
 // for the contract, and this cell sets requireConditionalReleaseEnv so every
 // exit short of a full run is a failure (conditionalReleaseUnprovable). A bd at
@@ -86,7 +86,7 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status "+
 			"(pre-beads#5008): the store latches to the raw-SQL fallback, which embedded mode rejects "+
 			"outright, so this row cannot exercise the verb at all. Both deps.env BD_VERSION "+
-			"(v1.3.0-rc.2) and BD_CURRENT_REF carry the flags, so a bd this old is the floor "+
+			"(v1.3.0) and BD_CURRENT_REF carry the flags, so a bd this old is the floor "+
 			"(BD_PREV_VERSION, 1.0.4) or something off-pin; the row is homed on the source-built "+
 			"BD_CURRENT_REF cell (make test-bd-conditional-release-contract).")
 	}

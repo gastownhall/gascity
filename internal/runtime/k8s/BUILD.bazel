@@ -1,0 +1,61 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "k8s",
+    srcs = [
+        "cutover.go",
+        "exec.go",
+        "name.go",
+        "pod.go",
+        "provider.go",
+        "seams.go",
+        "staging.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/k8s",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/citylayout",
+        "//internal/pathutil",
+        "//internal/runtime",
+        "//internal/shellquote",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/api/resource",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_client_go//kubernetes",
+        "@io_k8s_client_go//kubernetes/scheme",
+        "@io_k8s_client_go//rest",
+        "@io_k8s_client_go//tools/clientcmd",
+        "@io_k8s_client_go//tools/remotecommand",
+        "@io_k8s_client_go//util/exec",
+    ],
+)
+
+go_test(
+    name = "k8s_test",
+    srcs = [
+        "beads_script_test.go",
+        "controller_script_test.go",
+        "exec_provider_test.go",
+        "name_test.go",
+        "pod_test.go",
+        "provider_stale_probe_test.go",
+        "provider_test.go",
+        "seams_test.go",
+        "session_script_test.go",
+        "staging_test.go",
+        "testenv_helpers_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":k8s"],
+    deps = [
+        "//internal/runtime",
+        "//internal/shellquote",
+        "//internal/testenv",
+        "@io_k8s_api//core/v1:core",
+        "@io_k8s_apimachinery//pkg/api/errors",
+        "@io_k8s_apimachinery//pkg/apis/meta/v1:meta",
+        "@io_k8s_apimachinery//pkg/runtime/schema",
+        "@io_k8s_client_go//util/exec",
+    ],
+)

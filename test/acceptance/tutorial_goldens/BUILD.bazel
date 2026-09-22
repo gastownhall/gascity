@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "tutorial_goldens_test",
+    srcs = ["testenv_import_test.go"],
+    data = glob(["testdata/**"]),
+    deps = ["//internal/testenv"],
+)

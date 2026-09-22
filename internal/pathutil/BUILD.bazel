@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "pathutil",
+    srcs = ["pathutil.go"],
+    importpath = "github.com/gastownhall/gascity/internal/pathutil",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "pathutil_test",
+    srcs = [
+        "pathutil_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":pathutil"],
+    deps = ["//internal/testenv"],
+)

@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sdnotify",
+    srcs = ["sdnotify.go"],
+    importpath = "github.com/gastownhall/gascity/internal/sdnotify",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "sdnotify_test",
+    srcs = [
+        "sdnotify_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":sdnotify"],
+    deps = ["//internal/testenv"],
+)

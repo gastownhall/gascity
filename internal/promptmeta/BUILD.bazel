@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "promptmeta",
+    srcs = ["promptmeta.go"],
+    importpath = "github.com/gastownhall/gascity/internal/promptmeta",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "promptmeta_test",
+    srcs = [
+        "promptmeta_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":promptmeta"],
+    deps = ["//internal/testenv"],
+)

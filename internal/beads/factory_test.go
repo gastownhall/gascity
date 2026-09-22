@@ -308,6 +308,163 @@ func TestOpenStoreAtForCityExecutableHooksBlockNativeStore(t *testing.T) {
 	}
 }
 
+// The proxied binding lives in .beads/metadata.json. bd commits it there and
+// writes no dolt.mode into config.yaml at all — its own validator accepts only
+// "server"|"embedded" for that key — so a config.yaml carrying
+// "proxied-server" is drift, not a topology decision, and must not decide the
+// store. Preflight answers instead.
+func TestOpenStoreAtForCityConfigMarkerIsNotProxiedAuthority(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: proxied-server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	native := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("a config.yaml marker alone routed the scope to the bd provider")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) { return native, nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != native {
+		t.Fatalf("Store = %T, want the preflight-selected native store", result.Store)
+	}
+	if result.Diagnostic.PreflightGate == BeadsGateProxiedProvider {
+		t.Fatal("config.yaml decided the proxied gate; metadata.json is the authority")
+	}
+}
+
+// Metadata is that authority: the same marker there does route to the bd
+// provider under the proxied gate, without ever opening a native store.
+func TestOpenStoreAtForCityMetadataProxiedModeBlocksNativeStore(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for a proxied metadata binding")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want fallback store", result.Store)
+	}
+	if result.Diagnostic.PreflightGate != BeadsGateProxiedProvider {
+		t.Fatalf("preflight_gate = %q, want proxied_provider", result.Diagnostic.PreflightGate)
+	}
+}
+
+func TestOpenStoreAtForCityUnknownPersistedDoltModeFallsBack(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scope, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"mystery"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, `{"backend":"dolt","dolt_mode":"mystery","project_id":"gc-local"}`, contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for unknown persisted dolt mode")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback || result.Diagnostic.PreflightGate != "unsupported_dolt_mode" {
+		t.Fatalf("result = (%T, %+v), want fallback with unsupported_dolt_mode", result.Store, result.Diagnostic)
+	}
+}
+
+func TestOpenStoreAtForCityUnreadableConfigFailsClosed(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "config.yaml"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called with unreadable config")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback || result.Diagnostic.PreflightGate != "config_unreadable" {
+		t.Fatalf("result = (%T, %+v), want fallback with config_unreadable", result.Store, result.Diagnostic)
+	}
+}
+
+func TestOpenStoreAtForCityUnknownConfigDoltModeFallsBack(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	beadsDir := filepath.Join(scope, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: mystery\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fallback := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore:      func() (Store, error) { return fallback, nil },
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for unknown config dolt mode")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback || result.Diagnostic.PreflightGate != "unsupported_dolt_mode" {
+		t.Fatalf("result = (%T, %+v), want fallback with unsupported_dolt_mode", result.Store, result.Diagnostic)
+	}
+}
+
 func TestOpenStoreAtForCityGCStampedHooksDoNotBlockNativeStore(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	scope := t.TempDir()

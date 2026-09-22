@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "testutil",
+    srcs = [
+        "git.go",
+        "path.go",
+        "timeout.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testutil",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/pathutil"],
+)
