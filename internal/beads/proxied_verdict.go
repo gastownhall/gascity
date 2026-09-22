@@ -96,6 +96,17 @@ const (
 	// about the endpoint, so it is never terminal.
 	ProxiedVerdictBudgetExhausted ProxiedVerdict = "budget_exhausted"
 
+	// ProxiedVerdictSchemaUnverified reports a probe that answered "served"
+	// without having evaluated the ignored lane's cursor reality (council pr2
+	// D-F11). The gate needs that reality to know which cursor the linked
+	// library will act on, and an unevaluated one is not evidence, so it is
+	// refused rather than believed. It is not terminal: it describes the
+	// session that produced the result, not the database, so the open takes the
+	// bd front door and a later open asks again. In production only the probe
+	// session marks a reality evaluated, so this verdict names a Session
+	// implementation that skipped the check.
+	ProxiedVerdictSchemaUnverified ProxiedVerdict = "schema_unverified"
+
 	// ProxiedVerdictHeadMoved reports that the database changed across gc's
 	// own library open: the HEAD hash the admitting probe session read is not
 	// the one a re-read sees once the open has returned — or, on the
@@ -146,8 +157,10 @@ func (v ProxiedVerdict) String() string { return string(v) }
 //
 //   - Not terminal: the endpoint is in motion (proxy_gone, draining,
 //     backend_unreachable, circuit_open), gc simply ran out of clock
-//     (budget_exhausted), or gc saw something it cannot attribute to itself
-//     (head_moved — any bd client may commit inside the same window).
+//     (budget_exhausted), gc saw something it cannot attribute to itself
+//     (head_moved — any bd client may commit inside the same window), or the
+//     evidence was never gathered (schema_unverified — a fact about the
+//     session, not the database).
 //     Retrying inside the escalation ladder is the point.
 //   - Terminal: a fact about the database, the record, or the policy that a
 //     retry cannot move (schema_skew, not_ours, legacy_schema, database_gone,
@@ -163,7 +176,8 @@ func (v ProxiedVerdict) Terminal() bool {
 		ProxiedVerdictBackendUnreachable,
 		ProxiedVerdictCircuitOpen,
 		ProxiedVerdictBudgetExhausted,
-		ProxiedVerdictHeadMoved:
+		ProxiedVerdictHeadMoved,
+		ProxiedVerdictSchemaUnverified:
 		return false
 	default:
 		return true

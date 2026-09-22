@@ -230,6 +230,22 @@ func (c Cursors) String() string {
 //
 // Limited false means nothing was missing: believe the cursor as read, which is
 // the shape of every healthy database.
+//
+// # Its zero value is REFUSED, not believed (council pr2 D-F11)
+//
+// "Limited false" is also what a CursorReality nobody filled in says, and a
+// gate that read the zero value as "nothing was missing" compared exactly the
+// raw cursor A-F2 exists to stop comparing. ProbeIO.Session is an injection
+// seam and ProbeResult a plain struct, so a second Session — PR3's write arm,
+// an acceptance seam — that populated Cursors and forgot Reality reopened A-F2
+// with no compile error and no failing test.
+//
+// So a reality also records whether a session actually EVALUATED it. The mark
+// is unexported: in production only readCursorsOver sets it, on every session
+// that completed its reads (including the cursor-0 case, where the library too
+// has nothing to corroborate). The admission gate refuses an unchecked reality
+// with a non-terminal verdict. A test stub gets a checked one only by asking
+// for it by name, through ServedProbeForTest.
 type CursorReality struct {
 	// Limited reports that a sentinel the library probes is absent, so the
 	// library will disbelieve the cursor down to Floor.
@@ -239,7 +255,16 @@ type CursorReality struct {
 	// Missing names the sentinel whose absence set the floor, for a message an
 	// operator can act on.
 	Missing string
+
+	// checked reports that a probe session evaluated this reality. See the
+	// type doc: the zero value is refused.
+	checked bool
 }
+
+// Checked reports whether a probe session actually evaluated this reality. An
+// unchecked reality is not evidence: a gate must refuse it rather than read
+// its Limited=false as "nothing was missing".
+func (r CursorReality) Checked() bool { return r.checked }
 
 // EffectiveIgnored is the ignored-lane cursor the LINKED LIBRARY will compute
 // from this database, which is not always the number on disk.
@@ -662,6 +687,9 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 			return report, err
 		}
 	}
+	// The one production place a reality is marked evaluated (council pr2
+	// D-F11): every read this session owed has completed.
+	report.Reality.checked = true
 	return report, nil
 }
 

@@ -114,7 +114,7 @@ func TestProxiedHeadMovedIsLoudAtEverySite(t *testing.T) {
 			Database:     "beads",
 			ProcessTable: admitted.processTable(),
 			Probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
-				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 			},
 			Observed:  NewGenerationSet(),
 			Recovered: NewGenerationSet(),

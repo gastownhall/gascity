@@ -558,6 +558,18 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 		// ignored cursor is not the number the linked library acts on, and a
 		// gate that compared it admitted databases the library would migrate.
 		// See CursorsMatchPinned (council A-F2).
+		//
+		// And it reads it only when a session EVALUATED it (council pr2
+		// D-F11). An unevaluated reality's zero value says "nothing was
+		// missing", which is the raw-cursor comparison A-F2 removed, so it is
+		// refused — non-terminally, because it is a fact about the session
+		// that produced the result rather than about the database.
+		if !probe.Reality.Checked() {
+			return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictSchemaUnverified,
+				"the probe reported the database served but its session never evaluated the ignored lane's "+
+					"cursor reality, so the gate cannot tell which cursor the linked library will act on; "+
+					"in production only the probe session marks a reality evaluated", nil)
+		}
 		ok, lane, dir := CursorsMatchPinned(probe.Cursors, probe.Reality)
 		if !ok {
 			detail := fmt.Sprintf("database %s, this binary pins main=%d ignored=%d",

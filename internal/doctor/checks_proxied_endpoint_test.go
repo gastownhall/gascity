@@ -130,10 +130,7 @@ func TestBeadsStorePayloadOnAHealthyProxiedScope(t *testing.T) {
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
 	stubProxyProcess(t, fixture, "-1ns")
 	probes := 0
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
-	}, &probes)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), &probes)
 
 	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{
 		Store:         beads.BeadsStoreNameBdStore,
@@ -252,7 +249,7 @@ func TestBeadsStorePayloadNeverProbesAnUnprovenEndpoint(t *testing.T) {
 			fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, tc.pid, 45200)
 			tc.table(t, fixture)
 			probes := 0
-			stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, &probes)
+			stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), &probes)
 
 			payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore})
 			ep := payload.Endpoint
@@ -369,7 +366,7 @@ func TestBeadsStorePayloadIdleSourcesCrossed(t *testing.T) {
 			scope := t.TempDir()
 			fixture := writeProxiedScope(t, scope, tc.sidecar, 6006, 45400)
 			stubProxyProcess(t, fixture, tc.idleFlag)
-			stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, nil)
+			stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), nil)
 
 			ep := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore}).Endpoint
 			if ep.IdlePolicy != tc.wantPolicy || ep.IdlePolicySource != tc.wantSource {
@@ -400,7 +397,7 @@ func TestBeadsStorePayloadSkipsNonProxiedScopes(t *testing.T) {
 		Alive: func(int) bool { consulted = true; return false },
 	})
 	probes := 0
-	stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, &probes)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), &probes)
 
 	payload := newBeadsStorePayload(scope, contract.DoltConnectionTarget{DoltMode: "server", Database: "beads"}, beadsStoreDiagnostic{
 		Store: "NativeDoltStore",
@@ -423,10 +420,7 @@ func TestBeadsStorePayloadMarshalsTheShapeAutomationReads(t *testing.T) {
 	scope := t.TempDir()
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6007, 45500)
 	stubProxyProcess(t, fixture, "-1ns")
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: 66, Ignored: 26},
-	}, nil)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: 66, Ignored: 26}, proxyendpoint.CursorReality{}), nil)
 
 	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{
 		Store:         beads.BeadsStoreNameBdStore,
@@ -735,10 +729,7 @@ func TestBeadsStoreCheckPayloadReportsProxiedNativeVerdict(t *testing.T) {
 		scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
 		fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
 		stubProxyProcess(t, fixture, "-1ns")
-		stubProbe(t, proxyendpoint.ProbeResult{
-			Outcome: proxyendpoint.ProbeServed,
-			Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
-		}, nil)
+		stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
 		spy := &spyPingStore{pingFunc: func() error { return nil }}
 		return NewBeadsStoreCheck(scope, func(_ string) (beads.StoreOpenResult, error) {
 			return beads.StoreOpenResult{Store: spy, Diagnostic: diag}, nil
@@ -856,10 +847,7 @@ func TestBeadsStoreCheckFlagOffPayloadUnchanged(t *testing.T) {
 	scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
 	stubProxyProcess(t, fixture, "-1ns")
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
-	}, nil)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
 
 	// The flag-off diagnostic for a proxied scope: exactly what the factory
 	// produces today, with no Proxied field at all.
@@ -932,10 +920,7 @@ func TestBeadsStoreCheckReportsAPostOpenDemotion(t *testing.T) {
 	scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
 	stubProxyProcess(t, fixture, "-1ns")
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
-	}, nil)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
 
 	// The handle stood down after the open: the open's account says native and
 	// not demoted, the live handle says otherwise.

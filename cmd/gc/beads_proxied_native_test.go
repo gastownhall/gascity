@@ -136,7 +136,7 @@ func (f *proxiedScopeFixture) admit(t *testing.T, longLived bool) beads.Pin {
 		Database:     "beads",
 		ProcessTable: f.processTable(),
 		Probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
 		},
 		LongLived: longLived,
 		Observed:  beads.NewGenerationSet(),
@@ -285,7 +285,7 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 	}
 	servedProbe := func(f *proxiedScopeFixture) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
 		}
 	}
 
@@ -441,7 +441,7 @@ func TestProxiedGuardRecoveryAdmitsWithoutForkingBd(t *testing.T) {
 			ops:          proxiedProviderOps{cityPath: t.TempDir(), observed: observed},
 			processTable: f.processTable(),
 			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
-				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
 			},
 			observed:  observed,
 			recovered: beads.NewGenerationSet(),
@@ -513,7 +513,11 @@ func TestProxiedGuardRecoverySpendsAtMostOneProbeSession(t *testing.T) {
 			processTable: f.processTable(),
 			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 				*probes++
-				return proxyendpoint.ProbeResult{Outcome: outcome, Cursors: f.pinnedCursors()}
+				// Served rows need a checked reality (council pr2 D-F11); for
+				// every other outcome the reality is meaningless.
+				result := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+				result.Outcome = outcome
+				return result
 			},
 			observed:  beads.NewGenerationSet(),
 			recovered: beads.NewGenerationSet(),
@@ -600,7 +604,7 @@ func TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget(t *testing.T) {
 		database:     "beads",
 		processTable: f.processTable(),
 		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
 		},
 		observed:  beads.NewGenerationSet(),
 		recovered: beads.NewGenerationSet(),
@@ -887,7 +891,9 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			processTable: f.processTable(),
 			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 				n.probes++
-				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: f.pinnedCursors(), Head: head}
+				served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+				served.Head = head
+				return served
 			},
 			observed:  beads.NewGenerationSet(),
 			recovered: beads.NewGenerationSet(),

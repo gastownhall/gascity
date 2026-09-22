@@ -652,6 +652,12 @@ func proxiedGuardReadCursors(ctx context.Context, pin Pin) (proxyendpoint.Cursor
 		}
 		return proxyendpoint.Cursors{}, fmt.Errorf("guard cursor read: probe outcome %s", result.Outcome)
 	}
+	if !result.Reality.Checked() {
+		// The same refusal the admission gate makes (council pr2 D-F11), as an
+		// undecided tick rather than a demotion: an unevaluated reality is not
+		// evidence the schema moved, and not evidence it did not.
+		return proxyendpoint.Cursors{}, errors.New("guard cursor read: the session never evaluated the ignored lane's cursor reality")
+	}
 	return proxyendpoint.Cursors{
 		Main:    result.Cursors.Main,
 		Ignored: result.Reality.EffectiveIgnored(result.Cursors.Ignored),

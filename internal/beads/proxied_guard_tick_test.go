@@ -62,7 +62,7 @@ func (f *guardFixture) probe(context.Context, proxyendpoint.Endpoint, string) pr
 	if f.probeResult != nil {
 		return f.probeResult()
 	}
-	return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+	return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 }
 
 func newGuardFixture(t *testing.T) *guardFixture {
@@ -649,7 +649,7 @@ func TestProxiedGuardTickDoesNotServeAMovedRootWhileTheNewProxyRefuses(t *testin
 		if refusing {
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
 		}
-		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 	}
 
 	probes := f.probes

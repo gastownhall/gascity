@@ -3,6 +3,10 @@ package proxyendpoint
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -113,6 +117,12 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 					t.Errorf("reality message %q does not name the missing sentinel", report.Reality.String())
 				}
 			}
+			// Council pr2 D-F11: the session is what marks a reality
+			// evaluated, on every row — including the empty lane, where the
+			// library too has nothing to corroborate.
+			if !report.Reality.Checked() {
+				t.Fatalf("a completed session left its reality unchecked (%+v); the gate would refuse every probe", report.Reality)
+			}
 			if got := report.Reality.EffectiveIgnored(report.Cursors.Ignored); got != tc.wantEffective {
 				t.Fatalf("EffectiveIgnored(%d) = %d, want %d: this is the number migrationSource.atLatest computes, and therefore the number that decides whether MigrateUp replays the ignored series",
 					report.Cursors.Ignored, got, tc.wantEffective)
@@ -195,4 +205,90 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 			t.Fatalf("a server error spent %d confirming dial(s); it must not reach the no-greeting ladder", dials)
 		}
 	})
+}
+
+// TestOnlyTheSessionAndTheNamedHelperMarkARealityChecked is council pr2 D-F11.
+//
+// A reality's zero value says "nothing was missing", which is the raw-cursor
+// comparison A-F2 removed, so an unchecked one is refused by the gate. That is
+// only a protection if nothing marks a reality checked by accident: the mark is
+// unexported, the session sets it only when every read it owed completed, and
+// the one exported way to get it is a helper whose name says it is for tests.
+func TestOnlyTheSessionAndTheNamedHelperMarkARealityChecked(t *testing.T) {
+	if (CursorReality{}).Checked() {
+		t.Fatal("a zero-value reality reports itself checked")
+	}
+	handBuilt := ProbeResult{Outcome: ProbeServed, Cursors: Cursors{Main: 66, Ignored: 26}}
+	if handBuilt.Reality.Checked() {
+		t.Fatal("a hand-built served result carries a checked reality; a stub could be admitted without saying so")
+	}
+	if got := ServedProbeForTest(Cursors{Main: 66, Ignored: 26}, CursorReality{}); !got.Reality.Checked() || got.Outcome != ProbeServed {
+		t.Fatalf("ServedProbeForTest = %+v, want a served result with a checked reality", got)
+	}
+
+	// A session that failed part-way marks nothing, even though it may have
+	// filled the cursors it did read.
+	failing := &fakeProbeConnector{
+		cursors:  map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: 26},
+		queryErr: errors.New("invalid connection"),
+	}
+	report, err := readCursorsOver(context.Background(), failing)
+	if err == nil {
+		t.Fatal("a failing session reported success")
+	}
+	if report.Reality.Checked() {
+		t.Fatal("a failed session marked its reality checked")
+	}
+}
+
+// TestServedProbeForTestIsNeverCalledInProduction holds the other half of
+// D-F11's line: the helper that marks a reality checked must not become a
+// production shortcut past the session. It scans every non-test Go file in the
+// module.
+func TestServedProbeForTestIsNeverCalledInProduction(t *testing.T) {
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(self), "..", "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("module root %s has no go.mod: %v", root, err)
+	}
+	scanned := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "vendor", ".claude":
+				return filepath.SkipDir
+			}
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+					return filepath.SkipDir // a nested worktree is another checkout
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			filepath.Base(path) == "probe_testing.go" {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		scanned++
+		if strings.Contains(string(body), "ServedProbeForTest(") {
+			t.Errorf("%s calls ServedProbeForTest outside a test: only the probe session may mark a reality checked", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+	if scanned < 100 {
+		t.Fatalf("scanned %d non-test Go files from %s; the walk is not seeing the module", scanned, root)
+	}
 }

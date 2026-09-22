@@ -94,6 +94,10 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 		// own open, and another bd client's ordinary write must not pin a scope
 		// to the bd front door for the process. See ProxiedOpenUnmoved.
 		ProxiedVerdictHeadMoved,
+		// schema_unverified describes the SESSION that produced a served
+		// result, not the database (council pr2 D-F11): a later open may ask
+		// a session that did evaluate the reality.
+		ProxiedVerdictSchemaUnverified,
 	}
 	terminal := []ProxiedVerdict{
 		ProxiedVerdictSchemaSkew,

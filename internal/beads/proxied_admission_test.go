@@ -173,7 +173,7 @@ func (o *admissionOps) counts() (int, int) {
 func servedProbe(cursors proxyendpoint.Cursors, calls *int) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 	return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		*calls++
-		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: cursors}
+		return proxyendpoint.ServedProbeForTest(cursors, proxyendpoint.CursorReality{})
 	}
 }
 
@@ -184,7 +184,7 @@ func servedProbe(cursors proxyendpoint.Cursors, calls *int) func(context.Context
 func servedProbeWithReality(cursors proxyendpoint.Cursors, reality proxyendpoint.CursorReality, calls *int) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 	return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		*calls++
-		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: cursors, Reality: reality}
+		return proxyendpoint.ServedProbeForTest(cursors, reality)
 	}
 }
 
@@ -409,7 +409,7 @@ func TestAdmitTable(t *testing.T) {
 			if probes == 1 {
 				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
 			}
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 		}
 
 		pin, err := Admit(context.Background(), in)
@@ -1101,7 +1101,7 @@ func TestDrainReProbesTheDataPort(t *testing.T) {
 		if probes <= 2 {
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
 		}
-		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 	}
 
 	start := now
@@ -1166,6 +1166,46 @@ func TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers(t *testing.T) {
 		t.Fatalf("the drain ran %d probe sessions, want at most %d per pass: re-probing on every poll "+
 			"costs bd an accepted connection every 250ms for a minute", probes, perPass)
 	}
+}
+
+// TestAdmitRefusesAnUncheckedCursorReality is council pr2 D-F11.
+//
+// CursorReality's zero value says "nothing was missing", which made the A-F2
+// gate fail OPEN: a Session that filled the cursors and forgot the reality —
+// cmd/gc's own test stubs built exactly that shape and passed — compared the
+// raw ignored cursor, the comparison A-F2 exists to remove. Undetermined is
+// never a pass: an unevaluated reality is refused, non-terminally, and a
+// checked one with the pinned cursors still admits.
+func TestAdmitRefusesAnUncheckedCursorReality(t *testing.T) {
+	t.Run("a zero-value reality is refused, non-terminally", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		}
+		pin, err := Admit(context.Background(), in)
+		if pin.Admitted() {
+			t.Fatal("a served probe whose reality nobody evaluated was admitted")
+		}
+		verdict, typed := ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != ProxiedVerdictSchemaUnverified {
+			t.Fatalf("err = %v, want the schema_unverified verdict", err)
+		}
+		if verdict.Terminal() {
+			t.Error("an unevaluated reality is a fact about the session, not the database: it must not latch")
+		}
+	})
+
+	t.Run("a checked reality with the pinned cursors admits", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		in := baseAdmissionInput(f, &admissionOps{})
+		calls := 0
+		in.Probe = servedProbe(pinnedCursors(), &calls)
+		pin, err := Admit(context.Background(), in)
+		if err != nil || !pin.Admitted() {
+			t.Fatalf("Admit = (%+v, %v), want an admitted pin", pin, err)
+		}
+	})
 }
 
 // TestProxiedOpenUnmovedDeclinesRatherThanAgrees is council pr2 D-F3's unit
@@ -1297,7 +1337,9 @@ func TestAdmitCarriesTheProbesHeadButNotTheMemos(t *testing.T) {
 	in.SkipMemo = false
 	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		probes++
-		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors(), Head: "head0000"}
+		served := proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+		served.Head = "head0000"
+		return served
 	}
 
 	fresh, err := Admit(context.Background(), in)
@@ -1376,7 +1418,11 @@ func TestAdmitProbeOnceSpendsOneSessionAndNeverWaits(t *testing.T) {
 			}
 			in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 				probes++
-				return proxyendpoint.ProbeResult{Outcome: tc.outcome, Cursors: pinnedCursors()}
+				// Served rows need a checked reality (council pr2 D-F11); for
+				// every other outcome the reality is meaningless.
+				result := proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+				result.Outcome = tc.outcome
+				return result
 			}
 
 			_, err := Admit(context.Background(), in)
@@ -1435,7 +1481,7 @@ func TestDrainIsNotEndedByAnIndeterminateProbe(t *testing.T) {
 		probes++
 		switch {
 		case ep.Record.PID == 6002:
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 		case probes == 1:
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
 		default:
@@ -1470,7 +1516,7 @@ func TestDrainIsNotEndedByAnIndeterminateProbe(t *testing.T) {
 			if probes == 1 {
 				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
 			}
-			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
 		}
 		if _, err := Admit(context.Background(), in); err != nil {
 			t.Fatalf("a proxy that came up during the drain was not admitted: %v", err)
