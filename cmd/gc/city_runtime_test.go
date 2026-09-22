@@ -1109,7 +1109,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	preflightIndex := orderEvents.index("preflight")
 	sessionListIndex := orderEvents.index("session-list")
@@ -1164,7 +1164,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
@@ -1255,7 +1255,7 @@ func TestCityRuntimeTickStretchSkipStillRunsNudgeDispatchFallback(t *testing.T) 
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if !cr.sessionPhaseStretchActive() {
 		t.Fatal("precondition: stretch must be active for this tick to have taken the stretch-skip branch")
@@ -1723,7 +1723,7 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -1808,7 +1808,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 	// This is the delta lane being honestly delta, and it is what makes the
 	// sweep non-optional rather than redundant.
 	for _, trigger := range []string{"poke", "patrol"} {
-		cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, trigger)
+		cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, trigger, false)
 		if got := completedFacts(); len(got) != 0 {
 			t.Fatalf("completed events after a %s tick = %#v, want none: no event named this root", trigger, got)
 		}
@@ -1839,7 +1839,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 	// further. Without this row, "the tick emits nothing" above would be
 	// satisfied by a delta lane that is wired to nothing at all.
 	lane.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: root.ID})
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	if got := completedFacts(); len(got) != 1 {
 		t.Fatalf("completed events after a tick that named the root = %#v, want the one fact", got)
 	}
@@ -1869,7 +1869,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if od.called.Load() {
 		t.Fatal("order dispatcher should not run after city context is canceled")
@@ -1902,7 +1902,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -3970,7 +3970,7 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test", false)
 
 	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
 		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
@@ -4006,7 +4006,7 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test", false)
 
 	got := stderr.String()
 	for _, want := range []string{
@@ -4253,7 +4253,7 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	var prevPoolRunning map[string]bool
 	var lastProviderName string
 	dirty := &atomic.Bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test", false)
 	// tick() enqueues the async start wave and returns without waiting for it:
 	// enqueuePreparedStartWaveForCity spawns a goroutine per candidate and
 	// reports TraceOutcomeStartEnqueued immediately. That goroutine goes on to
@@ -4480,7 +4480,7 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 	lastProviderName := ""
 	prevPoolRunning := make(map[string]bool)
 	runMainTick := func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 	}
 
 	// The targeted dispatcher signal path must both materialize and start the
@@ -5645,7 +5645,7 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -5758,7 +5758,7 @@ func TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange(t *testing.T) {
 			lastProviderName := "fake"
 			var prevPoolRunning map[string]bool
 
-			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload")
+			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload", false)
 
 			select {
 			case reply := <-doneCh:
@@ -6086,7 +6086,7 @@ func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *tes
 	var prevPoolRunning map[string]bool
 
 	cr.safeTick(func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 	}, "poke")
 
 	if cr.activeReload != nil {
@@ -6140,7 +6140,7 @@ func TestCityRuntimeWatchReloadPanicRestoresDirty(t *testing.T) {
 	var prevPoolRunning map[string]bool
 
 	cr.safeTick(func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol", false)
 	}, "patrol")
 
 	if !dirty.Load() {

@@ -792,7 +792,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	}
 	// Track pool instance liveness for death detection.
 	var prevPoolRunning map[string]bool
-	runTick := func(trigger string) {
+	runTick := func(trigger string, forceSessionPhases bool) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -803,11 +803,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		prev := beads.SetReconcilerTickTrigger(trigger)
 		defer beads.RestoreReconcilerTickTrigger(prev)
 		cr.safeTick(func() {
-			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
+			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger, forceSessionPhases)
 		}, trigger)
 	}
 	if dirty.Load() {
-		runTick("startup-poke")
+		runTick("startup-poke", false)
 		if ctx.Err() != nil {
 			return
 		}
@@ -889,17 +889,20 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
+			// pending event-driven fires are redundant — drop them. A
+			// dropped poke may have been the thing that would have made
+			// sessionPhasesDue's stretch check re-run session phases this
+			// cycle; force them due so the drop never causes a silent skip.
+			pokeDropped := pokeDB.cancelPending()
 			ctrlDB.cancelPending()
-			runTick("patrol")
+			runTick("patrol", pokeDropped)
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Arm the debouncer; the deferred fire runs runTick("poke")
 			// once the burst settles.
 			pokeDB.arm(debounce)
 		case <-pokeDB.fired():
-			runTick("poke")
+			runTick("poke", false)
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
@@ -1041,18 +1044,25 @@ func (d *tickDebouncer) arm(delay time.Duration) {
 
 // cancelPending stops an armed timer and discards a queued fire, if
 // any. Used when a higher-priority tick (e.g. the periodic patrol)
-// supersedes whatever caused the pending fire.
-func (d *tickDebouncer) cancelPending() {
+// supersedes whatever caused the pending fire. Reports whether anything
+// was actually pending (an armed timer or an already-queued fire), so a
+// caller that preempts real work (not just an idle debouncer) can react
+// — e.g. force the tick it runs instead to cover what was dropped.
+func (d *tickDebouncer) cancelPending() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	had := false
 	if d.timer != nil {
 		d.timer.Stop()
 		d.timer = nil
+		had = true
 	}
 	select {
 	case <-d.fireCh:
+		had = true
 	default:
 	}
+	return had
 }
 
 // fired returns the channel that emits when a debounced fire is due.
@@ -1133,8 +1143,11 @@ func (cr *CityRuntime) reconcilePoolDeaths(prevPoolRunning *map[string]bool) {
 // patrol-driven session scans run at the stretched cadence — event pokes
 // carry the real-time work and the patrol scan is the safety net. A pending
 // config change always runs the phases (a reload must reconcile fully).
-func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now time.Time) bool {
-	due := trigger != "patrol" || configPending || !cr.sessionPhaseStretchActive() ||
+// forceDue is set when this patrol tick discarded a pending event-driven
+// poke: that poke might have been the trigger that made session phases due
+// this cycle, so the drop must not also cause a silent skip.
+func (cr *CityRuntime) sessionPhasesDue(trigger string, configPending bool, now time.Time, forceDue bool) bool {
+	due := trigger != "patrol" || configPending || forceDue || !cr.sessionPhaseStretchActive() ||
 		!now.Before(cr.sessionPhasesLast.Add(cr.cfg.Daemon.SessionPatrolIntervalDuration()))
 	if due {
 		cr.sessionPhasesLast = now
@@ -1163,6 +1176,7 @@ func (cr *CityRuntime) tick(
 	cityRoot string,
 	prevPoolRunning *map[string]bool,
 	trigger string,
+	forceSessionPhases bool,
 ) {
 	if ctx.Err() != nil {
 		return
@@ -1190,7 +1204,7 @@ func (cr *CityRuntime) tick(
 	// ([daemon].session_patrol_interval) — event pokes carry the real-time
 	// work and the patrol scan is the safety net. Non-patrol triggers and
 	// pending config changes always run the session phases.
-	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), time.Now())
+	runSessionPhases := cr.sessionPhasesDue(trigger, dirty.Load(), time.Now(), forceSessionPhases)
 	// Detect pool instance deaths since last tick (session phase). Ordered
 	// ahead of the config reload so it compares against the config the
 	// deaths happened under.

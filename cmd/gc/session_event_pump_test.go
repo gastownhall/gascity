@@ -443,7 +443,7 @@ func TestSessionPhasesDueDoesNotStretchBeforeEventFlow(t *testing.T) {
 	cr := stretchTestRuntime(t, "10m", pump)
 	now := time.Now()
 	cr.sessionPhasesLast = now
-	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
 		t.Fatal("patrol was stretched before the event backend proved it could deliver")
 	}
 }
@@ -455,7 +455,7 @@ func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {
 	now := time.Now()
 	cr.sessionPhasesLast = now // just ran
 	for _, trigger := range []string{"poke", "startup-poke"} {
-		if !cr.sessionPhasesDue(trigger, false, now) {
+		if !cr.sessionPhasesDue(trigger, false, now, false) {
 			t.Errorf("sessionPhasesDue(%q) = false, want true", trigger)
 		}
 	}
@@ -464,7 +464,7 @@ func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {
 func TestSessionPhasesDuePatrolWithoutStretchRuns(t *testing.T) {
 	cr := stretchTestRuntime(t, "", nil)
 	cr.sessionPhasesLast = time.Now()
-	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
 		t.Error("sessionPhasesDue(patrol) = false with stretching unset, want true")
 	}
 }
@@ -474,13 +474,13 @@ func TestSessionPhasesDuePatrolStretchSkipsWithinWindow(t *testing.T) {
 	defer cancel()
 	cr := stretchTestRuntime(t, "10m", pump)
 	now := time.Now()
-	if !cr.sessionPhasesDue("patrol", false, now) {
+	if !cr.sessionPhasesDue("patrol", false, now, false) {
 		t.Fatal("first patrol tick must run the session phases")
 	}
-	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
 		t.Error("patrol tick inside the stretch window ran the session phases")
 	}
-	if !cr.sessionPhasesDue("patrol", false, now.Add(11*time.Minute)) {
+	if !cr.sessionPhasesDue("patrol", false, now.Add(11*time.Minute), false) {
 		t.Error("patrol tick past the stretch window skipped the session phases")
 	}
 }
@@ -488,7 +488,7 @@ func TestSessionPhasesDuePatrolStretchSkipsWithinWindow(t *testing.T) {
 func TestSessionPhasesDuePatrolStretchIgnoredWithoutStream(t *testing.T) {
 	cr := stretchTestRuntime(t, "10m", nil) // no pump wired
 	cr.sessionPhasesLast = time.Now()
-	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
 		t.Error("stretch honored without a session-event stream")
 	}
 
@@ -498,7 +498,7 @@ func TestSessionPhasesDuePatrolStretchIgnoredWithoutStream(t *testing.T) {
 	idle.restart(runtime.NewFake()) // provider without a stream
 	cr = stretchTestRuntime(t, "10m", idle)
 	cr.sessionPhasesLast = time.Now()
-	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
 		t.Error("stretch honored while the pump is not streaming")
 	}
 }
@@ -509,7 +509,7 @@ func TestSessionPhasesDueStretchNotLongerThanPatrolIgnored(t *testing.T) {
 	for _, stretch := range []string{"30s", "10s"} {
 		cr := stretchTestRuntime(t, stretch, pump)
 		cr.sessionPhasesLast = time.Now()
-		if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
 			t.Errorf("stretch %q (not longer than patrol) skipped the session phases", stretch)
 		}
 	}
@@ -521,7 +521,27 @@ func TestSessionPhasesDueConfigPendingRuns(t *testing.T) {
 	cr := stretchTestRuntime(t, "10m", pump)
 	now := time.Now()
 	cr.sessionPhasesLast = now
-	if !cr.sessionPhasesDue("patrol", true, now) {
+	if !cr.sessionPhasesDue("patrol", true, now, false) {
 		t.Error("pending config change did not force the session phases")
+	}
+}
+
+func TestSessionPhasesDueForceDueOverridesStretch(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	if !cr.sessionPhasesDue("patrol", false, now, false) {
+		t.Fatal("first patrol tick must run the session phases")
+	}
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
+		t.Fatal("patrol tick inside the stretch window ran the session phases without forceDue")
+	}
+	// A dropped poke inside the stretch window must still force the phases
+	// due, even though the window itself has not elapsed: the poke that was
+	// discarded when patrol preempted it may have been exactly what would
+	// have made this cycle due.
+	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), true) {
+		t.Error("forceDue=true inside the stretch window did not run the session phases")
 	}
 }
