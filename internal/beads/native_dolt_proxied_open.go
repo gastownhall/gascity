@@ -2,11 +2,13 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	beadslib "github.com/steveyegge/beads"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
 
 // bdEnvPrefix is the namespace bd's own CLI configures itself from. It is not
@@ -170,31 +172,37 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 
 // ProxiedOpenedHead reads the database's HEAD commit hash over a library handle
 // gc has just opened, through that handle's OWN connection pool (council pr2
-// D-F3).
+// D-F3), once the open's own work has finished (council pr2 E-S3).
 //
 // It is the post-open half of the HEAD observation, and the reason it goes
-// through the library rather than through a probe session is the cost: the pool
-// already holds a connection the open used, so the re-read is one statement on
-// it, with no dial, no handshake and no accepted connection on bd's proxy that
-// bd's idle watcher would have to count. VersionControlReader is the library's
-// exported, read-only surface for exactly this question (beads v1.3.0
-// beads.go:259; GetCurrentCommit is SELECT DOLT_HASHOF('HEAD') on the store's
-// pool, internal/storage/dolt/versioned.go:190).
+// through the library's pool rather than through a probe session is the cost:
+// the pool already holds a connection the open used, so the re-read is two
+// statements on it, with no dial, no handshake and no accepted connection on
+// bd's proxy that bd's idle watcher would have to count.
 //
-// A handle that does not implement it is reported as an error, not as "".
-// Every server-mode open returns *dolt.DoltStore, which does, so this can only
-// fire if a beads bump changes that — and the caller treats an unreadable hash
-// as "not observed", which is the safe reading of a check it could not make.
+// TWO statements, on one pinned connection, because one is not an observation
+// of the post-open state (proxyendpoint.ReadPostOpen): the connection the
+// library's open-time checks ran on stays pinned to the pre-open session root
+// after a non-numbered MigrateUp commit (be-itm5), so its first statement
+// answers the hash from BEFORE the open. It used to be
+// VersionControlReader.GetCurrentCommit — one SELECT DOLT_HASHOF('HEAD') on the
+// pool — which on the read path's reopen was exactly that first statement.
+//
+// The pool is reached through UnderlyingDB, which every server-mode open's
+// *dolt.DoltStore exports (beads v1.3.0 internal/storage/dolt/store.go:3162,
+// the accessor bd's own doctor and `bd sql` use). A handle that does not
+// export it is reported as an error, not as "": the caller logs an
+// unobservable open rather than treating it as an unchanged one.
 func ProxiedOpenedHead(ctx context.Context, storage NativeStorage) (string, error) {
-	reader, ok := storage.(beadslib.VersionControlReader)
+	accessor, ok := storage.(interface{ UnderlyingDB() *sql.DB })
 	if !ok {
-		return "", fmt.Errorf("read HEAD after the proxied open: the linked library's %T is not a VersionControlReader", storage)
+		return "", fmt.Errorf("read HEAD after the proxied open: the linked library's %T exports no UnderlyingDB", storage)
 	}
-	head, err := reader.GetCurrentCommit(ctx)
+	report, err := proxyendpoint.ReadPostOpen(ctx, accessor.UnderlyingDB())
 	if err != nil {
 		return "", fmt.Errorf("read HEAD after the proxied open: %w", err)
 	}
-	return strings.TrimSpace(head), nil
+	return report.Head, nil
 }
 
 // ProxiedLeafHead is ProxiedOpenedHead for a leaf the open has already wrapped in

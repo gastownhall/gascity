@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint/proxyendpointtest"
 )
 
 // proxiedUnlockKeys are the five variables that must be UNSET inside the
@@ -334,63 +337,69 @@ func TestProxiedOpenIsReadOnlyWithoutBeingAsked(t *testing.T) {
 	}
 }
 
-// headReadingStorage is a library handle whose only real surface is
-// VersionControlReader, counting the re-reads it serves.
-type headReadingStorage struct {
+// poolStorage is a library handle whose only real surface is the pool it
+// exports through UnderlyingDB — the accessor server-mode *dolt.DoltStore
+// carries, and the only thing the post-open observation touches.
+type poolStorage struct {
 	beadslib.Storage
-	head  string
-	err   error
-	reads int
+	db *sql.DB
 }
 
-func (s *headReadingStorage) GetCurrentCommit(context.Context) (string, error) {
-	s.reads++
-	return s.head, s.err
-}
-
-func (s *headReadingStorage) CurrentBranch(context.Context) (string, error) { return "main", nil }
-
-func (s *headReadingStorage) ListBranches(context.Context) ([]string, error) { return nil, nil }
-
-func (s *headReadingStorage) CommitExists(context.Context, string) (bool, error) { return false, nil }
-
-func (s *headReadingStorage) Status(context.Context) (*beadslib.VCStatus, error) { return nil, nil }
-
-func (s *headReadingStorage) Log(context.Context, int) ([]beadslib.CommitInfo, error) {
-	return nil, nil
-}
+func (s *poolStorage) UnderlyingDB() *sql.DB { return s.db }
 
 // TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool is council pr2 D-F3's
-// re-read half: the post-open HEAD comes from the handle the open just built —
-// one statement on its pool — and not from a session of gc's own, which would
-// be one more accepted connection on bd's proxy per open.
+// re-read half: the post-open HEAD comes from the handle the open just built,
+// and not from a session of gc's own, which would be one more accepted
+// connection on bd's proxy per open.
+//
+// And council pr2 E-S3: the pool models beads' be-itm5 — a connection answers
+// its first statement from the pre-open root — so the observation must be the
+// SECOND statement on one pinned connection. A reader that trusted the first
+// answer reports "before0000" here, which is the hash the probe saw, and an
+// open that committed would pass the check.
 func TestProxiedOpenedHeadReadsOverTheLibrarysOwnPool(t *testing.T) {
-	storage := &headReadingStorage{head: " after11111\n"}
-	head, err := ProxiedOpenedHead(context.Background(), storage)
+	pool := proxyendpointtest.NewPostOpenDB(
+		proxyendpointtest.State{Head: "before0000"},
+		proxyendpointtest.State{Head: " after11111\n"})
+	t.Cleanup(func() { _ = pool.DB.Close() })
+
+	head, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: pool.DB})
 	if err != nil {
 		t.Fatalf("ProxiedOpenedHead: %v", err)
 	}
 	if head != "after11111" {
-		t.Fatalf("head = %q, want the library's answer, trimmed", head)
+		t.Fatalf("head = %q, want the state AFTER the open, trimmed: the first statement on a connection "+
+			"the open's checks ran on reads the pre-open root (be-itm5)", head)
 	}
-	if storage.reads != 1 {
-		t.Fatalf("the re-read asked the library %d time(s), want exactly 1", storage.reads)
+	if conns, statements := pool.Conns(), len(pool.Statements()); conns != 1 || statements != 2 {
+		t.Fatalf("the re-read used %d connection(s) and %d statement(s), want 1 and 2: "+
+			"the advancing statement and the answer must share a connection", conns, statements)
 	}
 
 	// The same question through the wrapped leaf reaches the same pool.
-	leaf := newNativeDoltStoreForTest(storage)
+	leafPool := proxyendpointtest.NewPostOpenDB(
+		proxyendpointtest.State{Head: "before0000"}, proxyendpointtest.State{Head: "after11111"})
+	t.Cleanup(func() { _ = leafPool.DB.Close() })
+	leaf := newNativeDoltStoreForTest(&poolStorage{db: leafPool.DB})
 	if head, err := ProxiedLeafHead(context.Background(), leaf); err != nil || head != "after11111" {
-		t.Fatalf("ProxiedLeafHead = (%q, %v), want the leaf's own pool's answer", head, err)
+		t.Fatalf("ProxiedLeafHead = (%q, %v), want the leaf's own pool's post-open answer", head, err)
 	}
 
 	// A handle that cannot answer is an error, never "": the caller must be
 	// able to tell "not observed" from a value.
 	if _, err := ProxiedOpenedHead(context.Background(), &nativeDoltStorageSpy{}); err == nil {
-		t.Fatal("a handle with no VersionControlReader produced a HEAD")
+		t.Fatal("a handle with no UnderlyingDB produced a HEAD")
 	}
-	failing := &headReadingStorage{err: errors.New("invalid connection")}
-	if _, err := ProxiedOpenedHead(context.Background(), failing); err == nil {
+	failing := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{}, proxyendpointtest.State{}).
+		Failing(errors.New("invalid connection"))
+	t.Cleanup(func() { _ = failing.DB.Close() })
+	if _, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: failing.DB}); err == nil {
 		t.Fatal("a failed re-read produced a HEAD")
+	}
+	empty := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: "x"}, proxyendpointtest.State{Head: ""})
+	t.Cleanup(func() { _ = empty.DB.Close() })
+	if _, err := ProxiedOpenedHead(context.Background(), &poolStorage{db: empty.DB}); err == nil {
+		t.Fatal("an empty hash was reported as an observation instead of a failure to observe")
 	}
 	// A closed leaf is refused before anything is asked.
 	if _, err := ProxiedLeafHead(context.Background(), nil); err == nil {

@@ -79,8 +79,8 @@ import (
 // re-admits with AdmissionInput.ProbeOnce — one pass, at most ONE probe session,
 // no sleeps, no drain wait and no no-greeting ladder, because the next tick is
 // the retry (council pr2 D-F5). Only when that admits does the tick also open
-// the library, inside the hermetic window, plus the single HEAD re-read
-// statement on the new pool. Before the cap it could cost nine probe sessions
+// the library, inside the hermetic window, plus the post-open re-read: two
+// statements on one pinned connection of the new pool (council pr2 E-S3). Before the cap it could cost nine probe sessions
 // and ~6s of sleeps per tick against a silent proxy, and the full 60s drain
 // against a refusing one, every interval.
 

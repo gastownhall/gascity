@@ -176,9 +176,10 @@ type proxiedNativeOpener struct {
 	openNativeStorage func(ctx context.Context, scopeRoot string, env map[string]string) (beads.NativeStorage, error)
 
 	// leafHead and storageHead are the POST-open half of the HEAD observation:
-	// one statement over the pool the library open just built, so the re-read
-	// costs a round trip on a connection gc already holds and never a session
-	// of its own. Injected for the same reason as the two opens; nil means the
+	// two statements on one pinned connection of the pool the library open
+	// just built (the first advances a connection beads left on the pre-open
+	// root, be-itm5), so the re-read costs round trips on a connection gc
+	// already holds and never a session of its own. Injected for the same reason as the two opens; nil means the
 	// production readers, so omitting them cannot switch the check off.
 	leafHead    func(ctx context.Context, native *beads.NativeDoltStore) (string, error)
 	storageHead func(ctx context.Context, storage beads.NativeStorage) (string, error)
@@ -378,7 +379,9 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 // all of it, because every one of those writes ends in a commit.
 //
 // The pre-open hash came free with the probe session's first statement; the
-// re-read is read(), one statement over the library's own pool. A pin served
+// re-read is read(), over the library's own pool (beads.ProxiedOpenedHead: the
+// SECOND statement on one pinned connection, because the first answers from
+// the pre-open root on a connection the open's checks ran on). A pin served
 // from the admission memo carries no hash, so it spends nothing and concludes
 // nothing. A re-read that fails concludes nothing either: the pool that just
 // served the open cannot answer, the first read will meet the same failure on

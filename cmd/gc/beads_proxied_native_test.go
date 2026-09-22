@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint/proxyendpointtest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -1053,6 +1055,73 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
 		}
 	})
+
+	// Council pr2 E-S3. The rows above inject storageHead, so none of them
+	// could see what the PRODUCTION re-read actually observes on the reopen
+	// path: beads leaves the connection its open-time checks ran on pinned to
+	// the pre-open session root when MigrateUp commits without applying a
+	// numbered migration (the dolt_ignore seed, the content_hash pass), and
+	// that connection's first statement answers the pre-open HEAD (be-itm5).
+	// The reopen issues no statement of its own before the check (the first
+	// open reads issue_prefix first, which masked this there), so a single
+	// DOLT_HASHOF('HEAD') was that first statement and a HEAD the open moved
+	// read as unmoved. This row leaves storageHead nil and hands the reopen a
+	// pool that behaves that way.
+	t.Run("the reopen detects a HEAD its own open moved, through the production re-read", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"},
+			proxyendpointtest.State{Head: "after11111"})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		storage := &poolExportingStorage{db: pool.DB}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		opener.storageHead = nil
+
+		got, err := opener.reopen(false)(context.Background())
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("reopen = (%v, %v), want the head_moved verdict: the re-read answered from the "+
+				"connection's pre-open root", got, err)
+		}
+		if !strings.Contains(verdict.Detail, "after11111") {
+			t.Errorf("the verdict does not name the post-open hash: %s", verdict.Detail)
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+
+		// Control: an open that moved nothing is served, on the same shape.
+		steady := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"}, proxyendpointtest.State{Head: "before0000"})
+		t.Cleanup(func() { _ = steady.DB.Close() })
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return &poolExportingStorage{db: steady.DB}, nil
+		}
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		if _, err := opener.reopen(false)(context.Background()); err != nil {
+			t.Fatalf("a reopen that moved nothing was refused: %v", err)
+		}
+	})
+}
+
+// poolExportingStorage is a library handle whose real surface is the pool it
+// exports through UnderlyingDB, as server-mode *dolt.DoltStore does, plus a
+// counted Close.
+type poolExportingStorage struct {
+	beads.NativeStorage
+	db     *sql.DB
+	closed int
+}
+
+func (s *poolExportingStorage) UnderlyingDB() *sql.DB { return s.db }
+
+func (s *poolExportingStorage) Close() error {
+	s.closed++
+	return nil
 }
 
 // closeCountingStorage is a library handle whose only real surface is Close.
