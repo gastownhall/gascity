@@ -136,6 +136,20 @@ func (s *readyQueryRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 	return s.MemStore.Ready(query...)
 }
 
+// listCallCountingStore counts calls made through List so a test can assert
+// a lookup's store-read cost stays flat against an unrelated input's size
+// (e.g. the number of configured named sessions), rather than growing one
+// read per item (ga-0t7qjl).
+type listCallCountingStore struct {
+	*beads.MemStore
+	listCalls int
+}
+
+func (s *listCallCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
+}
+
 type blockingPoolCreateStore struct {
 	*beads.MemStore
 	alias               string
@@ -2450,6 +2464,44 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	}
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
+	}
+}
+
+// TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount
+// pins ga-0t7qjl: readyAssignedWorkAssignees looked up each on_demand named
+// session's closed-bead phantom one identity at a time
+// (findClosedNamedSessionBead -> one store.List per identity), so its store
+// cost scaled linearly with the number of configured named sessions — 109
+// serial calls, +155s, on this city. A batched lookup must cost the same
+// small constant number of store reads regardless of how many named
+// sessions are configured.
+func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t *testing.T) {
+	newCityWithNamedSessions := func(n int) *config.City {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		for i := 0; i < n; i++ {
+			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+				Dir:      fmt.Sprintf("repo-%d", i),
+				Template: "named-worker",
+				Mode:     "on_demand",
+			})
+		}
+		return cfg
+	}
+
+	countListCalls := func(n int) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil)
+		return store.listCalls
+	}
+
+	small := countListCalls(2)
+	large := countListCalls(200)
+
+	if small != large {
+		t.Fatalf("store.List call count scales with named-session count: 2 sessions -> %d calls, 200 sessions -> %d calls; want equal (one batched lookup regardless of session count)", small, large)
+	}
+	if large > 2 {
+		t.Fatalf("store.List called %d times for 200 named sessions; want a small constant via one batched lookup, not one call per named session", large)
 	}
 }
 
