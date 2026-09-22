@@ -105,8 +105,10 @@ const (
 	// the shapes that gate cannot see. It is not terminal, because gc cannot
 	// tell a commit ITS open minted from one another bd client made in the same
 	// window, and another process's ordinary write must not permanently demote
-	// this scope. It is the one verdict the factory logs at WARN: it is an
-	// incident, not an expected refusal. See ProxiedHeadUnmoved.
+	// this scope. It is the one verdict logged at WARN, at every site that
+	// meets it — the factory, the read path's reopen and the guard's recovery
+	// (proxied_incident_log.go): it is an incident, not an expected refusal.
+	// See ProxiedHeadUnmoved.
 	ProxiedVerdictHeadMoved ProxiedVerdict = "head_moved"
 
 	// ProxiedVerdictWriteIndeterminate is RESERVED and never produced in PR2.

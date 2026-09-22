@@ -444,6 +444,10 @@ func (s *ProxiedStore) classifyReadError(err error) error {
 		return nil
 	}
 	if verdict, ok := ProxiedVerdictOf(err); ok {
+		// A head_moved verdict here came from the reopen hook's library open,
+		// and it is an incident, not a refusal: without this it was one
+		// caller's read error and a silent stand-down (council pr2 E-S2).
+		logProxiedHeadMoved(nil, s.scopeRootForPin(), ProxiedIncidentSiteReadReopen, verdict)
 		s.standDown(verdict)
 	}
 	return err

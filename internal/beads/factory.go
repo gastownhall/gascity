@@ -389,8 +389,13 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 		// The city still gets its store, but the operator is told — at WARN,
 		// with both hashes — and the diagnostic keeps the detail, because
 		// "head_moved" alone does not say which database or which commit.
+		//
+		// Through the lane's incident log, NOT logNativeUnavailable: that one
+		// returns on a nil Logger, and the controller's rig stores pass none,
+		// so the long-lived open this incident is most likely on was the one
+		// open that could not report it (council pr2 E-S2).
 		diag.Proxied = report.diagnostic(verdictErr.Verdict, verdictErr.Detail)
-		logNativeUnavailable(opts.Logger, opts.ScopeRoot, proxiedProviderGate, verdictErr.Error())
+		logProxiedHeadMoved(opts.Logger, opts.ScopeRoot, ProxiedIncidentSiteOpen, verdictErr)
 		return false, StoreOpenResult{}, nil
 	}
 	if verdictErr, ok := ProxiedVerdictOf(err); ok {

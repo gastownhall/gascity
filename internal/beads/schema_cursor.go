@@ -199,10 +199,12 @@ func CursorsMatchPinned(c proxyendpoint.Cursors, reality proxyendpoint.CursorRea
 // same window: bd writes to this database constantly, and the schema commits
 // carry no author gc could recognize. Demoting terminally on that would let
 // another process's ordinary `bd update` permanently pin a scope to the bd front
-// door. So the verdict is non-terminal: this open stands down loudly (the
-// factory logs it with both hashes, see openProxiedNative), the opener forgets
-// the memoized admission so the next open re-probes and is checked again, and a
-// genuine per-open write shows up as a per-open demotion rather than as silence.
+// door. So the verdict is non-terminal: this open stands down loudly (every
+// site that meets the verdict logs it at WARN with both hashes — the factory,
+// the read path's reopen and the guard's recovery, proxied_incident_log.go),
+// the opener forgets the memoized admission so the next open re-probes and is
+// checked again, and a genuine per-open write shows up as a per-open demotion
+// rather than as silence.
 //
 // The price of that choice is stated rather than hidden: on a city whose bd
 // clients commit inside the probe-to-re-read window, an open that wrote nothing

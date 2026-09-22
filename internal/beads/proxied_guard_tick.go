@@ -556,9 +556,20 @@ func (g *proxiedGuard) recoverNative(ctx context.Context) proxiedGuardStep {
 	}
 	native, pin, err := reopen(ctx)
 	if err != nil {
-		if verdict, ok := ProxiedVerdictOf(err); ok && verdict.Terminal() {
+		// A recovery is a library open like any other, so it can meet
+		// head_moved, and it is the one open no caller is waiting on: nothing
+		// but this line reports it (council pr2 E-S2).
+		logProxiedHeadMoved(nil, g.store.scopeRootForPin(), ProxiedIncidentSiteGuardRecovery, err)
+		verdict, ok := ProxiedVerdictOf(err)
+		if ok && verdict.Terminal() {
 			g.store.standDown(verdict)
 			return proxiedGuardStoodDown
+		}
+		if ok {
+			// Still demoted, for a reason newer than the one that demoted it.
+			// Doctor reads the store's verdict, and "proxy_gone" for a handle
+			// whose recoveries keep failing on head_moved is a stale account.
+			g.store.noteDemotedVerdict(verdict)
 		}
 		return proxiedGuardUndecided
 	}
@@ -744,6 +755,23 @@ func (s *ProxiedStore) guardState() (Pin, *NativeDoltStore, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.pin, s.native, s.terminal
+}
+
+// noteDemotedVerdict replaces the recorded reason of a NON-terminally demoted
+// handle with a newer non-terminal one, so the diagnostic says why the handle is
+// still on bd now rather than why it first left. It never touches a serving
+// handle and never overwrites a terminal latch or records a terminal verdict:
+// those go through standDown.
+func (s *ProxiedStore) noteDemotedVerdict(verdict *ProxiedVerdictError) {
+	if verdict == nil || verdict.Terminal() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.native != nil || s.terminal {
+		return
+	}
+	s.verdict = verdict
 }
 
 // adoptPin installs a freshly admitted pin on a store whose native leaf is still

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -181,6 +182,12 @@ type proxiedNativeOpener struct {
 	// production readers, so omitting them cannot switch the check off.
 	leafHead    func(ctx context.Context, native *beads.NativeDoltStore) (string, error)
 	storageHead func(ctx context.Context, storage beads.NativeStorage) (string, error)
+
+	// logger receives the post-open check's WARN when the re-read itself
+	// fails. Nil is slog.Default(): the composition roots build this opener
+	// without one, and the controller's rig stores pass no logger anywhere, so
+	// a nil here must not mean silence (council pr2 E-S2).
+	logger *slog.Logger
 }
 
 // newProxiedNativeOpener builds the opener for one scope.
@@ -284,7 +291,7 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 		return nil, pin.Report(), err
 	}
 
-	native, err := o.openNativeLeaf(ctx, pin, longLived)
+	native, err := o.openNativeLeaf(ctx, pin, longLived, beads.ProxiedIncidentSiteOpen)
 	if err != nil {
 		return nil, pin.Report(), err
 	}
@@ -332,8 +339,8 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 // first open and by the guard tick's recovery, so a replacement leaf is
 // configured exactly like the one it replaces — the read-only fence, the proxied
 // read budget and the reconnect hook are not things a second call site may
-// forget.
-func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin, longLived bool) (*beads.NativeDoltStore, error) {
+// forget. site names the open for the post-open check's log line.
+func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin, longLived bool, site string) (*beads.NativeDoltStore, error) {
 	native, err := o.openNative(ctx, o.scopeRoot, nativeDoltProxiedOpenEnvForPin(o.cityName, pin, longLived),
 		// The reconnect hook is where a re-pin actually happens: it re-runs
 		// admission and re-projects the CURRENT generation's endpoint, on the
@@ -354,7 +361,7 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 	if leafHead == nil {
 		leafHead = beads.ProxiedLeafHead
 	}
-	if verdict := o.headUnmoved(ctx, pin, func(ctx context.Context) (string, error) { return leafHead(ctx, native) }); verdict != nil {
+	if verdict := o.headUnmoved(ctx, pin, site, func(ctx context.Context) (string, error) { return leafHead(ctx, native) }); verdict != nil {
 		closeProxiedLeafQuietly(native)
 		return nil, verdict
 	}
@@ -376,16 +383,25 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 // nothing. A re-read that fails concludes nothing either: the pool that just
 // served the open cannot answer, the first read will meet the same failure on
 // the read path, and this check is detection over a gate that already passed.
+// It is not SILENT, though (council pr2 E-S2): the check that exists to catch
+// gc writing to bd's database did not run, and that is logged at WARN with
+// the site and the reason.
+//
+// A verdict is not logged here. It is returned, and every consumer that meets
+// it — the factory, the read path, the guard's recovery — logs it through the
+// lane's one incident line (internal/beads proxied_incident_log.go), so a
+// head_moved is reported once, at the place that decided what to do about it.
 //
 // On a verdict the memoized admission is forgotten. Otherwise the next open in
 // this process would be served from the memo — which carries no hash — and walk
 // past the one check that just fired.
-func (o *proxiedNativeOpener) headUnmoved(ctx context.Context, pin beads.Pin, read func(context.Context) (string, error)) error {
+func (o *proxiedNativeOpener) headUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (string, error)) error {
 	if pin.Head() == "" {
 		return nil
 	}
 	head, err := read(ctx)
 	if err != nil {
+		beads.LogProxiedPostOpenUnobserved(o.logger, o.scopeRoot, site, err)
 		return nil
 	}
 	verdict := beads.ProxiedHeadUnmoved(pin, head)
@@ -437,7 +453,7 @@ func (o *proxiedNativeOpener) recoverNativeLeaf() beads.NativeLeafReopener {
 		if err != nil {
 			return nil, beads.Pin{}, err
 		}
-		native, err := o.openNativeLeaf(ctx, pin, true)
+		native, err := o.openNativeLeaf(ctx, pin, true, beads.ProxiedIncidentSiteGuardRecovery)
 		if err != nil {
 			return nil, beads.Pin{}, err
 		}
@@ -538,7 +554,7 @@ func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 		if storageHead == nil {
 			storageHead = beads.ProxiedOpenedHead
 		}
-		if verdict := o.headUnmoved(ctx, pin, func(ctx context.Context) (string, error) { return storageHead(ctx, storage) }); verdict != nil {
+		if verdict := o.headUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (string, error) { return storageHead(ctx, storage) }); verdict != nil {
 			_ = storage.Close()
 			return nil, verdict
 		}

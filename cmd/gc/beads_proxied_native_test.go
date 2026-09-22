@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -914,7 +915,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			t.Fatalf("the pin carries head %q, want the probe's: admission must record what it saw", pin.Head())
 		}
 
-		_, err = opener.openNativeLeaf(context.Background(), pin, false)
+		_, err = opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen)
 		verdict, typed := beads.ProxiedVerdictOf(err)
 		if !typed {
 			t.Fatalf("openNativeLeaf err = %v, want a typed verdict the factory can fall back on", err)
@@ -957,7 +958,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("admit: %v", err)
 		}
-		if _, err := opener.openNativeLeaf(context.Background(), pin, false); err != nil {
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen); err != nil {
 			t.Fatalf("a healthy open was refused: %v", err)
 		}
 		if n.reads != 1 || n.probes != 1 {
@@ -973,7 +974,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		if n.probes != 1 {
 			t.Fatalf("the second open probed again (%d sessions); this row must exercise the memo", n.probes)
 		}
-		if _, err := opener.openNativeLeaf(context.Background(), memoized, false); err != nil {
+		if _, err := opener.openNativeLeaf(context.Background(), memoized, false, beads.ProxiedIncidentSiteOpen); err != nil {
 			t.Fatalf("a memoized open was refused: %v", err)
 		}
 		if n.reads != 1 {
@@ -981,19 +982,46 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		}
 	})
 
-	t.Run("a re-read that fails says nothing about what the open did", func(t *testing.T) {
+	t.Run("a re-read that fails says nothing about what the open did, and says so loudly", func(t *testing.T) {
 		f := newProxiedScopeFixture(t)
 		var n counters
 		opener := newOpener(t, f, "before0000", &n, func() (string, error) {
 			return "", errors.New("invalid connection")
 		})
+		var logged strings.Builder
+		opener.logger = slog.New(slog.NewTextHandler(&logged, nil))
 
 		pin, err := opener.admit(context.Background(), false)
 		if err != nil {
 			t.Fatalf("admit: %v", err)
 		}
-		if _, err := opener.openNativeLeaf(context.Background(), pin, false); err != nil {
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen); err != nil {
 			t.Fatalf("a failed belt-and-braces re-read refused an open the schema gate admitted: %v", err)
+		}
+		// Council pr2 E-S2: the check that exists to catch gc writing to bd's
+		// database did not run, and that used to be a silent nil.
+		line := logged.String()
+		for _, want := range []string{"level=WARN", "msg=" + beads.ProxiedPostOpenUnobservedMessage, "site=open", "invalid connection"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("the failed re-read's log line lacks %q:\n%s", want, line)
+			}
+		}
+
+		// The same on the read path's reopen, which is the other library open.
+		logged.Reset()
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return &closeCountingStorage{}, nil
+		}
+		opener.storageHead = func(context.Context, beads.NativeStorage) (string, error) {
+			return "", errors.New("invalid connection")
+		}
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		if _, err := opener.reopen(false)(context.Background()); err != nil {
+			t.Fatalf("a failed re-read refused the reopen: %v", err)
+		}
+		if line := logged.String(); !strings.Contains(line, "msg="+beads.ProxiedPostOpenUnobservedMessage) ||
+			!strings.Contains(line, `site="read-path reopen"`) {
+			t.Fatalf("the reopen's failed re-read was not logged with its site:\n%s", line)
 		}
 	})
 
