@@ -552,11 +552,13 @@ func TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot(t *testing.T) {
 	})
 
 	t.Run("a scope with no canonical database refuses with a typed verdict", func(t *testing.T) {
-		// The lane declines rather than guessing, and it declines VISIBLY: a nil
+		// A scope the contract cannot resolve AT ALL — the error return, not a
+		// missing dolt_database key — declines, and declines VISIBLY: a nil
 		// opener would make "no database" indistinguishable from "the lane was
 		// never wired here", and the cursors admission gates on are
 		// DATABASE()-scoped, so a probe with none selected would read zeros and
-		// call them evidence.
+		// call them evidence. The missing-KEY case is a different answer and is
+		// pinned in TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity.
 		ops := &scriptedProviderOps{}
 		restore := providerOwnedScopeLifecycleOp
 		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error { return ops.run(op) }
@@ -615,6 +617,26 @@ func TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity(t *testing.T) {
 		t.Fatalf("canonicalScopeDoltTarget(bd-shaped proxied city) = ok %v, err %v; want ok=false — if this starts answering, the comment on proxiedScopeDatabase needs rewriting, not deleting",
 			ok, err)
 	}
+
+	// Council C-F13. The missing-KEY case is a GUESS, not a decline:
+	// ResolveDoltConnectionTarget initializes Database: "beads" unconditionally
+	// and overwrites it only when metadata.json names one. The old doc said the
+	// lane "declines rather than guessing", which is true only of the total
+	// resolution failure below. The guess is fenced — a wrong database fails
+	// the probe, and a shared proxy root serving a differently-prefixed
+	// database is caught by proxiedPrefixAgreement — so this pins the behavior
+	// rather than changing it, and pins it where a reader looking for the
+	// decline will find it.
+	t.Run("metadata with no dolt_database yields beads' own default", func(t *testing.T) {
+		metadata := filepath.Join(f.scopeRoot, ".beads", "metadata.json")
+		if err := os.WriteFile(metadata, []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := proxiedScopeDatabase(f.scopeRoot, f.scopeRoot); got != "beads" {
+			t.Fatalf("proxiedScopeDatabase with no dolt_database = %q, want %q: the contract defaults "+
+				"the name rather than declining, and the doc must say which it does", got, "beads")
+		}
+	})
 
 	// And the lane still declines for a scope the contract cannot resolve at
 	// all, rather than inventing beads' default database name for it.

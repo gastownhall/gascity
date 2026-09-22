@@ -207,9 +207,25 @@ func (o *proxiedNativeOpener) scopeDatabase() string {
 // proxiedScopeDatabase resolves the Dolt database name for a scope from the
 // connection contract — the same resolution doctor's beads-store check and every
 // bd child's environment use, so the native handle and the bd leaf agree on which
-// database they are talking about. A scope the contract cannot resolve at all
-// yields "", and the lane declines rather than guessing: admission refuses an
-// empty database anyway, because the cursors it gates on are DATABASE()-scoped.
+// database they are talking about.
+//
+// What "resolve" means here is narrower than an earlier version of this comment
+// claimed, and the claim was wrong rather than imprecise (council C-F13). It
+// said a scope the contract cannot resolve yields "" and "the lane declines
+// rather than guessing". ResolveDoltConnectionTarget initializes
+// Database: "beads" unconditionally and overwrites it only when
+// .beads/metadata.json actually names one, so a proxied scope whose metadata
+// lacks dolt_database but whose config validates gets the GUESSED name "beads",
+// and admission pins and probes it. Only a total resolution failure — the error
+// return — yields "".
+//
+// The guess is fenced rather than harmless, which is why this is a comment fix
+// and not a code one: a wrong database fails the probe and the lane refuses
+// with a typed verdict, and a shared proxy root serving a differently-prefixed
+// database is caught by proxiedPrefixAgreement with both handles open. And
+// "beads" is bd's own default, so the guess is right for every scope bd
+// created without being asked otherwise. An empty name is still refused by
+// admission, because the cursors it gates on are DATABASE()-scoped.
 //
 // It deliberately does NOT go through canonicalScopeDoltTarget, and this is the
 // first defect the acceptance gate found. That helper requires
