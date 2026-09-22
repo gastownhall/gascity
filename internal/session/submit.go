@@ -562,15 +562,6 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
-// eventCapableRouter is implemented by composite providers (e.g. auto,
-// hybrid) that route different sessions to different backends. See
-// cmd/gc's providerRetiresNudgePollers for the sibling call site this
-// mirrors; that copy cannot be imported here (internal/session must not
-// depend on cmd/gc).
-type eventCapableRouter interface {
-	EventCapableRoute(name string) bool
-}
-
 // providerRetiresDeferredSubmitPoller reports whether sp's event stream
 // retires the deferred-submit sidecar poller for sessName. A nil provider
 // fails open — callers without a resolved provider keep the spawn behavior.
@@ -578,7 +569,7 @@ func providerRetiresDeferredSubmitPoller(sp runtime.Provider, sessName string) b
 	if sp == nil {
 		return false
 	}
-	if router, ok := sp.(eventCapableRouter); ok {
+	if router, ok := sp.(runtime.EventCapableRouter); ok {
 		return router.EventCapableRoute(sessName)
 	}
 	_, ok := sp.(runtime.SessionEventProvider)

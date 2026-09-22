@@ -535,7 +535,7 @@ func TestProviderRetiresNudgePollers(t *testing.T) {
 	}
 }
 
-// routedFake implements eventCapableRouter to simulate a composite provider
+// routedFake implements runtime.EventCapableRouter to simulate a composite provider
 // (e.g. hybrid) whose top-level SessionEventProvider assertion is true
 // (because SOME routed backend is event-capable) but whose per-session
 // routing decision differs — regression coverage for gc-ey9vgx finding 3:
@@ -548,7 +548,7 @@ type routedFake struct {
 
 var (
 	_ runtime.SessionEventProvider = (*routedFake)(nil)
-	_ eventCapableRouter           = (*routedFake)(nil)
+	_ runtime.EventCapableRouter   = (*routedFake)(nil)
 )
 
 func (r *routedFake) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {

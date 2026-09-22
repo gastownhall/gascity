@@ -388,16 +388,6 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 	return quiescence - since, true
 }
 
-// eventCapableRouter is implemented by composite providers (e.g. hybrid) that
-// route different sessions to different backends. Asserting sp against
-// runtime.SessionEventProvider alone answers "is ANY routed backend
-// event-capable", which for hybrid is true whenever its local side is, even
-// for sessions it routes to remote. A provider that can report per-session
-// capability must be asked per-session.
-type eventCapableRouter interface {
-	EventCapableRoute(name string) bool
-}
-
 // providerRetiresNudgePollers reports whether sp's event stream retires the
 // sidecar poller class for target: the supervisor-hosted event dispatcher
 // owns queued delivery for such sessions (in both nudge_dispatcher modes),
@@ -407,7 +397,7 @@ func providerRetiresNudgePollers(target nudgeTarget, sp runtime.Provider) bool {
 	if sp == nil {
 		return false
 	}
-	if router, ok := sp.(eventCapableRouter); ok {
+	if router, ok := sp.(runtime.EventCapableRouter); ok {
 		return router.EventCapableRoute(target.sessionName)
 	}
 	_, ok := sp.(runtime.SessionEventProvider)

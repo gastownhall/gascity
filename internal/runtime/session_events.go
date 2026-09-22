@@ -90,3 +90,13 @@ type SessionEvent struct {
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
 }
+
+// EventCapableRouter is implemented by composite providers (e.g. auto,
+// hybrid) that route different sessions to different backends. Asserting a
+// provider against SessionEventProvider alone answers "is ANY routed backend
+// event-capable", which for a composite is true whenever its local side is,
+// even for sessions it routes elsewhere. A provider that can report
+// per-session capability must be asked per-session.
+type EventCapableRouter interface {
+	EventCapableRoute(name string) bool
+}
