@@ -199,6 +199,32 @@ func TestRecordingBDCountsInvocations(t *testing.T) {
 	recorder.Reset()
 }
 
+// TestRecordingBDRefusesAnInterleavedLog pins the one thing the single-printf
+// shim cannot promise: a record larger than the shell's stdout buffer, written
+// by two forks at once, arrives spliced.
+//
+// /bin/dash emits any record in one write, but bash standing in as /bin/sh
+// chunks at 4096 bytes, and gc does build argv over 4 KiB (bead bodies on
+// --description). A count read off a spliced log is a number nobody can
+// reproduce, so the reader refuses it instead of quietly under-reporting by one.
+func TestRecordingBDRefusesAnInterleavedLog(t *testing.T) {
+	good := "4242" + fieldSeparator + "ping" + fieldSeparator + recordSeparator + "\n"
+	invocations, err := parseInvocations([]byte(good))
+	if err != nil {
+		t.Fatalf("parseInvocations over an intact log: %v", err)
+	}
+	if len(invocations) != 1 || invocations[0].PPID != "4242" {
+		t.Fatalf("parseInvocations over an intact log = %+v, want one record from ppid 4242", invocations)
+	}
+
+	// What a chunked write looks like: the tail of one record's argv is the head
+	// of what the reader takes for the next record.
+	spliced := good + "a title with spaces" + fieldSeparator + "--json" + fieldSeparator + recordSeparator + "\n"
+	if _, err := parseInvocations([]byte(spliced)); err == nil {
+		t.Fatal("parseInvocations accepted a record whose first field is not a pid; an interleaved log must fail the test, not lower its fork count")
+	}
+}
+
 // writeInvocations appends records in the shim's wire format: ppid first, then
 // argv, every field unit-separated, every record separator-terminated and
 // followed by the readability newline the shim writes.

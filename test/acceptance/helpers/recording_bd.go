@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -100,12 +101,30 @@ func NewRecordingBD(t *testing.T, realBD string) *RecordingBD {
 	// deterministic fork gate the next slice builds on Count() cannot stand on
 	// that.
 	//
-	// The record is assembled in a variable and emitted with one printf, whose
-	// single write is atomic under O_APPEND for any record up to PIPE_BUF (4096
-	// bytes) — every argv gc or its provider script builds. The separators are
-	// literal bytes rather than printf escapes so that assembling a record
-	// costs no subshell: a fork per invocation inside the instrument would be a
-	// process the fork census cannot see.
+	// The record is assembled in a variable and emitted with ONE printf. What
+	// that buys is bounded by the shell's stdout buffer, not by PIPE_BUF, and
+	// this used to claim otherwise. Measured with strace on a 20 000-byte
+	// record:
+	//
+	//   - /bin/dash: one write(1, …, 20000) for the record plus a separate
+	//     write of the trailing newline. Records of any size are one write;
+	//     Invocations() already treats the newline as belonging to no record.
+	//   - /bin/bash standing in as /bin/sh (Fedora, macOS): five writes in
+	//     4096-byte chunks. Two concurrent forks whose argv exceeds 4 KiB can
+	//     interleave chunks there.
+	//
+	// gc does build argv over 4 KiB — bead bodies ride `--description`
+	// (internal/beads/bdstore.go) — so that is an ordinary size, not an exotic
+	// one. The limitation is therefore stated rather than papered over, and
+	// Invocations() refuses to guess when it meets an interleaved record instead
+	// of quietly under-counting. A per-invocation file would remove the bound
+	// altogether; it would also cost a directory scan per assertion, which is
+	// the trade PR2's deterministic gate can make if it ever runs where /bin/sh
+	// is bash.
+	//
+	// The separators are literal bytes rather than printf escapes so that
+	// assembling a record costs no subshell: a fork per invocation inside the
+	// instrument would be a process the fork census cannot see.
 	//
 	// The bytes on disk are unchanged (ppid US arg US … US RS newline), so
 	// Invocations parses exactly what it parsed before.
@@ -130,6 +149,12 @@ exec %s "$@"
 
 // Invocations returns every recorded fork, oldest first. An absent log means
 // no bd ran, which is a legitimate answer and not an error.
+//
+// A record whose first field is not a pid is an interleaved write (see
+// NewRecordingBD: only possible where /bin/sh chunks a printf larger than its
+// stdout buffer, with two such forks in flight) and fails the test. A fork
+// census that silently dropped one would be worse than no census: the count the
+// gate reads would be a number nobody can reproduce.
 func (r *RecordingBD) Invocations() []Invocation {
 	r.t.Helper()
 	data, err := os.ReadFile(r.logPath)
@@ -139,6 +164,17 @@ func (r *RecordingBD) Invocations() []Invocation {
 		}
 		r.t.Fatalf("read recording bd log: %v", err)
 	}
+	invocations, parseErr := parseInvocations(data)
+	if parseErr != nil {
+		r.t.Fatalf("recording bd log %s: %v", r.logPath, parseErr)
+	}
+	return invocations
+}
+
+// parseInvocations decodes the shim's wire format. It is separated from
+// Invocations so that the refusal above has a test which does not have to fail
+// one.
+func parseInvocations(data []byte) ([]Invocation, error) {
 	var out []Invocation
 	for _, record := range strings.Split(string(data), recordSeparator) {
 		// The shim writes a newline after each record separator so the log is
@@ -151,9 +187,12 @@ func (r *RecordingBD) Invocations() []Invocation {
 		if len(fields) == 0 || fields[0] == "" {
 			continue
 		}
+		if _, convErr := strconv.Atoi(fields[0]); convErr != nil {
+			return nil, fmt.Errorf("a record's first field %q is not a pid: two bd forks with argv over the shell's output buffer interleaved their writes, so this log's fork count cannot be trusted", fields[0])
+		}
 		out = append(out, Invocation{PPID: fields[0], Argv: fields[1:]})
 	}
-	return out
+	return out, nil
 }
 
 // Count returns how many recorded invocations begin with prefix. Calling it
