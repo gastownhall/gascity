@@ -167,8 +167,9 @@ func proxiedEnv(t *testing.T, bdPath, doltPath string) *helpers.Env {
 
 // proxiedNativeFlagEnv is PR2's rollout flag: native reads over bd's proxy,
 // every mutation still on the bd CLI. internal/beads/proxied_flag.go owns the
-// spellings it accepts.
-const proxiedNativeFlagEnv = "GC_BEADS_PROXIED_NATIVE"
+// spellings it accepts; the shared harness owns the NAME, because the harness
+// is what has to be able to remove it.
+const proxiedNativeFlagEnv = helpers.EnvProxiedNative
 
 // proxiedNativeLaneEnv turns the flag on for one lane's commands.
 //

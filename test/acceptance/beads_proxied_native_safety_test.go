@@ -190,10 +190,8 @@ func TestProxiedNativeSafety(t *testing.T) {
 		city: city, root: cityRoot, proxyDir: proxiedScopeProxyRoot(t, cityRoot),
 	}
 
-	// One `gc doctor --json` in the flag-on lane, before anything is disturbed.
-	// It is both the lane's own health check and the traffic the no-spawn rows
-	// read: doctor's dolt:check-dolt runs `dolt version` from gc itself, which is
-	// the gc-ancestored dolt exec the positive control needs.
+	// One `gc doctor --json` in the flag-on lane, before anything is disturbed:
+	// the lane has to be serving natively or none of the rows below are about it.
 	payload, result := readBeadsStorePayload(t, lane, cityRoot, "the safety city")
 	if payload.Store != "NativeDoltStore" {
 		t.Fatalf("the safety city is not serving natively, so none of these rows would be about the lane: store=%q %s\n  %s",
@@ -204,10 +202,13 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// The instrument, before the claim. Two properties, both required for the
 		// next row to mean anything:
 		//
-		//   1. the sentinel sees gc's OWN dolt children. gc runs `dolt version`
-		//      from a doctor check, so a log with no gc-ancestored entry at all
-		//      would mean the sentinel is not the dolt gc finds — and the next
-		//      row's zero would be zero by construction.
+		//   1. the sentinel sees gc's OWN dolt children. `gc init` runs
+		//      `dolt version` and two `dolt config --global --get` — the identity
+		//      preflight — directly, so a log with no gc-ancestored entry at all
+		//      would mean the sentinel is not the dolt gc resolves, and the next
+		//      row's zero would be zero by construction. (doctor's dolt check also
+		//      runs `dolt version`, but through a `timeout` wrapper, so its
+		//      immediate parent is timeout and it is not what this counts.)
 		//   2. the sentinel sees sql-server spawns. bd started one for this city,
 		//      so a log with no server entry would mean the sentinel is not the
 		//      dolt BD finds either, and "no gc-spawned server" would again be

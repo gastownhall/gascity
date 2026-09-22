@@ -14,6 +14,11 @@ const (
 	EnvRequireLegacyGC = "GC_REQUIRE_ACCEPTANCE_LEGACY_GC"
 	// EnvTopologyMatrix opts a run in to the full bd/dolt topology matrix.
 	EnvTopologyMatrix = "GC_ACCEPTANCE_TOPOLOGY_MATRIX"
+	// EnvProxiedNative is PR2's rollout flag: native reads over bd's proxy,
+	// every mutation still through the bd CLI. It lives here rather than in the
+	// test package because the shared harness has to be able to REMOVE it — a
+	// flag-off lane that an ambient export can turn on is not a lane.
+	EnvProxiedNative = "GC_BEADS_PROXIED_NATIVE"
 )
 
 // RequireTopologyMatrix skips unless the run opted in to the topology matrix.
