@@ -145,6 +145,7 @@ type Entry struct {
 // Catalog returns fresh entries from the checked runtime-provider ledger.
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
+	hybridConstructor := repoSymbol("internal/runtime/hybrid", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -236,7 +237,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
 				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				"cmd/gc.newHybridProvider unconditionally constructs the K8s backend before consulting its routing predicate, so the wrapper itself cannot be constructed under RunProviderTests without a resolvable Kubernetes client config, and no kind/integration-tagged harness supplies one (see the k8s entry above). Its component constructors are now independently accounted for elsewhere (tmux: proved, k8s: waived, internal/runtime/hybrid.New: proved via runtime.composition.hybrid), but the wrapper's own conditional-construction boundary remains ungated by any of those.",
 			),
 		),
 		builtin(
@@ -293,6 +294,26 @@ func Catalog() []Entry {
 				"internal/runtime/auto/conformance_test.go",
 				"TestAutoConformance",
 				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
+			)},
+		},
+		{
+			ID:           "runtime.composition.hybrid",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{hybridConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "newHybridProvider",
+				Reason:   "conditional local/remote composition is constructed inside the wrapper, not the runtime registry",
+			},
+			Claims: []ContractClaim{provedRuntimeScoped(
+				hybridConstructor,
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime", "NewFake"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
