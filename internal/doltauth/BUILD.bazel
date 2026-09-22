@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "doltauth",
+    srcs = ["auth.go"],
+    importpath = "github.com/gastownhall/gascity/internal/doltauth",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/beads/contract"],
+)
+
+go_test(
+    name = "doltauth_test",
+    srcs = [
+        "auth_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":doltauth"],
+    deps = [
+        "//internal/beads/contract",
+        "//internal/testenv",
+    ],
+)

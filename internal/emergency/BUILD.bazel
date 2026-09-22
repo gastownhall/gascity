@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "emergency",
+    srcs = ["emergency.go"],
+    importpath = "github.com/gastownhall/gascity/internal/emergency",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/citylayout",
+        "//internal/events",
+    ],
+)
+
+go_test(
+    name = "emergency_test",
+    srcs = [
+        "emergency_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":emergency"],
+    deps = ["//internal/testenv"],
+)

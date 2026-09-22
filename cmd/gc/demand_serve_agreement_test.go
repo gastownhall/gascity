@@ -76,6 +76,22 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
+			// The discriminating row for the gc.run_target FALLBACK. a-6 above
+			// is the #2763 shape the fallback exists for — a root-only molecule
+			// whose root IS the unit of work. This one was compiled with real
+			// child steps, so gc.workflow_expanded is stamped and the root is
+			// only ever claimable via gc.routed_to (#5900). Counting it would
+			// be permanent demand for a row every worker's claim matcher
+			// refuses: seat spawns, hook reads empty, drains, counted again.
+			name: "fully-expanded workflow root with only run_target",
+			bead: beads.Bead{ID: "a-13", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.RunTargetMetadataKey:        agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
 			name: "routed epic",
 			bead: beads.Bead{
 				ID: "a-7", Status: "open", Type: "epic",
@@ -401,13 +417,18 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 
 // legacyWorkflowTierServes evaluates the generated query's LEGACY workflow-root
 // tier: its own reader flags plus the jq post-filter the builder pipes the
-// result through. That filter keeps only rows whose gc.routed_to is empty, which
-// is the same gate the Go side applies in routedToAndLegacyWorkflowCandidates —
-// run_target is consulted only when there is no canonical route. Mirroring one
-// jq clause here is the single restatement in this conformance, and
+// result through. That filter keeps only rows whose gc.routed_to is empty and
+// which are not already expanded into real child steps — the same two gates the
+// Go side applies in controllerDemandRouteCandidates: run_target is consulted
+// only when there is no canonical route, and only for a root the fallback may
+// still speak for (workflowRunTargetFallbackEligible, #5900). Mirroring those
+// jq clauses here is the single restatement in this conformance, and
 // assertLegacyTierFilterUnchanged is what keeps it honest.
 func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
 	if !workerIsServed(bead, opts, metaWant) {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.WorkflowExpandedMetadataKey]) == "true" {
 		return false
 	}
 	return strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == ""
@@ -446,7 +467,7 @@ func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
 	// query is compared with the sh -c single-quote escaping undone, so the pin
 	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select((.metadata["gc.routed_to"] // "") == "")] | .[:1]'`
+	const wantFilter = `jq '[.[] | select(((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.workflow_expanded"] // "") != "true"))] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}

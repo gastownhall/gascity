@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -81,6 +82,7 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		Provider:                sp,
 		CityPath:                cityPath,
 		SearchPaths:             searchPaths,
+		Recorder:                cliFactoryEventsRecorder(cityPath, cfg),
 		UsageSink:               usageSinkForCity(cfg, cityPath),
 		ResolveTransport:        resolveTransport,
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
@@ -708,6 +710,8 @@ func resolvedWorkerRuntimeCommandForTransport(cityPath string, resolved *config.
 			if shouldPreserveStoredRuntimeCommandForTransport(command, desiredCommand, transport, optionOverrides) {
 				desiredCommand = command
 			}
+		} else {
+			log.Printf("WARNING: unhonored option pin (%v); launching without schema flags", err)
 		}
 	}
 	if !shouldPreserveStoredRuntimeCommand(command, desiredCommand) {

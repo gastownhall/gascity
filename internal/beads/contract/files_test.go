@@ -65,6 +65,51 @@ dolt.auto-start: false
 	}
 }
 
+func TestReadConfigStatePreservesDoltMode(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "yaml parser path",
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: proxied-server\n",
+			want: "proxied-server",
+		},
+		{
+			name: "line scanner fallback path",
+			// Keep the mode in a top-level dotted key while making the
+			// document invalid YAML so ReadConfigState uses its repair scanner.
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: server\n" +
+				"broken: [\n",
+			want: "server",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			state, ok, err := ReadConfigState(fs, path)
+			if err != nil {
+				t.Fatalf("ReadConfigState() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("ReadConfigState() ok = false, want true")
+			}
+			if state.DoltMode != tc.want {
+				t.Fatalf("ReadConfigState().DoltMode = %q, want %q", state.DoltMode, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsLegacyMinimalEndpointConfig(t *testing.T) {
 	if !IsLegacyMinimalEndpointConfig(ConfigState{}) {
 		t.Fatal("IsLegacyMinimalEndpointConfig(empty) = false, want true")
@@ -1912,35 +1957,44 @@ func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
 	}
 }
 
-// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
-// that a pre-existing dolt.mode: server in config is not removed or changed
-// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
-func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+// TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt pins the
+// own-it-or-drop-it rule dolt.mode now shares with dolt.host/port/socket/user.
+// It replaces an earlier test that asserted the opposite (preserve on empty):
+// preserving made the key unclearable, so a scope bd migrated to
+// proxied-server kept gc's pre-migration `dolt.mode: server` and every
+// endpoint resolution read the stale value instead of metadata.json (D1).
+func TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	// Pre-write a config that already has dolt.mode: server.
 	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"}); err != nil {
 		t.Fatalf("setup EnsureCanonicalConfig() error = %v", err)
 	}
 
-	// Now call with DoltMode:"" — existing dolt.mode must be preserved unchanged.
 	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
 	if err != nil {
 		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) error = %v", err)
 	}
-	if changed {
-		data, _ := fs.ReadFile(path)
-		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig(DoltMode empty) changed = false, want the stale key dropped")
 	}
 
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "dolt.mode: server") {
-		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	if strings.Contains(string(data), "dolt.mode") {
+		t.Fatalf("dolt.mode survived a canonical write that does not set it:\n%s", data)
+	}
+
+	// And the drop is idempotent — a second pass must report no change.
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatal("second EnsureCanonicalConfig(DoltMode empty) changed = true, want idempotent")
 	}
 }
 
@@ -1992,5 +2046,159 @@ func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
 		if _, ok := meta[key]; !ok {
 			t.Fatalf("metadata should preserve %q when backend is empty: %s", key, data)
 		}
+	}
+}
+
+// TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding pins the boundary
+// between the endpoint keys gc writes and the one bd writes. dolt_server_host
+// and dolt_server_port are `bd init --server --external`'s record of the
+// upstream and nothing else on disk carries it, so canonicalisation scrubbing
+// them re-homes a bd-owned direct-external scope onto a gc-managed server with
+// no way back — see ReadPersistedServerBinding, whose doc calls metadata "the
+// only place the endpoint lives".
+func TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding(t *testing.T) {
+	for name, input := range map[string]string{
+		"tcp":    bdExternalTCPMetadata,
+		"socket": `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/var/run/dolt.sock","dolt_server_user":"beads","dolt_database":"hosted"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".beads", "metadata.json")
+			writeRawMetadata(t, fs, dir, input)
+
+			if _, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hosted",
+			}); err != nil {
+				t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+			}
+
+			binding, ok, err := ReadPersistedServerBinding(fs, path)
+			if err != nil {
+				t.Fatalf("ReadPersistedServerBinding() error = %v", err)
+			}
+			if !ok {
+				data, _ := fs.ReadFile(path)
+				t.Fatalf("canonicalisation erased bd's persisted server binding: %s", data)
+			}
+			want, _ := persistedServerBinding([]byte(input))
+			if binding.DoltHost != want.DoltHost || binding.DoltPort != want.DoltPort || binding.DoltSocket != want.DoltSocket {
+				t.Fatalf("binding = %+v, want %+v", binding, want)
+			}
+			// Every key of the binding survives, not only the ones the reader
+			// happens to need: dolt_server_user is bd's too, and a canonicalise
+			// that keeps the host while dropping the user still loses part of an
+			// endpoint gc cannot reconstruct.
+			var before, after map[string]any
+			if err := json.Unmarshal([]byte(input), &before); err != nil {
+				t.Fatal(err)
+			}
+			data, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &after); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range persistedServerBindingKeys {
+				if _, ok := before[key]; !ok {
+					continue
+				}
+				if _, ok := after[key]; !ok {
+					t.Fatalf("canonicalisation dropped %q from bd's binding: %s", key, data)
+				}
+			}
+		})
+	}
+}
+
+// A fragment that names no server is not a binding, and canonicalisation still
+// clears it: the preservation above must not become a way for stale keys to
+// outlive the endpoint they half-describe.
+func TestEnsureCanonicalMetadataScrubsAnUnusableServerBindingFragment(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".beads", "metadata.json")
+	writeRawMetadata(t, fs, dir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_port":0,"dolt_server_user":"legacy","dolt_database":"hq"}`)
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report the fragment scrub")
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range persistedServerBindingKeys {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain %q: %s", key, data)
+		}
+	}
+}
+
+// TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps pins the difference between
+// the two readers of one key.
+//
+// metadata.json IS bd's config file (configfile.ConfigFileName), and
+// Config.GetDoltDataDir hands DatabasePath the value JSON decoded, untrimmed. A
+// reader resolving the directory bd serves from must therefore not trim; a
+// reader comparing the value against a path gc itself wrote may, because
+// SetMetadataDoltDataDir trims on the way in.
+func TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    string
+		wantRaw  string
+		wantTidy string
+		wantOK   bool
+	}{
+		{name: "no padding: the readers agree", value: `"elsewhere/dolt"`, wantRaw: "elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a leading space is a directory name", value: `" elsewhere/dolt"`, wantRaw: " elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a trailing space too", value: `"elsewhere/dolt "`, wantRaw: "elsewhere/dolt ", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "whitespace only is no claim either way", value: `"  "`, wantRaw: "  ", wantTidy: "", wantOK: false},
+		{name: "absent", value: "", wantRaw: "", wantTidy: "", wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			body := `{"dolt_mode":"proxied-server"}`
+			if tc.value != "" {
+				body = `{"dolt_mode":"proxied-server","dolt_data_dir":` + tc.value + `}`
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			raw, rawOK, err := ReadMetadataDoltDataDirRaw(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDirRaw: %v", err)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("ReadMetadataDoltDataDirRaw = %q, want %q (beads resolves the value as decoded)", raw, tc.wantRaw)
+			}
+			if rawOK != (tc.wantRaw != "") {
+				t.Errorf("ReadMetadataDoltDataDirRaw ok = %v, want %v", rawOK, tc.wantRaw != "")
+			}
+			tidy, tidyOK, err := ReadMetadataDoltDataDir(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDir: %v", err)
+			}
+			if tidy != tc.wantTidy || tidyOK != tc.wantOK {
+				t.Errorf("ReadMetadataDoltDataDir = %q/%v, want %q/%v", tidy, tidyOK, tc.wantTidy, tc.wantOK)
+			}
+		})
 	}
 }

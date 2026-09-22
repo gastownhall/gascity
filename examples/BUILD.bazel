@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "examples_test",
+    srcs = [
+        "routing_namespace_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

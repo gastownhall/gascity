@@ -53,6 +53,15 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
+	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
+	// candidate whose only claim blocker was another worker's stale (lease-
+	// expired) assignee, and then wins the retried claim in the same hook
+	// cycle. Scoped to exactly the one candidate bd reclaim --id targeted —
+	// this is not a sweep. Lets mayor/watchers see the recovery happen instead
+	// of only ever observing the fresh claim with no story for how the prior
+	// assignee's abandoned work moved.
+	HookClaimReclaimedStale = "hook.claim.reclaimed_stale"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a
 	// claim command that outlived the agent turn that invoked it (an abandoned
@@ -227,6 +236,18 @@ const (
 	// settle attempt; a duplicate is possible under a misconfigured second
 	// dispatcher, same as ControlStalled.
 	ControlRootSettleFailed = "control.root_settle_failed"
+	// ControlDispatcherScopeGap fires once per scope per desired-state build
+	// when open control work is owned by a scope — the city, or one rig — that
+	// configures no control-dispatcher. The reconciler suppresses those rows
+	// from the tick's demand snapshot (routing them to another scope's
+	// dispatcher would park them on a store it cannot read), which is silent by
+	// construction: the work simply never runs. Before this event the gap was
+	// reported only as one stderr line per scope per tick, so a city could
+	// accumulate 600+ identical lines over a day with every health surface
+	// green. The payload carries the count of rows suppressed for that scope in
+	// the build, so the signal is a level-triggered gauge of stuck work rather
+	// than a per-row alert.
+	ControlDispatcherScopeGap = "control.dispatcher_scope_gap"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -414,6 +435,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
@@ -425,6 +447,7 @@ var KnownEventTypes = []string{
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
 	ControlRootSettleFailed,
+	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,

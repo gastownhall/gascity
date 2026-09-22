@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "promptsafe",
+    srcs = ["promptsafe.go"],
+    importpath = "github.com/gastownhall/gascity/internal/promptsafe",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "promptsafe_test",
+    srcs = [
+        "promptsafe_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":promptsafe"],
+    deps = ["//internal/testenv"],
+)

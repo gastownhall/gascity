@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "packlint_test",
+    srcs = [
+        "bd_show_jq_test.go",
+        "gc_nudge_form_test.go",
+        "gc_session_peek_form_test.go",
+        "managed_prompt_hook_timeout_test.go",
+        "no_dolt_3307_fallback_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = ["//internal/testenv"],
+)

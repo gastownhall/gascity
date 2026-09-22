@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "agent",
+    srcs = [
+        "hints.go",
+        "session_name.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/agent",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "agent_test",
+    srcs = [
+        "hints_test.go",
+        "identity_separator_doc_test.go",
+        "session_name_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":agent"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+    ],
+)

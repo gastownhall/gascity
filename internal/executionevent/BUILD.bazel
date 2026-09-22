@@ -1,0 +1,36 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "executionevent",
+    srcs = ["projector.go"],
+    importpath = "github.com/gastownhall/gascity/internal/executionevent",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/convoy",
+        "//internal/events",
+        "//pkg/eventexport",
+    ],
+)
+
+go_test(
+    name = "executionevent_test",
+    srcs = [
+        "completed_fact_index_test.go",
+        "completed_fact_warm_tail_test.go",
+        "completion_converged_stamp_test.go",
+        "completion_sweep_path_test.go",
+        "lifecycle_test.go",
+        "projector_test.go",
+        "reconcile_budget_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":executionevent"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/events",
+        "//internal/testenv",
+    ],
+)
