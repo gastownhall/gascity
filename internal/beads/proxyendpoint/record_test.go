@@ -493,6 +493,17 @@ func TestProviderRootMirrorsBdDoltDirResolution(t *testing.T) {
 			want: func(_, beadsDir string) string { return filepath.Join(beadsDir, " proxyroot") },
 		},
 		{
+			// R3-F1: the metadata arm is raw for the same reason, and it needed a
+			// reader of its own to be so — contract.ReadMetadataDoltDataDir trims.
+			// bd's Config.GetDoltDataDir hands DatabasePath the value JSON decoded,
+			// so this scope's store is "<.beads>/ elsewhere/dolt", a directory whose
+			// name starts with a space, and the trimmed answer names a sibling
+			// nothing publishes into.
+			name:     "a padded metadata dolt_data_dir keeps the space bd keeps",
+			metadata: `{"dolt_mode":"proxied-server","dolt_data_dir":" elsewhere/dolt"}`,
+			want:     func(_, beadsDir string) string { return filepath.Join(beadsDir, " elsewhere", "dolt") },
+		},
+		{
 			// bd's IsSharedServerMode compares the raw value, so " 1" is not on;
 			// a trim here would turn shared-server mode on for gc alone.
 			name:     "a padded BEADS_DOLT_SHARED_SERVER is off for bd and off here",

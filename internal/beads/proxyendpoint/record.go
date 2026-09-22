@@ -221,12 +221,17 @@ func DoltDataDir(beadsDir string) (string, error) {
 	if env := os.Getenv(DoltDataDirEnv); env != "" {
 		return resolveUnderBeadsDir(beadsDir, env), nil
 	}
-	recorded, ok, err := contract.ReadMetadataDoltDataDir(fsys.OSFS{}, filepath.Join(beadsDir, MetadataFileName))
+	// Raw here too, and this is the arm where "raw" needed a second reader:
+	// contract.ReadMetadataDoltDataDir trims (trimmedString), which is right for
+	// gc's own writers but not for resolving the directory bd resolves. bd's
+	// Config.GetDoltDataDir returns dolt_data_dir as JSON decoded it and
+	// DatabasePath joins it, so {"dolt_data_dir":" elsewhere/dolt"} roots bd at
+	// "<.beads>/ elsewhere/dolt" and a trimming reader looks in
+	// "<.beads>/elsewhere/dolt".
+	recorded, ok, err := contract.ReadMetadataDoltDataDirRaw(fsys.OSFS{}, filepath.Join(beadsDir, MetadataFileName))
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", filepath.Join(beadsDir, MetadataFileName), err)
 	}
-	// bd's Config.GetDoltDataDir/DatabasePath take the recorded value as written
-	// too.
 	if ok && recorded != "" {
 		return resolveUnderBeadsDir(beadsDir, recorded), nil
 	}
