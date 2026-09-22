@@ -450,20 +450,6 @@ type NativeDoltStore struct {
 	// should demote to the bd leaf in seconds rather than hold a caller
 	// through a minute and a half of mysql i/o timeouts.
 	readRetryBudgetOverride time.Duration
-	// pingUpstream is the single upstream read Ping performs. Nil in
-	// production, where Ping calls beadslib.Storage.GetStatistics directly.
-	//
-	// It exists because GetStatistics returns a type from beads' INTERNAL
-	// package, so no in-process fixture can implement it (the constraint G3
-	// recorded as P2-09 deviation 5) — which left Ping's lane gate untestable
-	// at the only level that matters. Council pr2 D-F1 was exactly that gap:
-	// the routing regression was invisible to a test that could assert nothing
-	// past "no typed verdict", while the three production loops that poll Ping
-	// care about the error they receive, how many times the reopen hook fired,
-	// and how long the call took. Substituting the one upstream call lets a
-	// test drive a refused dial through the REAL Ping, on both lanes, and
-	// measure those.
-	pingUpstream func(context.Context, beadslib.Storage) error
 
 	// readOnlyReason, when non-empty, latches this handle read-only: every
 	// mutating method refuses with ErrProxiedNativeReadOnly before it reaches
@@ -2294,12 +2280,16 @@ func (s *NativeDoltStore) Ping() error {
 	return s.withReadRetry(s.pingUpstreamRead)
 }
 
-// pingUpstreamRead is the one upstream call a Ping makes. See pingUpstream for
-// why the substitution seam exists.
+// pingUpstreamRead is the one upstream call a Ping makes.
+//
+// There used to be a test seam in front of it, on the stated ground that
+// GetStatistics returns a type from beads' INTERNAL package and so no
+// in-process fixture could implement it. That was false (council pr2 E-I2):
+// beads v1.3.0 exports the type as backend.Statistics
+// (github.com/steveyegge/beads/backend, types.go:43), and a fixture implements
+// GetStatistics with it. So the tests drive this line itself, on both lanes,
+// and production carries no substitution hook.
 func (s *NativeDoltStore) pingUpstreamRead(ctx context.Context, storage beadslib.Storage) error {
-	if s != nil && s.pingUpstream != nil {
-		return s.pingUpstream(ctx, storage)
-	}
 	_, err := storage.GetStatistics(ctx)
 	return err
 }

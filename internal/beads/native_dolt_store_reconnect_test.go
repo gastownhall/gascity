@@ -16,6 +16,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/backend"
 )
 
 // These tests exercise the native read-path reconnect: a read against the
@@ -1225,11 +1226,11 @@ func TestStaleMarkSurvivesTheABAInterleaving(t *testing.T) {
 // callers see — the verbatim error, one upstream call, zero reopens, no wall
 // time — because any one of those alone passes on the broken code.
 //
-// beadslib.Storage.GetStatistics returns a type from beads' internal package,
-// so no in-process fixture can implement it (the constraint G3 recorded as
-// P2-09 deviation 5); the rows that need a failing upstream read substitute
-// Ping's single upstream call through the store's pingUpstream seam and drive
-// the real Ping.
+// The rows that need a failing upstream read hand the store a statisticsStorage:
+// beads exports GetStatistics' return type as backend.Statistics, so a fixture
+// implements the real upstream call and the REAL Ping runs its production line
+// (council pr2 E-I2; an earlier version substituted that line through a seam on
+// the false premise that the type could not be named).
 func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 	t.Run("a stale mark is honored before the ping is served", func(t *testing.T) {
 		store := newNativeDoltStoreForTest(healthySearchStorage())
@@ -1284,17 +1285,13 @@ func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 
 	t.Run("a direct ping returns the refused dial the way main does", func(t *testing.T) {
 		var pings, reopens int32
-		store := newNativeDoltStoreForTest(healthySearchStorage())
-		store.pingUpstream = func(context.Context, beadslib.Storage) error {
-			atomic.AddInt32(&pings, 1)
-			return refusedDial
-		}
+		store := newNativeDoltStoreForTest(&statisticsStorage{calls: &pings, err: refusedDial})
 		// Short, so a regression reads as a spent budget rather than as a
 		// 90-second test. Production has no override on this lane at all.
 		store.readRetryBudgetOverride = 400 * time.Millisecond
 		store.reopen = func(context.Context) (beadslib.Storage, error) {
 			atomic.AddInt32(&reopens, 1)
-			return healthySearchStorage(), nil
+			return &statisticsStorage{calls: &pings}, nil
 		}
 
 		start := time.Now()
@@ -1326,16 +1323,12 @@ func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 
 	t.Run("a proxied ping still retries the same refused dial", func(t *testing.T) {
 		var pings, reopens int32
-		store := newNativeDoltStoreForTest(healthySearchStorage())
+		store := newNativeDoltStoreForTest(&statisticsStorage{calls: &pings, err: refusedDial})
 		store.proxiedReadVerdicts = true
-		store.pingUpstream = func(context.Context, beadslib.Storage) error {
-			atomic.AddInt32(&pings, 1)
-			return refusedDial
-		}
 		store.readRetryBudgetOverride = 300 * time.Millisecond
 		store.reopen = func(context.Context) (beadslib.Storage, error) {
 			atomic.AddInt32(&reopens, 1)
-			return healthySearchStorage(), nil
+			return &statisticsStorage{calls: &pings, err: refusedDial}, nil
 		}
 
 		err := store.Ping()
@@ -1354,4 +1347,35 @@ func TestNativeDoltStorePingGoesThroughTheReadPath(t *testing.T) {
 			t.Fatal("the proxied lane never reconnected for a refused dial")
 		}
 	})
+
+	t.Run("a healthy ping is one upstream GetStatistics call on either lane", func(t *testing.T) {
+		for _, proxied := range []bool{false, true} {
+			var pings int32
+			store := newNativeDoltStoreForTest(&statisticsStorage{calls: &pings})
+			store.proxiedReadVerdicts = proxied
+			if err := store.Ping(); err != nil {
+				t.Fatalf("proxied=%v: Ping on a healthy handle: %v", proxied, err)
+			}
+			if n := atomic.LoadInt32(&pings); n != 1 {
+				t.Fatalf("proxied=%v: Ping made %d GetStatistics call(s), want exactly 1", proxied, n)
+			}
+		}
+	})
+}
+
+// statisticsStorage is a library handle whose Ping surface is real. beads
+// v1.3.0 exports GetStatistics' return type as backend.Statistics, so a fixture
+// implements the actual upstream call Ping makes.
+type statisticsStorage struct {
+	nativeDoltStorageSpy
+	calls *int32
+	err   error
+}
+
+func (s *statisticsStorage) GetStatistics(context.Context) (*backend.Statistics, error) {
+	atomic.AddInt32(s.calls, 1)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &backend.Statistics{}, nil
 }
