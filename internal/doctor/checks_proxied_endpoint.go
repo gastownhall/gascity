@@ -266,7 +266,7 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 	for _, scopeRoot := range c.scopeRoots {
 		label := proxiedScopeLabel(c.cityPath, scopeRoot)
 		if scopeInitializationPending(c.cityPath, scopeRoot) {
-			pending = append(pending, label)
+			pending = append(pending, fmt.Sprintf("%s %s", label, pendingScopeDetailSuffix))
 			continue
 		}
 		settled++

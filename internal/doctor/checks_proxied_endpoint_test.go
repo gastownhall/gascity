@@ -479,17 +479,37 @@ func writeScopeOwnership(t *testing.T, cityPath string, scopes map[string]string
 	writeScopeOwnershipInState(t, cityPath, scopes, "ready")
 }
 
-// writeScopeOwnershipInState records gc ownership in a chosen journal state, so
-// a test can drive the pending-initialisation lens.
+// writeScopeOwnershipInState records gc ownership of every scope in one chosen
+// journal state, so a test can drive the pending-initialisation lens.
 func writeScopeOwnershipInState(t *testing.T, cityPath string, scopes map[string]string, state string) {
+	t.Helper()
+	rows := make([]scopeOwnershipRow, 0, len(scopes))
+	for key, path := range scopes {
+		rows = append(rows, scopeOwnershipRow{key: key, path: path, state: state})
+	}
+	writeScopeOwnershipRows(t, cityPath, rows...)
+}
+
+// scopeOwnershipRow is one journal entry: the scope's key, its path, and the
+// state gc last recorded for it.
+type scopeOwnershipRow struct {
+	key   string
+	path  string
+	state string
+}
+
+// writeScopeOwnershipRows records gc ownership of several scopes in states that
+// may differ, which is the shape the pending-initialisation lens is for: one
+// scope settled, another still being initialized.
+func writeScopeOwnershipRows(t *testing.T, cityPath string, rows ...scopeOwnershipRow) {
 	t.Helper()
 	gcDir := filepath.Join(cityPath, ".gc")
 	if err := os.MkdirAll(gcDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	entries := make([]string, 0, len(scopes))
-	for key, path := range scopes {
-		entries = append(entries, fmt.Sprintf(`%q:{"scope_path":%q,"lifecycle_owner":"provider","state":%q}`, key, path, state))
+	entries := make([]string, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, fmt.Sprintf(`%q:{"scope_path":%q,"lifecycle_owner":"provider","state":%q}`, row.key, row.path, row.state))
 	}
 	body := fmt.Sprintf(`{"version":1,"scopes":{%s}}`, strings.Join(entries, ","))
 	if err := os.WriteFile(filepath.Join(gcDir, "scope-ownership.json"), []byte(body), 0o600); err != nil {
@@ -607,15 +627,38 @@ func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
 		rig := filepath.Join(city, "rigs", "alpha")
 		writeProxiedScope(t, city, `{"root_path":"dolt"}`, 0, 0)
 		writeProxiedScope(t, rig, "", 0, 0)
-		writeScopeOwnershipInState(t, city, map[string]string{"city": city}, "ready")
+		// BOTH scopes have to be in the config and in the journal or the check
+		// never covers the rig: managedDoltScopeRootsFromConfig enumerates
+		// cfg.Rigs, and the constructor keeps only journaled scopes. The rig is
+		// journaled as still initializing, the city as settled and offending.
+		writeScopeOwnershipRows(t, city,
+			scopeOwnershipRow{key: "city", path: city, state: "ready"},
+			scopeOwnershipRow{key: "rigs/alpha", path: rig, state: "provider_initializing"},
+		)
+		cfg := &config.City{Rigs: []config.Rig{{Name: "alpha", Path: rig}}}
 
-		check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{}, nil)
+		check := NewProxiedIdleTimeoutCheckForConfig(city, cfg, nil)
 		if check == nil {
 			t.Fatal("the check was not registered for a journaled proxied scope")
+		}
+		if len(check.scopeRoots) != 2 {
+			t.Fatalf("the check covers %d scope(s) (%v), want the city and the rig: a pending scope that is not covered cannot be reported beside anything", len(check.scopeRoots), check.scopeRoots)
 		}
 		got := check.Run(&CheckContext{CityPath: city})
 		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not pin their proxy resident") {
 			t.Fatalf("status/message = %v / %q, want the settled scope reported", got.Status, got.Message)
+		}
+		// The offender is counted alone: a scope mid-initialisation is not one.
+		if !strings.Contains(got.Message, "1 gc-owned proxied scope(s) do not pin") {
+			t.Errorf("message %q counts the pending scope as an offender", got.Message)
+		}
+		// And the pending scope is still SAID, in a detail a reader can tell
+		// apart from an offender's `label (policy)` line.
+		if !containsAny(got.Details, pendingScopeDetailSuffix) {
+			t.Fatalf("details %v do not name the pending scope as pending", got.Details)
+		}
+		if !containsAny(got.Details, "rigs/alpha") {
+			t.Fatalf("details %v do not mention the pending rig at all", got.Details)
 		}
 	})
 }
