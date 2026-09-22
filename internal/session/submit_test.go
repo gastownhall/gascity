@@ -530,6 +530,66 @@ func TestSubmitFollowUpSkipsPollerForEventCapableProvider(t *testing.T) {
 	}
 }
 
+// compositeRoutedFake stands in for a composite provider (auto, hybrid) that
+// satisfies runtime.SessionEventProvider at the top level (so a naive
+// assertion reports "event-capable") while routing a given session name to a
+// non-event-capable backend, mirroring EventCapableRoute's per-session
+// contract.
+type compositeRoutedFake struct {
+	*runtime.Fake
+	eventCapableRoutes map[string]bool
+}
+
+func (f compositeRoutedFake) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (f compositeRoutedFake) EventCapableRoute(name string) bool {
+	return f.eventCapableRoutes[name]
+}
+
+func TestSubmitFollowUpSpawnsPollerForCompositeProviderNonEventRoute(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := compositeRoutedFake{Fake: runtime.NewFake(), eventCapableRoutes: map[string]bool{}}
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// This session's route is explicitly non-event-capable, even though sp
+	// as a whole satisfies runtime.SessionEventProvider (the composite's
+	// other route is event-capable). The naive top-level assertion this
+	// regression guards against would report event-capable and suppress the
+	// sidecar poller, silently dropping delivery for this route.
+	sp.eventCapableRoutes[info.SessionName] = false
+
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
+
+	outcome, err := mgr.Submit(context.Background(), info.ID, "follow up later", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}, SubmitIntentFollowUp)
+	if err != nil {
+		t.Fatalf("Submit(follow_up): %v", err)
+	}
+	if !outcome.Queued {
+		t.Fatal("Submit(follow_up) should report queued")
+	}
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1: this session's route is not event-capable, so the sidecar poller must still spawn", pollerCalls)
+	}
+}
+
 func TestEnsureSessionSubmitPollerRejectsGoTestExecutable(t *testing.T) {
 	cityPath := t.TempDir()
 	exe := filepath.Join(t.TempDir(), "session.test")

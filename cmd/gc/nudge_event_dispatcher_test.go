@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -287,6 +288,84 @@ func TestNudgeEventDispatcherResyncRunsFullPass(t *testing.T) {
 
 	if !waitForDeliveredNudge(t, dir, fake) {
 		t.Fatalf("queued nudge not delivered on resync full pass; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
+// TestNudgeEventDispatcherRunPassClosesBeadStore guards against a resource
+// leak: runPass opens a bead store handle on every pass (idle events,
+// resyncs, wake kicks, patrol fallback) but did not close it on any of its
+// several return paths. A long-running controller doing many passes would
+// accumulate open store handles indefinitely.
+func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
+	fake := newNudgeEventedFake()
+
+	// The fixture's leading resync pass, enqueueQueuedNudge, and kickAll's
+	// pass each call openNudgeBeadStore independently (mirroring production,
+	// where every pass opens its own handle) and must each close what they
+	// open. Mint a fresh counting wrapper per open, all sharing one
+	// underlying MemStore so data written by one pass is visible to the
+	// next, and sum closes across every minted wrapper.
+	//
+	// Swap before the fixture starts the dispatcher's worker goroutine: the
+	// worker reads openNudgeBeadStore on every pass (including the fixture's
+	// own leading resync pass), so swapping after starting it races the
+	// worker's read against this write.
+	shared := beads.NewMemStore()
+	var mu sync.Mutex
+	var minted []*closeCountingStore
+	origOpen := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.NudgesStore {
+		w := &closeCountingStore{MemStore: shared}
+		mu.Lock()
+		minted = append(minted, w)
+		mu.Unlock()
+		return beads.NudgesStore{Store: w}
+	}
+	t.Cleanup(func() { openNudgeBeadStore = origOpen })
+
+	totalCloses := func() (opens, closes int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		opens = int64(len(minted))
+		for _, w := range minted {
+			closes += w.closes()
+		}
+		return opens, closes
+	}
+
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	opensBefore, _ := totalCloses()
+
+	d.kickAll()
+
+	// Wait for the kicked pass to register as at least one more open, then
+	// settle briefly: the dispatcher's own reconnect/resync loop keeps
+	// opening and closing handles in the background, so opens keeps growing
+	// over any observation window. The leak signature isn't "opens stop
+	// growing" -- it's outstanding (unclosed) handles accumulating, so the
+	// invariant is opens-closes staying bounded (<=1: at most one pass
+	// in flight), matching TestControlReadyCachesForClosesOwnedSourcesPerPrime.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		opens, _ := totalCloses()
+		if opens > opensBefore {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("kickAll did not trigger a bead store open (opens=%d)", opens)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if opens, closes := totalCloses(); opens-closes > 1 {
+		t.Fatalf("runPass is leaking bead store handles (opens=%d closes=%d, want opens-closes<=1)", opens, closes)
 	}
 }
 
