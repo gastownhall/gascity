@@ -20,7 +20,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 6;
+const GC_OPENCODE_HOOK_VERSION = 7;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
@@ -152,6 +152,20 @@ async function mirrorTranscript(directory, client, sessionID) {
 
 export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
+  // experimental.chat.system.transform fires once per model generation, not
+  // once per user turn: OpenCode triggers it from Agent.generate, so every tool
+  // call in a turn rebuilds the prefix, and chat.message builds it once more.
+  // `gc nudge drain --inject` is consumptive, so the queue was emptied several
+  // times per turn and the drained items landed in whichever generation won the
+  // race; each run also opened hundreds of store connections (#5552).
+  //
+  // Track the turn a user message opened and run the consumptive commands once
+  // per turn. When no turn is known — events not delivered, or a payload
+  // without the fields below — fall back to running them every time, so nudges
+  // are never silently withheld.
+  let currentTurnID = "";
+  let drainedTurnID = null;
+  let drainedPrefix = "";
 
   async function readPrime(force = false, extraEnv = {}) {
     if (force || cachedPrime === null) {
@@ -166,9 +180,18 @@ export default async function gascityPlugin({ directory, client }) {
 
   async function buildPrefix() {
     const prime = await readPrime();
+    if (currentTurnID && drainedTurnID === currentTurnID) {
+      // Later generations of the same turn: the prime is per-generation
+      // context and correct to repeat; the drained items were injected already.
+      return prime;
+    }
+    // Claim the turn before awaiting so concurrent generations cannot both
+    // reach the drain.
+    drainedTurnID = currentTurnID;
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
-    return [prime, nudges, mail].filter(Boolean).join("\n\n");
+    drainedPrefix = [nudges, mail].filter(Boolean).join("\n\n");
+    return [prime, drainedPrefix].filter(Boolean).join("\n\n");
   }
 
   return {
@@ -182,8 +205,17 @@ export default async function gascityPlugin({ directory, client }) {
             await mirrorTranscript(directory, client, sessionID);
           }
           return;
-        case "session.idle":
         case "message.updated":
+          {
+            // A new user message opens a turn.
+            const info = event?.properties?.info;
+            if (info && info.role === "user" && info.id) {
+              currentTurnID = String(info.id);
+            }
+          }
+          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
+          return;
+        case "session.idle":
           await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
         default:
