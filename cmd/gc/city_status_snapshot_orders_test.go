@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,17 @@ func TestCityStatusOrdersSurfacesStaleFiring(t *testing.T) {
 		t.Fatalf("Orders[%s].Message = %q, want %q (gc status and gc doctor must never disagree)", wantResult.Name, order.Message, wantResult.Message)
 	}
 
+	// The check's Message names no order ("scheduled orders are stale"), so
+	// the row is only actionable if it carries the check's own per-order
+	// Details through. Without them an operator has to run gc doctor to learn
+	// which order is stale, which is the thing this bead exists to avoid.
+	if len(order.Details) == 0 {
+		t.Fatalf("Orders[%s].Details is empty, want doctor's per-order breakdown %v", wantResult.Name, wantResult.Details)
+	}
+	if !slices.Equal(order.Details, wantResult.Details) {
+		t.Fatalf("Orders[%s].Details = %v, want %v (carried through verbatim from gc doctor)", wantResult.Name, order.Details, wantResult.Details)
+	}
+
 	var stdout bytes.Buffer
 	renderCityStatusText(snapshot, newDrainOps(sp), &stdout)
 	if !strings.Contains(stdout.String(), "Orders:") {
@@ -152,6 +164,9 @@ func TestCityStatusOrdersSurfacesStaleFiring(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), wantResult.Message) {
 		t.Fatalf("stdout = %q, want it to contain doctor's message %q", stdout.String(), wantResult.Message)
+	}
+	if !strings.Contains(stdout.String(), "stale-order") {
+		t.Fatalf("stdout = %q, want the rendered row to name the offending order %q", stdout.String(), "stale-order")
 	}
 }
 
@@ -358,6 +373,121 @@ name = "test-city"
 		if o.Name == wantResult.Name {
 			t.Fatalf("Orders contains %+v for check %q, want no entry; gc doctor reports %v via order-run history, so gc status must too, not surface it as unhealthy; stderr = %s", o, wantResult.Name, wantResult.Status, stderr.String())
 		}
+	}
+}
+
+// TestCityStatusOrdersIgnoresStaleGateSuppression pins the expiry side of the
+// suppression read. Recovery is silent -- clearOpenWorkSuppression drops the
+// in-memory streak and emits nothing -- so the last order.suppressed line
+// stays in events.jsonl forever. Without a recency window, one order that was
+// wedged for twenty ticks last month produces an Orders row on every gc status
+// from then on. A live streak re-alerts every orderOpenWorkSuppressionRepeat,
+// so an event older than orderSuppressionRecencyWindow can only describe a
+// streak that has already ended.
+func TestCityStatusOrdersIgnoresStaleGateSuppression(t *testing.T) {
+	cityPath, cfg := cityStatusOrderTestCity(t)
+
+	now := time.Now().UTC()
+	stale := now.Add(-orderSuppressionRecencyWindow - time.Hour)
+	payload := events.OrderSuppressedPayload{
+		OrderName:       "long-recovered-order",
+		Consecutive:     31,
+		FirstSuppressed: stale.Add(-time.Hour).Format(time.RFC3339),
+		SuppressedForMS: 60 * 60 * 1000,
+	}
+	writeCityStatusOrderEvents(t, cityPath,
+		events.Event{
+			Type:    events.OrderSuppressed,
+			Actor:   "controller",
+			Subject: "long-recovered-order",
+			Ts:      stale,
+			Message: "open-work gate has suppressed this order for 31 consecutive dispatch checks",
+			Payload: events.OrderSuppressedPayloadJSON(payload),
+		},
+	)
+
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+
+	for _, o := range snapshot.Orders {
+		if o.Name == "long-recovered-order" {
+			t.Fatalf("Orders contains %+v for a suppression event %s old, want no row (the streak ended; recovery emits no event to clear it)", o, orderSuppressionRecencyWindow+time.Hour)
+		}
+	}
+
+	var stdout bytes.Buffer
+	renderCityStatusText(snapshot, newDrainOps(sp), &stdout)
+	if strings.Contains(stdout.String(), "long-recovered-order") {
+		t.Fatalf("stdout = %q, want no mention of an expired suppression streak", stdout.String())
+	}
+}
+
+// TestCityStatusOrdersDedupesRepeatedGateSuppression exercises the
+// newest-wins branch of the per-order dedupe, which no other test reaches: a
+// wedged order re-alerts every orderOpenWorkSuppressionRepeat, so several
+// events for the same order sit in the tail window and only the newest
+// Consecutive/FirstSuppressed describe the current streak.
+// ReadFilteredTail returns events oldest-first, so the loop's overwrite
+// yields the newest -- this test is what pins that direction.
+func TestCityStatusOrdersDedupesRepeatedGateSuppression(t *testing.T) {
+	cityPath, cfg := cityStatusOrderTestCity(t)
+
+	now := time.Now().UTC()
+	firstSuppressed := now.Add(-150 * time.Minute).Format(time.RFC3339)
+	suppressionEvent := func(ts time.Time, consecutive int) events.Event {
+		payload := events.OrderSuppressedPayload{
+			OrderName:       "wedged-order",
+			Consecutive:     consecutive,
+			FirstSuppressed: firstSuppressed,
+			SuppressedForMS: now.Sub(ts).Milliseconds(),
+		}
+		return events.Event{
+			Type:    events.OrderSuppressed,
+			Actor:   "controller",
+			Subject: "wedged-order",
+			Ts:      ts,
+			Message: fmt.Sprintf("open-work gate has suppressed this order for %d consecutive dispatch checks", consecutive),
+			Payload: events.OrderSuppressedPayloadJSON(payload),
+		}
+	}
+	writeCityStatusOrderEvents(t, cityPath,
+		suppressionEvent(now.Add(-120*time.Minute), 20),
+		suppressionEvent(now.Add(-60*time.Minute), 140),
+		suppressionEvent(now.Add(-2*time.Minute), 260),
+	)
+
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+
+	var rows int
+	for _, o := range snapshot.Orders {
+		if o.Name == "wedged-order" {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("got %d Orders rows for wedged-order, want exactly 1 (three events, one live streak): %+v", rows, snapshot.Orders)
+	}
+
+	order := findCityStatusOrder(t, snapshot.Orders, "wedged-order")
+	if order.Consecutive != 260 {
+		t.Fatalf("Orders[wedged-order].Consecutive = %d, want 260 (the newest event's count)", order.Consecutive)
+	}
+	if order.FirstSuppressed != firstSuppressed {
+		t.Fatalf("Orders[wedged-order].FirstSuppressed = %q, want %q", order.FirstSuppressed, firstSuppressed)
+	}
+
+	var stdout bytes.Buffer
+	renderCityStatusText(snapshot, newDrainOps(sp), &stdout)
+	if strings.Count(stdout.String(), "wedged-order") != 1 {
+		t.Fatalf("stdout = %q, want wedged-order rendered exactly once", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "260") {
+		t.Fatalf("stdout = %q, want the newest consecutive-suppression count", stdout.String())
 	}
 }
 
