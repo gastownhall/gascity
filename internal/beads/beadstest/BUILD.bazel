@@ -1,5 +1,12 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# pinned_module_hostcache_test.go resolves the module cache this test binary was
+# linked from: it walks up from the working directory for go.mod and reads
+# GOMODCACHE/GOPATH/GOENV/HOME. A bazel test sandbox has neither, and the
+# resolver is deliberately fatal rather than skipping, so the file is retained in
+# the Go package suite and deferred from the hermetic Bazel pilot.
+# gazelle:exclude pinned_module_hostcache_test.go
+
 go_library(
     name = "beadstest",
     srcs = [

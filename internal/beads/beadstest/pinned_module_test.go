@@ -51,14 +51,6 @@ func TestPinnedBeadsModuleDirRefusesAnUnresolvedCache(t *testing.T) {
 			t.Fatalf("pinnedBeadsModuleDir = %q, want %q", got, want)
 		}
 	})
-
-	// And the live resolution the drift check depends on must work in this
-	// build: this package's own test binary links the pinned module too.
-	t.Run("this build's own cache", func(t *testing.T) {
-		if dir := PinnedBeadsModuleDir(t); dir == "" {
-			t.Fatal("PinnedBeadsModuleDir returned no directory")
-		}
-	})
 }
 
 // TestPinnedBeadsModuleDirFailsRatherThanSkips pins the seam itself.
