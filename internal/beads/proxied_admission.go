@@ -105,11 +105,17 @@ var (
 type Pin struct {
 	admitted bool
 	key      proxyendpoint.PoolKey
-	root     string
-	database string
-	idle     proxyendpoint.IdlePolicy
-	cursors  proxyendpoint.Cursors
-	evidence proxyendpoint.Evidence
+	// scopeRoot is the WORKSPACE this pin admitted, which is not root: one bd
+	// proxy root legitimately serves several scopes (a rig sharing its city's
+	// proxy differs from the city in the database alone). The pin memo is keyed
+	// on it, so anything that must invalidate a memoized pass — the mutation
+	// bracket's generation check, the guard tick — needs it back out.
+	scopeRoot string
+	root      string
+	database  string
+	idle      proxyendpoint.IdlePolicy
+	cursors   proxyendpoint.Cursors
+	evidence  proxyendpoint.Evidence
 }
 
 // Admitted reports whether this is a real pass rather than the zero value.
@@ -120,6 +126,10 @@ func (p Pin) PoolKey() proxyendpoint.PoolKey { return p.key }
 
 // Root is bd's proxy root the record was read from.
 func (p Pin) Root() string { return p.root }
+
+// ScopeRoot is the workspace this pin admitted. See the field comment for why it
+// is not the same thing as Root.
+func (p Pin) ScopeRoot() string { return p.scopeRoot }
 
 // Database is the Dolt database the pin admitted.
 func (p Pin) Database() string { return p.database }
@@ -362,13 +372,14 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 					probe.Cursors, SchemaCursorMain, SchemaCursorIgnored))
 		}
 		return Pin{
-			admitted: true,
-			key:      key,
-			root:     root,
-			database: in.Database,
-			idle:     idle,
-			cursors:  probe.Cursors,
-			evidence: ep.Liveness.Evidence,
+			admitted:  true,
+			key:       key,
+			scopeRoot: in.ScopeRoot,
+			root:      root,
+			database:  in.Database,
+			idle:      idle,
+			cursors:   probe.Cursors,
+			evidence:  ep.Liveness.Evidence,
 		}, false, nil
 
 	case proxyendpoint.ProbeRefused:
