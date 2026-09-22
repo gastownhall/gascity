@@ -29,6 +29,27 @@ const defaultStaleTTL = 30 * time.Second
 // fetchTimeout is the hard timeout for a single runtime-state fetch.
 const fetchTimeout = 3 * time.Second
 
+// Backoff bounds for the process-table snapshot after it fails.
+//
+// The snapshot is a full-OS `ps` scan, and it fails by losing a CPU race: the
+// box is saturated, the scan does not finish inside fetchTimeout, and the
+// context kills it. Re-attempting it on the very next refresh spends another
+// fetchTimeout and forks another full-OS scan into the contention that just
+// starved the last one, so a loaded box keeps paying for a probe that cannot
+// succeed while it stays loaded. That is a feedback loop, and it was observed
+// running for days: a supervisor logged the degrade 74 times an hour, one
+// futile scan every ~48s, and the probe never recovered on its own until the
+// process was restarted.
+//
+// Backing off does not weaken the answer. A failed snapshot already degrades
+// optimistically (see processAlive), and holding that degraded state longer is
+// the same answer held longer — while the machine gets the CPU back that lets
+// the next attempt actually finish.
+const (
+	processSnapshotBackoffBase = 15 * time.Second
+	processSnapshotBackoffMax  = 2 * time.Minute
+)
+
 // StateFetcher abstracts tmux subprocess calls for testability.
 type StateFetcher interface {
 	// FetchState returns a runtime-state snapshot for live sessions.
@@ -244,6 +265,60 @@ func (c *StateCache) refresh() {
 // tmuxFetcher implements StateFetcher using a real Tmux instance.
 type tmuxFetcher struct {
 	tm *Tmux
+	// snapshotGate bounds re-attempts of the process-table snapshot after it
+	// fails. Its zero value attempts immediately, so a bare &tmuxFetcher{tm:
+	// tm} behaves exactly as it did before this gate existed.
+	snapshotGate processSnapshotGate
+}
+
+// processSnapshotGate decides whether the full-OS process scan may be attempted
+// now, and records what happened when it was.
+//
+// It is a property of the fetcher rather than of the cache because the cache
+// cannot see this failure at all: FetchState degrades rather than erroring when
+// the scan fails, so refresh() books the result as a success — it stamps
+// fetchedAt, clears dirty, and has no idea the expensive half of the fetch just
+// died. Nothing above this point knows there is anything to back off from.
+type processSnapshotGate struct {
+	mu          sync.Mutex
+	failures    int
+	nextAttempt time.Time
+}
+
+// allow reports whether the scan may be attempted at now.
+func (g *processSnapshotGate) allow(now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.nextAttempt.IsZero() || !now.Before(g.nextAttempt)
+}
+
+// failed records a failed attempt and returns the window before the next one.
+//
+// The window doubles from processSnapshotBackoffBase and is capped, so a box
+// that stays saturated settles at one attempt per processSnapshotBackoffMax
+// instead of one per refresh.
+func (g *processSnapshotGate) failed(now time.Time) time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	window := processSnapshotBackoffBase << min(g.failures, 8)
+	if window > processSnapshotBackoffMax || window <= 0 {
+		window = processSnapshotBackoffMax
+	}
+	g.failures++
+	g.nextAttempt = now.Add(window)
+	return window
+}
+
+// succeeded clears the backoff, and reports whether it was clearing one — so
+// the caller can say the probe recovered exactly once rather than on every
+// healthy refresh forever after.
+func (g *processSnapshotGate) succeeded() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	recovered := g.failures > 0
+	g.failures = 0
+	g.nextAttempt = time.Time{}
+	return recovered
 }
 
 // FetchState runs one tmux pane snapshot and one process-table snapshot.
@@ -316,6 +391,15 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		}
 		state.Sessions[name] = session
 	}
+	// Skipping is the same outcome as failing — process detail unavailable,
+	// sessions retained — reached without spending fetchTimeout and a full-OS
+	// scan to rediscover it. Silent by design: the whole point is to stop
+	// paying per refresh, and a line per skip would simply move the cost from
+	// CPU to the log.
+	if !f.snapshotGate.allow(time.Now()) {
+		state.ProcessesAvailable = false
+		return state, nil
+	}
 	processes, err := fetchProcessSnapshot(ctx)
 	if err != nil {
 		// Degrade, do NOT discard: tmux list-panes above already established
@@ -325,9 +409,13 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		// liveness — that is what was starving the controller's reconcile and
 		// cold-pool-spawner. Keep the sessions; mark process detail unavailable
 		// so processAlive degrades optimistically instead of reporting dead.
-		log.Printf("tmux state cache: process snapshot degraded, retaining tmux session liveness: %v", err)
+		window := f.snapshotGate.failed(time.Now())
+		log.Printf("tmux state cache: process snapshot degraded, retaining tmux session liveness (next attempt in %v): %v", window, err)
 		state.ProcessesAvailable = false
 		return state, nil
+	}
+	if f.snapshotGate.succeeded() {
+		log.Printf("tmux state cache: process snapshot recovered")
 	}
 	state.Processes = processes
 	state.ProcessesAvailable = true

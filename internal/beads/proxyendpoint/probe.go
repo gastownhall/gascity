@@ -1,0 +1,545 @@
+package proxyendpoint
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
+)
+
+// Probe budgets. A probe is a diagnostic, not a retry loop: it either answers
+// inside this window or the caller treats the endpoint as unproven and escalates
+// through a bd verb.
+const (
+	// ProbeDialTimeout bounds the bare TCP dial that separates "nothing is
+	// listening" from "something accepted us".
+	ProbeDialTimeout = 500 * time.Millisecond
+	// ProbeSessionTimeout bounds the MySQL handshake and both cursor reads.
+	ProbeSessionTimeout = 2 * time.Second
+	// ProbeDriverTimeoutSlack is how far the driver's own socket deadlines sit
+	// ABOVE the session budget, and it is a correctness margin rather than a
+	// tuning knob.
+	//
+	// go-sql-driver arms SetReadDeadline(now+ReadTimeout) before every read
+	// (connection.go readWithTimeout) and, on ANY read error, readPacket closes
+	// the connection and returns mc.canceled — the context error — only if the
+	// context watcher has ALREADY fired; otherwise it logs the real error and
+	// returns the sentinel mysql.ErrInvalidConn (packets.go readPacket). The
+	// context path is two scheduling hops longer (timer -> AfterFunc closes
+	// Done() -> watcher goroutine -> mc.cancel), so with the two deadlines set
+	// equal the socket deadline usually wins and a slow proxy's session comes
+	// back spelled as a connection-level failure. The confirming dial then
+	// succeeds, and the verdict is accepted_no_greeting: the zombie signature
+	// §3.4 escalates to `bd ping` -> `recover` (`bd dolt stop`), on a proxy that
+	// is merely slow. Measured 5 of 8 probes against a silent listener at
+	// production budgets.
+	//
+	// Keeping the driver's deadlines strictly above the session budget makes the
+	// context watcher the thing that ends a slow session, so the error carries
+	// the fact the probe owns — its own clock ran out. The driver deadlines stay
+	// in place as a backstop for the case the watcher cannot cover: a read that
+	// blocks with no context deadline at all.
+	ProbeDriverTimeoutSlack = 1 * time.Second
+)
+
+// probeUser is the login the probe uses. bd's own proxied CLI speaks to the
+// proxy as `root` with no password, so this is the account that exists rather
+// than one gc chose.
+const probeUser = "root"
+
+// Cursor table names. bd has kept these stable across the whole 1.x line
+// (beads internal/storage/schema/schema.go), which is what makes two read-only
+// point queries a safe thing for a co-resident reader to issue.
+const (
+	mainCursorQuery    = "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+	ignoredCursorQuery = "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"
+	cursorTableMain    = "schema_migrations"
+	cursorTableIgnored = "ignored_schema_migrations"
+	cursorExistsQuery  = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+)
+
+// ErrNoDatabase reports a probe asked to read cursors without naming a database.
+//
+// The cursor reads are scoped by DATABASE(): with no database selected it is
+// NULL, both existence probes count zero rows, both cursors read zero, and the
+// probe reports `served` with main=0 ignored=0 — a proxy that answered and a
+// database that is catastrophically behind, which is not what happened. The
+// design's own sketch of the session (doltpool.Open(host, port, "root", "", ""))
+// invites exactly that call, so the probe refuses it rather than answering it.
+// The refusal is not connection-level and not a timeout, so it classifies as
+// ProbeUnknown: it says something about the caller, not about the proxy.
+var ErrNoDatabase = errors.New("proxyendpoint: probe requires a database name")
+
+// ProbeOutcome is what one probe of a proxy's data port concluded. The three
+// real outcomes are the three observable states of bd's byte-pump proxy, and
+// they are not orderable: `refused` on a live record is a proxy draining its
+// backend, `accepted_no_greeting` is a proxy whose Dolt child has exited, and
+// `served` is the only one a reader may act on.
+type ProbeOutcome int
+
+// Probe outcomes.
+const (
+	// ProbeUnknown is the zero value, and also the honest answer whenever the
+	// session failed for a reason that is not the proxy's — a missing database,
+	// a denied login, a caller's canceled context, and above all the probe's OWN
+	// expired budget. It is never a conclusion about the proxy, and it is the
+	// only outcome a reader may reach by running out of time.
+	ProbeUnknown ProbeOutcome = iota
+	// ProbeRefused means the kernel refused the connection: ECONNREFUSED, and
+	// nothing else. On a record whose process is gone this is the ordinary
+	// stopped state; on a live same-generation record it is bd's teardown
+	// window, where the listener is already closed and the record is removed
+	// only after the backend's shutdown GC finishes. A dial that merely ran out
+	// of time proves nothing about a listener and is ProbeUnknown.
+	ProbeRefused
+	// ProbeAcceptedNoGreeting means the proxy accepted the connection and then
+	// closed it without completing the MySQL handshake. That is the signature of
+	// a live proxy whose backend dial failed: the proxy parses no wire protocol,
+	// so a dead Dolt child shows up as an accept followed by a close.
+	//
+	// The token reads as "no greeting arrived", and it also covers a greeting
+	// that arrived before the close, because the driver spells the two the same
+	// way: whether the peer closes before writing HandshakeV10 or after writing
+	// it and before answering the handshake response, the read fails with
+	// `unexpected EOF` and go-sql-driver returns mysql.ErrInvalidConn. There is
+	// nothing in the session error to tell them apart, and the confirming dial
+	// succeeds either way.
+	//
+	// That costs nothing here: a backend that greets and then hangs up is
+	// disturbed in the same way and wants the same response
+	// (backend_unreachable, three in a row before one bd ping, recover only if
+	// the ping fails). A reader that needs the narrower fact — greeting bytes
+	// seen or not — has to read the wire itself, which this probe deliberately
+	// does not do.
+	ProbeAcceptedNoGreeting
+	// ProbeServed means the handshake completed and both schema cursors were
+	// read.
+	ProbeServed
+)
+
+// String renders the outcome as the token the diagnostics report.
+func (o ProbeOutcome) String() string {
+	switch o {
+	case ProbeRefused:
+		return "refused"
+	case ProbeAcceptedNoGreeting:
+		return "accepted_no_greeting"
+	case ProbeServed:
+		return "served"
+	default:
+		return "unknown"
+	}
+}
+
+// Cursors are a database's two schema-migration cursors: the main lane and the
+// dolt-ignored lane. Both are read because bd's own shared-store migration gate
+// consults only the main one, so a reader that compared only that lane could
+// meet a database its linked library would migrate without consent.
+type Cursors struct {
+	Main    int `json:"main"`
+	Ignored int `json:"ignored"`
+}
+
+// String renders the pair compactly for a message.
+func (c Cursors) String() string {
+	return "main=" + strconv.Itoa(c.Main) + " ignored=" + strconv.Itoa(c.Ignored)
+}
+
+// ProbeResult is one probe's outcome plus whatever it learned.
+type ProbeResult struct {
+	Outcome ProbeOutcome
+	// Cursors are meaningful only for ProbeServed.
+	Cursors Cursors
+	// Err is the failure behind any outcome other than served.
+	Err error
+}
+
+// ProbeIO is the two IO operations a probe performs. They are injected rather
+// than called directly so the outcome table is provable without a proxy, a
+// listener or a database anywhere in the test binary: the classification is the
+// part with the bugs, and it is pure.
+type ProbeIO struct {
+	// Session performs the MySQL handshake and reads both cursors over one
+	// pinned connection.
+	Session func(ctx context.Context) (Cursors, error)
+	// Dial is a bare TCP connect-and-close, used only to disambiguate a failed
+	// session: something that accepts is a live proxy, and something that
+	// refuses is not listening at all.
+	Dial func(ctx context.Context) error
+}
+
+// Probe asks a proxy's data port which of the three states it is in.
+//
+// The session runs FIRST and the bare dial only if it failed, so a healthy
+// endpoint costs the backend exactly one session rather than two. The dial is
+// what keys the two failure arms apart: the design deliberately does not branch
+// on driver error text, because "connection refused" and "EOF" are the driver's
+// spelling of the day, while "did anything accept me" is a property of the
+// proxy.
+func Probe(ctx context.Context, probeIO ProbeIO) ProbeResult {
+	return probeWithBudget(ctx, probeIO, ProbeSessionTimeout)
+}
+
+// probeWithBudget is Probe with the session budget injected, so a test can pin
+// the classification on a real socket without paying the production budget once
+// per probe. Production has exactly one budget: ProbeSessionTimeout.
+func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration) ProbeResult {
+	if probeIO.Session == nil {
+		return ProbeResult{Err: errors.New("proxyendpoint: probe has no session to run")}
+	}
+	sessionCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	started := time.Now()
+	cursors, sessionErr := probeIO.Session(sessionCtx)
+	spent := time.Since(started)
+	if sessionErr == nil {
+		return ProbeResult{Outcome: ProbeServed, Cursors: cursors}
+	}
+	// The budget expiring is a fact this function owns, and it outranks every
+	// spelling the driver may have put on the error. go-sql-driver turns a socket
+	// read deadline into mysql.ErrInvalidConn (see ProbeDriverTimeoutSlack), and
+	// a classifier that believed that spelling reported the zombie signature for
+	// a proxy that had merely not answered yet. Asking the clock instead is
+	// unfalsifiable: if this budget is gone, nothing about the session can be
+	// evidence about the endpoint, and no confirming dial is worth spending on it.
+	//
+	// The budget is read two ways because the two readings can disagree by a
+	// scheduling hop. sessionCtx.Err() is the context's own verdict, but it is set
+	// by a time.AfterFunc goroutine, and on a loaded box the netpoller can hand a
+	// socket deadline to the reader before that callback runs — measured 1 in 8
+	// with the deadlines equal, which is how this arrives wearing the driver's
+	// spelling. A session that consumed the whole budget is the same fact read
+	// off the clock, and it cannot lose that race.
+	if sessionCtx.Err() != nil || spent >= budget {
+		return ProbeResult{Outcome: ProbeUnknown, Err: sessionErr}
+	}
+	var dialErr error
+	if IsConnectionLevel(sessionErr) && probeIO.Dial != nil {
+		dialCtx, dialCancel := context.WithTimeout(ctx, ProbeDialTimeout)
+		defer dialCancel()
+		dialErr = probeIO.Dial(dialCtx)
+	}
+	return ProbeResult{Outcome: ClassifyProbe(sessionErr, dialErr), Err: sessionErr}
+}
+
+// ClassifyProbe maps a session error and the confirming dial's result onto an
+// outcome. It is pure, and it is where the three-way split lives.
+//
+// The FIRST question is whether the probe ran out of its own time, because that
+// error is the one the probe manufactures itself and the only one that says
+// nothing whatever about the endpoint. context.DeadlineExceeded implements
+// net.Error — Timeout() and Temporary() are on it — so a classifier that reached
+// for net.Error first read the probe's own two-second budget as a wire failure
+// and then, with the confirming dial succeeding against a perfectly healthy
+// proxy, reported accepted_no_greeting: the zombie signature, on a proxy that is
+// serving bd fine. Under load, an information_schema scan across a city root's
+// databases passes two seconds without anything being wrong. The escalation that
+// reads it is `bd dolt stop` on a live proxy, which is why the order of these
+// arms is a correctness property and not a style.
+//
+// A session error that is not connection-level — an unknown database, a denied
+// login, a canceled caller — is ProbeUnknown for the same reason: those errors
+// say something about the database or the caller, and a probe that reported them
+// as "the proxy is fine" or "the proxy is gone" would be wrong in both
+// directions.
+//
+// The two proxy verdicts are both positive claims and both need positive
+// evidence. accepted_no_greeting requires a failure that could only have
+// happened after something accepted the connection (see IsPostAcceptFailure) AND
+// a dial that something accepted; refused requires the kernel's ECONNREFUSED. A
+// confirming dial that timed out is neither: it is a busy accept queue, and on a
+// live same-generation record calling that "refused" would name a healthy proxy
+// as draining.
+func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
+	switch {
+	case sessionErr == nil:
+		return ProbeServed
+	case IsIndeterminate(sessionErr):
+		return ProbeUnknown
+	case !IsConnectionLevel(sessionErr):
+		return ProbeUnknown
+	case dialErr == nil:
+		// "It accepted us and said nothing" is a claim about a greeting, so the
+		// session has to have got far enough to be owed one. A session refused
+		// by the kernel, confirmed by a dial a just-respawned proxy accepts,
+		// reaches this arm with no greeting ever attempted — a ~millisecond
+		// window on a proxy restart, but the design escalates on three of these
+		// in a row, and evidence that was never collected must not count as one.
+		if !IsPostAcceptFailure(sessionErr) {
+			return ProbeUnknown
+		}
+		return ProbeAcceptedNoGreeting
+	case errors.Is(dialErr, syscall.ECONNREFUSED):
+		return ProbeRefused
+	default:
+		return ProbeUnknown
+	}
+}
+
+// IsIndeterminate reports whether err is the probe's own clock or its caller's
+// cancellation rather than anything the endpoint did.
+//
+// It is the guard in front of every other classification arm. The probe imposes
+// its own deadlines (ProbeSessionTimeout, ProbeDialTimeout) and its caller can
+// cancel at any moment; both surface as errors that satisfy net.Error, and
+// neither is evidence about a proxy. Every one of these maps to ProbeUnknown,
+// which is the only outcome that carries no claim.
+func IsIndeterminate(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, sentinel := range []error{context.DeadlineExceeded, context.Canceled, os.ErrDeadlineExceeded} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	// A driver or a listener may report its own timeout type rather than one of
+	// the sentinels above; a timeout is a timeout however it is spelled.
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// IsPostAcceptFailure reports whether err could only have happened AFTER
+// something accepted the connection.
+//
+// It is the narrower half of IsConnectionLevel, and it is what
+// accepted_no_greeting needs. Every error here is a peer that had the connection
+// and then dropped it: an EOF or an unexpected EOF mid-handshake, the driver's
+// ErrInvalidConn (which is how go-sql-driver reports a greeting read that
+// failed), a reset, a broken pipe. A dial the kernel refused or a host it could
+// not reach is connection-level too, but it never reached a greeting, so it is
+// not evidence that one was withheld.
+//
+// The distinction has a real window: on a proxy restart a session refused at
+// t=0 and a confirming dial the new proxy accepts at t=1ms would otherwise be
+// reported as the zombie signature with nothing having been read at all.
+func IsPostAcceptFailure(err error) bool {
+	if err == nil || IsIndeterminate(err) {
+		return false
+	}
+	for _, sentinel := range []error{
+		io.EOF,
+		io.ErrUnexpectedEOF,
+		driver.ErrBadConn,
+		mysql.ErrInvalidConn,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsConnectionLevel reports whether err is about the connection rather than
+// about the statement or the data.
+//
+// The set is matched by sentinel and by type, not by text: go-sql-driver wraps a
+// server that hangs up before the greeting as ErrInvalidConn or a bare io.EOF
+// depending on how far the handshake got, and database/sql retries and rewraps
+// on top of that. A text match over that surface is a guess that goes stale on
+// a driver bump; errors.Is over exported sentinels does not.
+//
+// "About the connection" means the peer did something, so a timeout is excluded:
+// see IsIndeterminate.
+func IsConnectionLevel(err error) bool {
+	if err == nil {
+		return false
+	}
+	// The probe's own deadline and its caller's cancellation are not the wire.
+	// This arm is FIRST because context.DeadlineExceeded satisfies both the
+	// net.Error and the timeout checks below, so any later placement would let
+	// the probe's own clock be read as a proxy state.
+	if IsIndeterminate(err) {
+		return false
+	}
+	for _, sentinel := range []error{
+		io.EOF,
+		io.ErrUnexpectedEOF,
+		driver.ErrBadConn,
+		mysql.ErrInvalidConn,
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
+}
+
+// DefaultProbeIO builds the real IO for one endpoint: a private MySQL session
+// against the proxy's loopback port as `root` with no password — the same
+// credentials bd's own CLI uses over the same proxy — and a bare TCP dial.
+//
+// "Private" is the load-bearing word, and it is why this does not reach for
+// internal/doltpool. That registry is a process-lifetime cache: its handles must
+// never be closed, it retains up to maxIdleConns connections per endpoint, and a
+// returned connection stays open for the registry's idle bound (20s) or until
+// the process exits. bd's idle watcher counts every accepted TCP connection,
+// pooled-idle or not, and cannot arm while one is open, so a probe that parked a
+// connection there would defer the very retirement the diagnostic reports —
+// through the rest of a ~40-check doctor run, and even after a check doctor has
+// already given up on. The probe therefore opens its own unregistered handle
+// with no idle slot at all and closes it before it returns: no connection to bd
+// survives the check that made it.
+func DefaultProbeIO(port int, database string) ProbeIO {
+	return probeIOWithDriverTimeout(port, database, probeDriverTimeout(ProbeSessionTimeout))
+}
+
+// probeIOWithDriverTimeout is DefaultProbeIO with the driver's socket deadlines
+// injected, so a test can drive the real driver over a real socket with the
+// deadlines it wants — including the equal-budget configuration this package
+// used to ship, which must classify as ProbeUnknown through the context guard in
+// probeWithBudget rather than through this margin.
+func probeIOWithDriverTimeout(port int, database string, driverTimeout time.Duration) ProbeIO {
+	addr := net.JoinHostPort(Host, strconv.Itoa(port))
+	return ProbeIO{
+		Session: func(ctx context.Context) (Cursors, error) {
+			return readCursors(ctx, port, database, driverTimeout)
+		},
+		Dial: func(ctx context.Context) error {
+			var dialer net.Dialer
+			conn, err := dialer.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return err
+			}
+			return conn.Close()
+		},
+	}
+}
+
+// ProbeEndpoint probes a validated endpoint's data port for one database.
+//
+// The database is required: the cursors are DATABASE()-scoped, so a probe with
+// none selected would report served with both cursors at zero. Callers get
+// ProbeUnknown and ErrNoDatabase instead. gc's own caller cannot reach it — the
+// connection target defaults the name to "beads" — which is precisely why the
+// refusal lives here rather than in a comment.
+func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResult {
+	return Probe(ctx, DefaultProbeIO(ep.Record.Port, database))
+}
+
+// readCursors reads both schema cursors over one pinned private connection.
+//
+// One connection, not two: Dolt pins a session to the catalog snapshot it had
+// when a statement failed, so an existence probe and a read that disagreed
+// about which connection they ran on could report a table as absent that the
+// other connection can see. The existence probe itself is bd's own ordering
+// (internal/storage/schema/schema.go) and exists for the harsher version of the
+// same hazard: a bare SELECT against a not-yet-created cursor table poisons the
+// pooled connection for the rest of its life.
+func readCursors(ctx context.Context, port int, database string, driverTimeout time.Duration) (Cursors, error) {
+	if strings.TrimSpace(database) == "" {
+		// Cursors read against no database are zeros, not evidence.
+		return Cursors{}, ErrNoDatabase
+	}
+	connector, err := probeConnector(port, database, driverTimeout)
+	if err != nil {
+		return Cursors{}, err
+	}
+	return readCursorsOver(ctx, connector)
+}
+
+// probeDriverTimeout is the driver-level socket deadline for a session budget:
+// strictly above it, so the context watcher is what ends a slow session and the
+// driver's deadlines are only the backstop. See ProbeDriverTimeoutSlack.
+func probeDriverTimeout(budget time.Duration) time.Duration {
+	return budget + ProbeDriverTimeoutSlack
+}
+
+// probeConnector builds the driver connector for one probe session.
+//
+// It is a connector rather than a DSN because sql.OpenDB over a connector is the
+// one way to get a *sql.DB no registry owns, which is the whole point of it. The
+// timeouts are minutes below the pool's: a diagnostic that could outlive its own
+// deadline through a driver-level read timeout would be a diagnostic with no
+// bound at all. They are also strictly ABOVE the session budget the context
+// carries, which is the F1 fix — see ProbeDriverTimeoutSlack for why an equal
+// deadline made a slow proxy read as a dead one.
+func probeConnector(port int, database string, driverTimeout time.Duration) (driver.Connector, error) {
+	cfg := mysql.NewConfig()
+	cfg.User = probeUser
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(Host, strconv.Itoa(port))
+	cfg.DBName = database
+	cfg.Timeout = driverTimeout
+	cfg.ReadTimeout = driverTimeout
+	cfg.WriteTimeout = driverTimeout
+	cfg.AllowNativePasswords = true
+	return mysql.NewConnector(cfg)
+}
+
+// readCursorsOver runs one probe session over connector and closes everything it
+// opened before it returns.
+//
+// The closes are the contract rather than housekeeping, so they are
+// deterministic and they are ordered: the pinned connection goes first — with no
+// idle slot to go back to, that closes the socket — and then the handle itself,
+// which nothing else holds and so cannot outlive this call. A caller's canceled
+// or expired context reaches the same returns through db.Conn and the queries,
+// so a probe the caller has already abandoned still closes its session here.
+func readCursorsOver(ctx context.Context, connector driver.Connector) (Cursors, error) {
+	var cursors Cursors
+	db := sql.OpenDB(connector)
+	// One connection, never idle: the probe needs exactly one session, and it
+	// must leave nothing behind for anything to reuse.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	defer db.Close() //nolint:errcheck // the probe's own handle, closed on every path
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return cursors, err
+	}
+	defer conn.Close() //nolint:errcheck // closes the socket: this handle retains no idle connection
+	if err := conn.PingContext(ctx); err != nil {
+		return cursors, err
+	}
+	if cursors.Main, err = readCursor(ctx, conn, cursorTableMain, mainCursorQuery); err != nil {
+		return cursors, err
+	}
+	if cursors.Ignored, err = readCursor(ctx, conn, cursorTableIgnored, ignoredCursorQuery); err != nil {
+		return cursors, err
+	}
+	return cursors, nil
+}
+
+// readCursor reads one cursor table's highest applied version, treating a table
+// that does not exist as version 0 — which is what it means: a database that
+// predates that lane has applied none of it.
+func readCursor(ctx context.Context, conn *sql.Conn, table, query string) (int, error) {
+	var exists int
+	if err := conn.QueryRowContext(ctx, cursorExistsQuery, table).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("probing %s existence: %w", table, err)
+	}
+	if exists == 0 {
+		return 0, nil
+	}
+	var version int
+	if err := conn.QueryRowContext(ctx, query).Scan(&version); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading %s version: %w", table, err)
+	}
+	return version, nil
+}

@@ -236,6 +236,18 @@ const (
 	// settle attempt; a duplicate is possible under a misconfigured second
 	// dispatcher, same as ControlStalled.
 	ControlRootSettleFailed = "control.root_settle_failed"
+	// ControlDispatcherScopeGap fires once per scope per desired-state build
+	// when open control work is owned by a scope — the city, or one rig — that
+	// configures no control-dispatcher. The reconciler suppresses those rows
+	// from the tick's demand snapshot (routing them to another scope's
+	// dispatcher would park them on a store it cannot read), which is silent by
+	// construction: the work simply never runs. Before this event the gap was
+	// reported only as one stderr line per scope per tick, so a city could
+	// accumulate 600+ identical lines over a day with every health surface
+	// green. The payload carries the count of rows suppressed for that scope in
+	// the build, so the signal is a level-triggered gauge of stuck work rather
+	// than a per-row alert.
+	ControlDispatcherScopeGap = "control.dispatcher_scope_gap"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -435,6 +447,7 @@ var KnownEventTypes = []string{
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
 	ControlRootSettleFailed,
+	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,

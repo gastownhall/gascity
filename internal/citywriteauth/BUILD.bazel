@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "citywriteauth",
+    srcs = [
+        "citywriteauth.go",
+        "doc.go",
+        "replay.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/citywriteauth",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "citywriteauth_test",
+    srcs = [
+        "citywriteauth_test.go",
+        "golden_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":citywriteauth"],
+    deps = ["//internal/testenv"],
+)

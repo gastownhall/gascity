@@ -359,3 +359,20 @@ func repoRootForLint(t *testing.T) string {
 		dir = parent
 	}
 }
+
+func TestGCBeadsBDScriptPinsWitnessAndDirectInitToBDBin(t *testing.T) {
+	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	for _, want := range []string{
+		`raw=$("${BD_BIN:-bd}" version 2>/dev/null)`,
+		`"${BD_BIN:-bd}" "$@"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("gc-beads-bd.sh must use BD_BIN for direct managed initialization boundary: missing %q", want)
+		}
+	}
+}

@@ -1,0 +1,61 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "extmsg",
+    srcs = [
+        "adapter_registry.go",
+        "binding_reaper.go",
+        "binding_service.go",
+        "delivery_service.go",
+        "doc.go",
+        "errors.go",
+        "events.go",
+        "group_service.go",
+        "helpers.go",
+        "http_adapter.go",
+        "inbound.go",
+        "labels.go",
+        "live_session.go",
+        "outbound.go",
+        "safe_error.go",
+        "services.go",
+        "system_reminder.go",
+        "time.go",
+        "transcript_service.go",
+        "types.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/extmsg",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+        "//internal/promptsafe",
+        "//internal/session",
+    ],
+)
+
+go_test(
+    name = "extmsg_test",
+    srcs = [
+        "agent_binding_test.go",
+        "binding_survival_test.go",
+        "default_route_test.go",
+        "extmsg_test.go",
+        "helpers_test.go",
+        "http_adapter_test.go",
+        "outbound_test.go",
+        "rebind_test.go",
+        "session_directory_test.go",
+        "session_model_phase0_spec_test.go",
+        "system_reminder_test.go",
+        "testenv_import_test.go",
+        "types_wire_test.go",
+    ],
+    embed = [":extmsg"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+        "//internal/session",
+        "//internal/testenv",
+    ],
+)

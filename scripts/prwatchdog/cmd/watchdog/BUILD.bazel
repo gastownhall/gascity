@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "watchdog_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/gastownhall/gascity/scripts/prwatchdog/cmd/watchdog",
+    visibility = ["//visibility:private"],
+    deps = ["//scripts/prwatchdog"],
+)
+
+go_binary(
+    name = "watchdog",
+    embed = [":watchdog_lib"],
+    visibility = ["//visibility:public"],
+)

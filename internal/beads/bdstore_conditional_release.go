@@ -37,7 +37,7 @@ import (
 // beads#5008, so a store opened against that bd latches and stays there.
 //
 // The installable default does not reach it. deps.env BD_VERSION is
-// v1.3.0-rc.2, cut from beads main past beads#5008, so on a stock install the
+// v1.3.0, cut from beads main past beads#5008, so on a stock install the
 // VERB is the live path and the fallback serves the floor alone. The verb is
 // also exercised against the source-built deps.env BD_CURRENT_REF bd
 // (make test-bd-conditional-release-contract) — now where the contract is

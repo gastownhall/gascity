@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "closeorder",
+    srcs = ["closeorder.go"],
+    importpath = "github.com/gastownhall/gascity/internal/beads/closeorder",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/beads"],
+)

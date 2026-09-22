@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fsystest",
+    srcs = ["conformance.go"],
+    importpath = "github.com/gastownhall/gascity/internal/fsys/fsystest",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/fsys"],
+)

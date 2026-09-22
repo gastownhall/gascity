@@ -1,0 +1,155 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "orders",
+    srcs = [
+        "discovery.go",
+        "env.go",
+        "filenames.go",
+        "filter.go",
+        "order.go",
+        "override.go",
+        "runtime_helpers.go",
+        "scanner.go",
+        "store.go",
+        "store_reads.go",
+        "trigger_exec_unix.go",
+        "trigger_exec_windows.go",
+        "triggers.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/orders",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/convergence",
+        "//internal/events",
+        "//internal/execenv",
+        "//internal/fsys",
+        "@com_github_burntsushi_toml//:toml",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/processgroup",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "orders_test",
+    srcs = [
+        "discovery_test.go",
+        "env_test.go",
+        "filenames_test.go",
+        "filter_test.go",
+        "order_test.go",
+        "override_test.go",
+        "runtime_helpers_test.go",
+        "scanner_test.go",
+        "store_reads_bounded_test.go",
+        "store_reads_test.go",
+        "store_test.go",
+        "testenv_import_test.go",
+        "trigger_exec_unix_test.go",
+        "triggers_test.go",
+        "webhook_trigger_test.go",
+    ],
+    embed = [":orders"],
+    deps = [
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/convergence",
+        "//internal/events",
+        "//internal/fsys",
+        "//internal/processgroup/processgrouptest",
+        "//internal/testenv",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/processgroup",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/processgroup",
+        ],
+        "//conditions:default": [],
+    }),
+)

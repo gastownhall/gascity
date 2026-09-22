@@ -1,0 +1,29 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "providerledger",
+    srcs = [
+        "guard.go",
+        "ledger.go",
+        "proof.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/testutil/providerledger",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/testpolicy/waiverclock"],
+)
+
+go_test(
+    name = "providerledger_test",
+    srcs = [
+        "ledger_test.go",
+        "testenv_import_test.go",
+        "waiver_clock_test.go",
+        "waiver_owner_test.go",
+        "waiver_stagger_test.go",
+    ],
+    embed = [":providerledger"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testpolicy/waiverclock",
+    ],
+)

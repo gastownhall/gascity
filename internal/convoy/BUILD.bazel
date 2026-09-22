@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "convoy",
+    srcs = [
+        "classes.go",
+        "convoy.go",
+        "convoy_fields.go",
+        "membership.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/convoy",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/events",
+        "//internal/storeref",
+    ],
+)
+
+go_test(
+    name = "convoy_test",
+    srcs = [
+        "classes_test.go",
+        "convoy_fields_test.go",
+        "convoy_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":convoy"],
+    deps = [
+        "//internal/beads",
+        "//internal/events",
+        "//internal/testenv",
+    ],
+)

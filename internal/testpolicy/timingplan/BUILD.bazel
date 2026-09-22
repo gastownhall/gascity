@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "timingplan",
+    srcs = ["plan.go"],
+    importpath = "github.com/gastownhall/gascity/internal/testpolicy/timingplan",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/testpolicy/timingsummary"],
+)
+
+go_test(
+    name = "timingplan_test",
+    srcs = [
+        "plan_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":timingplan"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testpolicy/timingsummary",
+    ],
+)

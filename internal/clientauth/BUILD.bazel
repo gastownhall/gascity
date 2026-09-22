@@ -1,0 +1,21 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "clientauth",
+    srcs = ["clientauth.go"],
+    importpath = "github.com/gastownhall/gascity/internal/clientauth",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "clientauth_test",
+    srcs = [
+        "clientauth_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":clientauth"],
+    deps = [
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
