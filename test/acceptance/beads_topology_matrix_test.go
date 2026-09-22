@@ -115,7 +115,7 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		// shape declares an expectation, so the matrix reports no skips: a skip
 		// in a lane whose whole job is "this shape is unchanged" is
 		// indistinguishable from a pass in a job summary.
-		if run.Topology.City.StoreNativeLane != nil {
+		if run.Topology.CityStoreNativeLane != nil {
 			t.Run("native-lane", func(t *testing.T) {
 				assertTopologyNativeLane(t, run)
 			})
@@ -227,7 +227,7 @@ func assertTopologyDoctor(t *testing.T, run *helpers.TopologyRun, allowedFailure
 	// costs nothing extra, and it is asserted on payload FIELDS rather than on
 	// the message — the message is the operator's line and is free to change,
 	// these are the contract automation reads.
-	assertTopologyBeadsStore(t, report, run.Topology.City.Store, label)
+	assertTopologyBeadsStore(t, report, run.Topology.CityStore, label)
 
 	allowed := make(map[string]bool, len(allowedFailures)+len(run.Topology.DoctorGaps))
 	for _, name := range allowedFailures {
@@ -301,12 +301,12 @@ func assertTopologyNativeLane(t *testing.T, run *helpers.TopologyRun) {
 	out, _ := helpers.RunGC(lane, run.City.Dir, "doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
 	var report doctorReport
 	lastJSONLine(t, out, &report)
-	assertTopologyBeadsStore(t, report, *topo.City.StoreNativeLane, topo.Name+" city, flag on")
+	assertTopologyBeadsStore(t, report, *topo.CityStoreNativeLane, topo.Name+" city, flag on")
 
 	out, _ = run.City.GC("doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
 	var offReport doctorReport
 	lastJSONLine(t, out, &offReport)
-	assertTopologyBeadsStore(t, offReport, topo.City.Store, topo.Name+" city, flag off (re-checked)")
+	assertTopologyBeadsStore(t, offReport, topo.CityStore, topo.Name+" city, flag off (re-checked)")
 }
 
 // assertTopologyBeadsStore checks one `beads-store` payload against a shape's
