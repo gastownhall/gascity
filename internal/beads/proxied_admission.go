@@ -280,8 +280,15 @@ const (
 	// beat, and escalating inside that beat would fork bd for a proxy that was
 	// about to answer.
 	admissionNoGreetingSpacing = time.Second
-	// admissionDrainPoll is the drain re-probe cadence.
+	// admissionDrainPoll is the drain loop's cadence for the cheap half: two
+	// file reads, no socket.
 	admissionDrainPoll = 250 * time.Millisecond
+	// admissionDrainProbesEvery is how many polls pass between re-probes of the
+	// data port. Eight polls is two seconds, which is the probe's own session
+	// budget — so the loop never has more than one probe's worth of staleness
+	// and never costs bd's idle watcher more than one accepted connection per
+	// two seconds of waiting.
+	admissionDrainProbesEvery = 8
 	// admissionDrainCeiling caps the drain wait however long the caller's
 	// context is. A proxy that has been draining for a minute is not draining.
 	admissionDrainCeiling = 60 * time.Second
@@ -456,7 +463,7 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 		}, false, nil
 
 	case proxyendpoint.ProbeRefused:
-		return in.drain(ctx, root, key)
+		return in.drain(ctx, ep, root, key)
 
 	case proxyendpoint.ProbeAcceptedNoGreeting:
 		return in.escalateZombie(ctx, root, ep, key)
@@ -485,13 +492,13 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 // Expiry returns draining NON-TERMINAL, and that is B's trap made safe. The
 // budget running out says nothing about the proxy, so a terminal verdict here
 // would permanently demote a handle over a slow box.
-func (in AdmissionInput) drain(ctx context.Context, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
+func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	if !in.LongLived {
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
 			"data port refused; a one-shot open takes the bd front door rather than waiting", nil)
 	}
 	deadline := in.Now().Add(admissionDrainCeiling)
-	for in.Now().Before(deadline) {
+	for poll := 1; in.Now().Before(deadline); poll++ {
 		if err := in.Sleep(ctx, admissionDrainPoll); err != nil {
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
 				"the drain wait ran out of budget", err)
@@ -503,6 +510,28 @@ func (in AdmissionInput) drain(ctx context.Context, root string, key proxyendpoi
 			// validated.
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
 				"the draining generation was replaced; re-admitting", err)
+		}
+		if poll%admissionDrainProbesEvery != 0 {
+			continue
+		}
+		// Re-probe the PORT, not just the record (council A-F7). ECONNREFUSED
+		// on a live same-generation record is the signature of a proxy on its
+		// way down AND of one on its way up: the supervisor writes the record
+		// at start, binds its listener afterwards, and its Dolt child can
+		// cold-start for tens of seconds. In the starting case the generation
+		// never moves, so a loop that watched only the record burned the whole
+		// 60s ceiling and then refused — a controller boot that caught that
+		// window blocked for a minute and fell to BdStore for the process.
+		switch probe := in.Probe(ctx, ep, in.Database); probe.Outcome {
+		case proxyendpoint.ProbeRefused:
+			// Still down, or still coming up. Keep waiting.
+		default:
+			// Anything else is a changed answer, and the endpoint is no longer
+			// this pass's evidence: re-run from the top, where a served probe
+			// meets the cursor gate and a silent one meets the no-greeting
+			// ladder.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,
+				"the data port answered "+probe.Outcome.String()+" during the drain wait; re-admitting", probe.Err)
 		}
 	}
 	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictDraining,

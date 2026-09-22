@@ -1014,3 +1014,103 @@ func TestAbsentRecordPingIsOncePerIncidentNotOncePerProcess(t *testing.T) {
 			"the scope was poisoned for the process lifetime", pings)
 	}
 }
+
+// TestDrainReProbesTheDataPort is council A-F7.
+//
+// ECONNREFUSED on a live, same-generation record is the signature of a proxy on
+// its way DOWN and of one on its way UP: bd's supervisor writes the record at
+// start, binds its listener afterwards, and its Dolt child can cold-start for
+// tens of seconds. The drain loop only re-read the RECORD, and in the starting
+// case the generation never moves — so a long-lived open that caught that
+// window ran the full 60s admissionDrainCeiling and then refused, and a
+// controller boot fell to BdStore for the whole process over a proxy that was
+// about to answer.
+func TestDrainReProbesTheDataPort(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ops := &admissionOps{}
+
+	// A fake clock the drain's own Sleep advances, so the 60s ceiling is real
+	// to the code and instant to the test.
+	now := time.Now()
+	probes := 0
+
+	in := baseAdmissionInput(f, ops)
+	in.LongLived = true
+	in.Now = func() time.Time { return now }
+	in.Sleep = func(_ context.Context, d time.Duration) error {
+		now = now.Add(d)
+		return nil
+	}
+	// The proxy is STARTING: the record is live and unchanged throughout, the
+	// port refuses, and then the listener binds.
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		probes++
+		if probes <= 2 {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+		}
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+	}
+
+	start := now
+	pin, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit across a starting proxy: %v", err)
+	}
+	if !pin.Admitted() {
+		t.Fatal("Admit returned no error and no pin")
+	}
+	waited := now.Sub(start)
+	if waited >= admissionDrainCeiling {
+		t.Fatalf("the drain waited %s, i.e. the whole %s ceiling, for a proxy that answered: "+
+			"the loop is still watching only the record", waited, admissionDrainCeiling)
+	}
+	// One re-probe per admissionDrainProbesEvery polls, so the wait is bounded
+	// by the re-probe cadence rather than by the ceiling.
+	if want := time.Duration(admissionDrainProbesEvery) * admissionDrainPoll; waited > 2*want {
+		t.Errorf("the drain waited %s for a port that answered, want at most two re-probe intervals (%s)",
+			waited, 2*want)
+	}
+	if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+		t.Errorf("waiting out a starting proxy spent %d ping / %d recover, want 0/0", pings, recovers)
+	}
+}
+
+// TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers is the other side: a
+// port that stays refused must still end at the ceiling, and must not buy a
+// probe session on every 250ms poll on the way there.
+func TestDrainStillHonoursTheCeilingForAPortThatNeverAnswers(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ops := &admissionOps{}
+	now := time.Now()
+	probes := 0
+
+	in := baseAdmissionInput(f, ops)
+	in.LongLived = true
+	in.Now = func() time.Time { return now }
+	in.Sleep = func(_ context.Context, d time.Duration) error {
+		now = now.Add(d)
+		return nil
+	}
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		probes++
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+	}
+
+	_, err := Admit(context.Background(), in)
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok || verdict.Verdict != ProxiedVerdictDraining {
+		t.Fatalf("Admit = %v, want a draining verdict", err)
+	}
+	if verdict.Terminal() {
+		t.Error("a drain that ran out of wall clock says nothing about the proxy, so it must be non-terminal")
+	}
+	// The ceiling is reached once per pass; admitOnce's own probe opens each
+	// pass. Whatever the pass count, the drain must not have probed once per
+	// poll: that would be admissionDrainCeiling/admissionDrainPoll = 240
+	// accepted connections per pass on a proxy bd's idle watcher is counting.
+	perPass := int(admissionDrainCeiling/admissionDrainPoll)/admissionDrainProbesEvery + 1
+	if probes > 4*perPass {
+		t.Fatalf("the drain ran %d probe sessions, want at most %d per pass: re-probing on every poll "+
+			"costs bd an accepted connection every 250ms for a minute", probes, perPass)
+	}
+}
