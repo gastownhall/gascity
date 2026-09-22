@@ -19,10 +19,25 @@ var bdForkSpellings = []string{`"${BD_BIN:-bd}"`, `"$bd_bin"`}
 // runs bd past the census bdForkSpellings counts.
 var bdChokepointSpellings = []string{`"${BD_BIN:-bd}"`, `"$bd_bin"`, `bd_bin=`}
 
-// bareBdFork matches `bd` used as a command: at the start of a line or after a
-// separator, with nothing quoting it. The two chokepoints are quoted, so they
-// are removed before this runs (see shellCode with dropQuoted).
-var bareBdFork = regexp.MustCompile(`(?:^|[;&|(]|&&|\|\||\bexec\b|\bthen\b|\bdo\b)[[:space:]]*bd(?:[[:space:]]|$)`)
+// bareBdFork matches the word `bd` with nothing quoting it and nothing glued to
+// it: an unquoted, standalone `bd` in shell code is the binary, and running it
+// is a fork the census cannot see.
+//
+// This used to enumerate what may precede it — start of line, `;&|(`, `&&`,
+// `||`, exec, then, do — and claimed to refuse "any bare bd in command
+// position". POSIX sh has more command positions than that: `command bd`,
+// `if bd`, `elif bd`, `else bd`, `! bd`, `{ bd`, a backtick substitution, and an
+// env-assignment prefix (`BEADS_DIR=... bd context`, which is the shape site
+// 3064 already uses with the chokepoint, so it is the most likely way a bare
+// copy would be written). Eight tokens caught five of the ten shapes.
+//
+// Enumerating nothing is both shorter and stricter. The three things that made
+// the enumeration look necessary are handled elsewhere: prose and comments are
+// removed by shellCode (`die "bd $version ..."`), the quoted chokepoints go with
+// them, and `\b` plus the required trailing space separate the word `bd` from
+// `bd_bin`, `bd-store-bridge` and `run_bd_init_proxied`. Measured over the real
+// script's 3974 lines: zero findings.
+var bareBdFork = regexp.MustCompile(`\bbd(?:[[:space:]]|$)`)
 
 // jsonlTraceRedirect matches a redirection into the JSONL trace file in any
 // spelling: >> or >, any spacing, braced or bare, quoted or not. Pinning the one
@@ -86,8 +101,16 @@ func unpinnedBdReference(line string) string {
 
 // forksBareBd reports whether line runs `bd` off PATH rather than through the
 // chokepoint.
+//
+// The chokepoint spellings are blanked as well as quote-dropped. Quote-dropping
+// already removes them, since both are quoted; blanking says so in one place
+// rather than leaving the scan's correctness resting on that.
 func forksBareBd(line string) bool {
-	return bareBdFork.MatchString(shellCode(line, true))
+	code := shellCode(line, true)
+	for _, spelling := range bdChokepointSpellings {
+		code = strings.ReplaceAll(code, spelling, " ")
+	}
+	return bareBdFork.MatchString(code)
 }
 
 // bdForkSiteCount is how many places the script forks bd. It is pinned because
@@ -300,6 +323,69 @@ func TestBdForkLintSeesEveryWayOfNamingBd(t *testing.T) {
 			}
 			if got := forksBareBd(tc.line); got != tc.wantBare {
 				t.Errorf("forksBareBd(%q) = %v, want %v", tc.line, got, tc.wantBare)
+			}
+		})
+	}
+}
+
+// TestForksBareBdSeesEveryCommandPosition is the matrix the enumerated pattern
+// failed: ten ways POSIX sh puts a bare `bd` in command position.
+//
+// The previous shape listed the tokens that may precede a command and caught
+// five of these — line start, after `exec`, after `|`, after `(`. The other
+// five run bd exactly as invisibly: `command bd` and `! bd` and `{ bd` and the
+// if/elif/else heads are command positions the list never named, and the
+// env-assignment prefix is the shape the script's own traced site 3064 uses, so
+// it is the likeliest spelling of an untraced copy.
+//
+// The negative half matters as much: the script is full of prose that says the
+// word, and a lint that flagged `die "bd $version ..."` would be switched off
+// within a week. Those rows are the reason the scan runs over quote-dropped,
+// comment-stripped code rather than the raw line.
+func TestForksBareBdSeesEveryCommandPosition(t *testing.T) {
+	bare := []struct {
+		name string
+		line string
+	}{
+		{name: "at the start of a line", line: `        bd ping --json`},
+		{name: "after exec", line: `        exec bd "$@"`},
+		{name: "after command", line: `        command bd ping --json`},
+		{name: "as an if condition", line: `        if bd context >/dev/null 2>&1; then`},
+		{name: "behind an env-assignment prefix", line: `        BEADS_DIR="$dir/.beads" bd context >/dev/null`},
+		{name: "inside a backtick substitution", line: "        version=`bd version`"},
+		{name: "negated", line: `        ! bd ping --json`},
+		{name: "inside a brace group", line: `        { bd ping --json; }`},
+		{name: "as an else body", line: `        else bd ping --json`},
+		{name: "as an elif condition", line: `        elif bd ping --json; then`},
+	}
+	for _, tc := range bare {
+		t.Run(tc.name, func(t *testing.T) {
+			if !forksBareBd(tc.line) {
+				t.Errorf("forksBareBd(%q) = false; this line runs bd off PATH and the census would not count it", tc.line)
+			}
+		})
+	}
+
+	legal := []struct {
+		name string
+		line string
+	}{
+		{name: "the inline chokepoint", line: `        "${BD_BIN:-bd}" "$@"`},
+		{name: "the resolved local", line: `        "$bd_bin" "$@"`},
+		{name: "resolving the local", line: `        bd_bin="${BD_BIN:-bd}"`},
+		{name: "the chokepoint behind an env-assignment prefix", line: `        (cd "$dir" && BEADS_DIR="$dir/.beads" "$bd_bin" context >/dev/null 2>&1)`},
+		{name: "a gc subcommand whose name starts with bd", line: `        "$gc_bin" bd-store-bridge --scope "$dir"`},
+		{name: "a function whose name contains bd", line: `        run_bd_init_proxied "$dir" "$prefix"`},
+		{name: "bd named inside a message", line: `            die "bd $version cannot initialize the workspace at $dir (bd 1.0.0 or newer required)"`},
+		{name: "a comment naming the chokepoint", line: `        # honor "${BD_BIN:-bd}" here too`},
+		{name: "a trailing comment naming bd", line: `        run_init "$dir"   # bd init runs here`},
+		{name: "a single-quoted bd", line: `        printf '%s\n' 'bd ping'`},
+		{name: "reading the trace variable", line: `    [ -n "${GC_BD_TRACE:-}" ] || return 0`},
+	}
+	for _, tc := range legal {
+		t.Run(tc.name, func(t *testing.T) {
+			if forksBareBd(tc.line) {
+				t.Errorf("forksBareBd(%q) = true; a lint that cries wolf on this line is a lint nobody runs", tc.line)
 			}
 		})
 	}
