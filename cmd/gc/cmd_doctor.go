@@ -461,6 +461,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, cfg, cfgErr); c != nil {
 		register(c)
 	}
+	// A gc-owned proxied scope whose sidecar does not pin its proxy resident.
+	// bd elides a zero idle_timeout, so an absent key means its provider
+	// substitutes 30s and retires the proxy and its Dolt child after every
+	// quiet period — invisible to every other check, and paid for as a cold
+	// start on the next command against that scope. Registered only when the
+	// city actually has such a scope.
+	if c := doctor.NewProxiedIdleTimeoutCheckForConfig(cityPath, cfg, cfgErr); c != nil {
+		register(c)
+	}
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
@@ -887,6 +896,10 @@ type doctorJSONResult struct {
 	// distinguish an abandoned check (outcome unknown, worth retrying) from a
 	// check that ran and returned an ordinary advisory error.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Payload projects CheckResult.Payload: a check's structured findings, for
+	// consumers that must not parse Message. Absent for the checks that set
+	// none, which is nearly all of them.
+	Payload any `json:"payload,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -942,6 +955,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
 			TimedOut:     r.TimedOut,
+			Payload:      r.Payload,
 		})
 	}
 	return writeCLIJSONLine(w, out)

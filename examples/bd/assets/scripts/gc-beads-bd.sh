@@ -81,6 +81,49 @@ die() {
     exit 1
 }
 
+# trace_bd_argv records one bd invocation this script is about to fork, as a
+# single line appended to the file named by $GC_BD_TRACE. No-op when the
+# variable is unset, which is every ordinary run.
+#
+# It exists because this script is a blind spot in gc's own fork accounting.
+# gc records the bd calls it makes in-process, but the provider script is a
+# separate process that writes nothing, so every bd it forks — the ping behind
+# start/ensure-ready/health/probe, the init, the stop — was invisible to the
+# very measurement the proxied topology made worth taking.
+#
+# It deliberately writes the LINE format under $GC_BD_TRACE rather than the
+# JSONL under $GC_BD_TRACE_JSON. The JSONL file is where the fork-count gate
+# counts, and a test that also substitutes a recording BD_BIN shim would have
+# every fork in it twice — once from the shim and once from here. Two formats
+# under two variables keep the census and this breadcrumb trail separate.
+#
+# Best-effort in both directions: an unwritable path is ignored rather than
+# failing the operation it was only observing.
+trace_bd_argv() {
+    # The JSONL trace claims tracing when it is set, exactly as the in-process
+    # writer does (internal/beads/bdstore.go newBDExecTrace): that file is where
+    # the fork-count gate counts, and a run that also substitutes a recording
+    # BD_BIN shim would otherwise have every fork twice, once from the shim and
+    # once from here. Two formats sharing one file is the other half of the same
+    # hazard. The implementer's claim that the formats never interleave rests on
+    # this guard, so the script has to honour it too.
+    [ -z "${GC_BD_TRACE_JSON:-}" ] || return 0
+    [ -n "${GC_BD_TRACE:-}" ] || return 0
+    trace_args=$*
+    # One fork, one line. An argv can carry a newline — a bead title, a JSON
+    # payload on `bd create` — and a raw one here splits the breadcrumb into two
+    # lines, the second with no source= prefix, which any reader counts as a
+    # record it cannot attribute. The fold costs a subshell only when there is
+    # actually a newline to fold, which no gc-built argv has.
+    case $trace_args in
+    *"
+"*) trace_args=$(printf '%s' "$trace_args" | tr '\n\r' '  ') ;;
+    esac
+    printf '%s source=provider-script subcommand=%s pid=%s dir=%s args=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${1:-unknown}" "$$" "$(pwd)" "$trace_args" \
+        >>"$GC_BD_TRACE" 2>/dev/null || true
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -446,6 +489,7 @@ seed_fresh_managed_bd_version_witness() {
 
     [ ! -e "$marker" ] || return 0
 
+    trace_bd_argv version
     if ! raw=$("${BD_BIN:-bd}" version 2>/dev/null); then
         die "failed to read bd version while initializing fresh managed Dolt workspace at $dir"
     fi
@@ -2709,6 +2753,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -2762,6 +2807,7 @@ run_bd_init_proxied() {
             set -- "$@" --database "$dolt_database"
         fi
         set -- "$@" --skip-hooks --skip-agents "$dir"
+        trace_bd_argv "$@"
         "$bd_bin" "$@"
     )
 }
@@ -2778,6 +2824,7 @@ run_bd_doltlite() {
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
         unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
@@ -3004,7 +3051,21 @@ op_init() {
         # BD_BIN here just as run_bd_init_proxied does; tests and pinned
         # deployments must not silently invoke an unrelated PATH binary.
         bd_bin="${BD_BIN:-bd}"
-        if [ ! -f "$metadata_path" ] || ! (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+        # The context probe is a bd fork like any other and has to be recorded
+        # like one: a fork census with a hole in it is worse than none, because
+        # the budget it informs reads as met. The condition is split rather than
+        # traced in place because the original `[ ! -f metadata ] || ! (… bd
+        # context …)` short-circuits — a trace above it would count a fork that
+        # never happened on a scope with no metadata.json, which is the common
+        # case on a first init.
+        proxied_needs_init=true
+        if [ -f "$metadata_path" ]; then
+            trace_bd_argv context
+            if (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+                proxied_needs_init=false
+            fi
+        fi
+        if [ "$proxied_needs_init" = true ]; then
             run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
         fi
         ensure_beads_dir_permissions "$dir"
@@ -3606,6 +3667,7 @@ run_provider_owned_bd() {
             # the parent process. The binding determines its own transport.
             unset BEADS_DOLT_PROXIED_SERVER
         fi
+        trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
 }
