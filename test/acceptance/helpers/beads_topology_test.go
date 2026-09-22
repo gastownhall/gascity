@@ -81,12 +81,12 @@ func TestEveryProxiedTopologyDeclaresACityStoreExpectation(t *testing.T) {
 	if len(topologies) == 0 {
 		t.Fatal("BeadsTopologies() is empty; this guard would pass vacuously")
 	}
-	proxied, nativeLanes := 0, 0
+	proxied, offLaneFences := 0, 0
 	for _, topo := range topologies {
-		if topo.CityStoreNativeLane != nil {
-			nativeLanes++
-		}
 		if topo.City.DoltMode != "proxied-server" {
+			if topo.CityStoreNativeLane != nil {
+				offLaneFences++
+			}
 			continue
 		}
 		proxied++
@@ -104,8 +104,15 @@ func TestEveryProxiedTopologyDeclaresACityStoreExpectation(t *testing.T) {
 	if proxied == 0 {
 		t.Fatal("no proxied topology found; the scan is broken, not satisfied")
 	}
-	if nativeLanes < 2 {
-		t.Fatalf("only %d shape(s) run the flag-on lane; at least one non-proxied shape must opt in as "+
-			"the fence that says the flag changes nothing off its own lane", nativeLanes)
+	// Counted over the NON-proxied shapes only (council pr2 D-F13). The guard
+	// used to count every shape with a flag-on expectation and require two,
+	// but the loop above already fails any proxied shape without one and there
+	// are three proxied shapes, so the count was >= 3 whenever the test got
+	// here: removing M2-direct-local's opt-in left it at 3, the guard passed,
+	// and the matrix silently stopped running the flag-on lane on the only
+	// shape that proves the flag changes nothing off its own lane.
+	if offLaneFences == 0 {
+		t.Fatal("no non-proxied shape runs the flag-on lane; at least one must opt in as the fence that " +
+			"says the flag changes nothing off its own lane")
 	}
 }
