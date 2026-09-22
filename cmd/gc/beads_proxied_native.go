@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // The composition root of the proxied-native lane.
@@ -202,17 +205,33 @@ func (o *proxiedNativeOpener) scopeDatabase() string {
 }
 
 // proxiedScopeDatabase resolves the Dolt database name for a scope from the
-// canonical connection contract — the same resolution every other gc projection
-// uses, so the native handle and every bd child agree on which database they are
-// talking about. A scope whose config is not authoritative resolves to "", and
-// the lane declines rather than guessing: admission refuses an empty database
-// anyway, because the cursors it gates on are DATABASE()-scoped.
+// connection contract — the same resolution doctor's beads-store check and every
+// bd child's environment use, so the native handle and the bd leaf agree on which
+// database they are talking about. A scope the contract cannot resolve at all
+// yields "", and the lane declines rather than guessing: admission refuses an
+// empty database anyway, because the cursors it gates on are DATABASE()-scoped.
+//
+// It deliberately does NOT go through canonicalScopeDoltTarget, and this is the
+// first defect the acceptance gate found. That helper requires
+// ResolveScopeConfigState to return ScopeConfigAuthoritative — which means the
+// scope's .beads/config.yaml carries gc's own endpoint keys. A gc-initialized
+// PROXIED city carries none of them: bd owns the topology, gc retires its
+// canonical Dolt config for such a scope on purpose, and what is left is bd's own
+// `issue_prefix:`-only file, which the contract classifies as
+// ScopeConfigLegacyMinimal. So the lane resolved "" for the one shape it exists
+// to serve and every proxied open on a gc-initialized city refused with
+// no_ownership_record ("admission was given no database name"), silently taking
+// the bd front door with the flag on.
+//
+// The database itself never depended on that authority: ResolveDoltConnectionTarget
+// reads it from .beads/metadata.json's dolt_database, which is bd's own record of
+// the database it serves, and validates the rest of the config on the way past.
 func proxiedScopeDatabase(cityPath, scopeRoot string) string {
-	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
-	if err != nil || !ok {
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
 		return ""
 	}
-	return target.Database
+	return strings.TrimSpace(target.Database)
 }
 
 // storeOpener is the closure the factory calls.

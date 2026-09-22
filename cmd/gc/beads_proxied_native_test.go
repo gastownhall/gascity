@@ -501,3 +501,48 @@ func TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity pins the database
+// resolution against the on-disk shape a real `gc init` leaves behind.
+//
+// This is the defect the acceptance fork gate found on its first run, and it is
+// worth a named test rather than a one-line change, because the mechanism is
+// counter-intuitive: the lane's own resolution asked for an AUTHORITATIVE scope
+// config, and the one shape it exists to serve — a gc-initialized proxied city —
+// deliberately has none. gc retires its canonical Dolt config for a scope bd
+// owns, so what is left is bd's `issue_prefix:`-only config.yaml, which the
+// contract classifies ScopeConfigLegacyMinimal. Every proxied open on such a
+// city therefore resolved an empty database and refused with
+// no_ownership_record, with the flag on, silently.
+//
+// The negative half is asserted too. Without it the test would pass just as
+// happily against the old resolution if some later change made proxied cities
+// authoritative again, and the reason this function does not use
+// canonicalScopeDoltTarget would quietly stop being true.
+func TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	// bd's own config.yaml, as `bd init --proxied-server` writes it and as gc
+	// leaves it on a scope bd owns: the issue prefix and nothing else. No
+	// gc.endpoint_origin, no dolt.mode, no host or port.
+	if err := os.WriteFile(filepath.Join(f.scopeRoot, ".beads", "config.yaml"),
+		[]byte("issue_prefix: hq\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := proxiedScopeDatabase(f.scopeRoot, f.scopeRoot); got != "beads" {
+		t.Fatalf("proxiedScopeDatabase = %q, want %q — admission refuses an empty database with a terminal verdict, so an unresolved name turns the whole lane off on the shape it exists for",
+			got, "beads")
+	}
+
+	if _, ok, err := canonicalScopeDoltTarget(f.scopeRoot, f.scopeRoot); err != nil || ok {
+		t.Fatalf("canonicalScopeDoltTarget(bd-shaped proxied city) = ok %v, err %v; want ok=false — if this starts answering, the comment on proxiedScopeDatabase needs rewriting, not deleting",
+			ok, err)
+	}
+
+	// And the lane still declines for a scope the contract cannot resolve at
+	// all, rather than inventing beads' default database name for it.
+	empty := t.TempDir()
+	if got := proxiedScopeDatabase(empty, empty); got != "" {
+		t.Errorf("proxiedScopeDatabase(a directory with no beads scope) = %q, want \"\"", got)
+	}
+}
