@@ -1039,8 +1039,8 @@ func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
 		t.Fatalf("the read re-pointed %d time(s), want 2: a mark set DURING the reconnect was swallowed, "+
 			"so this handle serves the previous generation's socket under the new generation's pin", got)
 	}
-	if got := store.poolStale.Load(); got != 0 {
-		t.Fatalf("poolStale = %d after both re-points, want 0: the read loop would spin", got)
+	if marked, owed := store.poolStaleOwed(); owed {
+		t.Fatalf("mark %d is still owed after both re-points: the read loop would spin", marked)
 	}
 
 	// And the steady state still clears: one mark, one re-point, no residue.
@@ -1053,9 +1053,127 @@ func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
 	if got := atomic.LoadInt32(&reopens); got != 3 {
 		t.Fatalf("a lone mark cost %d re-points in total, want 3", got)
 	}
-	if got := store.poolStale.Load(); got != 0 {
-		t.Fatalf("poolStale = %d after a lone mark, want 0", got)
+	if marked, owed := store.poolStaleOwed(); owed {
+		t.Fatalf("mark %d is still owed after a lone mark's re-point", marked)
 	}
+}
+
+// TestStaleMarkSurvivesTheABAInterleaving is council pr2 D-F6.
+//
+// A-F4 made the mark an epoch but cleared it with CompareAndSwap(seen, 0), so
+// the counter returned to zero and the swap tested for ABA rather than for a
+// watermark. Two interleavings lost a mark that way, and each row below drives
+// one of them deterministically, in the order the race would, through the real
+// repinStalePool and reconnect:
+//
+//  1. Two readers both load mark 1. R2 re-points and clears. Tick T2 marks
+//     (the counter is 1 AGAIN). R1, parked on the reconnect gate the whole
+//     time, finds another reader already reconnected — and its CAS(1, 0)
+//     succeeds, erasing T2's mark.
+//  2. A transient-error reconnect's reopen is in flight when the tick marks.
+//     A reader loads that mark, finds the transient reconnect already
+//     installed, and clears a mark the installed storage never saw.
+//
+// Either way the handle serves the previous generation's socket under the new
+// pin, and checkGeneration compares the record against the new pin and reports
+// Held, so no later tick re-marks it. The assertion is the caller-visible one:
+// the next read must re-point.
+func TestStaleMarkSurvivesTheABAInterleaving(t *testing.T) {
+	read := func(t *testing.T, store *NativeDoltStore) {
+		t.Helper()
+		if _, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth}); err != nil {
+			t.Fatalf("List: %v", err)
+		}
+	}
+
+	t.Run("two readers and a tick between them", func(t *testing.T) {
+		storage := healthySearchStorage()
+		store := newNativeDoltStoreForTest(storage)
+		var reopens int32
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return storage, nil
+		}
+
+		// Tick T1 marks; readers R1 and R2 both observe generation g and mark 1.
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		}
+		_, r1Gen, release, err := store.acquireStorageGen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		r1Mark, owed := store.poolStaleOwed()
+		if !owed {
+			t.Fatal("a fresh mark was not owed")
+		}
+		// R2 wins the gate and re-points.
+		read(t, store)
+		if got := atomic.LoadInt32(&reopens); got != 1 {
+			t.Fatalf("R2 re-pointed %d time(s), want 1", got)
+		}
+		// Tick T2 lands while R1 is still parked.
+		if !store.markPoolStale() {
+			t.Fatal("markPoolStale refused a handle with a reopen hook")
+		}
+		// R1 wakes: another reader already reconnected.
+		if err := store.repinStalePool(context.Background(), r1Gen, r1Mark); err != nil {
+			t.Fatalf("R1's repin: %v", err)
+		}
+		if got := atomic.LoadInt32(&reopens); got != 1 {
+			t.Fatalf("R1 re-pointed on a generation another reader had already replaced (%d reopens)", got)
+		}
+		// T2's mark must still be owed, and the next read must honor it.
+		read(t, store)
+		if got := atomic.LoadInt32(&reopens); got != 2 {
+			t.Fatalf("the read after T2's mark re-pointed %d time(s) in total, want 2: R1 erased the mark T2 set "+
+				"while it was parked, so this handle serves the previous generation's socket under T2's pin", got)
+		}
+		if marked, owed := store.poolStaleOwed(); owed {
+			t.Fatalf("mark %d is still owed after it was honored: the read loop would spin", marked)
+		}
+	})
+
+	t.Run("a transient reconnect in flight when the tick marks", func(t *testing.T) {
+		storage := healthySearchStorage()
+		store := newNativeDoltStoreForTest(storage)
+		var reopens int32
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			if atomic.AddInt32(&reopens, 1) == 1 {
+				// The tick marks while this (transient-error) reopen is in
+				// flight: whatever it re-admitted, it began before the mark.
+				if !store.markPoolStale() {
+					t.Error("markPoolStale refused a handle with a reopen hook")
+				}
+			}
+			return storage, nil
+		}
+
+		_, gen, release, err := store.acquireStorageGen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		// The transient-error path's reconnect, exactly as withReadRetry calls it.
+		if err := store.reconnect(context.Background(), gen); err != nil {
+			t.Fatalf("reconnect: %v", err)
+		}
+		// A reader that loaded the mark set during it, and observed the old
+		// generation, now finds that reconnect already installed.
+		mark, owed := store.poolStaleOwed()
+		if !owed {
+			t.Fatal("a mark set during a reconnect's reopen was treated as covered by that reopen")
+		}
+		if err := store.repinStalePool(context.Background(), gen, mark); err != nil {
+			t.Fatalf("repin: %v", err)
+		}
+		read(t, store)
+		if got := atomic.LoadInt32(&reopens); got != 2 {
+			t.Fatalf("the read after the mark re-pointed %d time(s) in total, want 2: the mark was cleared "+
+				"on the strength of a reopen that began before it", got)
+		}
+	})
 }
 
 // TestNativeDoltStorePingGoesThroughTheReadPath is council B-F2.

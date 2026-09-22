@@ -388,10 +388,24 @@ type NativeDoltStore struct {
 	// reports Held. On the root-move shape that is silent wrong-database reads
 	// for the life of the handle.
 	//
-	// The counter is snapshotted before the reconnect and the mark is cleared
-	// only if it has not advanced, so a mark set DURING a reconnect survives it
-	// and the next read re-points again.
-	poolStale atomic.Uint64
+	// That epoch was still not enough (council pr2 D-F6): it was cleared with
+	// CompareAndSwap(seen, 0), so the counter went back to zero and the swap
+	// was an ABA test, not a watermark. Two readers R1 and R2 both load mark 1;
+	// R2 reconnects and clears to 0 while R1 is parked on the reconnect gate;
+	// tick T2 marks — the counter is 1 AGAIN; R1 wakes, finds another reader
+	// already reconnected, and its CAS(1, 0) succeeds and erases T2's mark. The
+	// same loss happened when the install that satisfied R1 came from a
+	// transient-error reconnect whose reopen began BEFORE the mark.
+	//
+	// So poolStale is now MONOTONIC — markPoolStale increments it and nothing
+	// ever decrements it — and poolServiced is a separate watermark: the mark
+	// value snapshotted immediately before the reopen whose storage is now
+	// installed began (see reconnect). A re-point is owed exactly while
+	// poolStale > poolServiced. A reader no longer clears anything on its own
+	// say-so; only an install can advance the watermark, and only to the marks
+	// that install's reopen could actually have seen.
+	poolStale    atomic.Uint64
+	poolServiced atomic.Uint64
 
 	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
 	// binding claims. Empty leaves the store unfenced, which is the shipped
@@ -766,7 +780,7 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		if err != nil {
 			return err
 		}
-		if marked := s.poolStale.Load(); marked > 0 {
+		if marked, owed := s.poolStaleOwed(); owed {
 			// The guard tick saw this handle's proxy generation replaced. Re-point
 			// the pool BEFORE serving: a moved root serves the old database
 			// without an error, so waiting for a failure would wait forever.
@@ -891,14 +905,38 @@ func (s *NativeDoltStore) markPoolStale() bool {
 	return true
 }
 
+// poolStaleOwed reports the current mark count and whether a re-point is owed:
+// a mark exists that no installed storage's reopen could have seen.
+func (s *NativeDoltStore) poolStaleOwed() (uint64, bool) {
+	marked := s.poolStale.Load()
+	return marked, marked > s.poolServiced.Load()
+}
+
+// notePoolServiced advances the watermark to covered, never backwards. It is a
+// max rather than a store because two installs can finish out of the order
+// their reopens started in.
+func (s *NativeDoltStore) notePoolServiced(covered uint64) {
+	for {
+		current := s.poolServiced.Load()
+		if covered <= current || s.poolServiced.CompareAndSwap(current, covered) {
+			return
+		}
+	}
+}
+
 // repinStalePool swaps the pool a guard tick invalidated for one bound to the
 // current generation, on the CALLER's goroutine.
 //
 // The reconnect is the existing single-flight path, so concurrent readers
 // re-point once and the reopen hook — which re-runs admission and re-projects the
 // current endpoint — is what decides whether the new generation may be served at
-// all. Clearing the mark after reconnect returns nil (installed, or another
-// reader installed first) is what keeps the read loop from spinning.
+// all. It clears NOTHING itself (council pr2 D-F6): a successful install
+// advances the watermark to the marks its own reopen could see (reconnect), and
+// a reconnect that returned nil because another reader installed first leaves
+// the watermark wherever THAT install put it. The read loop then asks
+// poolStaleOwed again, so a mark neither install covered — one a tick set while
+// this reader was parked on the gate, or before a transient reconnect's reopen
+// began — is re-pointed rather than erased.
 func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servicing uint64) error {
 	reopen, closed := s.reopenState()
 	if closed {
@@ -906,20 +944,14 @@ func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servi
 	}
 	if reopen == nil {
 		// markPoolStale refuses a hook-less handle, so this is only reachable if
-		// the hook went away afterwards. Clear the mark rather than spin — and
-		// still only the mark we saw, for the reason below.
-		s.poolStale.CompareAndSwap(servicing, 0)
+		// the hook went away afterwards. There is nothing to re-point with, so
+		// the marks this reader saw are declared serviced rather than spun on.
+		s.notePoolServiced(servicing)
 		return nil
 	}
 	if err := s.reconnect(ctx, observedGen); err != nil {
 		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
 	}
-	// Clear only the mark this call was servicing. A tick that marked the pool
-	// again WHILE the reconnect was in flight moved the counter, the swap fails,
-	// and the next read re-points against the generation that tick adopted —
-	// instead of serving the previous generation's socket under the new
-	// generation's pin, which no later tick would notice (council A-F4).
-	s.poolStale.CompareAndSwap(servicing, 0)
 	return nil
 }
 
@@ -1020,6 +1052,14 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 		return nil // another reader already reconnected
 	}
 
+	// The stale-pool marks this reopen can honor are the ones already set
+	// before it starts: a guard tick adopts the new pin BEFORE it marks, so a
+	// reopen that begins after a mark re-admits against that pin or a newer
+	// one. A mark set while the reopen is in flight is not covered, and stays
+	// owed (council pr2 D-F6). On the direct and hosted lanes nothing ever
+	// marks, so this is a load of zero and the watermark stays at zero.
+	coversMarks := s.poolStale.Load()
+
 	// The reopen hook re-resolves the current managed port and re-opens under the
 	// caller's wall context, so a stuck env-resolution/recovery is canceled at
 	// the budget rather than running under its own separate timeout.
@@ -1048,6 +1088,9 @@ func (s *NativeDoltStore) reconnect(ctx context.Context, observedGen uint64) err
 	}
 	s.storage = fresh
 	s.generation++
+	// Advanced under the lock, with the install, so no reader can acquire the
+	// fresh storage and still see the marks this reopen covered as owed.
+	s.notePoolServiced(coversMarks)
 	s.mu.Unlock()
 
 	closeStorageQuietly(old)
