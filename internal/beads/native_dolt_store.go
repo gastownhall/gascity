@@ -366,8 +366,15 @@ type NativeDoltStore struct {
 	// tick notices the generation change from its own goroutine and sets this;
 	// the reconnect itself happens on the next READER's goroutine, through the
 	// injected reopen hook, because opening the library means mutating the
-	// process environment under nativeDoltOpenEnvMu and a background ticker is
-	// the wrong place for that.
+	// process environment under nativeDoltOpenEnvMu and, while a reader exists
+	// to carry it, a background ticker is the wrong place for that.
+	//
+	// "While a reader exists" is the whole rule, not a hedge (council pr2
+	// D-F12). A handle that has already stood down non-terminally has no native
+	// leaf, so no read reaches this mark or the reopen hook, and the guard tick
+	// DOES open the library there itself — see recoverNative in
+	// proxied_guard_tick.go, whose header states the exception and its budget.
+	// This mark is only ever the serving handle's mechanism.
 	//
 	// It is false on every direct and hosted handle — only the proxied guard tick
 	// sets it — so the read path's extra atomic load is the whole cost of the
