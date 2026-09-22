@@ -477,11 +477,21 @@ func TestAdmitTable(t *testing.T) {
 		f := newAdmissionFixture(t, "-1")
 		ops := &admissionOps{}
 		probes := 0
+		var waits []time.Duration
 
 		in := baseAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 			probes++
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+		// The ladder's DEPTH and SPACING are the cost the ladder exists to buy,
+		// and neither was asserted: probes was counted and never read, and
+		// Sleep was a no-op, so admissionNoGreetingSpacing was unexercised
+		// (council C-F9). Recording the waits is what makes "three times across
+		// at least two seconds" a property rather than a comment.
+		in.Sleep = func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d)
+			return nil
 		}
 
 		_, err := Admit(context.Background(), in)
@@ -505,6 +515,37 @@ func TestAdmitTable(t *testing.T) {
 		}
 		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
 			t.Errorf("a second zombie pass spent more verbs: %d ping / %d recover, want 1/1", pings, recovers)
+		}
+
+		// Four passes in total, and the count is the ladder's shape rather than
+		// a number: the FIRST Admit above runs three — one that spends the ping
+		// and re-admits, one that spends the recover and re-admits, and one
+		// that finds both rungs spent and answers proxy_zombie — and the second
+		// Admit runs one, which finds both rungs spent immediately. Each pass
+		// costs admissionNoGreetingAttempts probe sessions: admitOnce's own,
+		// plus the re-probes escalateZombie walks before it spends anything.
+		const passes = 4
+		if want := passes * admissionNoGreetingAttempts; probes != want {
+			t.Fatalf("the no-greeting ladder ran %d probe sessions across %d passes, want %d "+
+				"(%d per pass). A ladder that escalated on the FIRST silent probe would fork bd for "+
+				"every proxy that is merely mid-restart.",
+				probes, passes, want, admissionNoGreetingAttempts)
+		}
+		if want := passes * (admissionNoGreetingAttempts - 1); len(waits) != want {
+			t.Fatalf("the ladder waited %d times, want %d: the re-probes must be SPACED, "+
+				"or three probes in a microsecond is the same as one", len(waits), want)
+		}
+		for i, wait := range waits {
+			if wait != admissionNoGreetingSpacing {
+				t.Fatalf("wait %d was %s, want admissionNoGreetingSpacing (%s)", i, wait, admissionNoGreetingSpacing)
+			}
+		}
+		// The span the comment at admissionNoGreetingAttempts promises, stated
+		// as an assertion so a retuned constant has to face it.
+		if span := time.Duration(admissionNoGreetingAttempts-1) * admissionNoGreetingSpacing; span < 2*time.Second {
+			t.Fatalf("one no-greeting pass spans %s, want at least 2s: a proxy mid-restart accepts and "+
+				"stays silent for a beat, and escalating inside that beat forks bd for a proxy that was "+
+				"about to answer", span)
 		}
 	})
 

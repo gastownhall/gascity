@@ -45,6 +45,10 @@ type guardFixture struct {
 	recover func(context.Context) (*NativeDoltStore, Pin, error)
 	// recoveries counts the calls the guard made to it.
 	recoveries int
+	// cursorReads counts the injected cursor sessions. It is the other half of
+	// the per-tick budget: probes and cursor reads are both one connection to
+	// bd's proxy, and bd's idle watcher counts every one.
+	cursorReads int
 }
 
 // probe is the injected probe both admission and the tick run through. It
@@ -132,6 +136,7 @@ func (f *guardFixture) start() {
 		processTable: f.admitted.processTable(),
 		probe:        f.probe,
 		cursors: func(context.Context, Pin) (proxyendpoint.Cursors, error) {
+			f.cursorReads++
 			return f.cursors, nil
 		},
 		owner:      func(context.Context, Pin) proxiedOwner { return f.owner },
@@ -661,6 +666,59 @@ func TestProxiedGuardTickRecoversANonTerminallyDemotedHandle(t *testing.T) {
 		}
 		if f.recoveries != 1 {
 			t.Fatalf("the guard asked %d time(s) after a TERMINAL refusal, want exactly 1", f.recoveries)
+		}
+	})
+}
+
+// TestProxiedGuardTickSpendsOneSessionPerTick is the tick's stated budget, made
+// an assertion.
+//
+// proxied_guard_tick.go's header promises what one tick may spend: "two
+// 200-byte file reads (the record, and the root identity behind Validate), one
+// probe session, and -- every proxiedGuardOwnerEvery-th tick -- a /proc read."
+// The fixture counted its probe sessions and read the counter nowhere (council
+// C-F9), so a tick that dialed bd's proxy twice, or on every tick instead of on
+// a change, would have passed every existing guard test. A session is an
+// accepted TCP connection bd's idle watcher counts and cannot arm while one is
+// open, so the budget is the whole reason the tick is affordable at all.
+func TestProxiedGuardTickSpendsOneSessionPerTick(t *testing.T) {
+	f := newGuardFixture(t)
+	f.start()
+	// The pin was minted by the fixture's own Admit, which spent one.
+	admissionProbes := f.probes
+
+	t.Run("a held tick reads the cursors once and probes nothing", func(t *testing.T) {
+		for pass := 0; pass < 3; pass++ {
+			if step := f.tick(); step != proxiedGuardHeld {
+				t.Fatalf("pass %d reported %s, want held", pass, step)
+			}
+		}
+		if got := f.probes - admissionProbes; got != 0 {
+			t.Errorf("three held ticks ran %d admission probe session(s), want 0: "+
+				"an unchanged record is decided from two file reads", got)
+		}
+		if f.cursorReads != 3 {
+			t.Errorf("three held ticks ran %d cursor session(s), want exactly 3 (one per tick)", f.cursorReads)
+		}
+	})
+
+	t.Run("a re-pin costs exactly one more session, and not a second one", func(t *testing.T) {
+		before := f.probes
+		cursorsBefore := f.cursorReads
+		f.admitted.corrupt(func(rec *proxyendpoint.Record) {
+			rec.PID = 6007
+			rec.Birth = proxyendpoint.BirthToken("boot-fixture", "abcdabcd")
+		})
+
+		if step := f.tick(); step != proxiedGuardRepinned {
+			t.Fatalf("the generation change reported %s, want repinned", step)
+		}
+		if got := f.probes - before; got != 1 {
+			t.Fatalf("the re-pin ran %d probe session(s), want exactly 1: the re-admission is one session", got)
+		}
+		if got := f.cursorReads - cursorsBefore; got != 0 {
+			t.Fatalf("the re-pin ran %d cursor session(s) as well, want 0: the re-admission already "+
+				"gated the new generation's cursors, so a second session buys the same answer", got)
 		}
 	})
 }
