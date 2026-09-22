@@ -1370,6 +1370,19 @@ func (cr *CityRuntime) tick(
 			"session_patrol_interval": cr.cfg.Daemon.SessionPatrolInterval,
 		})
 	}
+	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
+	// queued items get delivered even if the wake socket missed the enqueue
+	// (process race during supervisor restart, listener crash). Called
+	// unconditionally, outside the runSessionPhases gate above: that gate
+	// stretches to session_patrol_interval when the provider streams
+	// session events, which would otherwise starve this belt-and-suspenders
+	// fallback to the same slow cadence instead of the fast patrol_interval
+	// nudgeDispatchTick's own doc comment promises. beadReconcileTick no
+	// longer calls it, to avoid a redundant double-dispatch on ticks where
+	// session phases do run.
+	phaseStart = time.Now()
+	cr.nudgeDispatchTick(ctx)
+	recordPhase(TraceSiteControllerTickPhase, "nudge_dispatch_patrol_fallback", phaseStart, nil)
 	// Graph stores intentionally do not emit bead.closed, so a step closed
 	// between the durable write and the best-effort journal append would be a
 	// permanent lifecycle gap. The tick repairs only the roots the journal named
@@ -2951,12 +2964,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
-	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
-	// queued items get delivered even if the wake socket missed the
-	// enqueue (process race during supervisor restart, listener crash).
-	phaseStart = time.Now()
-	cr.nudgeDispatchTick(ctx)
-	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
+	// The patrol-tick fallback for the supervisor nudge dispatcher used to run
+	// here, but that nested it inside the stretchable session-phase gate
+	// (sessionPhasesDue), starving it to session_patrol_interval instead of
+	// patrol_interval. tick() now calls cr.nudgeDispatchTick(ctx) directly,
+	// unconditionally, once per patrol tick.
 
 	// Idle recovery: re-nudge pool slots that are running but never claimed
 	// either their assigned/ready-routed trigger bead or the one ready graph-v2

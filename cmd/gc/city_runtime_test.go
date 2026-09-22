@@ -1785,6 +1785,88 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip reproduces
+// the patrol-tick nudge-dispatch fallback being starved by session-phase
+// stretching: the fallback's own doc comment (nudgeDispatchTick) promises
+// delivery "at the end of each patrol tick" as a belt-and-suspenders backstop
+// for a missed wake signal, but it used to run only from inside
+// beadReconcileTick, itself only reached when runSessionPhases is true. On a
+// patrol tick inside the stretch window (session-event stream flowing,
+// [daemon].session_patrol_interval longer than patrol_interval),
+// runSessionPhases is false and the fallback never ran at all until the
+// stretch window elapsed -- far slower than patrol_interval. tick() must
+// call it unconditionally instead.
+func TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip(t *testing.T) {
+	pump, cancelPump := streamingPump(t)
+	defer cancelPump()
+
+	nudgeCtx, cancelNudge := context.WithCancel(context.Background())
+	defer cancelNudge()
+	dispatcher := newNudgeEventDispatcher(nudgeCtx, t.TempDir(), io.Discard, "test")
+	dispatcher.mu.Lock()
+	dispatcher.eventCapable = true
+	dispatcher.cfg = &config.City{}
+	dispatcher.sp = runtime.NewFake()
+	dispatcher.mu.Unlock()
+
+	store := beads.NewMemStore()
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: "10m",
+			},
+		},
+		sp:                  runtime.NewFake(),
+		sessionEvents:       pump,
+		nudgeEvents:         dispatcher,
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		t.Fatal("session-management phases must not run inside the stretch window")
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	now := time.Now()
+	cr.sessionPhasesLast = now // just ran: the next patrol tick falls inside the stretch window
+
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+		t.Fatal("precondition failed: patrol tick should fall inside the stretch window")
+	}
+
+	// The full pass triggered by kickAll() runs asynchronously on the
+	// dispatcher's own worker goroutine and clears fullPassDue the instant
+	// it wakes, so that flag cannot be polled reliably. Observe the pass
+	// itself instead, through the same package-level seam the raw
+	// session-store regression tests use.
+	var runPasses atomic.Int32
+	origOpenRaw := openRawCityStoreForSessionResolution
+	openRawCityStoreForSessionResolution = func(path string) (beads.Store, error) {
+		runPasses.Add(1)
+		return origOpenRaw(path)
+	}
+	t.Cleanup(func() { openRawCityStoreForSessionResolution = origOpenRaw })
+
+	ctx := context.Background()
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runPasses.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("tick() did not run the nudge-dispatch patrol fallback during a stretch-skip patrol tick")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
