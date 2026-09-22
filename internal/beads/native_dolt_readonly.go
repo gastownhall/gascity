@@ -43,6 +43,18 @@ func WithProxiedReadOnly() NativeDoltStoreOption {
 	return func(s *NativeDoltStore) { s.readOnlyReason = proxiedNativeReadOnlyReason }
 }
 
+// ReadOnlyReporter is a store that can say whether it refuses mutations.
+//
+// It exists so a WRAPPER can forward the answer instead of swallowing it. Every
+// wrapper in the tree embeds the Store interface, which hides this method, and a
+// hidden mutation fence is worse than an absent one: a caller that asks "is this
+// handle read-only" gets "no" from a wrapper around a handle that refuses every
+// write.
+type ReadOnlyReporter interface {
+	// ReadOnly reports whether the store refuses mutations.
+	ReadOnly() bool
+}
+
 // ReadOnly reports whether this handle refuses mutations.
 func (s *NativeDoltStore) ReadOnly() bool {
 	if s == nil {
