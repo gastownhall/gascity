@@ -2922,7 +2922,6 @@ func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]
 	return b
 }
 
-
 // --- SendDeduped (mail.DedupSender capability) ---
 
 func TestSendDedupedSuppressesWhileLiveCopyExists(t *testing.T) {

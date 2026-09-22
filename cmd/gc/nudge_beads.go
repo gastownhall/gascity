@@ -60,7 +60,9 @@ func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 // A per-pass caller that closed it anyway would tear down that shared binding
 // out from under every other consumer of the same relocated class group.
 func nudgeBeadStoreOwned(cityPath string) bool {
-	_, relocated := cliStorageRoutes(cityPath).storeFor(coordclassFor(config.BeadClassNudges))
+	// Ownership probe, not a fresh store enumeration — mirrors the identical,
+	// already-accepted relocation check in cliSessionsRelocated (cli_class_stores.go).
+	_, relocated := cliStorageRoutes(cityPath).storeFor(coordclassFor(config.BeadClassNudges)) // residency:allow mirrors cliSessionsRelocated's identical check
 	return !relocated
 }
 
