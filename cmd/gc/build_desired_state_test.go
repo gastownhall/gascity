@@ -2505,6 +2505,39 @@ func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t
 	}
 }
 
+// TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession
+// pins ga-bequ8d: the closed-session index is built only when at least one
+// on_demand named session exists, so a city with none pays zero store reads.
+// readyAssignedWorkAssignees must not build the index (or issue any
+// store.List) when no configured named session is on_demand.
+func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
+	countListCalls := func(cfg *config.City) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(cfg, store, nil, nil)
+		return store.listCalls
+	}
+
+	t.Run("no named sessions configured", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with zero named sessions configured; want 0 (closed-session index must not be built)", got)
+		}
+	})
+
+	t.Run("only always-mode named sessions configured", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Dir: "repo", Template: "deputy", Mode: "always"},
+			},
+		}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with only always-mode named sessions; want 0 (closed-session index must not be built when no on_demand session needs it)", got)
+		}
+	})
+}
+
 func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
 	cityStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	rigStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
