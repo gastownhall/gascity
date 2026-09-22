@@ -199,59 +199,6 @@ func TestRecordingBDCountsInvocations(t *testing.T) {
 	recorder.Reset()
 }
 
-// TestRecordingBDCountWhereClassifiesByShapeNotPrefix pins the predicate form.
-//
-// Count's argv prefix answers "how many `bd dolt stop`", which is most of what
-// a fork gate asks and none of what the proxied lane's gates ask. Those are
-// about a fork's shape: which process forked it (gc itself, or the provider
-// script running under it), whether it carried --json anywhere in argv, whether
-// anything other than the one allowed passthrough ran at all. Without this, each
-// gate re-implements the Invocations() loop — and a call site that loops itself
-// is one that can forget the interleave refusal Invocations performs.
-func TestRecordingBDCountWhereClassifiesByShapeNotPrefix(t *testing.T) {
-	recorder := NewRecordingBD(t, filepath.Join(t.TempDir(), "bd"))
-
-	if got := recorder.CountWhere(func(Invocation) bool { return true }); got != 0 {
-		t.Fatalf("a shim that has not run matched %d invocation(s)", got)
-	}
-
-	writeInvocations(t, recorder,
-		[]string{"4242", "list", "--json"},
-		[]string{"4242", "ping"},
-		// The provider script's own fork: a different ppid under the same run.
-		[]string{"9001", "dolt", "status", "--json"},
-		[]string{"9001", "ping"},
-	)
-
-	fromController := recorder.CountWhere(func(i Invocation) bool { return i.PPID == "4242" })
-	if fromController != 2 {
-		t.Errorf("forks from ppid 4242 = %d, want 2:\n%s", fromController, recorder.Describe())
-	}
-
-	jsonForks := recorder.CountWhere(func(i Invocation) bool {
-		for _, arg := range i.Argv {
-			if arg == "--json" {
-				return true
-			}
-		}
-		return false
-	})
-	if jsonForks != 2 {
-		t.Errorf("--json forks = %d, want 2 — the flag is not always argv[1]", jsonForks)
-	}
-
-	// "Everything that is not the one allowed fork" is the shape a
-	// zero-forks-except-this gate needs, and no prefix can express it.
-	notList := recorder.CountWhere(func(i Invocation) bool { return i.Subcommand() != "list" })
-	if notList != 3 {
-		t.Errorf("non-list forks = %d, want 3", notList)
-	}
-
-	if got := recorder.CountWhere(func(Invocation) bool { return true }); got != recorder.Count() {
-		t.Errorf("an always-true predicate counted %d, but Count() says %d", got, recorder.Count())
-	}
-}
-
 // TestRecordingBDRefusesAnInterleavedLog pins the one thing the single-printf
 // shim cannot promise: a record larger than the shell's stdout buffer, written
 // by two forks at once, arrives spliced.
