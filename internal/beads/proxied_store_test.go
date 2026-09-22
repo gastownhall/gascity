@@ -793,3 +793,228 @@ func TestProxiedStoreCountAndDepListBatchRouteToTheReadLeaf(t *testing.T) {
 		}
 	})
 }
+
+// conditionalRestartLeaf is a write leaf that carries the conditional-write
+// capabilities AND restarts bd's proxy on every one of them, which is the shape
+// H6 exists for: the bd child finds the proxy stopped and brings it back as a
+// NEW generation on a new port while the write itself succeeds.
+//
+// It implements the methods explicitly rather than embedding a store that has
+// them, because an embedded Store interface strips the concrete leaf's own
+// methods — which is exactly why the capability HANDLES exist in the first
+// place.
+type conditionalRestartLeaf struct {
+	Store
+	onWrite func()
+}
+
+func (l *conditionalRestartLeaf) UpdateIfMatch(string, int64, UpdateOpts) error {
+	l.onWrite()
+	return nil
+}
+func (l *conditionalRestartLeaf) CloseIfMatch(string, int64) error  { l.onWrite(); return nil }
+func (l *conditionalRestartLeaf) DeleteIfMatch(string, int64) error { l.onWrite(); return nil }
+
+func (l *conditionalRestartLeaf) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	l.onWrite()
+	return true, nil
+}
+
+func (l *conditionalRestartLeaf) CloseWithMetadataIfMatch(string, int64, map[string]string) (Bead, error) {
+	l.onWrite()
+	return Bead{}, nil
+}
+
+// TestProxiedStoreBracketsTheConditionalWriteHandles is council B-F3.
+//
+// H6's bracket ran only for the mutations the wrapper implements as METHODS.
+// Four capability families are exposed as HANDLES instead, and every one of
+// them used to resolve to the bd leaf object, which the caller then drove
+// directly: UpdateIfMatch, CloseIfMatch, DeleteIfMatch,
+// CompareAndSetMetadataKey and CloseWithMetadataIfMatch never re-entered the
+// wrapper. Their callers are real — internal/molecule, internal/storebinding —
+// and a one-shot gc command has no guard tick either, so a CAS that restarted
+// bd's proxy left the handle's pool on the previous generation with nothing
+// left to notice.
+//
+// Each row asserts the DEMOTION, not the write: the write succeeds either way,
+// and it is the bracket that is the subject.
+func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
+	root := t.TempDir()
+	writeRecord := func(t *testing.T, pid, port int, birth string) {
+		t.Helper()
+		rootID, err := proxyendpoint.RootID(root)
+		if err != nil {
+			t.Fatalf("RootID: %v", err)
+		}
+		body, err := json.Marshal(proxyendpoint.Record{
+			PID: pid, Port: port, UpstreamID: "upstream", Schema: proxyendpoint.SchemaV2,
+			Kind: proxyendpoint.RecordKind, Birth: birth, RootID: rootID, ControlPort: port + 1,
+		})
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		if err := os.WriteFile(proxyendpoint.PIDPath(root), body, 0o600); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+
+	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
+		t.Helper()
+		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
+		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+		leaf := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
+			if restart {
+				writeRecord(t, 4002, 45987, proxyendpoint.BirthToken("boot", "222"))
+			}
+		}}
+		store, err := NewProxiedStore(native, leaf, PinForTest("/scope", root, "beads"))
+		if err != nil {
+			t.Fatalf("NewProxiedStore: %v", err)
+		}
+		return store
+	}
+
+	cases := []struct {
+		name string
+		call func(t *testing.T, store *ProxiedStore)
+	}{
+		{
+			name: "UpdateIfMatch",
+			call: func(t *testing.T, store *ProxiedStore) {
+				writer, ok := ConditionalWriterFor(store)
+				if !ok {
+					t.Fatal("ConditionalWriterFor did not resolve through the wrapper")
+				}
+				if err := writer.UpdateIfMatch("gc-1", 1, UpdateOpts{}); err != nil {
+					t.Fatalf("UpdateIfMatch: %v", err)
+				}
+			},
+		},
+		{
+			name: "CloseIfMatch",
+			call: func(t *testing.T, store *ProxiedStore) {
+				writer, _ := ConditionalWriterFor(store)
+				if err := writer.CloseIfMatch("gc-1", 1); err != nil {
+					t.Fatalf("CloseIfMatch: %v", err)
+				}
+			},
+		},
+		{
+			name: "DeleteIfMatch",
+			call: func(t *testing.T, store *ProxiedStore) {
+				writer, _ := ConditionalWriterFor(store)
+				if err := writer.DeleteIfMatch("gc-1", 1); err != nil {
+					t.Fatalf("DeleteIfMatch: %v", err)
+				}
+			},
+		},
+		{
+			name: "CompareAndSetMetadataKey",
+			call: func(t *testing.T, store *ProxiedStore) {
+				writer, ok := store.MetadataCASWriterHandle()
+				if !ok {
+					t.Fatal("MetadataCASWriterHandle did not resolve")
+				}
+				if _, err := writer.CompareAndSetMetadataKey("gc-1", "k", "", "v"); err != nil {
+					t.Fatalf("CompareAndSetMetadataKey: %v", err)
+				}
+			},
+		},
+		{
+			name: "CloseWithMetadataIfMatch",
+			call: func(t *testing.T, store *ProxiedStore) {
+				closer, ok := store.AtomicConditionalCloserHandle()
+				if !ok {
+					t.Fatal("AtomicConditionalCloserHandle did not resolve")
+				}
+				if _, err := closer.CloseWithMetadataIfMatch("gc-1", 1, map[string]string{"k": "v"}); err != nil {
+					t.Fatalf("CloseWithMetadataIfMatch: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+" across a proxy restart stands the native leaf down", func(t *testing.T) {
+			store := newSplit(t, true)
+			tc.call(t, store)
+			if !store.Demoted() {
+				t.Fatalf("%s restarted bd's proxy and the native leaf kept serving the previous "+
+					"generation; nothing else would have noticed on a one-shot store", tc.name)
+			}
+			verdict := store.Verdict()
+			if verdict == nil || verdict.Verdict != ProxiedVerdictProxyGone {
+				t.Fatalf("verdict = %v, want proxy_gone", verdict)
+			}
+			if verdict.Terminal() {
+				t.Error("a generation change must be NON-terminal: the guard tick re-pins rather than demoting")
+			}
+		})
+
+		t.Run(tc.name+" on a steady generation leaves the native leaf alone", func(t *testing.T) {
+			store := newSplit(t, false)
+			tc.call(t, store)
+			if store.Demoted() {
+				t.Fatalf("%s demoted the store without a generation change; the bracket is firing on nothing", tc.name)
+			}
+		})
+	}
+}
+
+// TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap makes the OTHER
+// half of council B-F3 executable rather than prose.
+//
+// The three handles above are bracketed, and beads.ConditionalWriterFor reaches
+// them because it does not follow the resolve target. MetadataCASWriterFor,
+// AtomicConditionalCloserFor and CachingStore.conditionalBacking() DO follow it
+// — and ProxiedStore.ConditionalWritesResolveTarget has to keep answering "the
+// bd leaf", because a wrapper that answered "me" would have to carry the
+// capability prober, the state inspector and conditionalStoreKind's identity as
+// well as the stamp surface it already carries: a hand-written capability leaf,
+// which is the shape splittest/strict_store.go warns about and the reason this
+// store is a wrapper at all.
+//
+// So this row pins the SCOPE of the bracket, not a wish. If a later change
+// closes the gap this test fails, which is the point: the deviation stops being
+// true and the comment that records it has to go with it.
+func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
+	storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+	native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+	bd := &conditionalRestartLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {}}
+	store, err := NewProxiedStore(native, bd, PinForTest("/scope", "", "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+
+	if got := store.ConditionalWritesResolveTarget(); got != Store(bd) {
+		t.Fatalf("ConditionalWritesResolveTarget() = %T, want the bd leaf: CachingStore.conditionalBacking "+
+			"follows it, and a target that cannot carry the stamp collapses the seam to unset->legacy", got)
+	}
+	// Both resolvers follow the target, so they reach the leaf rather than the
+	// bracketing adapters. Asserted on the CONCRETE type: the adapters are
+	// values of this package's own unexported types, so "is it the adapter" is
+	// a question the test can ask directly.
+	if writer, ok := MetadataCASWriterFor(store); ok {
+		if _, bracketed := writer.(proxiedMetadataCASWriter); bracketed {
+			t.Fatal("MetadataCASWriterFor now reaches the bracketing adapter; the gap recorded on " +
+				"ConditionalWritesResolveTarget and in ProxiedStore's H6 note is closed, so both comments must go")
+		}
+	}
+	if closer, ok := AtomicConditionalCloserFor(store); ok {
+		if _, bracketed := closer.(proxiedAtomicConditionalCloser); bracketed {
+			t.Fatal("AtomicConditionalCloserFor now reaches the bracketing adapter; the gap recorded on " +
+				"ConditionalWritesResolveTarget and in ProxiedStore's H6 note is closed, so both comments must go")
+		}
+	}
+	// The path that IS bracketed, so the two halves are asserted together and
+	// neither can be read as the whole story.
+	writer, ok := ConditionalWriterFor(store)
+	if !ok {
+		t.Fatal("ConditionalWriterFor did not resolve through the wrapper")
+	}
+	if _, bracketed := writer.(proxiedConditionalWriter); !bracketed {
+		t.Fatalf("ConditionalWriterFor resolved to %T, want the bracketing adapter", writer)
+	}
+}

@@ -244,24 +244,119 @@ func (s *ProxiedStore) GraphApplyHandle() (GraphApplyStore, bool) {
 
 // ConditionalWriterHandle forwards the write leaf's conditional-write capability
 // the same way, so beads.ConditionalWriterFor resolves through the wrapper
-// without a false claim.
+// without a false claim — and BRACKETS it, which is council B-F3.
+//
+// The handle used to be the bd leaf itself, so a caller that resolved it drove
+// the leaf directly and never re-entered the wrapper: UpdateIfMatch,
+// CloseIfMatch, DeleteIfMatch, CloseWithMetadataIfMatch and
+// CompareAndSetMetadataKey were mutations outside H6's generation bracket. The
+// hazard is the ordinary one H6 exists for: the bd child finds the proxy
+// stopped and restarts it as a NEW generation on a new port, the wrapper is
+// never told, ForgetProxiedPin is never called, and on a one-shot store there
+// is no guard tick either — so every later read on that handle is served from a
+// pool pointed at the previous generation.
 //
 // H9 (the revision token a CAS sends came from a NATIVE Get, and the write that
 // carries it runs on bd) is pinned by an integration row rather than by code
 // here: the two are the same column by documentation, and the plan's owner
 // question Q2 is a beads-side ask. Nothing in this file assumes an answer.
 func (s *ProxiedStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
-	return ConditionalWriterFor(s.writeLeaf())
+	writer, ok := ConditionalWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedConditionalWriter{store: s, writer: writer}, true
 }
 
-// MetadataCASWriterHandle forwards the write leaf's metadata compare-and-swap.
+// MetadataCASWriterHandle forwards the write leaf's metadata compare-and-swap,
+// bracketed. See ConditionalWriterHandle.
 func (s *ProxiedStore) MetadataCASWriterHandle() (MetadataCASWriter, bool) {
-	return MetadataCASWriterFor(s.writeLeaf())
+	writer, ok := MetadataCASWriterFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedMetadataCASWriter{store: s, writer: writer}, true
 }
 
-// AtomicConditionalCloserHandle forwards the write leaf's atomic terminal write.
+// AtomicConditionalCloserHandle forwards the write leaf's atomic terminal
+// write, bracketed. See ConditionalWriterHandle.
 func (s *ProxiedStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser, bool) {
-	return AtomicConditionalCloserFor(s.writeLeaf())
+	closer, ok := AtomicConditionalCloserFor(s.writeLeaf())
+	if !ok {
+		return nil, false
+	}
+	return proxiedAtomicConditionalCloser{store: s, closer: closer}, true
+}
+
+// The bracketing adapters. Each is the leaf's own capability, run inside
+// withMutation, so the 200-byte record read that surrounds every other mutation
+// surrounds these too.
+//
+// They are values rather than pointers and hold no state of their own: the
+// bracket's state is the wrapper's, and an adapter that could outlive or
+// diverge from it would be a second opinion about which generation is current.
+
+type proxiedConditionalWriter struct {
+	store  *ProxiedStore
+	writer ConditionalWriter
+}
+
+func (w proxiedConditionalWriter) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	return w.store.withMutation("update-if-match "+id, func(Store) error {
+		return w.writer.UpdateIfMatch(id, expectedRevision, opts)
+	})
+}
+
+func (w proxiedConditionalWriter) CloseIfMatch(id string, expectedRevision int64) error {
+	return w.store.withMutation("close-if-match "+id, func(Store) error {
+		return w.writer.CloseIfMatch(id, expectedRevision)
+	})
+}
+
+func (w proxiedConditionalWriter) DeleteIfMatch(id string, expectedRevision int64) error {
+	return w.store.withMutation("delete-if-match "+id, func(Store) error {
+		return w.writer.DeleteIfMatch(id, expectedRevision)
+	})
+}
+
+func (w proxiedConditionalWriter) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	var swapped bool
+	err := w.store.withMutation("compare-and-set-metadata "+id, func(Store) error {
+		var err error
+		swapped, err = w.writer.CompareAndSetMetadataKey(id, key, expected, next)
+		return err
+	})
+	return swapped, err
+}
+
+type proxiedMetadataCASWriter struct {
+	store  *ProxiedStore
+	writer MetadataCASWriter
+}
+
+func (w proxiedMetadataCASWriter) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	var swapped bool
+	err := w.store.withMutation("compare-and-set-metadata "+id, func(Store) error {
+		var err error
+		swapped, err = w.writer.CompareAndSetMetadataKey(id, key, expected, next)
+		return err
+	})
+	return swapped, err
+}
+
+type proxiedAtomicConditionalCloser struct {
+	store  *ProxiedStore
+	closer AtomicConditionalCloser
+}
+
+func (c proxiedAtomicConditionalCloser) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
+	var closed Bead
+	err := c.store.withMutation("close-with-metadata-if-match "+id, func(Store) error {
+		var err error
+		closed, err = c.closer.CloseWithMetadataIfMatch(id, expectedRevision, metadata)
+		return err
+	})
+	return closed, err
 }
 
 // ConditionalWritesResolveTarget declares the WRITE leaf as the
@@ -271,6 +366,22 @@ func (s *ProxiedStore) AtomicConditionalCloserHandle() (AtomicConditionalCloser,
 // silently, which conditional_writes_resolve.go names as the one optional
 // capability whose loss does not fail loudly — and under `require` it is the
 // exact silent fallback the seam exists to make inexpressible.
+//
+// It is also the one bracket gap this file does NOT close, and the reason is
+// structural rather than an oversight (council B-F3). CachingStore's
+// conditionalBacking() is followConditionalWritesResolveTarget(c.backing), so a
+// cached city store resolves PAST this wrapper to the bd leaf and drives it
+// directly — the handles above are not in that path at all. Making the wrapper
+// the target instead would require it to carry the conditional-writes STAMP
+// (conditionalWritesModeCarrier), the capability prober and the state
+// inspector as well as the three writer interfaces, i.e. a hand-written
+// capability leaf — the exact shape splittest/strict_store.go's package doc
+// warns about and the reason this store is a wrapper. The exposure is the H6
+// bracket only: the routing is correct (every such write is still the bd
+// leaf's), the read-only latch still refuses a native write, and what is lost
+// is the staleness half — a CAS through a CACHED proxied store that restarts
+// bd's proxy leaves this handle's pool on the previous generation until a
+// guard tick or a bracketed mutation notices. See the H6 note on ProxiedStore.
 func (s *ProxiedStore) ConditionalWritesResolveTarget() Store {
 	return s.writeLeaf()
 }

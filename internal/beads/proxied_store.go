@@ -35,28 +35,53 @@ import (
 //     bead is invisible to it. A native MISS on a bead-shaped id falls through to
 //     the bd leaf's Get, which has the `bd query --ephemeral` fallback. One fork,
 //     only on a miss. See Get.
+//
 //   - H2 one sidecar: localSidecar.ensureLoadedLocked latches loaded=true on
 //     first use and never re-reads, so two instances over one file diverge for the
 //     process lifetime. The wrapper owns ONE — the bd leaf's — and points the
 //     native leaf at the same object at construction. See NewProxiedStore.
+//
 //   - H3 AtomicTx: the native leaf answers true and the bd leaf is staged and
 //     non-atomic. Tx runs on the bd leaf, so AtomicTx follows the bd leaf. See
 //     AtomicTx.
+//
 //   - H4 graph-apply: *NativeDoltStore declares StorageGraphApplyStore and
 //     EphemeralGraphApplyStore, and cmd/gc's wrapStoreWithBeadPolicies picks
 //     beads.GraphApplyFor(store) at WRAP time — so a claim here would route
 //     policy-selected ephemeral graph creates into a native write. The wrapper
 //     deliberately implements neither and hands out the bd leaf's applier. See
 //     proxied_store_capabilities.go.
+//
 //   - H5 relocated classes: BdStore.guardRelocatedClassIDs turns an id-scoped
 //     read of a class this ledger no longer serves into a typed refusal;
 //     native_dolt_store.go has no equivalent, so the same read would come back a
 //     silent not-found. The guard runs before any id-scoped read is forwarded to
 //     the native leaf. See guardNativeIDs.
+//
 //   - H6 generation split across a write: bd restarts a stopped proxy as a NEW
-//     generation while the native pool still points at the old port. Every
-//     mutation is bracketed by a 200-byte record read, and a generation change
-//     stands the native leaf down. See withMutation.
+//     generation while the native pool still points at the old port. A mutation
+//     is bracketed by a 200-byte record read, and a generation change stands the
+//     native leaf down. See withMutation.
+//
+//     "A mutation", not "every mutation", and the difference is council B-F3.
+//     The bracket covers every method on the beads.Store surface, and — since
+//     B-F3 — the three capability HANDLES this wrapper hands out
+//     (ConditionalWriterHandle, MetadataCASWriterHandle,
+//     AtomicConditionalCloserHandle), which are wrapped in bracketing adapters
+//     rather than being the bd leaf itself.
+//
+//     Two paths remain outside it, both deliberately and both named where they
+//     live. GraphApplyHandle must hand out the bd leaf's own applier, because
+//     H4 forbids this wrapper claiming any graph-apply interface and
+//     cmd/gc's wrapStoreWithBeadPolicies caches the applier at WRAP time.
+//     ConditionalWritesResolveTarget must stay the bd leaf, because
+//     CachingStore.conditionalBacking() follows it and a wrapper that answered
+//     "me" would have to carry the conditional-writes stamp, the capability
+//     prober and the state inspector too — a hand-written capability leaf, which
+//     is the shape this store is a wrapper to avoid. On both, the ROUTING is
+//     correct (the write is the bd leaf's) and the read-only latch still refuses
+//     a native write; what is lost is the staleness half, bounded by the guard
+//     tick on a long-lived store and by the next bracketed mutation otherwise.
 //
 // # Demotion
 //
@@ -583,7 +608,10 @@ func (s *ProxiedStore) Ping() error {
 }
 
 // ---------------------------------------------------------------------------
-// Mutations. Always the bd leaf, always inside H6's generation bracket.
+// Mutations. Always the bd leaf. Inside H6's generation bracket for every
+// method below and for the three bracketing capability adapters in
+// proxied_store_capabilities.go; see the H6 note above for the two paths that
+// are outside it and why they have to be.
 // ---------------------------------------------------------------------------
 
 // Create persists a new bead through the bd CLI.
