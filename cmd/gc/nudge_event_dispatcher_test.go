@@ -553,6 +553,44 @@ func TestNudgeEventDispatcherWorkerFullPassPreservesFutureKick(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherFullPassFoldedKickStillRearms reproduces a gap
+// found independently by code-reviewer (minor) and codex:codex-rescue
+// (major) during ship-gate review: kickSessionAfter coalesces repeated kicks
+// for a session to the EARLIEST dueAt, which can be earlier than the queue
+// item's own real DeliverAfter. When that coalesced kick becomes due in the
+// same worker() tick as a full pass (kickAll), the tick used to run only
+// d.runPass("", ...): the due kick is unconditionally deleted from
+// d.pending, but the full pass's sessionFilter=="" means runPass's own
+// re-arm-from-DeliverAfter loop never executes (it only runs when
+// sessionFilter != ""), and deliverPendingQueuedNudges excludes the item
+// from delivery because its real DeliverAfter has not arrived. The retry
+// was silently dropped with nothing left to fire it: the worker has no
+// pending entries and no further event is coming. The fix re-runs each due
+// targeted kick through its own filtered pass alongside the full pass, so
+// it keeps its individual re-arm coverage.
+func TestNudgeEventDispatcherFullPassFoldedKickStillRearms(t *testing.T) {
+	fake := newNudgeEventedFake()
+	dir, d, info := newNudgeDispatcherFixture(t, fake)
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+
+	// The queue item's real DeliverAfter is in the near future.
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "wait satisfied: proceed", time.Now().Add(80*time.Millisecond))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	// Simulate an earlier kickSessionAfter coalescing to a dueAt EARLIER than
+	// the queue item's real DeliverAfter (already due now), landing in the
+	// same tick as a full pass — with no further event to rescue it.
+	d.mu.Lock()
+	d.pending[info.SessionName] = nudgeEventKick{dueAt: time.Now(), retriesLeft: nudgeEventRetryBudget}
+	d.mu.Unlock()
+	d.kickAll()
+
+	if !waitForDeliveredNudge(t, dir, fake) {
+		t.Fatalf("queued nudge folded into a full pass was never retried once its real DeliverAfter arrived; state=%+v", queueStateSnapshot(t, dir))
+	}
+}
+
 // TestNudgeEventDispatcherRunPassResolvesSessionStoreIndependentlyOfNudges
 // reproduces gc-08u54r finding #5: runPass used to derive the session-class
 // store by handing store.Store (already routed to the NUDGES class) to

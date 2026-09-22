@@ -324,6 +324,45 @@ func TestSessionEventPumpSubscribeErrorStaysInactive(t *testing.T) {
 	})
 }
 
+// TestSessionEventPumpFlowingAgesOutAfterStaleness proves flowing() stops
+// trusting a past delivery once sessionEventFlowingStaleness has elapsed with
+// no further event on the same subscription. Without lastEventAtNano's
+// staleness check, flowing() reports true forever from one stale success
+// (the sticky observedGen match alone), which would let patrol stretch
+// skipping run indefinitely against a subscription whose retry loop is
+// silently stuck reconnecting (herdr's retry loop never closes the channel,
+// so forward's ctx.Done()/channel-closed reset paths never fire).
+func TestSessionEventPumpFlowingAgesOutAfterStaleness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, _, cancel := newTestPump(t)
+		defer cancel()
+		pump.resyncDelay = time.Hour // keep the trailing poke out of this test's way
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+		synctest.Wait()
+		if !pump.flowing() {
+			t.Fatal("flowing() = false immediately after a delivered event")
+		}
+		<-time.After(sessionEventFlowingStaleness - time.Second)
+		synctest.Wait()
+		if !pump.flowing() {
+			t.Fatal("flowing() = false before sessionEventFlowingStaleness elapsed")
+		}
+		<-time.After(2 * time.Second) // crosses the staleness threshold
+		synctest.Wait()
+		if pump.flowing() {
+			t.Fatalf("flowing() = true more than %v after the last event; the sticky observedGen match must age out", sessionEventFlowingStaleness)
+		}
+		// A fresh event revives it.
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+		synctest.Wait()
+		if !pump.flowing() {
+			t.Fatal("flowing() = false after a fresh event revived a stale subscription")
+		}
+	})
+}
+
 func TestSessionEventPumpRestartSwitchesProviders(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pump, pokeCh, cancel := newTestPump(t)

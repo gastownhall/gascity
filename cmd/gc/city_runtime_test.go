@@ -1867,6 +1867,69 @@ func TestCityRuntimeTickRunsNudgeDispatchFallbackDuringStretchSkip(t *testing.T)
 	}
 }
 
+// TestCityRuntimeTickReadsDirtyExactlyOnce pins the fix for a TOCTOU window
+// found during ship-gate review of gc-2q8ohg: tick() used to decide
+// runSessionPhases from an early dirty.Load() peek, run reconcilePoolDeaths
+// gated on that decision, and only THEN read dirty.Swap(false) for the
+// reload gate — correcting runSessionPhases afterward if a change had
+// landed in between, but too late to un-skip a death scan that had already
+// run (or been skipped) on the stale peek. A config change from the
+// separate watcher goroutine (controller.go) landing inside that window
+// could be treated as configChanged for the reload while the death scan for
+// that same tick believed no change was pending; a live race between the
+// watcher and tick() has no reliable way to force that interleaving from a
+// test, so this pins the structural invariant instead, the way this package
+// already pins call sites (TestGCNonTestFilesStayOnWorkerBoundary,
+// TestCityRuntimeWiresSessionEventPumpCallSites): tick's body must call
+// dirty.Load()/dirty.Swap() exactly once. Two reads (one Load, one Swap, or
+// two Swaps) reopen the window even if both happen to agree in this test's
+// single-threaded call — the defect is that a second read exists at all,
+// not any particular observed value from it.
+func TestCityRuntimeTickReadsDirtyExactlyOnce(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	var tickFn *ast.FuncDecl
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "tick" || fn.Recv == nil {
+			return true
+		}
+		tickFn = fn
+		return false
+	})
+	if tickFn == nil {
+		t.Fatal("could not find func (cr *CityRuntime) tick in city_runtime.go")
+	}
+
+	reads := 0
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil {
+			return true
+		}
+		if sel.Sel.Name != "Load" && sel.Sel.Name != "Swap" {
+			return true
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok || recv.Name != "dirty" {
+			return true
+		}
+		reads++
+		return true
+	})
+	if reads != 1 {
+		t.Fatalf("tick() calls dirty.Load()/dirty.Swap() %d time(s), want exactly 1: a second read reopens the TOCTOU window between the session-phase gate and the reload gate", reads)
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
