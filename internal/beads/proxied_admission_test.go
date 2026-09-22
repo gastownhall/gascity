@@ -1331,3 +1331,86 @@ func TestAdmitProbeOnceSpendsOneSessionAndNeverWaits(t *testing.T) {
 		})
 	}
 }
+
+// TestDrainIsNotEndedByAnIndeterminateProbe is council pr2 D-F10.
+//
+// A-F7's re-probe ended the drain on ANY outcome other than refused, including
+// ProbeUnknown from the probe's own two-second clock — which PR1's contract says
+// is never a conclusion about the proxy, and which is exactly what a probe
+// session returns on a loaded box. So a genuinely draining proxy stopped being
+// waited out at the first indeterminate re-probe (poll 8, ~2s), the pass re-ran,
+// probed again, met the same indeterminate answer and returned a non-terminal
+// budget_exhausted: the controller demoted over a two-second shutdown on
+// precisely the box the long-lived drain was written for.
+//
+// Here bd replaces the draining generation at 5s while every re-probe of the
+// OLD one comes back indeterminate. The drain must keep waiting through them,
+// see the record move, and admit the new generation.
+func TestDrainIsNotEndedByAnIndeterminateProbe(t *testing.T) {
+	f := newAdmissionFixture(t, "-1")
+	ops := &admissionOps{}
+	now := time.Now()
+	start := now
+	replaced := false
+	probes := 0
+
+	in := baseAdmissionInput(f, ops)
+	in.LongLived = true
+	in.Now = func() time.Time { return now }
+	in.Sleep = func(_ context.Context, d time.Duration) error {
+		now = now.Add(d)
+		if !replaced && now.Sub(start) >= 5*time.Second {
+			f.writeRecord(6002, "99887766") // bd's replacement proxy
+			replaced = true
+		}
+		return nil
+	}
+	in.Probe = func(_ context.Context, ep proxyendpoint.Endpoint, _ string) proxyendpoint.ProbeResult {
+		probes++
+		switch {
+		case ep.Record.PID == 6002:
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		case probes == 1:
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+		default:
+			// A loaded box: the probe's own session budget ran out.
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeUnknown, Err: context.DeadlineExceeded}
+		}
+	}
+
+	pin, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit across a draining proxy with indeterminate re-probes: %v", err)
+	}
+	if pin.PoolKey().PID != 6002 {
+		t.Fatalf("admitted pid %d, want bd's replacement proxy 6002", pin.PoolKey().PID)
+	}
+	if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+		t.Errorf("waiting out a drain spent %d ping / %d recover, want 0/0", pings, recovers)
+	}
+
+	// The control: a DETERMINATE changed answer still ends the drain, which is
+	// A-F7's starting-proxy fix and must survive this one.
+	t.Run("a served re-probe still ends the drain", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		now := time.Now()
+		probes := 0
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.LongLived = true
+		in.Now = func() time.Time { return now }
+		in.Sleep = func(_ context.Context, d time.Duration) error { now = now.Add(d); return nil }
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			if probes == 1 {
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused}
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed, Cursors: pinnedCursors()}
+		}
+		if _, err := Admit(context.Background(), in); err != nil {
+			t.Fatalf("a proxy that came up during the drain was not admitted: %v", err)
+		}
+		if probes != 3 {
+			t.Fatalf("the drain spent %d probe(s), want 3 (refused, served re-probe, served re-admission)", probes)
+		}
+	})
+}

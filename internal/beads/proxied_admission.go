@@ -643,9 +643,21 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 		// never moves, so a loop that watched only the record burned the whole
 		// 60s ceiling and then refused — a controller boot that caught that
 		// window blocked for a minute and fell to BdStore for the process.
-		switch probe := in.Probe(ctx, ep, in.Database); probe.Outcome {
-		case proxyendpoint.ProbeRefused:
+		probe := in.Probe(ctx, ep, in.Database)
+		switch {
+		case probe.Outcome == proxyendpoint.ProbeRefused:
 			// Still down, or still coming up. Keep waiting.
+		case probe.Outcome == proxyendpoint.ProbeUnknown && proxyendpoint.IsIndeterminate(probe.Err):
+			// The probe's own clock (or the caller's) ended the session, which
+			// says nothing about the endpoint — the discipline every other
+			// probe consumer in this file applies. It is NOT a changed answer
+			// (council pr2 D-F10): ending the drain on it meant a draining
+			// proxy on a loaded box — exactly where two-second sessions run
+			// out — stopped being waited out at the first re-probe, re-ran the
+			// pass, met the same indeterminate probe and returned
+			// budget_exhausted. Keep waiting; the record check above and the
+			// ceiling still bound the loop, and the caller's cancellation
+			// still ends it through Sleep.
 		default:
 			// Anything else is a changed answer, and the endpoint is no longer
 			// this pass's evidence: re-run from the top, where a served probe
