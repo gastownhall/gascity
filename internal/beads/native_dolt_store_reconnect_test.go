@@ -936,3 +936,73 @@ func TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs(t *testing.T) {
 		})
 	}
 }
+
+// TestStaleMarkSetDuringAReconnectSurvivesIt is council A-F4.
+//
+// The stale mark is the ONLY mechanism that can see the root-move hazard
+// (design U22): bd's proxy root is recreated at the same path, root_id is
+// path-derived so the new proxy has the same root identity, and the old pooled
+// socket keeps serving the MOVED database without an error. The guard tick
+// notices from the record and marks the pool; the reader re-points.
+//
+// Clearing the mark unconditionally once the reconnect returned lost exactly
+// the case the mechanism is for. The reconnect sits inside the reopen hook —
+// a re-admission, the ladder's sleeps, a library open — for long enough that a
+// second tick can land inside it. With a flag, that tick's mark was swallowed
+// (already true), the reader installed the FIRST replacement's storage and
+// cleared the flag, and the handle then served generation B's socket while the
+// pin said C. No later tick re-marks it: checkGeneration compares the record
+// against pin C and reports Held.
+//
+// The reconnect below marks the pool again from inside the hook, which is the
+// tick landing mid-reconnect, deterministically and with no goroutine.
+func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
+	storage := healthySearchStorage()
+	store := newNativeDoltStoreForTest(storage)
+
+	var reopens int32
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		n := atomic.AddInt32(&reopens, 1)
+		if n == 1 {
+			// The second generation arrives while the first re-point is still
+			// in flight. This is the tick's move, verbatim: adoptPin then
+			// markPoolStale.
+			if !store.markPoolStale() {
+				t.Error("markPoolStale refused a handle with a reopen hook")
+			}
+		}
+		return storage, nil
+	}
+
+	if !store.markPoolStale() {
+		t.Fatal("markPoolStale refused a handle with a reopen hook")
+	}
+	if _, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	// Two marks were set and two re-points are owed, so the read loop must have
+	// gone round twice: once for the tick's mark, once for the one that landed
+	// during it.
+	if got := atomic.LoadInt32(&reopens); got != 2 {
+		t.Fatalf("the read re-pointed %d time(s), want 2: a mark set DURING the reconnect was swallowed, "+
+			"so this handle serves the previous generation's socket under the new generation's pin", got)
+	}
+	if got := store.poolStale.Load(); got != 0 {
+		t.Fatalf("poolStale = %d after both re-points, want 0: the read loop would spin", got)
+	}
+
+	// And the steady state still clears: one mark, one re-point, no residue.
+	if !store.markPoolStale() {
+		t.Fatal("markPoolStale refused a handle with a reopen hook")
+	}
+	if _, err := store.List(ListQuery{AllowScan: true, TierMode: TierBoth}); err != nil {
+		t.Fatalf("List after a lone mark: %v", err)
+	}
+	if got := atomic.LoadInt32(&reopens); got != 3 {
+		t.Fatalf("a lone mark cost %d re-points in total, want 3", got)
+	}
+	if got := store.poolStale.Load(); got != 0 {
+		t.Fatalf("poolStale = %d after a lone mark, want 0", got)
+	}
+}

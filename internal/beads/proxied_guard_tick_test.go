@@ -177,7 +177,7 @@ func TestProxiedGuardTickRepinsOnGenerationChange(t *testing.T) {
 	if step := f.tick(); step != proxiedGuardHeld {
 		t.Fatalf("a steady generation reported %s, want held", step)
 	}
-	if f.native.poolStale.Load() {
+	if f.native.poolStale.Load() != 0 {
 		t.Fatal("a steady tick invalidated the pool")
 	}
 
@@ -200,7 +200,7 @@ func TestProxiedGuardTickRepinsOnGenerationChange(t *testing.T) {
 	if after.PoolKey().PID != 6002 {
 		t.Fatalf("re-pinned to pid %d, want bd's new proxy 6002", after.PoolKey().PID)
 	}
-	if !f.native.poolStale.Load() {
+	if f.native.poolStale.Load() == 0 {
 		t.Fatal("the re-pin did not invalidate the pool, so the next read would be served from the OLD generation")
 	}
 	select {
@@ -218,7 +218,7 @@ func TestProxiedGuardTickRepinsOnGenerationChange(t *testing.T) {
 	default:
 		t.Fatal("the first read after a re-pin did not reconnect; it was served from the old pool")
 	}
-	if f.native.poolStale.Load() {
+	if f.native.poolStale.Load() != 0 {
 		t.Fatal("the stale mark survived the reconnect, so every later read would re-pin again")
 	}
 }

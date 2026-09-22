@@ -372,7 +372,26 @@ type NativeDoltStore struct {
 	// It is false on every direct and hosted handle — only the proxied guard tick
 	// sets it — so the read path's extra atomic load is the whole cost of the
 	// mechanism on those lanes.
-	poolStale atomic.Bool
+	//
+	// It is an EPOCH rather than a flag (council A-F4). A flag was cleared
+	// unconditionally once the reconnect returned, with no compare-and-swap
+	// against the mark being serviced, and the window that opens is the exact
+	// hazard the mechanism exists for. Tick T1 sees generation A->B, adopts B's
+	// pin and marks the pool stale. Reader R enters withReadRetry, sees the
+	// mark and calls repinStalePool, which can sit inside the reopen hook for
+	// hundreds of milliseconds — the re-admission, the ladder's sleeps, the
+	// library open. While R is in there, tick T2 sees B->C, adopts C's pin and
+	// marks again; the flag is already true, so nothing happens. R installs
+	// B's storage and clears the flag. The handle now serves reads from
+	// generation B's socket while the pin says C, and no later tick marks it
+	// again because checkGeneration compares the record against pin C and
+	// reports Held. On the root-move shape that is silent wrong-database reads
+	// for the life of the handle.
+	//
+	// The counter is snapshotted before the reconnect and the mark is cleared
+	// only if it has not advanced, so a mark set DURING a reconnect survives it
+	// and the next read re-points again.
+	poolStale atomic.Uint64
 
 	// reservedPrefixes is the pinned-id fence: the id namespaces this store's
 	// binding claims. Empty leaves the store unfenced, which is the shipped
@@ -733,12 +752,12 @@ func (s *NativeDoltStore) withReadRetry(fn func(context.Context, beadslib.Storag
 		if err != nil {
 			return err
 		}
-		if s.poolStale.Load() {
+		if marked := s.poolStale.Load(); marked > 0 {
 			// The guard tick saw this handle's proxy generation replaced. Re-point
 			// the pool BEFORE serving: a moved root serves the old database
 			// without an error, so waiting for a failure would wait forever.
 			release()
-			rcErr := s.repinStalePool(ctx, gen)
+			rcErr := s.repinStalePool(ctx, gen, marked)
 			if rcErr == nil {
 				continue
 			}
@@ -854,7 +873,7 @@ func (s *NativeDoltStore) markPoolStale() bool {
 	if closed || reopen == nil {
 		return false
 	}
-	s.poolStale.Store(true)
+	s.poolStale.Add(1)
 	return true
 }
 
@@ -866,21 +885,27 @@ func (s *NativeDoltStore) markPoolStale() bool {
 // current endpoint — is what decides whether the new generation may be served at
 // all. Clearing the mark after reconnect returns nil (installed, or another
 // reader installed first) is what keeps the read loop from spinning.
-func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen uint64) error {
+func (s *NativeDoltStore) repinStalePool(ctx context.Context, observedGen, servicing uint64) error {
 	reopen, closed := s.reopenState()
 	if closed {
 		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 	if reopen == nil {
 		// markPoolStale refuses a hook-less handle, so this is only reachable if
-		// the hook went away afterwards. Clear the mark rather than spin.
-		s.poolStale.Store(false)
+		// the hook went away afterwards. Clear the mark rather than spin — and
+		// still only the mark we saw, for the reason below.
+		s.poolStale.CompareAndSwap(servicing, 0)
 		return nil
 	}
 	if err := s.reconnect(ctx, observedGen); err != nil {
 		return fmt.Errorf("native Dolt re-pin after a proxy generation change: %w", err)
 	}
-	s.poolStale.Store(false)
+	// Clear only the mark this call was servicing. A tick that marked the pool
+	// again WHILE the reconnect was in flight moved the counter, the swap fails,
+	// and the next read re-points against the generation that tick adopted —
+	// instead of serving the previous generation's socket under the new
+	// generation's pin, which no later tick would notice (council A-F4).
+	s.poolStale.CompareAndSwap(servicing, 0)
 	return nil
 }
 
