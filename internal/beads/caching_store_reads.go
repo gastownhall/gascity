@@ -492,6 +492,19 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 			// verifies missing rows on the reconciliation cadence.
 			continue
 		}
+		if query.Status != "" && bead.NativelyBlocked {
+			// Same fixed point as the deferred case immediately above, for
+			// bd's "blocked" status instead: the cached row's Status is
+			// always "open" (mapBdStatus's default case), so it can only
+			// have matched a status-filtered query when that filter was
+			// "open" — and a status-filtered backing list never returns a
+			// blocked row by construction. The cached NativelyBlocked
+			// already explains the absence; re-Getting it would re-normalize
+			// to the same open/blocked state forever. An unfiltered
+			// (Status=="") list still flags it stale, matching the deferred
+			// case's identical reasoning above.
+			continue
+		}
 		stale = append(stale, id)
 	}
 	return stale

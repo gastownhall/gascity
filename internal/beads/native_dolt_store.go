@@ -2481,7 +2481,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 	if err != nil {
 		return Bead{}, fmt.Errorf("parsing metadata for bead %q: %w: %w", issue.ID, errNativeIssueMetadataParse, err)
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
+	status, indefinitelyDeferred, nativelyBlocked := normalizedBdReadState(string(issue.Status), issue.DeferUntil)
 	b := Bead{
 		ID:                   issue.ID,
 		Title:                issue.Title,
@@ -2498,6 +2498,7 @@ func beadFromNativeIssue(issue *beadslib.Issue) (Bead, error) {
 		NoHistory:            issue.NoHistory,
 		DeferUntil:           cloneTimePtr(issue.DeferUntil),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		NativelyBlocked:      nativelyBlocked,
 		Revision:             issue.RowVersion,
 	}
 	for _, dep := range issue.Dependencies {

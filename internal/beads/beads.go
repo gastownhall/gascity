@@ -182,6 +182,15 @@ type Bead struct {
 	// derived read-only representation is a wire-design decision, not a
 	// consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
+	// NativelyBlocked preserves bd's status-based "blocked" state after richer
+	// statuses normalize to Gas City's three-state model, mirroring how
+	// IndefinitelyDeferred preserves "deferred". "Natively" distinguishes it
+	// from IsBlocked above: IsBlocked is bd's dependency-readiness projection
+	// (nil/false for a blocked bead with no unmet dependency), while this is
+	// what bd's own status column said. Like IndefinitelyDeferred, no read
+	// surface exposes it; it exists so staleLiveCacheIDs and
+	// IsReadyCandidateForTier can see past the normalization to "open".
+	NativelyBlocked bool `json:"-"`
 	// Revision is the store-internal optimistic-concurrency token for
 	// ConditionalWriter. It is deliberately json:"-" so it stays off every HTTP
 	// and SSE wire path (beads.Bead is both the Huma response type and the SSE
@@ -645,7 +654,8 @@ func IsReadyCandidateForTier(b Bead, now time.Time, tier TierMode) bool {
 	}
 	return b.Status == "open" &&
 		!IsReadyExcludedBead(b) &&
-		!IsDeferred(b, now)
+		!IsDeferred(b, now) &&
+		!b.NativelyBlocked
 }
 
 // IsReadyExcludedBead reports whether a bead is infrastructure rather than
@@ -679,11 +689,19 @@ func IsDeferred(b Bead, now time.Time) bool {
 		(b.DeferUntil != nil && b.DeferUntil.After(now))
 }
 
+// IsNativelyBlocked reports whether a bead's source status was bd's
+// "blocked", preserved out-of-band after normalization to Gas City's
+// three-state model. Symmetric with IsDeferred/IndefinitelyDeferred.
+func IsNativelyBlocked(b Bead) bool {
+	return b.NativelyBlocked
+}
+
 // setBeadStatus applies an explicit Gas City status transition. Any such
 // transition supersedes richer source status that was normalized on read.
 func setBeadStatus(b *Bead, status string) {
 	b.Status = status
 	b.IndefinitelyDeferred = false
+	b.NativelyBlocked = false
 }
 
 func isReadyBlockingDependencyType(t string) bool {

@@ -65,8 +65,14 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 	}
 	// Only bd's deferred status needs re-derivation here; leaving every other
 	// raw status untouched keeps the ga-3mv5d3 collapse off the event path.
+	// The third return value (nativelyBlocked) is discarded, not wired to
+	// b.NativelyBlocked: this branch only runs when Status=="deferred", so it
+	// is guaranteed false here, and EncodeBeadEventPayload deliberately does
+	// not restore status="blocked" on this wire (see its own doc comment) —
+	// widening this call would be a silent step toward that, not a neutral
+	// arity fix.
 	if b.Status == "deferred" {
-		b.Status, b.IndefinitelyDeferred = normalizedBdReadState(b.Status, b.DeferUntil)
+		b.Status, b.IndefinitelyDeferred, _ = normalizedBdReadState(b.Status, b.DeferUntil)
 	}
 	if b.Type == "" {
 		var compat struct {

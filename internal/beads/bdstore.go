@@ -1093,7 +1093,7 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	status, indefinitelyDeferred, nativelyBlocked := normalizedBdReadState(b.Status, b.DeferUntil)
 	return Bead{
 		ID:                   b.ID,
 		Title:                b.Title,
@@ -1116,6 +1116,7 @@ func (b *bdIssue) toBead() Bead {
 		DeferUntil:           cloneTimePtr(b.DeferUntil),
 		IsBlocked:            b.IsBlocked.ptr(),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		NativelyBlocked:      nativelyBlocked,
 		Revision:             int64(b.Revision),
 	}
 }
@@ -1205,11 +1206,12 @@ func mapBdStatus(s string) string {
 	}
 }
 
-// normalizedBdReadState preserves bd's status-based indefinite deferral after
-// richer bd statuses collapse to Gas City's three-state model. A time-bound
-// deferral remains governed by DeferUntil so it can become ready after expiry.
-func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
-	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+// normalizedBdReadState preserves bd's status-based indefinite deferral and
+// blocked state after richer bd statuses collapse to Gas City's three-state
+// model. A time-bound deferral remains governed by DeferUntil so it can
+// become ready after expiry.
+func normalizedBdReadState(status string, deferUntil *time.Time) (normalized string, indefinitelyDeferred, nativelyBlocked bool) {
+	return mapBdStatus(status), status == "deferred" && deferUntil == nil, status == "blocked"
 }
 
 type optionalBool struct {

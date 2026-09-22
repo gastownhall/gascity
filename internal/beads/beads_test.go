@@ -140,6 +140,11 @@ func TestIsReadyCandidate(t *testing.T) {
 			bead: Bead{Status: "open", Type: "task", DeferUntil: &future},
 			want: false,
 		},
+		{
+			name: "natively blocked",
+			bead: Bead{Status: "open", Type: "task", NativelyBlocked: true},
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
