@@ -755,10 +755,17 @@ func TestNativeDoltProxiedReadBudgetExhaustionIsANonTerminalVerdict(t *testing.T
 }
 
 // TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning pins rung 3's
-// behavior: before it, an ErrCircuitOpen with no transient substring was handed
+// behavior: an ErrCircuitOpen with no transient substring used to be handed
 // straight to the caller, so a breaker that was about to re-arm read as a failed
 // read. The retry is bounded by the read's own budget, so a breaker that stays
-// open costs the budget and (on a proxied handle) demotes.
+// open costs the budget and demotes.
+//
+// Every store here is a PROXIED handle, and that is the point of the rung after
+// council B-F1: rung 3 is lane-gated, because on the DIRECT lane the immediate
+// return IS the contract main has and this PR promises not to change it. The
+// direct-lane half of the same rung is
+// TestFlagOffNativeReadIsByteIdenticalForTheTwoLaneGatedRungs; the two are
+// deliberately mirror images.
 func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 	var reads, reopens int32
 	healthy := healthySearchStorage(&beadslib.Issue{
@@ -773,6 +780,7 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 		},
 	}
 	store := newNativeDoltStoreForTest(flaky)
+	store.proxiedReadVerdicts = true
 	store.reopen = func(context.Context) (beadslib.Storage, error) {
 		atomic.AddInt32(&reopens, 1)
 		return nil, errors.New("reopen must not be reached for an open circuit")
@@ -802,6 +810,7 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 
 		atomic.StoreInt32(&reads, 0)
 		second := newNativeDoltStoreForTest(flaky)
+		second.proxiedReadVerdicts = true
 		second.reopen = func(context.Context) (beadslib.Storage, error) {
 			return nil, errors.New("reopen must not be reached for an open circuit")
 		}
@@ -817,6 +826,7 @@ func TestNativeDoltOpenCircuitWaitsTheCooldownInsteadOfReturning(t *testing.T) {
 
 	t.Run("a handle with no reopen hook keeps fail-fast", func(t *testing.T) {
 		bare := newNativeDoltStoreForTest(deadSearchStorage(fmt.Errorf("beads read: %w", beadslib.ErrCircuitOpen)))
+		bare.proxiedReadVerdicts = true
 		start := time.Now()
 		if _, err := bare.Get("gc-1"); !errors.Is(err, beadslib.ErrCircuitOpen) {
 			t.Fatalf("Get err = %v, want the circuit error returned immediately", err)
