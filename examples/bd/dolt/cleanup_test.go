@@ -90,6 +90,10 @@ func TestCleanupDryRunAnnotatesUnverifiedOnRegistryFailure(t *testing.T) {
 // when the registry query fails. This guards against a regression while
 // item 4's dry-run annotation fix lands alongside it.
 func TestCleanupForceRefusesOnRegistryFailure(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
 	cityPath := t.TempDir()
 
 	dataDir := t.TempDir()
