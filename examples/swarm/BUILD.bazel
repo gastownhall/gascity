@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "swarm_test",
+    srcs = [
+        "swarm_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        "//internal/builtinpacks",
+        "//internal/fsys",
+        "//internal/packman",
+        "//internal/testenv",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)

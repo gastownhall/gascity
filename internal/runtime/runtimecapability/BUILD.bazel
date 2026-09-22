@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "runtimecapability",
+    srcs = [
+        "catalog.go",
+        "probes.go",
+        "report.go",
+        "runner.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/runtimecapability",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "runtimecapability_test",
+    srcs = [
+        "runner_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":runtimecapability"],
+    deps = ["//internal/testenv"],
+)

@@ -619,3 +619,68 @@ func TestProvider_CapabilitiesIntersectsEveryField(t *testing.T) {
 		}
 	}
 }
+
+// idleSnapshotProvider is a backend that can take a point-in-time idle
+// observation. A plain runtime.Fake deliberately cannot, so it stands in for a
+// backend without the capability.
+type idleSnapshotProvider struct {
+	*runtime.Fake
+	idle  map[string]bool
+	calls []string
+}
+
+func newIdleSnapshotProvider() *idleSnapshotProvider {
+	return &idleSnapshotProvider{Fake: runtime.NewFake(), idle: make(map[string]bool)}
+}
+
+func (p *idleSnapshotProvider) SnapshotIdle(name string) (bool, error) {
+	p.calls = append(p.calls, name)
+	return p.idle[name], nil
+}
+
+// The composite must satisfy IdleSnapshotProvider itself. The idle-timeout
+// reconciler type-asserts the provider it holds, and cmd/gc wraps the WHOLE
+// city provider in auto.Provider as soon as any agent selects the ACP
+// transport — so without this the content-based idle clock silently never runs
+// in such a city (ga-07mi8).
+var _ runtime.IdleSnapshotProvider = (*Provider)(nil)
+
+func TestSnapshotIdle_RoutesToBackend(t *testing.T) {
+	def, acp := newIdleSnapshotProvider(), newIdleSnapshotProvider()
+	p := New(def, acp)
+	p.RouteACP("acpsess")
+	def.idle["plain"] = true
+
+	idle, err := p.SnapshotIdle("plain")
+	if err != nil {
+		t.Fatalf("SnapshotIdle(plain): %v", err)
+	}
+	if !idle {
+		t.Error("SnapshotIdle(plain) = false, want true from the default backend")
+	}
+	if !reflect.DeepEqual(def.calls, []string{"plain"}) {
+		t.Errorf("default backend SnapshotIdle calls = %v, want [plain]", def.calls)
+	}
+	if len(acp.calls) != 0 {
+		t.Errorf("acp backend SnapshotIdle calls = %v, want none", acp.calls)
+	}
+
+	if _, err := p.SnapshotIdle("acpsess"); err != nil {
+		t.Fatalf("SnapshotIdle(acpsess): %v", err)
+	}
+	if !reflect.DeepEqual(acp.calls, []string{"acpsess"}) {
+		t.Errorf("acp backend SnapshotIdle calls = %v, want [acpsess]", acp.calls)
+	}
+}
+
+func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
+	p := New(runtime.NewFake(), runtime.NewFake())
+
+	idle, err := p.SnapshotIdle("plain")
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		t.Fatalf("SnapshotIdle error = %v, want ErrInteractionUnsupported", err)
+	}
+	if idle {
+		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
+	}
+}

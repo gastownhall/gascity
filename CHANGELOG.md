@@ -75,7 +75,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
   rather than forwarded. No in-repo caller uses the `@file.json` spelling.
 
+- **`gc bd` on a split city now decides ownership by RESIDENCE, so a
+  reserved-prefix id the relocated class binding does not hold falls through to
+  the work ledger instead of being refused on its prefix.** The binding is the
+  authority for its reserved namespaces, not their only lawful holder:
+  `config.ValidateRigs` deliberately admits a rig prefix inside a reserved
+  namespace (`ReservedPrefixWarnings` only advises) and `gc storage migrate`
+  preserved ids in the other direction, so such a rig mints work beads carrying
+  ids the binding has never held. Every read and every write addressed at one —
+  including the step-completion write a worked bead ends with — died at this one
+  door, while the HTTP API and `classRoutedStoreForID` already served the same
+  rows. `gc bd create --deps <reserved-id>` and `--parent <reserved-id>` now
+  execute against the work ledger on a clean binding miss, where they were
+  previously refused; a subject the binding actually holds is still refused with
+  the routing diagnostic, and every addressed id is probed, so an unserved
+  `dep add <miss> <resident>` is refused in either argv order. A binding that
+  cannot ANSWER — unopenable, refusing, or faulting — is still a hard error and
+  never read as absence.
+
+  One diagnostic is lost, by design: a truncated `gcg-…` id no longer gets the
+  "class stores resolve ids exactly (no substring match)" hint and instead falls
+  through to `bd`'s own substring not-found. Distinguishing a typo from a
+  shadow-prefixed rig's real bead requires knowing the namespace has one lawful
+  minter, which is the premise this change retires (ga-8w5c7).
+
 ### Fixed
+
+- **A closed binding row now supersedes its retained frozen twin in the
+  one-live-workflow-per-source-bead guard, so a converged city stops refusing a
+  sling whose only live root is gone.** A storage migration copies rows into the
+  class binding with ids preserved and deletes nothing, so a workflow root
+  relocated into the binding and later closed there still exists as an OPEN copy
+  in the retained work ledger. The guard unioned every leg's live roots, reported
+  that copy as live, named it in `blocking_workflow_ids`, and refused. The
+  collector now lets the binding's row win on a shared root id — live or closed —
+  asking the binding directly about the ids the work legs reported, with a
+  bounded per-id probe rather than a full closed scan. Only a row that is really
+  the same root supersedes: ids are unique within a store and store-prefixed ids
+  collide across stores, so the binding's row must be a workflow root, for the
+  same source bead, naming the same source store whenever both sides name one. A
+  probe that faults refuses the sling: a binding fault is an error, never
+  absence. A binding row that predates the `gc.source_store_ref` stamp
+  supersedes its twin only once it is closed, because a live one is invisible to
+  the guard's own scan and dropping its twin would leave the sling unguarded. A
+  city that relocates nothing has no binding leg, runs no probe, and enumerates
+  exactly what it did before.
 
 - **The one-live-workflow-per-source-bead guard reads the graph binding, so a
   split city stops admitting a second live workflow.** A workflow root is graph
@@ -202,6 +246,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being reused, so the unfinished step is claimed properly instead of being
   pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
   are unaffected — a genuine crash still gets a fresh identity.
+
+- **`model` and `effort` pins are no longer silently discarded on launch.**
+  Provider model ids were modelled as a closed enum, so any id the builtin
+  catalog had not caught up to produced no flag args and the launch path
+  emitted no `--model` at all — leaving the agent on whatever the CLI
+  defaulted to, with no error. Named-session resolution meanwhile hard-errored
+  on the same value, so the two paths disagreed and the launch path failed
+  open. `gasburger.refinery` and `gasburger.gorkcats` ran unpinned this way for
+  months (ga-fyh); Claude hit the same hole in ra-jbbv0.
+
+  `model` and `effort` are now **open** options across the catalog: the
+  declared choices remain the curated suggestion list, and any other value is
+  honored by rendering the option's flag template. An unreleased id or a newer
+  effort tier reaches the provider CLI to accept or reject, instead of being
+  dropped. Specifically:
+
+  - grok gained `grok-4.6` and `grok-4.7` as curated ids.
+  - `effort = "max"` on codex and `effort = "xhigh"` / `"max"` on antigravity
+    are honored; those enums previously stopped short, so a tier blessed by
+    claude's own defaults was not portable.
+  - cursor gained a model option; it had none, so every cursor model pin was
+    dropped as an unknown key.
+  - Effort tiers now come from one canonical vocabulary shared by every
+    provider rather than a hand-copied per-provider list.
+
+  A pin that still cannot be honored — an unrecognized value for a genuinely
+  closed option such as `permission_mode`, or an option the provider has no
+  concept of (13 of 20 providers have no effort flag) — prints a loud startup
+  warning naming the agent, the rejected value, and the valid set.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -416,6 +489,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observed protocol update; it does not by itself diagnose why updates stopped
   or prove that a session is dead. `progress_stall_timeout` remains disabled by
   default.
+
+## [1.4.2] - 2026-09-18
+
+### Fixed
+
+- Restore the 1.4 release line's compatibility with Beads 1.3.0: initialize
+  fresh managed workspace version witnesses, align native library and CLI
+  pins, and decode decimal-string revision tokens without losing precision.
+- Allow graph containers to close without depending on their own finalizer,
+  and explicitly close skipped scope members while preserving cleanup.
+
+### Upgrading Notes
+
+- Coordinate clients sharing a Beads 1.2.2 database before running
+  `bd migrate schema`. The verified migration moves schema 53 to 66;
+  older clients cannot read the migrated schema.
+- Workflow dependency fixes apply to newly instantiated graphs and do not
+  rewrite already-persisted workflow dependencies.
+
+## [1.4.1] - 2026-08-15
+
+### Changed
+
+- **beads pinned to v1.2.2 everywhere** (go.mod library, `deps.env`
+  `BD_VERSION`, CI matrix, SHA-verified archive installer). beads v1.2.2 is
+  the recovery re-release of the tested 1.1 line that superseded the
+  accidental, untested v1.2.0/v1.2.1. With the library and the Homebrew
+  `beads` formula both at 1.2.2, the native store preflight's version-match
+  check passes again for `brew install gascity` users, re-activating the
+  in-process NativeDoltStore (it had silently fallen back to the per-call
+  `bd` CLI store since bd 1.1.2 replaced 1.1.0 as the released version).
+  The module bump is code-identical to the previously pinned 1.1 line
+  (v1.2.2 is the v1.1.2 tree; no transitive dependency changes).
 
 ## [1.4.0] - 2026-07-24
 

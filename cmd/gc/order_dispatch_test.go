@@ -1590,6 +1590,77 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+// cooldownEventFallbackOrders returns the single city-level cooldown order the
+// event-fallback dispatcher tests share. Pool and FormulaLayer are set so a due
+// order genuinely materializes beads — otherwise the "cooldown held" assertion
+// below would pass for the wrong reason.
+func cooldownEventFallbackOrders() []orders.Order {
+	return []orders.Order{{
+		Name:         "test-order",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+}
+
+// TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune pins the wiring
+// in memoryOrderDispatcher.dispatch that hands m.ep to
+// orders.LastRunFuncWithEventFallback: with every order-run tracking bead
+// compacted away, a recent order.fired event must still hold the cooldown
+// closed.
+func TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order", // city-level order: ScopedName() == Name
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) != 0 {
+		t.Fatalf("expected no dispatch (event fallback should hold the cooldown), got %d bead(s)", len(all))
+	}
+}
+
+// TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale is the negative
+// half of the test above: same pruned store and same order, but the only
+// order.fired event is older than the interval, so the order must dispatch.
+// Without this, a dispatch broken for any unrelated reason would let the
+// cooldown-held assertion pass vacuously.
+func TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order",
+		Ts:      time.Now().Add(-48 * time.Hour),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) == 0 {
+		t.Fatal("expected dispatch (last order.fired is older than the interval), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
@@ -4110,6 +4181,124 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 		if _, err := store.Get(id); err != nil {
 			t.Fatalf("%s should be preserved: %v", id, err)
 		}
+	}
+}
+
+// TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps is the
+// ga-ejwo1q regression: the retention prune deleted an expired CLOSED tracking
+// root without looking at its descendants, leaving live steps rootless. A
+// rootless step is unworkable by construction — it can only fail
+// an out-of-vocabulary failure class and mail an escalation — so the prune manufactured noise
+// out of live work (ga-033u0e).
+//
+// The guard is descendant-state-sensitive, not a blanket "never delete a root":
+// alpha-00 owns an OPEN step and is retained, while alpha-01 owns only a CLOSED
+// step and still prunes on the same sweep.
+func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed,
+		beads.Bead{
+			ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+		},
+		beads.Bead{
+			ID: "alpha-01-step", Title: "finished step", Status: "closed", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-01"},
+		},
+	)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var (
+		deleted int
+		err     error
+	)
+	logOutput := captureWispGCLog(t, func() {
+		deleted, err = sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+			deleteAfterClose: 24 * time.Hour,
+			retainLast:       minClosedOrderTrackingRetained,
+		}, nil)
+	})
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only; alpha-00 still owns an open step)", deleted)
+	}
+	// A retained root is only actionable if the log says WHICH root: a count
+	// alone leaves the operator to re-derive it from the store.
+	if !strings.Contains(logOutput, "alpha-00") {
+		t.Fatalf("retention log = %q, want the retained root alpha-00 named", logOutput)
+	}
+	if strings.Contains(logOutput, "alpha-01") {
+		t.Fatalf("retention log = %q, names alpha-01, which was pruned, not retained", logOutput)
+	}
+
+	// Assert the ROOT/STEP PAIR, not just the root's survival: the defect is
+	// the step outliving its root, so read the step's own pointer back and
+	// require it to still resolve.
+	step, err := store.Get("alpha-00-step")
+	if err != nil {
+		t.Fatalf("open step must not be deleted: %v", err)
+	}
+	if _, err := store.Get(step.Metadata[beadmeta.RootBeadIDMetadataKey]); err != nil {
+		t.Fatalf("open step left rootless — this is the ga-ejwo1q defect: %v", err)
+	}
+
+	if _, err := store.Get("alpha-01"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("alpha-01 owns only closed steps and must still prune: err = %v", err)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed, beads.Bead{
+		ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+		CreatedAt: beadTime, Ephemeral: true,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+	})
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil, 10)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only)", deleted)
+	}
+	if _, err := store.Get("alpha-00"); err != nil {
+		t.Fatalf("alpha-00 owns an open step and must be retained: %v", err)
+	}
+	if _, err := store.Get("alpha-00-step"); err != nil {
+		t.Fatalf("open step must not be stranded: %v", err)
 	}
 }
 
@@ -10617,4 +10806,54 @@ description = "Handle {{subject}} now."
 	if strings.Contains(work.Description, "{{subject}}") {
 		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
 	}
+}
+
+// TestDispatchWispResolvesFormulaFromAnyConfiguredLayer is the controller-path
+// regression for #4378: dispatchWisp must resolve an order's formula from every
+// layer the order's scope configures, not just the layer the ORDER FILE was
+// found in. This is the controller/webhook dispatch path — the one the issue was
+// filed against. Pre-fix, searchPaths was []string{a.FormulaLayer}, so an order
+// whose own layer does not ship the formula could never dispatch.
+func TestDispatchWispResolvesFormulaFromAnyConfiguredLayer(t *testing.T) {
+	packFormulaDir := t.TempDir()
+	orderOwnLayer := t.TempDir() // deliberately EMPTY: does not ship the formula
+	writeFile(t, filepath.Join(packFormulaDir, "pack-formula.toml"), `
+formula = "pack-formula"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:         "cross-layer-order",
+		Trigger:      "manual",
+		Formula:      "pack-formula",
+		FormulaLayer: orderOwnLayer,
+	}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{FormulaLayers: config.FormulaLayers{City: []string{packFormulaDir}}},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", nil)
+
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for i := range all {
+		if all[i].Title == "Do work" {
+			return
+		}
+	}
+	var titles []string
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
 }

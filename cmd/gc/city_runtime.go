@@ -208,6 +208,7 @@ type CityRuntime struct {
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
+	sessionEvents       *sessionEventPump            // provider event stream → pokeCh bridge; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
@@ -839,6 +840,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
+	// Bridge the provider's push session-event stream (if it has one) into
+	// pokeCh: a session death pokes the reconciler within seconds instead of
+	// surfacing at the next patrol scan. Config reload re-points the pump
+	// when it swaps the provider.
+	cr.sessionEvents = newSessionEventPump(ctx, cr.pokeCh, cr.stderr, cr.logPrefix)
+	cr.sessionEvents.restart(cr.sp)
+
 	// Reload acceptance runs on its own goroutine so that a slow tick
 	// body (e.g., a session-start wave that waits for startup_timeout)
 	// does not block reload request acceptance. The accept path
@@ -1149,6 +1157,8 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
+	// Detect pool instance deaths since last tick. Ordered ahead of the config
+	// reload so it compares against the config the deaths happened under.
 	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	var manualReload *reloadRequest
@@ -1275,6 +1285,8 @@ func (cr *CityRuntime) tick(
 		return
 	}
 
+	// Session-management phases: snapshot, corpse sweeps, drain finalization,
+	// demand/desired state, bead-driven reconcile.
 	phaseStart = time.Now()
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
@@ -1788,7 +1800,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 	statePtr := &nudgeState
 
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	mailTTL := nudgeMailSweepMailTTLForConfig(cr.cfg, cr.stderr)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, nudgeMailSweepWatchdogCloseBudget)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
@@ -2264,6 +2277,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
+
+	// Re-point the session-event pump at the new provider's stream (or
+	// deactivate it when the new provider has none). Nil until run() wires
+	// it — startup one-shot reloads happen before the pump exists.
+	if providerChanged && cr.sessionEvents != nil {
+		cr.sessionEvents.restart(nextSp)
+	}
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -2849,6 +2869,31 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
+			cr.stdout,
+		)
+		// The never-claimed lane (ga-evxqd). The three above key on a bead the
+		// seat was BOUND to, on one preassigned successor, or on an in_progress
+		// claim; this one keys on the seat's own OPEN ready work — assigned to
+		// it or merely routed to its identity — which is the residual none of
+		// them can see. It reads the BROAD open-routed view rather than the
+		// pool-demand-narrowed one because it settles readiness itself, from
+		// each row's own dependency edges: a named seat's routed work is not
+		// pool demand, so the narrowed view can be silent on exactly the rows
+		// this lane exists for. It nudges and reports; it never drains.
+		nudgeStalledSeatClaims(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.AssignedWorkBeads,
+			result.AssignedWorkStores,
+			result.AssignedWorkStoreRefs,
+			result.OpenRoutedWorkBeads,
+			result.OpenRoutedWorkStores,
+			result.OpenRoutedWorkStoreRefs,
+			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
+			time.Now(),
+			cr.rec,
 			cr.stdout,
 		)
 	}
@@ -3692,10 +3737,19 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	// single city store into the class accessors so a future per-class backend
 	// routes each role independently; both collapse to the same store today.
 	sessionsStore := cr.sessionsBeadStore()
+	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, sessionsStore.Store, unwrapWorkStores(cr.workBeadStores()), sessionBeads, trace)
+	} else {
+		result = cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, sessionsStore.Store)
+	// Emit here, at the FRESH build, rather than where the result is consumed:
+	// loadDemandSnapshot reuses a cached result across stable patrol ticks, so a
+	// consumer-side emission would replay an observation this tick never made.
+	// This keeps the event one-for-one with the stderr line the same build
+	// printed.
+	emitControlDispatcherScopeGapEvents(cr.rec, cr.cityName, result.ControlDispatcherScopeGaps, time.Now())
+	return result
 }
 
 // refreshDesiredState re-applies the session-bead overlay to an already-built

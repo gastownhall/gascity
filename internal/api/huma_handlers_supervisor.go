@@ -875,27 +875,16 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 	keepalive := time.NewTicker(sseKeepalive)
 	defer keepalive.Stop()
 
-	type result struct {
-		event events.TaggedEvent
-		err   error
-	}
-	ch := make(chan result, 1)
-	readNext := func() {
-		go func() {
-			te, err := mw.Next()
-			select {
-			case ch <- result{event: te, err: err}:
-			case <-hctx.Context().Done():
-			}
-		}()
-	}
-	readNext()
+	ch := readEventsAhead(hctx.Context(), mw.Next)
 
 	for {
 		select {
 		case <-hctx.Context().Done():
 			return
-		case r := <-ch:
+		case r, ok := <-ch:
+			if !ok {
+				return
+			}
 			if r.err != nil {
 				log.Printf("api: supervisor events-stream: multiplex Next failed: %v", r.err)
 				return
@@ -903,7 +892,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			cursors[r.event.City] = r.event.Seq
 			var wfp *workflowEventProjection
 			if cs := sm.resolver.CityState(r.event.City); cs != nil {
-				wfp = projectWorkflowEvent(cs, r.event.Event)
+				wfp = projectWorkflowEventWithSlack(cs, r.event.Event, len(ch))
 			}
 			envelope, decodeErr := wireTaggedEventFrom(r.event, wfp)
 			if decodeErr != nil {
@@ -913,7 +902,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				// firing in practice.
 				log.Printf("api: supervisor events-stream skip %s seq=%d city=%s: %v",
 					r.event.Type, r.event.Seq, r.event.City, decodeErr)
-				readNext()
 				continue
 			}
 			if err := send(StringIDMessage{ID: events.FormatCursor(cursors), Data: envelope}); err != nil {
@@ -923,7 +911,6 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 				// endpoints do the same on send failure.
 				return
 			}
-			readNext()
 		case t := <-keepalive.C:
 			// Emit a heartbeat frame (no ID so reconnect cursor is preserved).
 			// Idle proxies drop long-lived SSE without traffic; skipping this

@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "hybrid",
+    srcs = ["hybrid.go"],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/hybrid",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/runtime"],
+)
+
+go_test(
+    name = "hybrid_test",
+    srcs = [
+        "hybrid_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":hybrid"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+    ],
+)

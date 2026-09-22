@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -995,6 +996,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
+		cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 		cfg = runtime.SyncWorkDirEnv(cfg)
 
 		// Start the runtime session. Refuse to start if a prior escaped process
@@ -1283,6 +1285,8 @@ func (m *Manager) Suspend(id string) error {
 		if err := m.store.Update(id, beads.UpdateOpts{Metadata: map[string]string{
 			"state":        string(StateSuspended),
 			"suspended_at": time.Now().UTC().Format(time.RFC3339),
+			"slept_at":     "",
+			"sleep_reason": "",
 		}}); err != nil {
 			return fmt.Errorf("updating suspension state: %w", err)
 		}
@@ -1710,8 +1714,9 @@ func templateOverrideWakeInFlight(metadata map[string]string, state State, now t
 // pruneStateTimestamp returns the timestamp that PruneDetailed compares
 // against its cutoff for a session in the given state. Suspended sessions keep
 // the historical CreatedAt fallback for legacy beads. Asleep sessions normally
-// require slept_at, except legacy drained-asleep beads without slept_at can use
-// the bead update timestamp because sleep_reason=drained is terminal.
+// require slept_at; legacy beads without slept_at fall back to a stale
+// suspended_at, then to the bead update timestamp when sleep_reason=drained
+// is terminal.
 func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 	switch state {
 	case StateSuspended:
@@ -1727,6 +1732,12 @@ func pruneStateTimestamp(b beads.Bead, state State) (time.Time, bool) {
 		}
 		if strings.TrimSpace(b.Metadata["slept_at"]) != "" {
 			return time.Time{}, false
+		}
+		// Legacy beads written before the suspended->asleep re-projection fix
+		// (gastownhall/gascity#5739) carry a stale suspended_at with no slept_at;
+		// use it so those already-stuck sessions become prunable too.
+		if ts, ok := parsePruneMetadataTimestamp(b.Metadata, "suspended_at"); ok {
+			return ts, true
 		}
 		if strings.TrimSpace(b.Metadata["sleep_reason"]) != "drained" {
 			return time.Time{}, false

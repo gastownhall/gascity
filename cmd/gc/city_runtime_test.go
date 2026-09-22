@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log"
 	"os"
@@ -4103,6 +4106,11 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 			Name:     "my-city",
 			Provider: "claude",
 		},
+		// ga-hgjlhi: waitForAsyncStarts budgets cfg.Daemon.ShutdownTimeoutDuration(),
+		// which falls back to a 5s production default. The drain added below costs
+		// ~4s of real staleKeyDetectDelay waits, so an inherited 5s leaves ~1s of
+		// headroom on 12-way-shard CI. Match the trace fixtures' explicit 30s.
+		Daemon: config.DaemonConfig{ShutdownTimeout: "30s"},
 		Providers: map[string]config.ProviderSpec{
 			"claude": {
 				Command:    "echo",
@@ -4155,6 +4163,17 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	var lastProviderName string
 	dirty := &atomic.Bool{}
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	// tick() enqueues the async start wave and returns without waiting for it:
+	// enqueuePreparedStartWaveForCity spawns a goroutine per candidate and
+	// reports TraceOutcomeStartEnqueued immediately. That goroutine goes on to
+	// write cityPath/.gc/events.jsonl a few hundred microseconds later, which
+	// races t.TempDir()'s os.RemoveAll and fails the test with
+	// "TempDir RemoveAll cleanup: ... /.gc: directory not empty" even though
+	// every assertion below passed. Drain the wave first, exactly as the
+	// recovery-tick loop further down this file does (ga-9qs5gk).
+	if !cr.waitForAsyncStarts() {
+		t.Fatal("async session starts did not settle after tick")
+	}
 
 	if !mutated {
 		t.Fatal("test setup did not mutate the manual session bead between build and reconcile")
@@ -7554,5 +7573,156 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_CountsStoresTogether(t *testing.T
 	}
 	if strings.Count(got, "gc start:") != 1 {
 		t.Fatalf("warning = %q, want one advisory line for the city", got)
+	}
+}
+
+// TestNewCityRuntimeWiresAssignedWorkDeferTracker pins the assigned-work defer
+// tracker into the runtime's construction, not merely into the option that
+// consumes it. The tracker is the same-bead backstop the idle-kill ladder
+// consults; its behavior tests all drive withAssignedWorkDeferTracker directly,
+// so dropping cr.adt from newCityRuntime leaves every one of them green while
+// the backstop is dead in production. That has happened once already, during a
+// branch split, and only the unused-symbol linter noticed, because the builder
+// happened to lose its last caller at the same time. Losing just the
+// construction call would be silent.
+func TestNewCityRuntimeWiresAssignedWorkDeferTracker(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+
+	if cr.adt == nil {
+		t.Fatal("newCityRuntime left adt nil: the idle-kill same-bead defer backstop is not wired")
+	}
+
+	// Construction alone is not the whole wiring: the tracker also has to be
+	// HANDED to the reconcile pass. Applying the option here would only prove
+	// the option works, which no one doubts, and would stay green with the
+	// production call deleted. So pin the production call site, the way this
+	// package already pins call sites (TestGCNonTestFilesStayOnWorkerBoundary).
+	//
+	// Pin it through the PARSER rather than a substring search. A text search
+	// cannot tell code from a comment, so commenting the argument out would
+	// leave the backstop dead in production with this test still green; the
+	// parser only ever sees the call if the compiler does too.
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+	handed := false
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		fn, ok := call.Fun.(*ast.Ident)
+		if !ok || fn.Name != "withAssignedWorkDeferTracker" || len(call.Args) != 1 {
+			return true
+		}
+		sel, ok := call.Args[0].(*ast.SelectorExpr)
+		if ok && sel.Sel != nil && sel.Sel.Name == "adt" {
+			handed = true
+			return false
+		}
+		return true
+	})
+	if !handed {
+		t.Fatal("city_runtime.go no longer hands the constructed tracker to the reconcile pass: the backstop is dead in production while every behavior test that drives the option directly stays green")
+	}
+}
+
+// TestCityRuntimeWiresSessionEventPumpCallSites pins the two production call
+// sites that wire cr.sessionEvents: construction plus the initial subscribe
+// in run(), and the re-point in reloadConfigTraced() when the provider
+// changes. Every pump behavior test in session_event_pump_test.go constructs
+// a sessionEventPump directly and never drives CityRuntime.run or a reload,
+// so deleting either wiring line would leave those tests green while the
+// event-driven poke is dead in production (the same hazard
+// TestNewCityRuntimeWiresAssignedWorkDeferTracker pins for cr.adt).
+//
+// Pin it through the PARSER rather than a substring search: a text search
+// cannot tell code from a comment, so commenting a line out would leave the
+// backstop dead in production with this test still green.
+func TestCityRuntimeWiresSessionEventPumpCallSites(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	constructed := false // cr.sessionEvents = newSessionEventPump(...)
+	restarted := false   // cr.sessionEvents.restart(cr.sp) in run()
+	repointed := false   // cr.sessionEvents.restart(nextSp) in reloadConfigTraced()
+
+	isSessionEventsSelector := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "sessionEvents" {
+			return false
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		return ok && recv.Name == "cr"
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) == 1 && len(node.Rhs) == 1 && isSessionEventsSelector(node.Lhs[0]) {
+				if call, ok := node.Rhs[0].(*ast.CallExpr); ok {
+					if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "newSessionEventPump" {
+						constructed = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel == nil || sel.Sel.Name != "restart" || len(node.Args) != 1 {
+				return true
+			}
+			if !isSessionEventsSelector(sel.X) {
+				return true
+			}
+			switch arg := node.Args[0].(type) {
+			case *ast.SelectorExpr:
+				if arg.Sel != nil && arg.Sel.Name == "sp" {
+					restarted = true
+				}
+			case *ast.Ident:
+				if arg.Name == "nextSp" {
+					repointed = true
+				}
+			}
+		}
+		return true
+	})
+
+	if !constructed {
+		t.Fatal("city_runtime.go no longer constructs cr.sessionEvents via newSessionEventPump: the event-driven reconcile poke is dead in production")
+	}
+	if !restarted {
+		t.Fatal("city_runtime.go no longer calls cr.sessionEvents.restart(cr.sp) in run(): startup never subscribes to the provider's session-event stream")
+	}
+	if !repointed {
+		t.Fatal("city_runtime.go no longer calls cr.sessionEvents.restart(nextSp) on provider change: a reload leaves the pump subscribed to the stale provider")
 	}
 }

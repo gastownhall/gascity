@@ -308,6 +308,15 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+func compactBeadsQuarantineNotifyStatePath(cityPath string) string {
+	return filepath.Join(
+		cityPath,
+		".gc", "runtime", "packs", "dolt", "compact-notify-state",
+		"compact-quarantine",
+		"beads",
+	)
+}
+
 func assertCompactMarkerHasEvidence(t *testing.T, markerPath string, want ...string) {
 	t.Helper()
 	data, err := os.ReadFile(markerPath)
@@ -798,7 +807,7 @@ case "$query" in
     # probe, which reports writercommit so HEAD has moved past the flatten's own
     # commit. verify_counts still sees compactcommit (gain+drift) because it does
     # not probe HEAD and the "$(current_head)" gates read the real state.
-    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ]; } && [ "$(current_head)" = "compactcommit" ]; then
+    if { [ "$mode" = "writer_race_during_verify" ] || [ "$mode" = "writer_race_db_hash_during_verify" ] || [ "$mode" = "writer_race_with_mixed_same_count_hash_drift" ] || [ "$mode" = "row_count_decreases_with_writer_race" ] || [ "$mode" = "same_count_hash_drift_with_writer_race" ] || [ "$mode" = "writer_race_same_count_hash_drift_only" ] || [ "$mode" = "writer_race_same_count_hash_drift_diff_fails" ] || [ "$mode" = "writer_race_after_db_hash" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       calls_file="$state_file.postverify-head-calls"
       calls=0
       if [ -f "$calls_file" ]; then
@@ -806,7 +815,11 @@ case "$query" in
       fi
       calls=$((calls + 1))
       printf '%%s\n' "$calls" > "$calls_file"
-      if [ "$calls" -ge 2 ]; then
+      if [ "$mode" = "writer_race_after_db_hash" ] && [ "$calls" -ge 5 ]; then
+        print_cell writercommit
+        exit 0
+      fi
+      if [ "$mode" != "writer_race_after_db_hash" ] && [ "$calls" -ge 2 ]; then
         print_cell writercommit
         exit 0
       fi
@@ -2540,13 +2553,13 @@ func TestCompactScriptQuarantinesMixedSignalsDespiteWriterRace(t *testing.T) {
 // writer-race defer: the gain+drift quarantine is downgraded to a skip, so the
 // run exits 0, logs the defer message, writes NO quarantine marker, and does not
 // run DOLT_GC (GC is left for the next run after the writer settles).
-func assertCompactWriterRaceDeferred(t *testing.T, fixture compactScriptFixture, out string, err error) {
+func assertCompactWriterRaceDeferred(t *testing.T, fixture compactScriptFixture, out string, err error, expectedDeferMessage string) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("writer-race defer must exit 0 (skip, not failure): %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "writer race detected during flatten") ||
-		!strings.Contains(out, "deferring, will retry next run") {
+		!strings.Contains(out, expectedDeferMessage) {
 		t.Fatalf("output missing writer-race defer message:\n%s", out)
 	}
 	quarantine := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
@@ -2582,7 +2595,7 @@ func TestCompactScriptDefersWhenWriterCommitsBeforeFlatten(t *testing.T) {
 	if !strings.Contains(out, "pre_reset_HEAD=writercommit") {
 		t.Fatalf("defer message should report the pre-reset writer HEAD:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // A writer that commits during/after the post-flatten verify moves HEAD past
@@ -2598,7 +2611,7 @@ func TestCompactScriptDefersWhenWriterCommitsDuringVerify(t *testing.T) {
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // The whole-database value hash also drifts when a concurrent writer adds rows.
@@ -2614,7 +2627,7 @@ func TestCompactScriptDefersWhenWriterCommitsCausingDatabaseHashDrift(t *testing
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
@@ -2626,7 +2639,22 @@ func TestCompactScriptDefersWhenWriterCommitsDuringDatabaseHash(t *testing.T) {
 	if !strings.Contains(out, "post_db_hash_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving across the database hash probe:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
+}
+
+// A writer can commit after the database-hash probes have both completed but
+// immediately before full GC. The final HEAD fence must defer that run when it
+// observes that movement. This is not quiescence — a writer can still commit
+// after the probe — it narrows the window in which full GC starts against a
+// known-active store.
+func TestCompactScriptDefersWhenWriterCommitsAfterDatabaseHashBeforeGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "writer_race_after_db_hash", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if !strings.Contains(out, "writer race detected during flatten verification") ||
+		!strings.Contains(out, "final_verify_HEAD=writercommit") {
+		t.Fatalf("output missing final verification writer-race fence:\n%s", out)
+	}
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring full GC until the next quiet run")
 }
 
 func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProvesWriter(t *testing.T) {
@@ -2639,7 +2667,7 @@ func TestCompactScriptDefersWhenDatabaseHashPreHeadProbeIsEmptyButPostProbeProve
 		!strings.Contains(out, "post_db_hash_HEAD=writercommit") {
 		t.Fatalf("defer message should report empty pre-probe HEAD and writer post-probe HEAD:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // A concurrent UPDATE that lands during the post-flatten verify leaves the
@@ -2658,7 +2686,7 @@ func TestCompactScriptDefersProvenWriterRaceSameCountHashDrift(t *testing.T) {
 	if !strings.Contains(out, "post_verify_HEAD=writercommit") {
 		t.Fatalf("defer message should report HEAD moving past the flatten commit:\n%s", out)
 	}
-	assertCompactWriterRaceDeferred(t, fixture, out, err)
+	assertCompactWriterRaceDeferred(t, fixture, out, err, "deferring, will retry next run")
 }
 
 // Same proven writer race (HEAD moves past the flatten commit) but the
@@ -2711,7 +2739,7 @@ func TestCompactScriptRetriesPendingGCAfterWriterRaceDefer(t *testing.T) {
 	}
 
 	firstOut, err := fixture.run(t, "writer_race_during_verify", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	assertCompactWriterRaceDeferred(t, fixture, firstOut, err)
+	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring, will retry next run")
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	if compactedFrom := compactMarkerValue(t, pendingGC, "compacted_from_head"); compactedFrom != "headcommit" {
 		t.Fatalf("pending-GC marker should preserve compaction source HEAD, got %q", compactedFrom)
@@ -2747,7 +2775,7 @@ func TestCompactScriptRetriesRemotePendingGCAfterBeforeFlattenWriterRace(t *test
 	fixture := newCompactScriptFixture(t)
 
 	firstOut, err := fixture.run(t, "remote_writer_race_before_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	assertCompactWriterRaceDeferred(t, fixture, firstOut, err)
+	assertCompactWriterRaceDeferred(t, fixture, firstOut, err, "deferring, will retry next run")
 	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
 	marker, err := os.ReadFile(pendingGC)
 	if err != nil {
@@ -4229,6 +4257,97 @@ func TestCompactScriptNonRaceClassQuarantineReasonsNeverAutoClear(t *testing.T) 
 	}
 }
 
+func TestCompactScriptExistingQuarantineNotificationDoesNotMutateEvidenceMarker(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+	markerData := []byte("db=beads\nreason=manual repair pending\ncreated_at=2026-05-01T00:00:00Z\n")
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatalf("write quarantine marker: %v", err)
+	}
+
+	for run := 1; run <= 2; run++ {
+		out, err := fixture.run(t, "below_threshold")
+		if err == nil {
+			t.Fatalf("compact run %d succeeded despite quarantine:\n%s", run, out)
+		}
+	}
+
+	gotMarkerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read quarantine marker: %v", err)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("notification bookkeeping mutated the evidence marker\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "seen_count"); got != "2" {
+		t.Fatalf("two quarantine checks should be recorded in the notify sidecar, got seen_count=%q", got)
+	}
+	if got := compactMarkerValue(t, notifyState, "notify_count"); got != "1" {
+		t.Fatalf("unchanged quarantine should notify once, got notify_count=%q", got)
+	}
+}
+
+func TestCompactScriptMigratesLegacyMarkerNotifyStateWithoutMutationOrRemail(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+
+	const (
+		reason    = "post-flatten table value hash changed without row-count increase"
+		createdAt = "2026-08-29T07:11:12Z"
+	)
+	lastNotifiedAt := time.Now().UTC().Format(time.RFC3339)
+	markerData := []byte(fmt.Sprintf(
+		"db=beads\nreason=%s\ncreated_at=%s\nseen_count=1\nnotify_count=1\nlast_notified_ts=%s\nlast_notified_reason=%s\nlast_notify_error=\n",
+		reason, createdAt, lastNotifiedAt, reason,
+	))
+	if err := os.WriteFile(marker, markerData, 0o600); err != nil {
+		t.Fatalf("write legacy quarantine marker: %v", err)
+	}
+
+	out, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("compact succeeded despite legacy quarantine marker:\n%s", out)
+	}
+	if !strings.Contains(out, "integrity quarantine marker exists") {
+		t.Fatalf("compact missing quarantine refusal:\n%s", out)
+	}
+
+	gotMarkerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read legacy quarantine marker: %v", err)
+	}
+	if string(gotMarkerData) != string(markerData) {
+		t.Fatalf("legacy notify-state migration mutated the evidence marker\nwant:\n%s\ngot:\n%s", markerData, gotMarkerData)
+	}
+
+	log := readCompactGCLog(t, fixture)
+	if mailLines := compactGCLogLinesWithPrefix(log, "gc mail send "); len(mailLines) != 0 {
+		t.Fatalf("recent legacy notification state should migrate without re-mailing, got %d mail attempt(s)\nlog:\n%s", len(mailLines), log)
+	}
+
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	for key, want := range map[string]string{
+		"seen_count":               "2",
+		"notify_count":             "1",
+		"last_notified_ts":         lastNotifiedAt,
+		"last_notified_reason":     reason,
+		"last_notified_created_at": createdAt,
+		"last_notify_error":        "",
+	} {
+		if got := compactMarkerValue(t, notifyState, key); got != want {
+			t.Fatalf("migrated notify sidecar %s=%q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
@@ -4266,7 +4385,7 @@ func TestCompactScriptQuarantineMailFailureIsRetriedNextCycle(t *testing.T) {
 	}
 }
 
-func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.T) {
+func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInNotifyState(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	if err := os.WriteFile(fixture.mailFailFile, nil, 0o644); err != nil {
 		t.Fatalf("arm mail-failure sentinel: %v", err)
@@ -4279,9 +4398,9 @@ func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.
 
 	// An alert that never lands is how five cities stayed fail-closed for a
 	// month: notify_count=0, and nothing anywhere saying why.
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if got := compactMarkerValue(t, marker, "last_notify_error"); !strings.Contains(got, "mail send failed") {
-		t.Fatalf("marker must record why the alert did not land, got %q", got)
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "last_notify_error"); !strings.Contains(got, "mail send failed") {
+		t.Fatalf("notify sidecar must record why the alert did not land, got %q", got)
 	}
 	if !strings.Contains(firstOut, "quarantine alert did not reach recipient") || !strings.Contains(firstOut, "nobody") {
 		t.Fatalf("compact must name the unreachable recipient:\n%s", firstOut)
@@ -4296,10 +4415,10 @@ func TestCompactScriptUndeliverableQuarantineAlertRecordsWhyInMarker(t *testing.
 	if err == nil {
 		t.Fatalf("second compact succeeded despite quarantine:\n%s", secondOut)
 	}
-	if got := compactMarkerValue(t, marker, "last_notify_error"); got != "" {
+	if got := compactMarkerValue(t, notifyState, "last_notify_error"); got != "" {
 		t.Fatalf("a delivered alert must clear last_notify_error, got %q", got)
 	}
-	if got := compactMarkerValue(t, marker, "notify_count"); got != "1" {
+	if got := compactMarkerValue(t, notifyState, "notify_count"); got != "1" {
 		t.Fatalf("delivered alert should count once, got %q", got)
 	}
 }
@@ -4337,6 +4456,27 @@ func TestCompactScriptQuarantineReasonChangeReMails(t *testing.T) {
 	}
 	if !strings.Contains(mailLines[1], "reason="+newReason) {
 		t.Fatalf("re-sent mail should carry the new reason\nline:\n%s\nlog:\n%s", mailLines[1], log)
+	}
+}
+
+func TestCompactScriptReplacementMarkerWithSameReasonReMails(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "row_count_decreases", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact succeeded despite row-count decrease:\n%s", firstOut)
+	}
+
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	replaceCompactMarkerCreatedAt(t, marker, "2026-09-02T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "below_threshold")
+	if err == nil {
+		t.Fatalf("second compact succeeded despite replacement quarantine marker:\n%s", secondOut)
+	}
+	log := readCompactGCLog(t, fixture)
+	mailLines := compactGCLogLinesWithPrefix(log, "gc mail send ")
+	if len(mailLines) != 2 {
+		t.Fatalf("a replacement marker with the same reason must send a fresh mail, want 2, got %d\nlog:\n%s", len(mailLines), log)
 	}
 }
 
@@ -4896,8 +5036,8 @@ func TestCompactScriptGCOnlyQuarantineRefusalStillReports(t *testing.T) {
 	if after := len(compactGCLogLinesWithPrefix(log, "gc event emit dolt.compact.quarantine")); after != before+1 {
 		t.Fatalf("gc-only refusal must emit a dolt.compact.quarantine event, want %d got %d\nlog:\n%s", before+1, after, log)
 	}
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if got := compactMarkerValue(t, marker, "seen_count"); got != "2" {
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	if got := compactMarkerValue(t, notifyState, "seen_count"); got != "2" {
 		t.Fatalf("gc-only refusal must count as a sighting, got seen_count=%q", got)
 	}
 }

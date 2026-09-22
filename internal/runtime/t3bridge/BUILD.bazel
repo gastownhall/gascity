@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "t3bridge",
+    srcs = [
+        "cutover.go",
+        "envelope.go",
+        "provider.go",
+        "reuse.go",
+        "seams.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/t3bridge",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/events",
+        "//internal/runtime",
+        "@com_github_google_uuid//:uuid",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
+)
+
+go_test(
+    name = "t3bridge_test",
+    srcs = [
+        "envelope_test.go",
+        "provider_test.go",
+        "reuse_test.go",
+        "seams_test.go",
+        "testenv_import_test.go",
+        "watch_latest_seq_test.go",
+    ],
+    embed = [":t3bridge"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+        "@com_github_gorilla_websocket//:websocket",
+    ],
+)

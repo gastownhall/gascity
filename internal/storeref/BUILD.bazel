@@ -1,0 +1,45 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "storeref",
+    srcs = [
+        "class_candidates.go",
+        "plan.go",
+        "relevance.go",
+        "relic_census.go",
+        "resolve.go",
+        "storeref.go",
+        "topology.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/storeref",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+    ],
+)
+
+go_test(
+    name = "storeref_test",
+    srcs = [
+        "class_candidates_test.go",
+        "mint_test.go",
+        "placement_test.go",
+        "relevance_test.go",
+        "relic_census_test.go",
+        "residency_agreement_test.go",
+        "residency_conformance_test.go",
+        "residency_fixtures_test.go",
+        "resolve_test.go",
+        "storeref_test.go",
+        "testenv_import_test.go",
+        "walk_test.go",
+        "work_axis_test.go",
+    ],
+    embed = [":storeref"],
+    deps = [
+        "//internal/beads",
+        "//internal/coordclass",
+        "//internal/testenv",
+    ],
+)

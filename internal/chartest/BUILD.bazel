@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "chartest",
+    srcs = [
+        "canonicalize.go",
+        "golden.go",
+        "jsondiff.go",
+        "rules.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/chartest",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "chartest_test",
+    srcs = [
+        "canonicalize_test.go",
+        "golden_test.go",
+        "jsondiff_test.go",
+        "rules_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        ":chartest",
+        "//internal/testenv",
+    ],
+)

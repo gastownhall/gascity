@@ -28,12 +28,14 @@ var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
 	_ runtime.RelaunchProvider              = (*Provider)(nil)
 	_ runtime.LivenessObserver              = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
+	_ runtime.SessionEventProvider          = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -282,6 +284,18 @@ func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Du
 	return runtime.ErrInteractionUnsupported
 }
 
+// SnapshotIdle delegates to the routed backend when it can take a
+// point-in-time idle observation. Without this the composite would hide a
+// tmux-backed session's SnapshotIdle from every caller as soon as any agent in
+// the city selects the ACP transport, because this Provider enumerates the
+// optional interfaces it forwards rather than embedding a backend.
+func (p *Provider) SnapshotIdle(name string) (bool, error) {
+	if sp, ok := p.route(name).(runtime.IdleSnapshotProvider); ok {
+		return sp.SnapshotIdle(name)
+	}
+	return false, runtime.ErrInteractionUnsupported
+}
+
 // NudgeNow delegates to the routed backend when it supports immediate
 // injection without an internal wait-idle step.
 func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
@@ -415,4 +429,25 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 		return scp.SleepCapability(name)
 	}
 	return runtime.SessionSleepCapabilityDisabled
+}
+
+// SubscribeSessionEvents forwards the session-event stream of whichever
+// backend implements runtime.SessionEventProvider. Today only herdr does, so
+// without this method, wrapping an event-capable default backend (e.g.
+// herdr) behind auto for ACP routing would fail the
+// runtime.SessionEventProvider type assertion in cmd/gc's
+// sessionEventPump.restart and silently drop the whole event-driven
+// reconcile poke, falling back to patrol polling with no underlying
+// capability loss to explain it.
+func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
+	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
+	switch {
+	case dok:
+		return dSEP.SubscribeSessionEvents(ctx)
+	case aok:
+		return aSEP.SubscribeSessionEvents(ctx)
+	default:
+		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+	}
 }

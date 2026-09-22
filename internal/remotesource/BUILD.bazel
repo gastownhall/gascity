@@ -1,0 +1,18 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "remotesource",
+    srcs = ["remotesource.go"],
+    importpath = "github.com/gastownhall/gascity/internal/remotesource",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "remotesource_test",
+    srcs = [
+        "remotesource_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":remotesource"],
+    deps = ["//internal/testenv"],
+)

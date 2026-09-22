@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "helpers",
+    srcs = [
+        "binary.go",
+        "city.go",
+        "claude_state.go",
+        "doc.go",
+        "env.go",
+        "lifecycle.go",
+        "provider_shim.go",
+        "recording_bd.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/acceptance/helpers",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "helpers_test",
+    srcs = [
+        "binary_test.go",
+        "city_test.go",
+        "claude_state_test.go",
+        "env_test.go",
+        "provider_shim_test.go",
+        "recording_bd_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":helpers"],
+    deps = ["//internal/testenv"],
+)

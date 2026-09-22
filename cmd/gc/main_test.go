@@ -240,7 +240,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	if err != nil {
 		panic(err)
 	}
 	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
@@ -267,12 +268,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -2837,6 +2833,9 @@ version = "` + config.PublicGascityPackVersion + `"
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
 # "7d" is not a valid Go duration.
+# It also sets how long a read mail bead stays open before the nudge-mail
+# sweep closes it: unset keeps that sweep's own 60m default, while "0"
+# disables the close phase too, leaving read mail beads open.
 # retention_ttl = "0"
 `
 	if got != want {

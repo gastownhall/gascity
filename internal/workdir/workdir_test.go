@@ -200,6 +200,63 @@ func TestResolveWorkDirPathStrictRejectsInvalidTemplate(t *testing.T) {
 	}
 }
 
+// TestResolveWorkDirPathStrictIsolatesDynamicInstancesOfDirlessWorkDirlessAgent
+// is the ga-2c8f5o regression guard folded into ga-61igzb's fresh port of
+// pool_isolation.go: an agent with neither Dir nor WorkDir set falls through
+// to the bare city path today regardless of qualifiedName, so a dynamically
+// named instance (a wisp, or any alias distinct from the agent's own
+// canonical identity) silently shares a working directory with every other
+// such instance the moment more than one exists concurrently.
+func TestResolveWorkDirPathStrictIsolatesDynamicInstancesOfDirlessWorkDirlessAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	a := config.Agent{Name: "drifter"}
+
+	basePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", a.QualifiedName(), a, nil)
+	if err != nil {
+		t.Fatalf("resolving canonical identity path: %v", err)
+	}
+
+	instanceName := a.QualifiedInstanceName("drifter-wisp-7")
+	instancePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", instanceName, a, nil)
+	if err != nil {
+		t.Fatalf("resolving dynamic instance path: %v", err)
+	}
+
+	if instancePath == basePath {
+		t.Fatalf("dynamic instance %q shares a work_dir with canonical identity %q (both resolved to %q); "+
+			"a dir-less, work_dir-less agent's dynamic instances must get isolated working directories",
+			instanceName, a.QualifiedName(), basePath)
+	}
+}
+
+// TestResolveWorkDirPathStrictDoesNotAutoIsolateExplicitPoolAgents locks in
+// the exclusion ga-2c8f5o's fix carries alongside the isolation above: an
+// agent that explicitly signals it may run more than one concurrent instance
+// is left to ValidatePoolWorkDirIsolation's config-time rejection instead of
+// being silently auto-isolated here, which would otherwise mask that
+// misconfiguration.
+func TestResolveWorkDirPathStrictDoesNotAutoIsolateExplicitPoolAgents(t *testing.T) {
+	cityPath := t.TempDir()
+	a := config.Agent{Name: "drifter", MaxActiveSessions: intPtr(3)}
+
+	basePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", a.QualifiedName(), a, nil)
+	if err != nil {
+		t.Fatalf("resolving canonical identity path: %v", err)
+	}
+
+	instanceName := a.QualifiedInstanceName("drifter-3")
+	instancePath, err := ResolveWorkDirPathStrict(cityPath, "gastown", instanceName, a, nil)
+	if err != nil {
+		t.Fatalf("resolving pool instance path: %v", err)
+	}
+
+	if instancePath != basePath {
+		t.Fatalf("explicit pool agent %q got auto-isolated by ResolveWorkDirPathStrict (base=%q instance=%q); "+
+			"ValidatePoolWorkDirIsolation is responsible for rejecting this misconfiguration, not this fallback",
+			a.QualifiedName(), basePath, instancePath)
+	}
+}
+
 func TestExpandCommandTemplateFallsBackToCityDirBase(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "demo-city")
 	agent := config.Agent{Name: "worker"}

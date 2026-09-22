@@ -49,7 +49,9 @@ func drainInfrastructureClasses() []coordclass.Class {
 }
 
 // resolveDrainMember answers which store holds a member the drain reads but did
-// not mint, and what that store's row says.
+// not mint, and what that store's row says. The retry lane's required-artifact
+// gate shares it (resolveRequiredArtifactSourceBead) for the same shape: a
+// work-class bead a graph-store control kind reads but did not mint.
 //
 // The intent is ByID, not RoutedWork: a member's class is not statically known,
 // so a binding copy is the live relocated bead and the work store's copy is the

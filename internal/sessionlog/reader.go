@@ -408,6 +408,15 @@ func parseFile(path string) ([]*Entry, error) {
 	return entries, err
 }
 
+// ReadFileRecords reads every JSONL record from a transcript in file order,
+// before any active-branch selection. BuildDag drops entries without a uuid,
+// so records such as queue-operation task notifications never reach a caller
+// that reads a session. Callers that must observe those records — rather than
+// render a conversation — need this instead of a Read* helper.
+func ReadFileRecords(path string) ([]*Entry, error) {
+	return parseFile(path)
+}
+
 // parseFileDetailed reads all JSONL lines from a file into entries and
 // returns load diagnostics for malformed lines and torn tails.
 func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {

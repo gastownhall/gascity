@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "nudgepoller",
+    srcs = ["poller.go"],
+    importpath = "github.com/gastownhall/gascity/internal/nudgepoller",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/pathutil",
+        "//internal/pidutil",
+    ],
+)
+
+go_test(
+    name = "nudgepoller_test",
+    srcs = [
+        "poller_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":nudgepoller"],
+    deps = ["//internal/testenv"],
+)
