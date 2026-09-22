@@ -78,6 +78,33 @@ func bdStoreBacking(store beads.Store) (*beads.BdStore, bool) {
 		switch v := store.(type) {
 		case *beads.BdStore:
 			return v, v != nil
+		case beads.ProxiedStoreView:
+			// The proxied-native split store, and the answer depends on which
+			// leaf is serving RIGHT NOW.
+			//
+			// While the native leaf serves there is no subprocess to bind: the
+			// reads are library calls over bd's proxy, and returning a bd store
+			// here would make gc status rebuild a clone that forks once per read
+			// — turning the lane's zero-fork property into two forks, silently.
+			//
+			// After a stand-down the wrapper's reads ARE bd forks, and they are
+			// the ones ga-cdmx6x is about: gc status runs them under a 3s
+			// deadline, so a clone that is not ctx-bound abandons a live child
+			// instead of killing it. Unwrapping to the bd leaf is what lets the
+			// caller rebuild it bound to the request.
+			//
+			// One-way, like the demotion itself: a store that was native when
+			// this was asked and demotes a millisecond later simply keeps
+			// serving through the wrapper for this command.
+			if v == nil || !v.Demoted() {
+				return nil, false
+			}
+			leaf := v.BdLeaf()
+			if leaf == nil {
+				return nil, false
+			}
+			store = leaf
+			continue
 		case *beads.CachingStore:
 			if v == nil {
 				return nil, false

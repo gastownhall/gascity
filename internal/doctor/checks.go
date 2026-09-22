@@ -736,13 +736,20 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	// message below is built from, and sitting beside the independent endpoint
 	// account so a disagreement between the two is visible rather than averaged.
 	//
-	// It is the account AT OPEN. A handle that stood down afterwards is not
-	// visible here in PR2: the store doctor holds has been through
-	// wrapStoreWithBeadPolicies, which embeds the Store interface and therefore
-	// strips the wrapper's Demoted()/Verdict(). Reporting a demotion live needs
-	// cmd/gc to expose the unwrap, which is the same seam P2-13 opens for
-	// scopedStoreLike — recorded as a gap rather than guessed at.
-	proxied := result.Diagnostic.Proxied
+	// It is the account the handle gives NOW, not only the one the open gave.
+	// The store doctor holds has been through wrapStoreWithBeadPolicies, which
+	// embeds the Store interface and therefore strips the wrapper's own methods;
+	// beads.LiveProxiedDiagnostic asks through the unwrap seam that wrapper
+	// participates in, and falls back to the open-time account for every store
+	// that carries no split store — which is every store on every other lane, so
+	// their payload is byte-identical to today's.
+	//
+	// The difference is the whole point: a handle that stood down after the open
+	// (a migration under a controller store, a proxy that went away) reports
+	// itself native forever if the payload is only ever the open's account, and
+	// a demoted city reading as healthy is the one thing `gc doctor` must not
+	// say.
+	proxied := beads.LiveProxiedDiagnostic(result.Store, result.Diagnostic.Proxied)
 	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
 		Store:           result.Diagnostic.Store,
 		PreflightGate:   result.Diagnostic.PreflightGate,
@@ -754,7 +761,16 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		// is what serves the reads (design 5.3); the message is what tells an
 		// operator that this native store is reading through somebody else's
 		// proxy and writing through somebody else's CLI.
+		//
+		// A handle that has since stood down gets its own line: the open took the
+		// lane and the handle lost it, which is a different fact from a scope that
+		// never took it, and "native reads over bd proxy" would be a false
+		// statement about a store that is forking for every read.
 		r.Status = StatusOK
+		if proxied.Demoted {
+			r.Message = proxiedDemotedStoreMessage(proxied)
+			return r
+		}
 		r.Message = proxiedNativeStoreMessage(proxied)
 		return r
 	}

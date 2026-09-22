@@ -157,11 +157,10 @@ func proxiedNativeStoreMessage(proxied *beads.ProxiedDiagnostic) string {
 // returning a bare beads.Store, and unlike the city's (api_state.go's
 // CityBeadsDiagnostic) a rig's is discarded after the open. So the lane is read
 // off the store gc is actually holding, which is the one piece of evidence this
-// check has. A store that has been wrapped (policy, cache) reads as the bd front
-// door, which is the honest answer: this function can only report what it can
-// see.
+// check has — through the unwrap seam, so a policy- or cache-wrapped rig store
+// still answers instead of reading as the bd front door by default.
 func rigProxiedStoreMessage(store beads.Store) string {
-	if proxied, ok := store.(*beads.ProxiedStore); ok {
+	if proxied, ok := beads.ProxiedStoreFrom(store); ok {
 		report := proxied.Report()
 		if !report.Demoted {
 			return proxiedNativeStoreMessage(&beads.ProxiedDiagnostic{
@@ -174,6 +173,31 @@ func rigProxiedStoreMessage(store beads.Store) string {
 		}
 	}
 	return proxiedProviderStoreMessage
+}
+
+// proxiedDemotedStoreMessage is the line for a handle that WAS serving natively
+// and has since stood down.
+//
+// It is a distinct message from the healthy fallback because the two are
+// different facts: a fallback never opened the lane, and a demotion opened it and
+// lost it. An operator debugging "why is this city forking again" needs to know
+// which, and the verdict names the cause. The status stays OK — the bd front door
+// is a supported store for a proxied scope, and the lane is a performance
+// property, not an availability one.
+func proxiedDemotedStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	verdict := beads.ProxiedVerdictNone
+	generation := "unknown"
+	if proxied != nil {
+		verdict = proxied.Verdict
+		if proxied.Endpoint.Generation != "" {
+			generation = proxied.Endpoint.Generation
+		}
+	}
+	if verdict == beads.ProxiedVerdictNone {
+		return fmt.Sprintf("native reads over bd proxy stood down (gen %s); reads and writes via bd CLI", generation)
+	}
+	return fmt.Sprintf("native reads over bd proxy stood down (gen %s, verdict=%s); reads and writes via bd CLI",
+		generation, verdict)
 }
 
 // proxiedFallbackStoreMessage is the healthy-fallback line: the message a

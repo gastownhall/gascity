@@ -902,3 +902,106 @@ func TestRigProxiedStoreMessageReadsTheStoreItHolds(t *testing.T) {
 		t.Errorf("message for a bd-shaped store = %q, want the unchanged bd-owned line", got)
 	}
 }
+
+// liveProxiedStore stands in for a held *beads.ProxiedStore. The concrete type
+// cannot be built outside internal/beads (its constructor demands an admitted
+// beads.Pin), which is exactly why the unwrap seam is an interface: a check that
+// asserted the concrete type could not test its own branch without a live proxy.
+type liveProxiedStore struct {
+	beads.MemStore
+	demoted bool
+	verdict *beads.ProxiedVerdictError
+	report  beads.ProxiedOpenReport
+}
+
+func (s *liveProxiedStore) Demoted() bool                       { return s.demoted }
+func (s *liveProxiedStore) Verdict() *beads.ProxiedVerdictError { return s.verdict }
+func (s *liveProxiedStore) Report() beads.ProxiedOpenReport     { return s.report }
+func (s *liveProxiedStore) BdLeaf() beads.Store                 { return beads.NewMemStore() }
+func (s *liveProxiedStore) Ping() error                         { return nil }
+
+// TestBeadsStoreCheckReportsAPostOpenDemotion closes P2-10's recorded gap.
+//
+// The store-open diagnostic is the account AT OPEN. A controller store that was
+// admitted natively at boot and stood down two hours later — a migration under
+// it, a proxy that went away for good — would report itself native for the rest
+// of the process, and an operator asking `gc doctor` why their city is forking
+// again would be told it is not. The unwrap seam (P2-13) is what lets the check
+// ask the handle instead of the open.
+func TestBeadsStoreCheckReportsAPostOpenDemotion(t *testing.T) {
+	scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
+	stubProxyProcess(t, fixture, "-1ns")
+	stubProbe(t, proxyendpoint.ProbeResult{
+		Outcome: proxyendpoint.ProbeServed,
+		Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
+	}, nil)
+
+	// The handle stood down after the open: the open's account says native and
+	// not demoted, the live handle says otherwise.
+	held := &liveProxiedStore{
+		demoted: true,
+		verdict: beads.NewSchemaSkewVerdictError(beads.ProxiedSkewLaneMain, beads.ProxiedSkewDirAhead,
+			"the database was migrated under a held handle"),
+		report: beads.ProxiedOpenReport{
+			Endpoint:   beads.ProxiedEndpointStamp{Port: 45123, PID: 6001, Generation: proxiedNativeGeneration},
+			Evidence:   "argv+birth",
+			IdlePolicy: "never",
+			Cursors:    proxyendpoint.Cursors{Main: beads.SchemaCursorMain + 1, Ignored: beads.SchemaCursorIgnored},
+			Demoted:    true,
+		},
+	}
+	r := NewBeadsStoreCheck(scope, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: held,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               beads.BeadsStoreNameNativeDoltStore,
+				NativeStoreEligible: true,
+				Proxied:             proxiedNativeOpenReport(false),
+			},
+		}, nil
+	}).Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK: the bd front door is a supported store for a proxied scope; msg = %s", r.Status, r.Message)
+	}
+	payload, ok := r.Payload.(*BeadsStorePayload)
+	if !ok {
+		t.Fatalf("payload = %T, want *BeadsStorePayload", r.Payload)
+	}
+	if payload.Proxied == nil {
+		t.Fatal("the payload carries no proxied account at all")
+	}
+	if !payload.Proxied.Demoted {
+		t.Error("the payload reports the handle as still serving natively; the demotion happened after the open")
+	}
+	if payload.Proxied.Verdict != beads.ProxiedVerdictSchemaSkew {
+		t.Errorf("payload verdict = %q, want schema_skew — the reason the handle stood down", payload.Proxied.Verdict)
+	}
+	if payload.Proxied.Cursors.Main != beads.SchemaCursorMain+1 {
+		t.Errorf("payload cursors = %v, want the LIVE handle's pair (the drifted one)", payload.Proxied.Cursors)
+	}
+	if !strings.Contains(r.Message, "stood down") || !strings.Contains(r.Message, "verdict=schema_skew") {
+		t.Errorf("message = %q, want it to say the lane stood down and why", r.Message)
+	}
+	if strings.Contains(r.Message, "native reads over bd proxy (") {
+		t.Errorf("message = %q still claims native reads for a handle that forks every read", r.Message)
+	}
+}
+
+// TestRigProxiedStoreMessageSeesThroughWrappers is the same seam on the rig lane.
+// Rigs retain no store-open diagnostic at all, so the store gc is holding is the
+// only evidence the check has — and until the seam existed, a rig store that had
+// been policy- or cache-wrapped read as the plain bd front door.
+func TestRigProxiedStoreMessageSeesThroughWrappers(t *testing.T) {
+	native := &liveProxiedStore{report: beads.ProxiedOpenReport{
+		Endpoint: beads.ProxiedEndpointStamp{Generation: proxiedNativeGeneration},
+		Evidence: "argv+birth",
+	}}
+	if got := rigProxiedStoreMessage(beads.NewCachingStoreForTest(native, nil)); !strings.Contains(got, "native reads over bd proxy") {
+		t.Fatalf("rigProxiedStoreMessage(cache(native)) = %q, want the native-over-proxy line", got)
+	}
+	if got := rigProxiedStoreMessage(beads.NewMemStore()); got != proxiedProviderStoreMessage {
+		t.Fatalf("rigProxiedStoreMessage(MemStore) = %q, want the unchanged base message", got)
+	}
+}
