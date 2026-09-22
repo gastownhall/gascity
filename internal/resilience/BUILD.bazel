@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "resilience",
+    srcs = [
+        "breaker.go",
+        "registry.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/resilience",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "resilience_test",
+    srcs = [
+        "breaker_test.go",
+        "registry_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":resilience"],
+    deps = ["//internal/testenv"],
+)

@@ -130,6 +130,69 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	}
 }
 
+func TestBdContextCommandRunnerForCityPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
 func countBdShimInvocations(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -537,6 +600,35 @@ func TestRecoverManagedBDCommandCarriesWorkspaceBDBinaryPin(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != pinned {
 		t.Fatalf("recover BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
+// Recovering the legacy managed server is the path an in-place gc upgrade most
+// needs to keep working: the supervisor that calls it is already running, and an
+// upgrade that removed the directory /proc/self/exe resolved through leaves it
+// unable to canonicalize its own binary. main pinned no GC_BIN here at all, so
+// refusing turned a bounded staleness into a recover that can never run — and
+// with it, a managed Dolt nothing stops on SIGTERM. The pin degrades instead.
+func TestRecoverManagedBDCommandRunsWhenGCBinaryResolutionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-ran")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+capture+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() = %v, want the recover to run anyway", err)
+	}
+	if _, statErr := os.Stat(capture); statErr != nil {
+		t.Fatalf("recover child never ran: %v", statErr)
 	}
 }
 
@@ -5817,4 +5909,12 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN", got, ambient)
 		}
 	})
+}
+
+func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": "stale", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_SOCKET": "stale.sock"}
+	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
+	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
+		t.Fatalf("env = %#v", env)
+	}
 }

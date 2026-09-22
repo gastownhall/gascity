@@ -126,7 +126,17 @@ func validateCityAuthoringSurface(md toml.MetaData) error {
 	if md.IsDefined("formulas", "dir") {
 		return fmt.Errorf("[formulas].dir is no longer supported; use the well-known formulas/ directory")
 	}
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return err
+	}
 	return validateStorageAuthoringSurface(md)
+}
+
+func validateDoltModeAuthoringSurface(md toml.MetaData) error {
+	if md.IsDefined("dolt", "mode") {
+		return fmt.Errorf("[dolt].mode is not supported; Beads persists the initialized Dolt topology in its scope metadata")
+	}
+	return nil
 }
 
 func validatePackAuthoringSurface(md toml.MetaData, source string) error {

@@ -53,7 +53,7 @@ func TestCompactScriptStalePendingPushMarkerDoesNotRemailEveryCycle(t *testing.T
 // Previously quarantine_should_notify deduped on exact reason match with no
 // time backstop, so a real, still-unresolved integrity failure was reported
 // exactly once and then silently ignored forever (observed in production:
-// gascity marker seen_count=26, notify_count=1). This must not regress
+// gascity notify sidecar seen_count=26, notify_count=1). This must not regress
 // TestCompactScriptQuarantineReasonChangeReMails (a changed reason still
 // re-mails immediately, independent of the backstop) or
 // TestCompactScriptExistingQuarantineMarkerAlertsOnceAcrossRepeatedCycles
@@ -74,11 +74,11 @@ func TestCompactScriptQuarantineRenotifiesAfterBackstopElapses(t *testing.T) {
 		t.Fatalf("dedup should be established after two cycles, want 1 mail, got %d\nlog:\n%s", len(mailLines), log)
 	}
 
-	// Force the backstop to have elapsed by backdating the marker's own
-	// notify bookkeeping, matching the file's existing convention of aging
-	// marker fields directly rather than faking the clock.
-	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	replaceCompactMarkerField(t, marker, "last_notified_ts", "2000-01-01T00:00:00Z")
+	// Force the backstop to have elapsed by backdating the notify sidecar,
+	// matching the file's existing convention of aging persisted cadence state
+	// directly rather than faking the clock.
+	notifyState := compactBeadsQuarantineNotifyStatePath(fixture.cityPath)
+	replaceCompactMarkerField(t, notifyState, "last_notified_ts", "2000-01-01T00:00:00Z")
 
 	thirdOut, err := fixture.run(t, "below_threshold")
 	if err == nil {

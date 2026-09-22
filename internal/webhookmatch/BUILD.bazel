@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "webhookmatch",
+    srcs = [
+        "doc.go",
+        "extract.go",
+        "match.go",
+        "path.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/webhookmatch",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/orders"],
+)
+
+go_test(
+    name = "webhookmatch_test",
+    srcs = [
+        "extract_test.go",
+        "match_test.go",
+        "path_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":webhookmatch"],
+    deps = ["//internal/testenv"],
+)

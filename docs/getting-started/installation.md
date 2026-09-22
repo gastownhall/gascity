@@ -27,7 +27,7 @@ for you; the other methods require manual installation.
 | jq | Yes | — | `brew install jq` | `apt install jq` | JSON processing |
 | git | Yes | — | (built-in) | (built-in) | Version control |
 | dolt | Yes | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) | Beads data plane |
-| bd (Beads CLI) | Yes | 1.0.4 | `brew install beads` (see note) | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
+| bd (Beads CLI) | Yes | 1.0.4 minimum; 1.3.0 tested | `brew install beads` | [releases](https://github.com/gastownhall/beads/releases) | Issue tracking |
 | flock | Yes | — | `brew install flock` | (built-in via util-linux) | File locking |
 | gh | Optional | — | `brew install gh` | [cli.github.com](https://cli.github.com/) | GitHub gate checks |
 | Go 1.26+ | Source only | 1.26 | `brew install go` | [golang.org](https://go.dev/dl/) | Compiler |
@@ -41,11 +41,14 @@ under heavy write load.
 
 The exact versions CI pins are in [`deps.env`](https://github.com/gastownhall/gascity/blob/main/deps.env).
 
-**bd note:** `deps.env` currently pins `BD_VERSION=v1.3.0-rc.2`, a prerelease
-that is deliberately not published to Homebrew, npm or PyPI. `brew install
-beads` gives you the latest stable release instead, which is an OLDER bd than
-the one this gc was built and tested against. To match CI exactly, install the
-pinned tarball:
+Gas City 1.4.2 and main pair the native store with Beads 1.3.0. When upgrading
+an existing shared database from Beads 1.2.2, coordinate the upgrade of all
+clients using that database, then run `bd migrate schema` from the workspace.
+The tested upgrade moves schema 53 to 66 and preserves existing beads. Older
+clients cannot use the migrated schema. Fresh workspaces initialize directly
+at the new schema.
+
+To install the exact release archive pinned by CI:
 
 ```bash
 set -a && . ./deps.env && set +a && .github/scripts/install-bd-archive.sh "$BD_VERSION"

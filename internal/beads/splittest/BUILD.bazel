@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "splittest",
+    srcs = [
+        "semantics.go",
+        "split_stores.go",
+        "strict_store.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/splittest",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/storeref",
+    ],
+)
+
+go_test(
+    name = "splittest_test",
+    srcs = [
+        "import_boundary_test.go",
+        "split_stores_test.go",
+        "strict_store_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":splittest"],
+    deps = [
+        "//internal/beads",
+        "//internal/storeref",
+        "//internal/testenv",
+    ],
+)

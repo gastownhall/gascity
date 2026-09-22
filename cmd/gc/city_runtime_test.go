@@ -4106,6 +4106,11 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 			Name:     "my-city",
 			Provider: "claude",
 		},
+		// ga-hgjlhi: waitForAsyncStarts budgets cfg.Daemon.ShutdownTimeoutDuration(),
+		// which falls back to a 5s production default. The drain added below costs
+		// ~4s of real staleKeyDetectDelay waits, so an inherited 5s leaves ~1s of
+		// headroom on 12-way-shard CI. Match the trace fixtures' explicit 30s.
+		Daemon: config.DaemonConfig{ShutdownTimeout: "30s"},
 		Providers: map[string]config.ProviderSpec{
 			"claude": {
 				Command:    "echo",
@@ -4158,6 +4163,17 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	var lastProviderName string
 	dirty := &atomic.Bool{}
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	// tick() enqueues the async start wave and returns without waiting for it:
+	// enqueuePreparedStartWaveForCity spawns a goroutine per candidate and
+	// reports TraceOutcomeStartEnqueued immediately. That goroutine goes on to
+	// write cityPath/.gc/events.jsonl a few hundred microseconds later, which
+	// races t.TempDir()'s os.RemoveAll and fails the test with
+	// "TempDir RemoveAll cleanup: ... /.gc: directory not empty" even though
+	// every assertion below passed. Drain the wave first, exactly as the
+	// recovery-tick loop further down this file does (ga-9qs5gk).
+	if !cr.waitForAsyncStarts() {
+		t.Fatal("async session starts did not settle after tick")
+	}
 
 	if !mutated {
 		t.Fatal("test setup did not mutate the manual session bead between build and reconcile")

@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "materialize",
+    srcs = [
+        "mcp.go",
+        "mcp_project.go",
+        "mcp_project_lock.go",
+        "mcp_project_safety.go",
+        "mcp_resolve.go",
+        "mcp_runtime.go",
+        "skills.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/materialize",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/agentutil",
+        "//internal/bootstrap",
+        "//internal/citylayout",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/pathutil",
+        "//internal/runtime",
+        "//internal/workdir",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)
+
+go_test(
+    name = "materialize_test",
+    srcs = [
+        "mcp_project_test.go",
+        "mcp_test.go",
+        "skills_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":materialize"],
+    deps = [
+        "//internal/bootstrap",
+        "//internal/fsys",
+        "//internal/runtime",
+        "//internal/testenv",
+        "//internal/testutil",
+        "@com_github_burntsushi_toml//:toml",
+    ],
+)

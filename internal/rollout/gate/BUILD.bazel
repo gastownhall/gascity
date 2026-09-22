@@ -1,0 +1,8 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "gate",
+    srcs = ["gate.go"],
+    importpath = "github.com/gastownhall/gascity/internal/rollout/gate",
+    visibility = ["//:__subpackages__"],
+)

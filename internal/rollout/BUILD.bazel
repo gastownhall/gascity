@@ -1,0 +1,40 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "rollout",
+    srcs = [
+        "capability.go",
+        "doc.go",
+        "flag_beads_conditional_writes.go",
+        "flag_beads_guarded_release.go",
+        "flag_daemon_formula_v2.go",
+        "flags.go",
+        "fortest.go",
+        "mode.go",
+        "notice.go",
+        "registry.go",
+        "resolve.go",
+        "spec.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/rollout",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/rollout/gate"],
+)
+
+go_test(
+    name = "rollout_test",
+    srcs = [
+        "boundary_test.go",
+        "capability_test.go",
+        "flag_beads_guarded_release_test.go",
+        "flags_test.go",
+        "fortest_test.go",
+        "graduation_test.go",
+        "registry_binding_test.go",
+        "registry_test.go",
+        "resolve_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":rollout"],
+    deps = ["//internal/testenv"],
+)

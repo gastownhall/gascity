@@ -1,6 +1,8 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // ValidateDoltConfig rejects Dolt config values that would otherwise be
 // silently ignored or normalized at runtime.

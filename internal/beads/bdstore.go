@@ -1505,7 +1505,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
 // fallback for any bd predating the flags (beads#5008) — which means the
 // contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
-// installable default: deps.env BD_VERSION is v1.3.0-rc.2, cut past
+// installable default: deps.env BD_VERSION is v1.3.0, cut past
 // beads#5008, so a stock install takes the verb. This path is the floor's, not
 // the live one, and it stays reachable only because deps.env holds
 // BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
@@ -1810,6 +1810,42 @@ func (s *BdStore) Claim(id string) (Bead, bool, error) {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
 	}
 	return claimed, true, nil
+}
+
+// ReclaimStale attempts a scoped stale-lease reclaim for exactly the given
+// bead ID via `bd reclaim --id <id> --json`. It reports whether a reclaim
+// happened and, if so, the previous owner. Staleness itself is decided
+// entirely by bd's own lease-TTL machinery -- this method makes no judgment
+// call of its own (ga-7rj87d NFR3), so it deliberately never passes
+// --older-than and relies on bd's own default grace window.
+func (s *BdStore) ReclaimStale(id string) (bool, string, error) {
+	out, err := s.runBDTransientWriteOutput("reclaim", "--id", id, "--json")
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if isBdNotFound(err) {
+			return false, "", fmt.Errorf("reclaiming bead %q: %w", id, ErrNotFound)
+		}
+		if msg != "" {
+			return false, "", fmt.Errorf("reclaiming bead %q: %w: %s", id, err, msg)
+		}
+		return false, "", fmt.Errorf("reclaiming bead %q: %w", id, err)
+	}
+	var result struct {
+		Reclaimed []struct {
+			ID            string `json:"id"`
+			PreviousOwner string `json:"previous_owner"`
+		} `json:"reclaimed"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, "", fmt.Errorf("reclaiming bead %q: parsing JSON: %w", id, err)
+	}
+	for _, r := range result.Reclaimed {
+		if r.ID == id {
+			return true, r.PreviousOwner, nil
+		}
+	}
+	return false, "", nil
 }
 
 func parseBDMutationBead(op string, out []byte) (Bead, error) {

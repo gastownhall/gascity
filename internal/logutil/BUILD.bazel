@@ -1,0 +1,24 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "logutil",
+    srcs = [
+        "dedup.go",
+        "markers.go",
+        "walkthrough_urls.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/logutil",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "logutil_test",
+    srcs = [
+        "dedup_test.go",
+        "markers_test.go",
+        "testenv_import_test.go",
+        "walkthrough_urls_test.go",
+    ],
+    embed = [":logutil"],
+    deps = ["//internal/testenv"],
+)

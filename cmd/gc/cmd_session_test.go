@@ -94,6 +94,29 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+func TestSessionKillHelpDistinguishesProviderConversationContinuity(t *testing.T) {
+	long := newSessionKillCmd(io.Discard, io.Discard).Long
+	for _, want := range []string{
+		"Gas City bead continuity",
+		"provider resume",
+		"provider conversation continuity is not guaranteed",
+		"lifecycle state to asleep",
+	} {
+		if !strings.Contains(long, want) {
+			t.Fatalf("session kill help missing %q:\n%s", want, long)
+		}
+	}
+	for _, unwanted := range []string{
+		"without losing its conversation history",
+		"remains marked as active",
+		"without changing its bead state",
+	} {
+		if strings.Contains(long, unwanted) {
+			t.Fatalf("session kill help still carries stale claim %q:\n%s", unwanted, long)
+		}
+	}
+}
+
 func TestSessionExplicitNameForNewSessionTmuxAliasPrecedence(t *testing.T) {
 	agent := &config.Agent{
 		Name:              "worker",

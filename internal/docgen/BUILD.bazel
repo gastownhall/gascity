@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "docgen",
+    srcs = [
+        "cli.go",
+        "markdown.go",
+        "schema.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/docgen",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/git",
+        "@com_github_invopop_jsonschema//:jsonschema",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
+    ],
+)
+
+go_test(
+    name = "docgen_test",
+    srcs = [
+        "cli_test.go",
+        "markdown_test.go",
+        "schema_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":docgen"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_invopop_jsonschema//:jsonschema",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)

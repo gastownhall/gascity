@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "acp",
+    srcs = [
+        "acp.go",
+        "activity_publisher.go",
+        "conn.go",
+        "cutover.go",
+        "protocol.go",
+        "seams.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/acp",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/fsys",
+        "//internal/runtime",
+    ],
+)
+
+go_test(
+    name = "acp_test",
+    srcs = [
+        "acp_test.go",
+        "activity_test.go",
+        "meta_privacy_test.go",
+        "protocol_test.go",
+        "seams_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":acp"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
