@@ -753,6 +753,64 @@ func TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses proves the
+// fix for a false-positive nudgequeue.DispatcherIsHosting result: a listener
+// left running after a reload drops back to legacy dispatch on a non-event
+// provider would still answer dials, so a deferred submit would suppress its
+// fallback sidecar poller believing the supervisor still delivers, while
+// neither nudgeDispatchTick's event-dispatcher path nor its supervisor path
+// picks the item up. The listener must close when the activation gate it
+// itself uses stops being satisfied, so the socket stops answering and the
+// fallback poller is no longer suppressed.
+func TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	_ = openNudgeBeadStore(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cr := &CityRuntime{
+		cfg:         &config.City{},
+		cityPath:    dir,
+		stderr:      testWriter(t),
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, dir, cr.stderr, cr.logPrefix)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+
+	// Bring the gate up with an event-capable provider and confirm the
+	// listener is live and answering.
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("precondition: wake listener did not start for an event-capable provider")
+	}
+	if !nudgequeue.DispatcherIsHosting(dir) {
+		t.Fatal("precondition: socket must answer while the listener is up")
+	}
+
+	// Reload back onto a non-event provider under legacy dispatcher mode:
+	// neither half of the gate is satisfied any more.
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	if cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must not report active() for a non-event provider")
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener was not torn down after the gate closed")
+	}
+	if nudgequeue.DispatcherIsHosting(dir) {
+		t.Fatal("socket still answers after the wake listener was torn down; a deferred submit would wrongly suppress its fallback poller")
+	}
+}
+
 // TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener drives
 // reloadConfigTraced itself, not a hand-rolled stand-in for it. The unit
 // test above asserts the gate logic in ensureNudgeWakeListener is correct;

@@ -896,8 +896,17 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
+			// pending event-driven fires are redundant — drop them. But
+			// that's only true when this patrol tick will actually run the
+			// session-management phases: sessionPhasesDue can skip them on a
+			// stretched patrol (see sessionPhasesDue), and a poke dropped
+			// here on such a tick would never be handled at all — the tick
+			// that "made it redundant" didn't do the work it preempted.
+			// Control-dispatcher fires are unaffected by stretching, so they
+			// still cancel unconditionally.
+			if cr.sessionPhasesDue("patrol", dirty.Load(), time.Now()) {
+				pokeDB.cancelPending()
+			}
 			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:
@@ -1607,25 +1616,41 @@ func (cr *CityRuntime) runSessionManagementPhases(
 
 // ensureNudgeWakeListener starts the supervisor nudge wake-socket listener
 // if it is not already running and the current provider/config now satisfy
-// its activation gate. It is idempotent (safe to call on every reload) and
+// its activation gate, and tears it down if a later reload no longer
+// satisfies the gate. It is idempotent (safe to call on every reload) and
 // callers serialize it: startup (run()) and reload (reloadConfigTraced)
 // both execute on the reconciler goroutine, so no lock is needed around the
 // cr.nudgeWakeListener nil-check.
 //
-// The listener is never torn down once started, even if a later reload no
-// longer satisfies the gate (e.g. a provider swap back to a non-event
-// provider under legacy dispatcher mode): an idle listener is harmless,
-// while flapping it on every reload would risk a missed producer connect
-// during the window it is down. Once true, always true is the simpler and
-// safer invariant.
+// The listener's presence is also read cross-process:
+// nudgequeue.DispatcherIsHosting dials the socket to decide whether a
+// deferred submit's fallback sidecar poller is redundant (see
+// internal/session/submit.go's enqueueDeferredSubmitLocked). Leaving a stale
+// listener answering after a reload drops back to legacy dispatch on a
+// non-event provider — the gate this function itself uses to decide whether
+// anything still drains the queue — would make that check a false positive:
+// the socket answers, the fallback poller is suppressed, and neither
+// nudgeDispatchTick's event-dispatcher path nor its supervisor path picks up
+// the work (both require the gate this function checks), so the queued item
+// has no deliverer at all. A dial that finds nothing listening is a safe,
+// documented false negative (harmless duplicate contender); a listener that
+// outlives its gate is not. So the gate is re-checked on every call, in both
+// directions.
 func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
-	if cr.nudgeWakeListener != nil || cr.cityPath == "" {
+	if cr.cityPath == "" {
 		return
 	}
-	if cr.nudgeEvents == nil {
+	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if cr.nudgeWakeListener != nil {
+		if !gateOpen {
+			if err := cr.nudgeWakeListener.Close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+			cr.nudgeWakeListener = nil
+		}
 		return
 	}
-	if !nudgeDispatcherIsSupervisor(cr.cfg) && !cr.nudgeEvents.active() {
+	if !gateOpen {
 		return
 	}
 	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
@@ -4325,6 +4350,20 @@ func (cr *CityRuntime) shutdown() {
 				fmt.Fprintf(cr.stderr, "%s: closing the storage binding: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 			}
 		}()
+		// The nudge-event worker shares run()'s ctx and only checks
+		// cancellation between passes, not mid-runPass; it reads the same
+		// city store cr.storageRoutes.close() (deferred above, so it runs
+		// after this func returns) tears down. Wait for it to actually stop
+		// before that close can race an in-flight delivery attempt. Bounded:
+		// a wedged worker (e.g. a hung provider dial) must not stall
+		// shutdown indefinitely.
+		if cr.nudgeEvents != nil {
+			select {
+			case <-cr.nudgeEvents.workerDone:
+			case <-time.After(5 * time.Second):
+				fmt.Fprintf(cr.stderr, "%s: nudge event dispatcher worker did not stop within 5s; closing storage anyway\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+			}
+		}
 		asyncStartsDrained := cr.waitForAsyncStarts()
 		cr.waitForAsyncStops()
 		preserveSessions := cr.preserveSessionsShutdown.Load()
