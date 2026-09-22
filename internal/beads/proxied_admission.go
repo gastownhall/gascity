@@ -346,10 +346,11 @@ const (
 //
 // Step 6 runs BEFORE the library open and not after, and that is the whole
 // reason the cursors come from the probe rather than from a library read: the
-// linked library runs CheckForwardDrift at every open, so a mismatch discovered
-// after the open would be the library's untyped error — on a database gc had
-// already connected to and might already have migrated. Discovered here it is
-// gc's typed verdict, and nothing was opened.
+// library's own open-time checks see only the MAIN lane (see "What does NOT
+// bound it" on proxiedPinMemo), so an ignored-lane mismatch discovered after
+// the open is one the open has already migrated, and a main-lane one is the
+// library's untyped error. Discovered here it is gc's typed verdict, and nothing
+// was opened.
 func Admit(ctx context.Context, in AdmissionInput) (Pin, error) {
 	in = in.withDefaults()
 	if in.ScopeRoot == "" {
@@ -784,21 +785,47 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // its own reason to exist (17 accepted TCP connections per `gc doctor` run, on
 // a proxy whose idle watcher cannot arm while one is open).
 //
-// Three things bound the exposure instead, and they are stated here so a reader
+// Two things bound the exposure instead, and they are stated here so a reader
 // does not have to reconstruct them:
 //
 //  1. proxiedPinMemoTTL caps the entry at proxiedPinMemoMaxTTL however long the
 //     operator's guard interval is. GC_BEADS_PROXIED_GUARD_INTERVAL has a floor
 //     but no ceiling, so without the cap an operator asking for a quieter tick
 //     was also asking the memo to trust a schema answer for that long.
-//  2. The library runs CheckForwardDrift at EVERY open, so a database that
-//     moved ahead of this binary is refused by the library rather than served —
-//     as the library's untyped error rather than gc's typed verdict, which is
-//     the part that is genuinely worse and is the residual here.
-//  3. The guard tick re-reads the cursors every interval and, on drift, now
+//  2. The guard tick re-reads the cursors every interval and, on drift, now
 //     forgets the memo as well as standing the handle down — so the next open
 //     in the process re-derives instead of reading an answer a tick has already
-//     contradicted.
+//     contradicted. That is a long-lived store's bound only; a one-shot has no
+//     guard, and the TTL cap is all it gets.
+//
+// What does NOT bound it, corrected (council pr2 D-F7). This block used to
+// list a third bound: "the library runs CheckForwardDrift at EVERY open, so a
+// database that moved ahead of this binary is refused by the library". That is
+// true of exactly one lane and one direction, and it was cited as if it covered
+// the lane A-F2 exists for. At beads v1.3.0:
+//
+//   - CheckForwardDrift (store.go:1991) is checkSchemaSkew over CurrentVersion,
+//     which is mainSource.currentVersion (schema.go:133-162, :519-521): the
+//     MAIN lane, refused only when AHEAD.
+//   - A main lane BEHIND is refused by a different check, the shared-store
+//     migrate gate (store.go:2939, remote_migrate_gate.go:517-557), which again
+//     reads the main lane only.
+//   - NOTHING in the library's open consults the IGNORED lane before
+//     migrating it. So an ignored lane that moves inside the memo window — a
+//     sentinel that vanishes, dropping the library's effective cursor 26 -> 11,
+//     is the case that matters — is checked by nobody on a memo hit, and the
+//     open replays ignored 0012-0025 against bd's database. Inside the window
+//     that hazard is bounded by the TTL cap and the tick above, and by nothing
+//     the library does. The HEAD observation (ProxiedHeadUnmoved) does not
+//     reach it either: a memoized pin carries no hash.
+//
+// One thing the old sentence feared that does NOT happen: bd's documented
+// escape hatch BD_IGNORE_SCHEMA_SKEW=1 is read with os.Getenv inside the open,
+// but the proxied window withholds the whole BD_ namespace for the duration of
+// OpenBestAvailable (openNativeStorageProxied), so an operator's exported hatch
+// cannot switch the AHEAD refusal off in-process
+// (TestProxiedHermeticOpenScrubsUnlocksAndProjectsAuthorPair pins the unset).
+// TestForwardDriftSeesOnlyTheMainLane pins the three library facts above.
 var proxiedPinMemo = struct {
 	mu      sync.Mutex
 	entries map[string]proxiedPinMemoEntry

@@ -113,9 +113,11 @@ func PinnedSchemaCursors() (main, ignored int) {
 // comparisons a reader has to check for a swapped pair. The probe reads those
 // numbers straight off disk with SELECT COALESCE(MAX(version),0) over its own
 // connector, never through the linked library, which is what makes this gate
-// runnable BEFORE the library open: beads' CheckForwardDrift runs at every open,
-// so a mismatch discovered after the open would be the library's untyped error
-// instead of gc's verdict.
+// runnable BEFORE the library open. The library's own open-time checks cover
+// the MAIN lane only — CheckForwardDrift refuses it ahead, the shared-store
+// migrate gate refuses it behind — and nothing in the open consults the ignored
+// lane before migrating it (council pr2 D-F7), so this gate is the only check
+// that lane gets.
 //
 // "Match" is equality, not "at least". A database BEHIND the library is one the
 // library would migrate on open — a write to somebody else's shared database

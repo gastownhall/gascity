@@ -465,6 +465,54 @@ func intLit(expr ast.Expr) (int, error) {
 	return strconv.Atoi(literal.Value)
 }
 
+// TestForwardDriftSeesOnlyTheMainLane pins the library facts the corrected A-F3
+// residual on proxiedPinMemo rests on (council pr2 D-F7).
+//
+// The old residual said the library's CheckForwardDrift, run at every open,
+// covered a database that moved inside the memo window. It covers one lane in
+// one direction: CurrentVersion is the MAIN source's cursor, and
+// checkSchemaSkew returns nil unless that cursor is AHEAD. So the ignored lane
+// — the one A-F2 exists for — gets no library check before the open migrates it,
+// and gc's own gate is the only one. A beads release that teaches the drift
+// check the ignored lane breaks this test, which is the prompt to re-read the
+// residual (and perhaps to shorten it).
+func TestForwardDriftSeesOnlyTheMainLane(t *testing.T) {
+	path := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash("internal/storage/schema/schema.go"))
+	body, err := os.ReadFile(path) //nolint:gosec // a path derived from the module cache
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, path, body, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	bodyOf := func(name string) string {
+		t.Helper()
+		for _, decl := range parsed.Decls {
+			if function, ok := decl.(*ast.FuncDecl); ok && function.Recv == nil && function.Name.Name == name && function.Body != nil {
+				return string(body[fileSet.Position(function.Body.Pos()).Offset:fileSet.Position(function.Body.End()).Offset])
+			}
+		}
+		t.Fatalf("the pinned library no longer declares %s; re-read the A-F3 residual on proxiedPinMemo", name)
+		return ""
+	}
+
+	if got := bodyOf("CheckForwardDrift"); !strings.Contains(got, "return checkSchemaSkew(ctx, db)") {
+		t.Errorf("CheckForwardDrift is no longer checkSchemaSkew:\n%s", got)
+	}
+	skew := bodyOf("checkSchemaSkew")
+	if !strings.Contains(skew, "CurrentVersion(ctx, db)") || strings.Contains(skew, "Ignored") {
+		t.Errorf("checkSchemaSkew now reads something other than the main cursor; the residual says it does not:\n%s", skew)
+	}
+	if !strings.Contains(skew, "currentVersion <= LatestVersion()") {
+		t.Errorf("checkSchemaSkew no longer passes a database at or behind the binary; the residual says it refuses AHEAD only:\n%s", skew)
+	}
+	if got := bodyOf("CurrentVersion"); !strings.Contains(got, "return mainSource.currentVersion(ctx, db)") {
+		t.Errorf("CurrentVersion is no longer the MAIN source's cursor:\n%s", got)
+	}
+}
+
 // TestPinnedSchemaCursorsProjectsBothConstants pins the accessor's order as well
 // as its values: it returns two bare ints, and a caller that swapped them would
 // compare the ignored lane against the main constant and read as healthy.
