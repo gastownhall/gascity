@@ -4682,6 +4682,13 @@ func Parse(data []byte) (*City, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	if err := validateStorageAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}

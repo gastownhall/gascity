@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "overlay",
+    srcs = [
+        "lint.go",
+        "merge.go",
+        "overlay.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/overlay",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "overlay_test",
+    srcs = [
+        "lint_test.go",
+        "merge_test.go",
+        "overlay_test.go",
+        "per_provider_test.go",
+        "skip_mergeable_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":overlay"],
+    deps = ["//internal/testenv"],
+)

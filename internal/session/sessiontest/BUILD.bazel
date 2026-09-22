@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sessiontest",
+    srcs = ["sessiontest.go"],
+    importpath = "github.com/gastownhall/gascity/internal/session/sessiontest",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/session",
+    ],
+)
+
+go_test(
+    name = "sessiontest_test",
+    srcs = [
+        "sessiontest_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        ":sessiontest",
+        "//internal/beads",
+        "//internal/session",
+        "//internal/testenv",
+    ],
+)

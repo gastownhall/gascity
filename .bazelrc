@@ -1,0 +1,9 @@
+common --enable_bzlmod
+common --color=no
+
+# Side-by-side opt-in bazel arm. `go build`/`go test` continues to work unchanged.
+# To use the remote cache on cherry, uncomment:
+# build --remote_cache=grpc://127.0.0.1:50051
+
+test --test_output=errors
+test --flaky_test_attempts=2

@@ -28,10 +28,19 @@ import (
 // so Ready() and `bd ready` can exclude formula scaffolding from actionable
 // work queues. Without it registered, formula dispatch fails with
 // "invalid issue type: step" (#1039).
+//
+// "startup-health-episode" is included for the same reason
+// (internal/session.StartupHealthEpisodeType): the session reconciler writes
+// one per session name, and the startup-health-episodes check lists them. A
+// city on the bd CLI front door — which is every city that keeps its Dolt
+// topology in bd's hands — has bd validate the type on both paths, so an
+// unregistered one turns both the write and the scan into "invalid issue
+// type". A native-store city never noticed because its SQL path does not
+// validate.
 var RequiredCustomTypes = []string{
 	"molecule", "convoy", "message", "event", "gate",
 	"merge-request", "agent", "role", "rig", "session", "spec",
-	"convergence", "step",
+	"convergence", "step", "startup-health-episode",
 }
 
 // CustomTypesCheck verifies that all required Gas City custom bead
@@ -51,11 +60,29 @@ type CustomTypesCheck struct {
 	// `bd create --type <t>` with "invalid issue type: <t>" because the
 	// table row was never (re)created.
 	tableMissing []string
+	// BdBin is the bd executable to run, as the caller's own pin resolver
+	// answered it. Empty falls back to PATH.
+	BdBin string
 }
 
 // NewCustomTypesCheck creates a check for a specific store directory.
-func NewCustomTypesCheck(dir, label string) *CustomTypesCheck {
-	return &CustomTypesCheck{Dir: dir, Label: label}
+//
+// bdBin is the bd executable this store is pinned to, resolved by the caller
+// the same way every other gc bd call resolves it (city.toml
+// `[workspace.env] BD_BIN`, then PATH). Running whatever `bd` PATH happens to
+// hold is the wrong binary twice over: for a proxied scope it is not the one
+// that owns the proxy, and `gc doctor --fix` writes types.custom through it.
+// Empty means the caller has no pin and PATH is the answer.
+func NewCustomTypesCheck(dir, label, bdBin string) *CustomTypesCheck {
+	return &CustomTypesCheck{Dir: dir, Label: label, BdBin: bdBin}
+}
+
+// bdExecutable names the binary this check's bd calls run.
+func (c *CustomTypesCheck) bdExecutable() string {
+	if pinned := strings.TrimSpace(c.BdBin); pinned != "" {
+		return pinned
+	}
+	return "bd"
 }
 
 // Name returns the check identifier.
@@ -81,7 +108,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Get current custom types from the CSV config.
-	current, err := getCustomTypes(ctx, c.Dir)
+	current, err := getCustomTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read types.custom: %v", err)
@@ -95,7 +122,7 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Get registered types from the normalized custom_types table — the
 	// source of truth bd's create validation checks.
-	registered, err := getRegisteredTypes(ctx, c.Dir)
+	registered, err := getRegisteredTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		r.Status = StatusWarning
 		r.Message = fmt.Sprintf("could not read custom_types table: %v", err)
@@ -164,12 +191,12 @@ func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
 	// Read the current list so we can preserve user-added types.
 	// If we cannot read it, return the error rather than overwriting —
 	// silently dropping user types is worse than failing loud.
-	current, err := getCustomTypes(ctx, c.Dir)
+	current, err := getCustomTypes(ctx, c.bdExecutable(), c.Dir)
 	if err != nil {
 		return fmt.Errorf("reading current custom types: %w", err)
 	}
 	merged := contract.MergeCustomTypes(current, RequiredCustomTypes)
-	return setCustomTypes(ctx, c.Dir, strings.Join(merged, ","))
+	return setCustomTypes(ctx, c.bdExecutable(), c.Dir, strings.Join(merged, ","))
 }
 
 func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
@@ -263,12 +290,19 @@ func customTypesStoreEnv(ctx *CheckContext, dir string) ([]string, error) {
 	return out, nil
 }
 
-func customTypesBDCommand(ctx *CheckContext, dir string, args ...string) (*exec.Cmd, error) {
+// customTypesBDCommand builds a bd invocation for this store: the scrubbed
+// store environment main added, run through the bd binary the caller pinned
+// (bdBin, empty meaning PATH) rather than whatever `bd` PATH happens to hold.
+func customTypesBDCommand(ctx *CheckContext, bdBin, dir string, args ...string) (*exec.Cmd, error) {
 	env, err := customTypesStoreEnv(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("bd", args...)
+	bin := strings.TrimSpace(bdBin)
+	if bin == "" {
+		bin = "bd"
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	return cmd, nil
@@ -278,10 +312,10 @@ func customTypesBDCommand(ctx *CheckContext, dir string, args ...string) (*exec.
 // Uses --json so an unset key returns an empty string value rather than
 // the human-readable "types.custom (not set)" sentinel (which would
 // otherwise be persisted as a fake custom type when Fix() merges).
-func getCustomTypes(ctx *CheckContext, dir string) ([]string, error) {
+func getCustomTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"config", "get", "--json", "types.custom"}
-	cmd, err := customTypesBDCommand(ctx, dir, args...)
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -321,10 +355,10 @@ func parseCustomTypesJSON(out []byte) ([]string, error) {
 // getRegisteredTypes reads the bd store's normalized custom_types table —
 // the source of truth bd's create validation checks — as opposed to
 // getCustomTypes, which reads the types.custom CSV config value.
-func getRegisteredTypes(ctx *CheckContext, dir string) ([]string, error) {
+func getRegisteredTypes(ctx *CheckContext, bdBin, dir string) ([]string, error) {
 	start := time.Now()
 	args := []string{"types", "--json"}
-	cmd, err := customTypesBDCommand(ctx, dir, args...)
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -359,10 +393,10 @@ func parseRegisteredTypesJSON(out []byte) ([]string, error) {
 }
 
 // setCustomTypes writes the types.custom config to a bd store.
-func setCustomTypes(ctx *CheckContext, dir, types string) error {
+func setCustomTypes(ctx *CheckContext, bdBin, dir, types string) error {
 	start := time.Now()
 	args := []string{"config", "set", "types.custom", types}
-	cmd, err := customTypesBDCommand(ctx, dir, args...)
+	cmd, err := customTypesBDCommand(ctx, bdBin, dir, args...)
 	if err != nil {
 		return err
 	}

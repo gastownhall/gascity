@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "subprocess",
+    srcs = [
+        "cutover.go",
+        "seams.go",
+        "subprocess.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/runtime/subprocess",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/runtime",
+        "//internal/runtime/proctable",
+    ],
+)
+
+go_test(
+    name = "subprocess_test",
+    srcs = [
+        "meta_privacy_test.go",
+        "seams_test.go",
+        "subprocess_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":subprocess"],
+    deps = [
+        "//internal/runtime",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)

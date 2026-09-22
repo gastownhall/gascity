@@ -19,6 +19,9 @@
 #   GC_DOLT_PORT  — dolt server port (default: ephemeral, hashed from city path)
 #   GC_DOLT_USER  — dolt user (default: root)
 #   GC_DOLT_PASSWORD — dolt password (default: empty)
+#   GC_BEADS_PROXY_EXTERNAL_HOST/PORT — adapter-only upstream endpoint for a
+#                   proxied-external bd init; never used by Gas City's direct
+#                   lifecycle manager.
 #   GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS — concurrent-start wait budget in
 #       milliseconds (default: 75000 + 2× the lock-release window = 195000 at
 #       defaults, covering the start-flock winner's worst-case stop — 30s
@@ -121,6 +124,17 @@ connect_host() {
 
 trim_space() {
     printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+normalize_dolt_mode() {
+    # Keep shell mode classification aligned with Go's strings.TrimSpace and
+    # case-insensitive comparisons. YAML's unquoted inline comments are not
+    # part of the value, so discard a comment marker introduced after space.
+    local value
+    value=$(trim_space "$1")
+    value=$(printf '%s' "$value" | sed 's/[[:space:]]\+#.*$//')
+    value=$(trim_space "$value")
+    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
 }
 
 lower_dolt_database_name() {
@@ -420,13 +434,11 @@ ensure_database_registered() {
 }
 
 # seed_fresh_managed_bd_version_witness records the bd version that is about
-# to initialize a database created by this invocation. It probes the same
-# "${BD_BIN:-bd}" that run_bd_pinned runs, so the witness names the binary that
-# actually initializes the workspace rather than whichever bd happens to be on
-# PATH. bd 1.2+ uses this bounded witness to distinguish current server-mode
-# workspaces from legacy .beads/dolt layouts. Never create or replace it for a
-# pre-existing database: doing so would bypass bd's explicit cross-era
-# migration guard.
+# to initialize a database created by this invocation. bd 1.2+ uses this
+# bounded witness to distinguish current server-mode workspaces from legacy
+# .beads/dolt layouts. Use BD_BIN when supplied so the witness and the init
+# command cannot disagree about the selected provider binary. Never create or replace it for a pre-existing database:
+# doing so would bypass bd's explicit cross-era migration guard.
 seed_fresh_managed_bd_version_witness() {
     local dir="$1"
     local marker="$dir/.beads/.local_version"
@@ -501,6 +513,58 @@ read_metadata_string_field() {
 metadata_is_doltlite() {
     local meta_file="$1"
     [ "$(read_metadata_string_field "$meta_file" backend)" = "doltlite" ] || [ "$(read_metadata_string_field "$meta_file" database)" = "doltlite" ]
+}
+
+scope_backend_is_dolt() {
+    # dolt.mode belongs to the Dolt backend namespace. Scope metadata is the
+    # strongest persisted backend signal; fall back to the process backend for
+    # fresh scopes whose metadata has not been emitted yet. Unknown backends
+    # fail closed so a stale Dolt marker cannot redirect another provider.
+    local scope="$1" metadata_backend metadata_database configured_backend
+    metadata_backend="$(read_metadata_string_field "$scope/.beads/metadata.json" backend)"
+    metadata_backend="$(normalize_dolt_mode "$metadata_backend")"
+    if [ -n "$metadata_backend" ]; then
+        [ "$metadata_backend" = "dolt" ]
+        return $?
+    fi
+    metadata_database="$(read_metadata_string_field "$scope/.beads/metadata.json" database)"
+    metadata_database="$(normalize_dolt_mode "$metadata_database")"
+    case "$metadata_database" in
+        doltlite) return 1 ;;
+        dolt) return 0 ;;
+    esac
+    configured_backend="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
+    configured_backend="$(normalize_dolt_mode "$configured_backend")"
+    case "$configured_backend" in
+        ""|dolt) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+scope_is_proxied() {
+    # Persisted scope markers are authoritative. Ambient proxy mode is only a
+    # fallback for an otherwise-unmarked scope and must not override an
+    # explicit direct-server binding.
+    scope_backend_is_dolt "$1" || return 1
+    local metadata_mode config_mode normalized_mode
+    metadata_mode="$(normalize_dolt_mode "$(read_metadata_string_field "$1/.beads/metadata.json" dolt_mode)")"
+    if [ -n "$metadata_mode" ]; then
+        [ "$metadata_mode" = "proxied-server" ] && return 0
+        return 1
+    fi
+    # config.yaml is a legacy compatibility input for the direct/server shapes
+    # only. bd records the proxied binding in metadata.json and writes no
+    # dolt.mode of its own, so a "proxied-server" here is drift and must not
+    # move a scope onto the proxy path.
+    if [ -f "$1/.beads/config.yaml" ]; then
+        config_mode=$(sed -n 's/^[[:space:]]*dolt\.mode:[[:space:]]*//p' "$1/.beads/config.yaml" | head -1)
+        normalized_mode=$(normalize_dolt_mode "$config_mode")
+        if [ -n "$normalized_mode" ]; then
+            return 1
+        fi
+    fi
+    [ "${BEADS_DOLT_PROXIED_SERVER:-}" = "1" ] && return 0
+    return 1
 }
 
 write_doltlite_metadata() {
@@ -624,6 +688,16 @@ ensure_bd_runtime_issue_prefix() {
     local db="$1"
     local prefix="$2"
     ensure_bd_runtime_config_value "$db" "issue_prefix" "$prefix"
+}
+
+# gc_custom_types prints the bd custom bead types Gas City requires, as the CSV
+# bd's types.custom config takes. Custom bead types were extracted from beads
+# core in v0.46.0. "convergence" is required because gc's convergence handler
+# creates beads with that type; "step" is required for non-root formula step
+# beads (#1039). Must match doctor.RequiredCustomTypes.
+# GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
+gc_custom_types() {
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode}"
 }
 
 valid_custom_types_value() {
@@ -2655,6 +2729,43 @@ run_bd_init_pinned() {
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
 }
 
+# run_bd_init_proxied initializes a local workspace through beads RC's
+# proxied-server UOW path. Gas City deliberately does not provide a Dolt
+# host/port here: the RC owns both the proxy and its local Dolt child.
+run_bd_init_proxied() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local external_host="${GC_BEADS_PROXY_EXTERNAL_HOST:-}"
+    local external_port="${GC_BEADS_PROXY_EXTERNAL_PORT:-}"
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        export BEADS_DOLT_PROXIED_SERVER=1
+        unset BEADS_DOLT_AUTO_START
+        unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
+        unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
+        unset BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        bd_bin="${BD_BIN:-bd}"
+        # Idle-never is D3, and it applies to every proxied scope GC owns, not
+        # only the ones that arrive through the provider-owned front door:
+        # without it bd retires the proxy and its Dolt child after 30s quiet and
+        # every later command pays a cold start. It is also what makes bd write
+        # the client-info sidecar the lifecycle reads to find the proxy root.
+        set -- init --quiet --proxied-server --proxied-server-idle-timeout 0
+        if [ -n "$external_host" ] || [ -n "$external_port" ]; then
+            [ -n "$external_host" ] && [ -n "$external_port" ] || die "proxied-external init requires both GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+            set -- "$@" --proxied-server-external-host "$external_host" --proxied-server-external-port "$external_port"
+        fi
+        set -- "$@" -p "$prefix"
+        if [ -n "$dolt_database" ]; then
+            set -- "$@" --database "$dolt_database"
+        fi
+        set -- "$@" --skip-hooks --skip-agents "$dir"
+        "$bd_bin" "$@"
+    )
+}
+
 run_bd_doltlite() {
     local dir="$1"
     shift
@@ -2665,7 +2776,7 @@ run_bd_doltlite() {
         export GC_BEADS_BACKEND="doltlite"
         unset GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD GC_DOLT
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
-        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
+        unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
         "${BD_BIN:-bd}" "$@"
     )
@@ -2878,12 +2989,28 @@ op_init() {
         die "reserved dolt database name: $dolt_database (used internally by gc)"
     fi
 
-    # Custom bead types for bd (extracted from beads core in v0.46.0).
-    # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
-    # "convergence" is required because gc's convergence handler creates
-    # beads with that type. "step" is required for non-root formula step
-    # beads (#1039). Must match doctor.RequiredCustomTypes.
-    local custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
+    local custom_types
+    custom_types=$(gc_custom_types)
+
+    # Fresh managed-local scopes use direct/server mode by default. Beads
+    # metadata/config and a pending provider intent are the topology authority;
+    # existing authoritative modes remain unchanged.
+    if scope_is_proxied "$dir"; then
+        ensure_beads_dir_permissions "$dir"
+        # An explicitly opted-in proxied scope may already have config.yaml (gc writes the
+        # canonical mode before invoking this helper) but no metadata.json.
+        # `bd context` can succeed from ambient parent state in that shape, so
+        # use the RC's metadata marker as the initialization witness. Honor
+        # BD_BIN here just as run_bd_init_proxied does; tests and pinned
+        # deployments must not silently invoke an unrelated PATH binary.
+        bd_bin="${BD_BIN:-bd}"
+        if [ ! -f "$metadata_path" ] || ! (cd "$dir" && BEADS_DIR="$dir/.beads" BEADS_DOLT_PROXIED_SERVER=1 "$bd_bin" context >/dev/null 2>&1); then
+            run_bd_init_proxied "$dir" "$prefix" "$dolt_database" || die "bd proxied-server init failed for $dir"
+        fi
+        ensure_beads_dir_permissions "$dir"
+        normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+        exit 0
+    fi
 
     # Hosted beads-gateway: when a credential command is configured, bd
     # authenticates to the gateway via that command (EIA-as-username over TLS) and
@@ -3382,6 +3509,315 @@ op_shutdown() {
     op_stop
 }
 
+# provider_owned_scope_dir resolves the scope carried by GC's provider adapter.
+# The legacy wrapper always manages the city-wide Dolt runtime; provider-owned
+# scopes instead let bd own its own server or proxied UOW lifecycle.
+provider_owned_scope_dir() {
+    [ -n "${BEADS_DIR:-}" ] || die "provider-owned beads operation requires BEADS_DIR"
+    dirname "$BEADS_DIR"
+}
+
+provider_owned_transport() {
+    local dir="$1"
+    case "${GC_BEADS_TRANSPORT:-}" in
+        direct|proxied) printf '%s\n' "$GC_BEADS_TRANSPORT" ;;
+        '')
+            if scope_is_proxied "$dir"; then
+                printf '%s\n' proxied
+            else
+                printf '%s\n' direct
+            fi
+            ;;
+        *) die "invalid provider-owned beads transport: $GC_BEADS_TRANSPORT" ;;
+    esac
+}
+
+# provider_owned_scope_is_local reads durable bd topology instead of guessing
+# from a loopback address. GC_BEADS_TARGET is present only while a pending
+# initialization is being completed; ready scopes derive ownership from the
+# binding bd wrote in the scope itself.
+provider_owned_scope_is_local() {
+    local dir="$1" config sidecar metadata
+    case "${GC_BEADS_TARGET:-}" in
+        local) return 0 ;;
+        external) return 1 ;;
+    esac
+    config="$dir/.beads/config.yaml"
+    [ -f "$config" ] || return 1
+
+    # bd persists proxied-external topology in its client-info sidecar. The
+    # endpoint must not be inferred from the loopback proxy listener.
+    if scope_is_proxied "$dir"; then
+        sidecar="$dir/.beads/proxied_server_client_info.json"
+        [ -f "$sidecar" ] && grep -Eq '"external"[[:space:]]*:' "$sidecar" && return 1
+        return 0
+    fi
+
+    # A direct scope bd initialized against someone else's server records that
+    # upstream in its own metadata. That binding is the authority here, the
+    # same way the sidecar is for a proxied one: without it a direct-external
+    # scope read as local and `gc stop` issued a lifecycle command for a Dolt
+    # nobody here started.
+    metadata="$dir/.beads/metadata.json"
+    if [ -f "$metadata" ] && grep -Eq '"dolt_server_(host|socket)"[[:space:]]*:[[:space:]]*"[^"]' "$metadata"; then
+        return 1
+    fi
+
+    # Legacy GC-managed direct scopes deliberately disable bd auto-start to
+    # prevent a competing server, but GC still owns their local lifecycle.
+    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*managed_city[[:space:]]*$' "$config"; then
+        return 0
+    fi
+    # A direct canonical endpoint is local only when bd's own persisted
+    # auto-start policy says it owns the process. This keeps transferred local
+    # loopback scopes local without treating external loopback endpoints as
+    # GC-owned.
+    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*city_canonical[[:space:]]*$' "$config"; then
+        grep -Eq '^[[:space:]]*dolt\.auto-start:[[:space:]]*true[[:space:]]*$' "$config"
+        return $?
+    fi
+    if grep -Eq '^[[:space:]]*gc\.endpoint_origin:[[:space:]]*explicit[[:space:]]*$' "$config" ||
+        grep -Eq '^[[:space:]]*dolt\.(host|port|socket):' "$config"; then
+        return 1
+    fi
+    return 0
+}
+
+run_provider_owned_bd() {
+    local dir="$1"
+    shift
+    (
+        cd "$dir" || exit 1
+        export BEADS_DIR="$dir/.beads"
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" != "1" ] || [ "${GC_BEADS_TARGET:-}" = "local" ]; then
+            # A completed bd binding owns its endpoint. Do not let the legacy
+            # GC-managed projection override it. A direct external init is
+            # the one exception: bd needs its supplied endpoint to write that
+            # binding in the first place.
+            unset GC_DOLT GC_DOLT_HOST GC_DOLT_PORT GC_DOLT_USER GC_DOLT_PASSWORD
+            unset GC_DOLT_DATA_DIR GC_DOLT_LOG_FILE GC_DOLT_STATE_FILE GC_DOLT_PID_FILE GC_DOLT_LOCK_FILE GC_DOLT_CONFIG_FILE
+            unset BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET
+            unset BEADS_DOLT_AUTO_START
+        fi
+        if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
+            export BEADS_DOLT_PROXIED_SERVER=1
+        else
+            # A direct ready binding must not inherit a proxy selector from
+            # the parent process. The binding determines its own transport.
+            unset BEADS_DOLT_PROXIED_SERVER
+        fi
+        "${BD_BIN:-bd}" "$@"
+    )
+}
+
+op_provider_owned_init() {
+    local dir="$1" prefix="$2" database="${3:-}"
+    [ -n "$dir" ] && [ -n "$prefix" ] || die "usage: gc-beads-bd init <dir> <prefix> [dolt_database]"
+    case "${GC_BEADS_TRANSPORT:-}:${GC_BEADS_TARGET:-}" in
+        direct:local|direct:external)
+            set -- init --init-if-missing --quiet --server
+            if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+                # bd persists the endpoint it is given at init and nowhere
+                # else: --server-host/--server-port land in metadata.json as
+                # dolt_server_host/dolt_server_port, which is the whole
+                # binding. Handing bd only --external left it on its own
+                # default, starting a local sql-server beside the city and
+                # writing a binding that named no upstream — so every later
+                # command talked to that local server while the operator had
+                # asked for someone else's.
+                set -- "$@" --external
+                if [ -n "${BEADS_DOLT_SERVER_SOCKET:-}" ]; then
+                    set -- "$@" --server-socket "$BEADS_DOLT_SERVER_SOCKET"
+                else
+                    [ -n "${GC_DOLT_HOST:-}" ] && [ -n "${GC_DOLT_PORT:-}" ] || die "direct-external init requires GC_DOLT_HOST and GC_DOLT_PORT"
+                    set -- "$@" --server-host "$GC_DOLT_HOST" --server-port "$GC_DOLT_PORT"
+                fi
+            fi
+            ;;
+        proxied:local|proxied:external)
+            # Both targets own a LOCAL proxy and its Dolt child; only the data
+            # upstream differs. bd's default 30s idle timeout retires that pair
+            # after every quiet period, so each later bd command would pay a
+            # proxy plus Dolt cold start (~0.6-6s measured on rc.2). GC keeps
+            # the proxy resident for the city's lifetime instead and retires it
+            # explicitly in the stop op. Idle timeout 0 is bd's
+            # IdleTimeoutNever; it lands in the client-info sidecar as
+            # "idle_timeout": -1.
+            set -- init --init-if-missing --quiet --proxied-server --proxied-server-idle-timeout 0
+            if [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+                if [ -n "${GC_BEADS_PROXY_EXTERNAL_SOCKET:-}" ]; then
+                    set -- "$@" --proxied-server-external-socket-path "$GC_BEADS_PROXY_EXTERNAL_SOCKET"
+                else
+                    [ -n "${GC_BEADS_PROXY_EXTERNAL_HOST:-}" ] && [ -n "${GC_BEADS_PROXY_EXTERNAL_PORT:-}" ] || die "proxied-external init requires GC_BEADS_PROXY_EXTERNAL_HOST and GC_BEADS_PROXY_EXTERNAL_PORT"
+                    set -- "$@" --proxied-server-external-host "$GC_BEADS_PROXY_EXTERNAL_HOST" --proxied-server-external-port "$GC_BEADS_PROXY_EXTERNAL_PORT"
+                fi
+            fi
+            ;;
+        *) die "invalid provider-owned beads transport/target: ${GC_BEADS_TRANSPORT:-}/${GC_BEADS_TARGET:-}" ;;
+    esac
+    set -- "$@" -p "$prefix" --skip-hooks --skip-agents
+    [ -n "$database" ] && set -- "$@" --database "$database"
+    set -- "$@" "$dir"
+    # Registering gc's bead vocabulary with the new store is deliberately NOT
+    # done here. ga-5mym bans `bd config set` from this script because it runs
+    # under the provider op timeout; cmd/gc owns that step (see
+    # registerProviderOwnedScopeCustomTypes) alongside the canonical config it
+    # writes for the same scope.
+    GC_BEADS_PROVIDER_INIT=1 run_provider_owned_bd "$dir" "$@"
+}
+
+# provider_owned_retire_local_dolt retires the local Dolt lifecycle bd owns for
+# a scope. gc stop must be re-runnable, so "there was nothing to stop" is
+# success: bd's proxied path already reports that as exit 0, but the direct
+# path exits 1 with "dolt server is not running". Any other failure still
+# surfaces with bd's own diagnostics.
+provider_owned_retire_local_dolt() {
+    local dir="$1" out status
+    set +e
+    out=$(run_provider_owned_bd "$dir" dolt stop 2>&1)
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out"
+        fi
+        return 0
+    fi
+    case "$out" in
+        *"not running"*|*"no server"*) return 0 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return "$status"
+}
+
+# provider_owned_proxy_root prints the physical Dolt root a proxied scope's
+# lifecycle commands act on, or nothing when the scope has no proxied binding
+# yet. bd resolves that root from the client-info sidecar's root_path (see
+# internal/doltserver physical-root resolution: env, then sidecar, then the
+# scope's own data dir), and `bd dolt stop` shuts down whatever is serving it.
+provider_owned_proxy_root() {
+    local dir="$1" sidecar root
+    sidecar="$dir/.beads/proxied_server_client_info.json"
+    [ -f "$sidecar" ] || return 0
+    root=$(sed -n 's/.*"root_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$sidecar" | head -n 1)
+    [ -n "$root" ] || return 0
+    case "$root" in
+        /*) ;;
+        # bd resolves a relative root_path against BEADS_DIR, not the scope
+        # root (internal/configfile resolveSidecarPath -> Join(beadsDir, p)),
+        # and cmd/gc/beads_scope_ownership.go does the same. Joining to the
+        # scope root instead put the answer one directory too high, so a rig
+        # whose sidecar names the city's shared root compared unequal and its
+        # recover ran `bd dolt stop` — which bd resolves the sidecar's way,
+        # retiring the proxy and Dolt child serving hq and every rig.
+        *) root="$dir/.beads/$root" ;;
+    esac
+    # Physical resolution so two spellings of one directory compare equal: a
+    # migrated rig's root_path is the city's, reached through `..` segments.
+    (cd "$root" 2>/dev/null && pwd -P) || printf '%s\n' "$root"
+}
+
+# provider_owned_scope_shares_city_proxy_root reports whether this scope's proxy
+# root is the city's rather than its own.
+#
+# `gc beads city migrate-proxied` points every rig's Dolt data dir at the city's
+# .beads/dolt, so one proxy and one Dolt child serve hq and every rig. bd is
+# given only BEADS_DIR, and it resolves the root to stop from the sidecar, so a
+# rig-scoped `bd dolt stop` in that shape is a city-wide one.
+provider_owned_scope_shares_city_proxy_root() {
+    local dir="$1" scope_dir city_dir scope_root city_root
+    [ -n "${GC_CITY_PATH:-}" ] || return 1
+    scope_dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    city_dir=$(cd "$GC_CITY_PATH" 2>/dev/null && pwd -P) || return 1
+    # The city scope owns the shared root; it is the one scope allowed to cycle it.
+    [ "$scope_dir" != "$city_dir" ] || return 1
+    scope_root=$(provider_owned_proxy_root "$dir")
+    [ -n "$scope_root" ] || return 1
+    city_root=$(provider_owned_proxy_root "$GC_CITY_PATH")
+    [ -n "$city_root" ] || return 1
+    [ "$scope_root" = "$city_root" ]
+}
+
+op_provider_owned_lifecycle() {
+    local op="$1" dir transport local_scope=false
+    dir=$(provider_owned_scope_dir)
+    # A scope with no store has nothing left to retire. This is the half-built
+    # shape an interrupted `gc rig add` leaves: the ownership journal records a
+    # still-initializing path, and `bd init` then failed, so there is a journaled
+    # root with either no directory at all or a directory with no .beads.
+    #
+    # Both are already-stopped. The missing-directory arm is here because every
+    # bd invocation below starts with `cd "$dir"`. The no-.beads arm is here
+    # because bd ignores a BEADS_DIR that does not exist and walks up from the
+    # cwd instead (FindBeadsDir): for a rig that is its own repository that ends
+    # in "no active beads workspace found", which provider_owned_retire_local_dolt
+    # does not tolerate, so `gc stop` exited 1 on every run for a scope where
+    # nothing was running; and for a rig that is a subdirectory of the city the
+    # walk-up finds the CITY's store and the stop acts on the city's proxy under
+    # the rig's name, which is worse than the wrong exit code.
+    #
+    # A starting op still refuses: initializing a store for a scope that is not
+    # there is not something to do quietly.
+    if [ ! -d "$dir" ] || [ ! -d "$dir/.beads" ]; then
+        case "$op" in
+            stop|shutdown)
+                printf 'scope %s has no beads store; nothing to retire\n' "$dir" >&2
+                return 0
+                ;;
+        esac
+    fi
+    transport=$(provider_owned_transport "$dir")
+    export GC_BEADS_TRANSPORT="$transport"
+    if provider_owned_scope_is_local "$dir"; then
+        local_scope=true
+    fi
+    case "$transport" in
+        direct)
+            case "$op" in
+                start|ensure-ready) run_provider_owned_bd "$dir" ping ;;
+                health|probe) run_provider_owned_bd "$dir" ping ;;
+                recover) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir"; run_provider_owned_bd "$dir" ping ;;
+                stop|shutdown) [ "$local_scope" != true ] || provider_owned_retire_local_dolt "$dir" ;;
+                *) exit 2 ;;
+            esac
+            ;;
+        proxied)
+            case "$op" in
+                # One ping is the whole readiness wait: bd's provider open
+                # already blocks for the proxy endpoint and then for the Dolt
+                # child to report ready (~45s worst case on a cold start). An
+                # outer retry loop would only stack another wait on top of it,
+                # so GC widens the op budget instead (providerOwnedOpTimeout).
+                start|ensure-ready|health|probe) run_provider_owned_bd "$dir" ping ;;
+                # A proxied external scope still owns its local proxy child.
+                # bd dolt stop retires that proxy without issuing a lifecycle
+                # command to the upstream external Dolt server.
+                #
+                # A scope whose proxy root is the CITY's does not own that pair
+                # and must not retire it. `bd dolt stop` resolves the root from
+                # the sidecar, not from BEADS_DIR, so for a migrated rig the
+                # stop takes down the one proxy and Dolt child serving hq and
+                # every other rig, under live agents, to recover one rig — and
+                # the ping that follows cold-starts it while the rig-local cause
+                # is still there, so each health pass does it again. Recovery
+                # for such a rig is a ping; cycling the shared pair belongs to
+                # the city scope, whose own recover op does exactly that.
+                recover)
+                    if provider_owned_scope_shares_city_proxy_root "$dir"; then
+                        printf 'scope %s shares the city proxy root; recovering by ping only\n' "$dir" >&2
+                    else
+                        provider_owned_retire_local_dolt "$dir"
+                    fi
+                    run_provider_owned_bd "$dir" ping
+                    ;;
+                stop|shutdown) provider_owned_retire_local_dolt "$dir" ;;
+                *) exit 2 ;;
+            esac
+            ;;
+        *) die "invalid provider-owned beads transport/target: ${GC_BEADS_TRANSPORT:-}/${GC_BEADS_TARGET:-}" ;;
+    esac
+}
+
 # --- Main ---
 
 # GC_DOLT=skip → no-op for all operations.
@@ -3397,9 +3833,38 @@ if [ -z "$GC_CITY_PATH" ]; then
     die "GC_CITY_PATH not set"
 fi
 
+# A fresh scope which GC has explicitly delegated to bd must never reach the
+# historical GC-managed Dolt lifecycle below. The adapter supplies this marker
+# for every operation; init additionally carries the ephemeral selector.
+if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ]; then
+    case "$op" in
+        init) op_provider_owned_init "$@" ;;
+        start|ensure-ready|health|probe|recover|stop|shutdown) op_provider_owned_lifecycle "$op" ;;
+        *) exit 2 ;;
+    esac
+    exit $?
+fi
+
 # Set derived paths.
 GC_DIR="$GC_CITY_PATH/.gc"
 BEADS_DIR_ROOT="$GC_CITY_PATH/.beads"
+
+if scope_is_proxied "$GC_CITY_PATH"; then
+    case "$op" in
+        start|ensure-ready|health|probe|recover|stop|shutdown)
+            exit 2
+            ;;
+    esac
+    # Proxied store bridge operations are handled by bd through the GC bridge;
+    # no managed listener exists from which to derive a port.
+    DOLT_PORT=0
+    DOLT_USER="${GC_DOLT_USER:-root}"
+    case "$op" in
+        init) op_init "$@"; exit $? ;;
+        create|get|update|close|reopen|list|ready|children|list-by-label|set-metadata|delete|dep-add|dep-remove|dep-list)
+            op_store_bridge "$op" "$@"; exit $? ;;
+    esac
+fi
 
 # Prefer GC-owned runtime layout derivation when the current gc binary is
 # available. Fall back to the legacy shell derivation for compatibility.

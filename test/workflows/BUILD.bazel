@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "workflows_test",
+    srcs = [
+        "needs_lifecycle_test.go",
+        "testenv_import_test.go",
+    ],
+    deps = [
+        "//internal/testenv",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)

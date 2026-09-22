@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "reliability",
+    srcs = [
+        "format.go",
+        "reliability.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/reliability",
+    visibility = ["//:__subpackages__"],
+    deps = ["//internal/events"],
+)
+
+go_test(
+    name = "reliability_test",
+    srcs = [
+        "format_test.go",
+        "reliability_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":reliability"],
+    deps = [
+        "//internal/events",
+        "//internal/testenv",
+    ],
+)

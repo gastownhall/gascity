@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "prwatchdog",
+    srcs = [
+        "evaluate.go",
+        "watch.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/scripts/prwatchdog",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "prwatchdog_test",
+    srcs = [
+        "evaluate_test.go",
+        "testenv_import_test.go",
+        "watch_test.go",
+        "workflow_policy_test.go",
+    ],
+    embed = [":prwatchdog"],
+    deps = [
+        "//internal/testenv",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
