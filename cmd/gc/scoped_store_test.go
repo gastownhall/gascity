@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -537,5 +538,37 @@ func TestBeadPolicyStoreCarriesTheProxiedStoreView(t *testing.T) {
 	}
 	if _, ok := beads.ProxiedStoreFrom(wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})); ok {
 		t.Fatal("a policy-wrapped MemStore answered as a proxied store")
+	}
+}
+
+// TestBdStoreBackingGuardsATypedNilProxiedView is council A-F10.
+//
+// The interface arm read `if v == nil || !v.Demoted()`. `v == nil` is false for
+// an interface holding a nil *beads.ProxiedStore — the interface has a type —
+// and (*ProxiedStore).Demoted takes s.mu.RLock() on the nil receiver and
+// panics. The two neighboring arms (*beads.BdStore, *beads.CachingStore) both
+// guard their typed nils explicitly, so this was an inconsistency rather than a
+// deliberate choice, and bdStoreBacking is reached from gc status's snapshot
+// path where a panic is the whole command.
+func TestBdStoreBackingGuardsATypedNilProxiedView(t *testing.T) {
+	var typedNil *beads.ProxiedStore
+	// Through beads.Store, which is what bdStoreBacking takes; the type switch
+	// inside it is what reaches the ProxiedStoreView arm.
+	var store beads.Store = typedNil
+	// Asserted through reflect rather than `store == nil`: the comparison is
+	// the very thing this test is about, and staticcheck rejects it (SA4023)
+	// precisely because it can see that an interface with a type is never nil.
+	// That is the bug, stated by the linter.
+	if value := reflect.ValueOf(store); value.Kind() != reflect.Ptr || !value.IsNil() {
+		t.Fatal("the fixture did not build a typed nil; this test would prove nothing")
+	}
+	if _, ok := store.(beads.ProxiedStoreView); !ok {
+		t.Fatal("a *beads.ProxiedStore no longer satisfies ProxiedStoreView, so this test does not " +
+			"reach the arm it is about")
+	}
+
+	got, ok := bdStoreBacking(store)
+	if ok || got != nil {
+		t.Fatalf("bdStoreBacking(typed nil) = (%v, %v), want (nil, false)", got, ok)
 	}
 }
