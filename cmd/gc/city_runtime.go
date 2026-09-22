@@ -1219,6 +1219,19 @@ func (cr *CityRuntime) tick(
 	// was computed as false, silently skipping the death scan for the tick
 	// that believes it just reconciled everything.
 	configChanged := dirty.Swap(false)
+	tickCompleted := false
+	// Register the dirty-restoration guard before reconcilePoolDeaths runs
+	// below: a panic inside that call would otherwise leave configChanged's
+	// Swap(false) permanently applied, since the later defer that also
+	// restores dirty is not registered until after reconcilePoolDeaths
+	// returns and only recovers panics that occur once control reaches it.
+	if configChanged {
+		defer func() {
+			if !tickCompleted {
+				dirty.Store(true)
+			}
+		}()
+	}
 	// Stretched session-phase patrol: when the provider streams session
 	// events, patrol-driven session scans may run at a longer cadence
 	// ([daemon].session_patrol_interval) — event pokes carry the real-time
@@ -1237,7 +1250,6 @@ func (cr *CityRuntime) tick(
 	manualReloadCompleted := false
 	manualReloadReplied := false
 	dirtyCleared := false
-	tickCompleted := false
 	completeManualReload := func() {
 		if manualReload == nil || manualReloadReplied {
 			return

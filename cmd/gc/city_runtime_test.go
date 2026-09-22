@@ -1930,6 +1930,107 @@ func TestCityRuntimeTickReadsDirtyExactlyOnce(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickDirtyRestoreDefersBeforePoolDeathScan pins a second
+// ordering invariant found during ship-gate review of gc-2q8ohg: tick()
+// clears dirty via Swap(false) and then calls reconcilePoolDeaths before any
+// defer exists to restore dirty on an incomplete tick. If the defer that
+// calls dirty.Store(true) is registered only after reconcilePoolDeaths
+// returns, a panic inside reconcilePoolDeaths permanently drops the pending
+// config change: dirty was already cleared by the earlier Swap, and the
+// restoring defer was never reached, so it never runs during the panic's
+// unwind. This pins that the dirty.Store(true) restoration defer is
+// registered (its statement appears, textually, earlier in tick's body)
+// before the call to reconcilePoolDeaths, the way this package already pins
+// other structural orderings (TestCityRuntimeTickReadsDirtyExactlyOnce).
+func TestCityRuntimeTickDirtyRestoreDefersBeforePoolDeathScan(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "city_runtime.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse city_runtime.go: %v", err)
+	}
+
+	var tickFn *ast.FuncDecl
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "tick" || fn.Recv == nil {
+			return true
+		}
+		tickFn = fn
+		return false
+	})
+	if tickFn == nil {
+		t.Fatal("could not find func (cr *CityRuntime) tick in city_runtime.go")
+	}
+
+	isDirtyStoreCall := func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "Store" {
+			return false
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		return ok && recv.Name == "dirty"
+	}
+
+	var restoreDeferPos token.Pos
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		if restoreDeferPos != token.NoPos {
+			return false
+		}
+		deferStmt, ok := n.(*ast.DeferStmt)
+		if !ok {
+			return true
+		}
+		lit, ok := deferStmt.Call.Fun.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		found := false
+		ast.Inspect(lit.Body, func(inner ast.Node) bool {
+			if isDirtyStoreCall(inner) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			restoreDeferPos = deferStmt.Pos()
+			return false
+		}
+		return true
+	})
+	if restoreDeferPos == token.NoPos {
+		t.Fatal("no defer statement calling dirty.Store(...) found in tick()")
+	}
+
+	var poolDeathScanPos token.Pos
+	ast.Inspect(tickFn.Body, func(n ast.Node) bool {
+		if poolDeathScanPos != token.NoPos {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "reconcilePoolDeaths" {
+			return true
+		}
+		poolDeathScanPos = call.Pos()
+		return false
+	})
+	if poolDeathScanPos == token.NoPos {
+		t.Fatal("no call to reconcilePoolDeaths found in tick()")
+	}
+
+	if restoreDeferPos >= poolDeathScanPos {
+		t.Fatalf("the dirty.Store(...) restoration defer is registered at or after the reconcilePoolDeaths call: a panic inside reconcilePoolDeaths would permanently drop a pending config change instead of being restored on unwind")
+	}
+}
+
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
