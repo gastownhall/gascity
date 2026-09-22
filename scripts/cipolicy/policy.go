@@ -58,7 +58,18 @@ const (
 	// rows and the author-at-commit pin — was a local one-off no regression
 	// could fail. Reviewed delta: one `go test` step, same job, same tooling,
 	// no new trigger and no new permission.
-	expectedCIExecutionHash      = "25f66f71621780e6a94dbe6bfacf3cfee062274b39e103c058a02bb7ba5ee7ea"
+	//
+	// Bumped again to split that step into its own job (round3 D-F17). The
+	// topology job's four step -timeouts summed to 115 minutes against its own
+	// 90-minute cap, so a slow-but-live run was canceled by the job timeout
+	// and lost its `--- FAIL` line and tee'd log. Reviewed delta: the topology
+	// job's -timeouts become 30/15/30 (75 under 90); the lifecycle and safety
+	// step moves to a new "Beads / proxied-native acceptance" job with the same
+	// needs, the same beads_topology `if`, the same runner, env, bd build and
+	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
+	// skip summary; ci-required needs the new job and allows its skip exactly
+	// as it does the topology job's. No new trigger and no new permission.
+	expectedCIExecutionHash      = "1d4d121e46d9b57c8f951f1a461d841e59745447a56da7a63573d47e10125b6c"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
