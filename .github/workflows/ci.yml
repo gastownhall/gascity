@@ -569,6 +569,19 @@ jobs:
           go test -tags acceptance_a -timeout 30m -count=1 -v \
             -run 'TestBeadsInitTopologyMatrix$/^(M1-proxied-local|M5-legacy-gc-managed)$' \
             ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/topology.log"
+      # The proxied-native lane's evidence base. Both files carry
+      # //go:build acceptance_a and were selected by no -run expression in any
+      # job, so everything they prove was a local one-off: the per-crash-shape
+      # ping and recover budgets, foreign-root's "0 pings, 0 dolt stop", the
+      # no-spawn positive control, both no-migrate rows (the
+      # BD_ALLOW_REMOTE_MIGRATE consent fence) and the author-at-commit pin.
+      # A regression in any of them landed green.
+      - name: Proxied-native lifecycle and safety
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 35m -count=1 -v \
+            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$' \
+            ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
       # A skip that nobody reads is the failure mode this whole job exists to
       # fix, so the ones that remain are named in the summary.
       - name: Report remaining skips

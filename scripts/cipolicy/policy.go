@@ -48,7 +48,17 @@ const (
 	// only job that stands up the proxied shapes and ci-required accepted the
 	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
 	// internal packages, so the filter is now the graph itself.
-	expectedCIExecutionHash      = "c74219f009d94965f5172398ad5d0cf9ad3215ab2621b8604076afdf02b19674"
+	//
+	// Bumped again for one added step in the same job: "Proxied-native
+	// lifecycle and safety" (council pr2 C-F1). TestProxiedNativeLifecycle and
+	// TestProxiedNativeSafety carry //go:build acceptance_a and were selected
+	// by no -run expression in any job, so the proxied-native lane's whole
+	// evidence base — the per-crash-shape ping/recover budgets, foreign-root's
+	// "0 pings, 0 dolt stop", the no-spawn positive control, both no-migrate
+	// rows and the author-at-commit pin — was a local one-off no regression
+	// could fail. Reviewed delta: one `go test` step, same job, same tooling,
+	// no new trigger and no new permission.
+	expectedCIExecutionHash      = "25f66f71621780e6a94dbe6bfacf3cfee062274b39e103c058a02bb7ba5ee7ea"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
