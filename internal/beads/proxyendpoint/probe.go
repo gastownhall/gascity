@@ -103,9 +103,24 @@ const (
 	// of time proves nothing about a listener and is ProbeUnknown.
 	ProbeRefused
 	// ProbeAcceptedNoGreeting means the proxy accepted the connection and then
-	// closed it without a MySQL greeting. That is the signature of a live proxy
-	// whose backend dial failed: the proxy parses no wire protocol, so a dead
-	// Dolt child shows up as an accept followed by a close.
+	// closed it without completing the MySQL handshake. That is the signature of
+	// a live proxy whose backend dial failed: the proxy parses no wire protocol,
+	// so a dead Dolt child shows up as an accept followed by a close.
+	//
+	// The token reads as "no greeting arrived", and it also covers a greeting
+	// that arrived before the close, because the driver spells the two the same
+	// way: whether the peer closes before writing HandshakeV10 or after writing
+	// it and before answering the handshake response, the read fails with
+	// `unexpected EOF` and go-sql-driver returns mysql.ErrInvalidConn. There is
+	// nothing in the session error to tell them apart, and the confirming dial
+	// succeeds either way.
+	//
+	// That costs nothing here: a backend that greets and then hangs up is
+	// disturbed in the same way and wants the same response
+	// (backend_unreachable, three in a row before one bd ping, recover only if
+	// the ping fails). A reader that needs the narrower fact — greeting bytes
+	// seen or not — has to read the wire itself, which this probe deliberately
+	// does not do.
 	ProbeAcceptedNoGreeting
 	// ProbeServed means the handshake completed and both schema cursors were
 	// read.
