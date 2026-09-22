@@ -437,6 +437,11 @@ func (g *proxiedGuard) checkCursors(ctx context.Context, pin Pin) proxiedGuardSt
 	if observed == pinned {
 		return proxiedGuardHeld
 	}
+	// Drop the memoized pass before standing down. The memo's stamp fingerprints
+	// proxy.pid and the sidecar, and a migration writes neither — so without
+	// this, every other open in this process keeps reading an answer this tick
+	// has just contradicted, for the rest of the TTL (council A-F3).
+	ForgetProxiedPin(pin.ScopeRoot(), pin.Database())
 	lane, dir := cursorDriftAgainst(pinned, observed)
 	g.store.standDown(NewSchemaSkewVerdictError(lane, dir, fmt.Sprintf(
 		"the pinned database moved from %s to %s while this handle was open", pinned, observed)))

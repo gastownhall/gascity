@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -721,4 +722,44 @@ func TestProxiedGuardTickSpendsOneSessionPerTick(t *testing.T) {
 				"gated the new generation's cursors, so a second session buys the same answer", got)
 		}
 	})
+}
+
+// TestProxiedGuardTickForgetsTheMemoOnCursorDrift is the other half of council
+// A-F3.
+//
+// The pin memo's stamp fingerprints proxy.pid and the proxied sidecar, and a
+// migration writes neither — so nothing a file can tell invalidates a memoized
+// pass when somebody runs `bd migrate` inside the TTL. The guard tick's cursor
+// re-read is the ONE thing in the process that sees it, and it used to keep
+// that knowledge to itself: it stood this handle down and left every other open
+// in the process reading a pass it had just contradicted.
+func TestProxiedGuardTickForgetsTheMemoOnCursorDrift(t *testing.T) {
+	f := newGuardFixture(t)
+	f.start()
+
+	pin := f.store.Pin()
+	root, err := proxyendpoint.ProviderRoot(pin.ScopeRoot())
+	if err != nil {
+		t.Fatalf("ProviderRoot: %v", err)
+	}
+	beadsDir := filepath.Join(pin.ScopeRoot(), ".beads")
+	now := time.Now()
+
+	// The state a one-shot open in the same process would have left behind.
+	// (The guard's own admission runs with SkipMemo, so the tick cannot have
+	// written this itself — which is the point: it belongs to another open.)
+	storeProxiedPin(pin.ScopeRoot(), pin.Database(), false, root, beadsDir, pin, now)
+	if _, ok := lookupProxiedPin(pin.ScopeRoot(), pin.Database(), false, root, beadsDir, now); !ok {
+		t.Fatal("the memo entry was not installed; this test would pass vacuously")
+	}
+
+	// Somebody migrated the shared database.
+	f.cursors = proxyendpoint.Cursors{Main: SchemaCursorMain, Ignored: SchemaCursorIgnored + 1}
+	if step := f.tick(); step != proxiedGuardStoodDown {
+		t.Fatalf("cursor drift reported %s, want stood-down", step)
+	}
+	if _, ok := lookupProxiedPin(pin.ScopeRoot(), pin.Database(), false, root, beadsDir, now); ok {
+		t.Fatal("the tick stood this handle down for schema drift and left the memoized pass in place, " +
+			"so the next open in this process opens the library against the moved database without the gate")
+	}
 }

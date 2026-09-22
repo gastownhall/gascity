@@ -606,6 +606,36 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 // is a DIFFERENT question for a handle held for 40ms and one held for the
 // process lifetime, and a memo keyed on less than the question is a memo that
 // answers a question nobody asked.
+//
+// # What the stamp CANNOT see, and what bounds it (council A-F3)
+//
+// A migration writes neither proxy.pid nor the sidecar. The cursors are read
+// from the database, so no file fingerprint can invalidate an entry when
+// somebody runs `bd migrate` (or a newer bd opens the database) inside the TTL:
+// the memo hands back the stale pin, with the stale cursors, and the schema
+// gate does not run for that open.
+//
+// Re-reading the cursors on a memo HIT is not the fix. The cursor read IS the
+// probe session, and one probe session is exactly what a memo MISS costs on the
+// healthy path — so a memo that re-probed would cost what it saves and delete
+// its own reason to exist (17 accepted TCP connections per `gc doctor` run, on
+// a proxy whose idle watcher cannot arm while one is open).
+//
+// Three things bound the exposure instead, and they are stated here so a reader
+// does not have to reconstruct them:
+//
+//  1. proxiedPinMemoTTL caps the entry at proxiedPinMemoMaxTTL however long the
+//     operator's guard interval is. GC_BEADS_PROXIED_GUARD_INTERVAL has a floor
+//     but no ceiling, so without the cap an operator asking for a quieter tick
+//     was also asking the memo to trust a schema answer for that long.
+//  2. The library runs CheckForwardDrift at EVERY open, so a database that
+//     moved ahead of this binary is refused by the library rather than served —
+//     as the library's untyped error rather than gc's typed verdict, which is
+//     the part that is genuinely worse and is the residual here.
+//  3. The guard tick re-reads the cursors every interval and, on drift, now
+//     forgets the memo as well as standing the handle down — so the next open
+//     in the process re-derives instead of reading an answer a tick has already
+//     contradicted.
 var proxiedPinMemo = struct {
 	mu      sync.Mutex
 	entries map[string]proxiedPinMemoEntry
@@ -652,13 +682,32 @@ func lookupProxiedPin(scopeRoot, database string, longLived bool, root, beadsDir
 	return entry.pin, true
 }
 
+// proxiedPinMemoMaxTTL is the ceiling on how long a memoized admission pass may
+// be trusted, whatever the guard interval says.
+//
+// The TTL is the guard interval because the memo must never hold an answer
+// longer than the tick that would have re-checked it. That reasoning is sound
+// for everything the stamp CAN see and silent about the one thing it cannot: a
+// migration. GC_BEADS_PROXIED_GUARD_INTERVAL has a floor and no ceiling, so
+// `GC_BEADS_PROXIED_GUARD_INTERVAL=1h` — a reasonable thing for an operator to
+// ask of a ticker — also asked the memo to trust a schema answer for an hour.
+const proxiedPinMemoMaxTTL = 15 * time.Second
+
+// proxiedPinMemoTTL is how long an entry is trusted: the guard interval, capped.
+func proxiedPinMemoTTL() time.Duration {
+	if interval := proxiedGuardInterval(); interval < proxiedPinMemoMaxTTL {
+		return interval
+	}
+	return proxiedPinMemoMaxTTL
+}
+
 func storeProxiedPin(scopeRoot, database string, longLived bool, root, beadsDir string, pin Pin, now time.Time) {
 	proxiedPinMemo.mu.Lock()
 	defer proxiedPinMemo.mu.Unlock()
 	proxiedPinMemo.entries[proxiedPinMemoKey(scopeRoot, database, longLived)] = proxiedPinMemoEntry{
 		pin:     pin,
 		stamp:   proxiedPinStamp(root, beadsDir, now),
-		expires: now.Add(proxiedGuardInterval()),
+		expires: now.Add(proxiedPinMemoTTL()),
 	}
 }
 

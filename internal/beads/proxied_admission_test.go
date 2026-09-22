@@ -811,3 +811,35 @@ func TestZeroPinCannotBeOpened(t *testing.T) {
 		t.Errorf("the zero Pin carries an endpoint: %+v", pin.PoolKey())
 	}
 }
+
+// TestProxiedPinMemoTTLIsCapped is council A-F3's bound.
+//
+// The memo's stamp fingerprints proxy.pid and the sidecar, and a migration
+// writes neither — so no file fingerprint can invalidate an entry when somebody
+// runs `bd migrate` inside the TTL. Re-probing on a hit is not available: the
+// cursor read IS the probe session, and a memo that cost what it saves has no
+// reason to exist. So the exposure is bounded by time, and the TTL had no
+// ceiling: it was the guard interval, and GC_BEADS_PROXIED_GUARD_INTERVAL has a
+// floor and no upper bound, so asking for a quieter ticker also asked the memo
+// to trust a schema answer for that long.
+func TestProxiedPinMemoTTLIsCapped(t *testing.T) {
+	t.Run("a quiet guard interval does not extend the memo", func(t *testing.T) {
+		t.Setenv(proxiedGuardIntervalEnv, "1h")
+		if got := proxiedGuardInterval(); got != time.Hour {
+			t.Fatalf("proxiedGuardInterval() = %s, want 1h; this test is not driving the knob", got)
+		}
+		if got := proxiedPinMemoTTL(); got != proxiedPinMemoMaxTTL {
+			t.Fatalf("the memo TTL is %s for a 1h guard interval, want the %s cap: a memoized schema "+
+				"answer would be trusted for an hour, and no file fingerprint can see a migration",
+				got, proxiedPinMemoMaxTTL)
+		}
+	})
+
+	t.Run("a tick faster than the cap still bounds the memo", func(t *testing.T) {
+		t.Setenv(proxiedGuardIntervalEnv, "2s")
+		if got := proxiedPinMemoTTL(); got != 2*time.Second {
+			t.Fatalf("the memo TTL is %s for a 2s guard interval, want 2s: the memo must never hold an "+
+				"answer longer than the tick that would have re-checked it", got)
+		}
+	})
+}
