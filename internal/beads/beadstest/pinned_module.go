@@ -38,8 +38,28 @@ const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 // instead.
 func PinnedBeadsModuleDir(t *testing.T) string {
 	t.Helper()
-	version := PinnedBeadsVersion(t)
-	cache := goModuleCache(t)
+	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+}
+
+// moduleDirReporter is the subset of *testing.T the seam below uses.
+//
+// It exists so that "an unresolved cache is FATAL, never a skip" can be asserted
+// by a recorder in this package's own tests. The only other way to observe it is
+// a *testing.T in a subprocess, and a subprocess in a test grows the repo's
+// shrink-only resource census — the same reason this file resolves the module
+// cache inline instead of asking `go env`. Skipf is part of the interface on
+// purpose: a revert to it still compiles, and is caught by a test rather than by
+// a reviewer.
+type moduleDirReporter interface {
+	Helper()
+	Fatalf(format string, args ...any)
+	Skipf(format string, args ...any)
+}
+
+// pinnedBeadsModuleDirOrFatal reports an unresolved module cache as a test
+// failure. See PinnedBeadsModuleDir for why it cannot be a skip.
+func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) string {
+	t.Helper()
 	dir, err := pinnedBeadsModuleDir(cache, version)
 	if err != nil {
 		t.Fatalf("%v\n"+
