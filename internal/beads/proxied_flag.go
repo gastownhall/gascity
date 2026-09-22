@@ -63,9 +63,14 @@ func proxiedGuardInterval() time.Duration {
 	return proxiedEnvDuration(proxiedGuardIntervalEnv, proxiedGuardIntervalDefault)
 }
 
-// proxiedReadBudget returns the per-read wall-clock budget for a proxied native
+// ProxiedReadBudget returns the per-read wall-clock budget for a proxied native
 // handle, under the same default-on-nonsense rule as the guard interval.
-func proxiedReadBudget() time.Duration {
+//
+// It is exported because the OPENER lives in cmd/gc: the budget is applied with
+// WithNativeReadRetryBudget at open time, so the composition root has to be able
+// to read the knob. Applying it structurally inside the proxied open instead
+// would hide the one number an operator is most likely to want to change.
+func ProxiedReadBudget() time.Duration {
 	return proxiedEnvDuration(proxiedReadBudgetEnv, proxiedReadBudgetDefault)
 }
 

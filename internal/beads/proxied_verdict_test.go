@@ -178,7 +178,7 @@ func TestProxiedKnobsDefaultAndFloor(t *testing.T) {
 	if got := proxiedGuardInterval(); got != proxiedGuardIntervalDefault {
 		t.Errorf("default guard interval = %v, want %v", got, proxiedGuardIntervalDefault)
 	}
-	if got := proxiedReadBudget(); got != proxiedReadBudgetDefault {
+	if got := ProxiedReadBudget(); got != proxiedReadBudgetDefault {
 		t.Errorf("default read budget = %v, want %v", got, proxiedReadBudgetDefault)
 	}
 	if proxiedReadBudgetDefault >= nativeReadRetryBudget {
@@ -204,11 +204,11 @@ func TestProxiedKnobsDefaultAndFloor(t *testing.T) {
 	}
 
 	t.Setenv(proxiedReadBudgetEnv, "3s")
-	if got := proxiedReadBudget(); got != 3*time.Second {
+	if got := ProxiedReadBudget(); got != 3*time.Second {
 		t.Errorf("GC_BEADS_PROXIED_READ_BUDGET=3s -> %v, want 3s", got)
 	}
 	t.Setenv(proxiedReadBudgetEnv, "nope")
-	if got := proxiedReadBudget(); got != proxiedReadBudgetDefault {
+	if got := ProxiedReadBudget(); got != proxiedReadBudgetDefault {
 		t.Errorf("an unparseable read budget -> %v, want the default %v", got, proxiedReadBudgetDefault)
 	}
 }

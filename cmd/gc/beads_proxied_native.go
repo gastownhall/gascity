@@ -1,0 +1,420 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+// The composition root of the proxied-native lane.
+//
+// Everything below this line is gc's half of the split store: which bd verbs
+// admission may spend and what they mean, what environment the linked library is
+// opened with, what happens when a read's reconnect finds the proxy replaced,
+// and where the two halves are joined into a beads.ProxiedStore. The decisions —
+// whether the scope may be served natively at all, what a refusal is called,
+// when a handle stands down — belong to internal/beads and are not restated here.
+//
+// Two invariants hold across the whole file:
+//
+//   - gc never spawns dolt and never starts a proxy. The only lifecycle moves
+//     available are the two provider verbs below, both of which ask BD to make
+//     bd's proxy healthy.
+//   - nothing here runs unless the persisted topology is proxied-server, the
+//     rollout flag is on, and the factory decided to consult the opener. The
+//     openers are built unconditionally at every composition root; they are inert
+//     until all three hold.
+
+const (
+	// proxiedProviderProbeOp is the provider verb behind ProviderOps.Ping. On a
+	// proxied scope the script's probe arm is exactly `bd ping`
+	// (gc-beads-bd.sh), which adopts or restarts BD's proxy. gc spawns nothing.
+	proxiedProviderProbeOp = "probe"
+	// proxiedProviderRecoverOp is the verb behind ProviderOps.Recover: `bd dolt
+	// stop` followed by `bd ping`, except for a scope that shares the CITY's
+	// proxy root, where the script degrades to a ping alone rather than cycling
+	// the one proxy serving hq and every other rig.
+	proxiedProviderRecoverOp = "recover"
+
+	// proxiedOneShotAdmissionBudget bounds admission for a command a human is
+	// waiting on. A one-shot that cannot be admitted quickly takes the bd front
+	// door, which is the store it has today.
+	proxiedOneShotAdmissionBudget = 10 * time.Second
+	// proxiedLongLivedAdmissionBudget bounds admission for a store held for the
+	// process lifetime. It is the drain ceiling plus room for the ladder: a
+	// controller boot may legitimately wait out a proxy that is shutting down.
+	proxiedLongLivedAdmissionBudget = 90 * time.Second
+
+	// proxiedAdmissionPasses caps the outer ladder. The rungs themselves are
+	// bounded by the generation sets (one ping and one recover per generation,
+	// ever), so this only stops a record that keeps changing under us from
+	// spinning.
+	proxiedAdmissionPasses = 3
+	// proxiedAdmissionBackoff spaces those passes.
+	proxiedAdmissionBackoff = 200 * time.Millisecond
+)
+
+// The process-local escalation ledgers.
+//
+// They are package-level because "once per generation, per process" is the scope
+// the design asks for: a gc command opens many scopes, several of which may
+// share one bd proxy root, and a per-open set would turn "recover once" into
+// "recover on every open". They are also what makes the readiness memo work —
+// see proxiedProviderOps.noteReady.
+var (
+	proxiedObservedGenerations  = beads.NewGenerationSet()
+	proxiedRecoveredGenerations = beads.NewGenerationSet()
+)
+
+// providerOwnedScopeLifecycleOp is the seam the proxied lane runs provider verbs
+// through. Production is the real, semaphore-guarded, traced provider op; tests
+// script it to assert WHICH verbs a ladder spent, which is the only way to prove
+// "at most one ping and one recover per generation" without a bd binary.
+var providerOwnedScopeLifecycleOp = runProviderOwnedScopeLifecycleOpContext
+
+// proxiedProviderOps is the ENTIRE bd-verb surface admission may reach, bound to
+// one city.
+//
+// Both verbs are provider-owned lifecycle ops gc already runs elsewhere (health
+// passes, recovery sweeps), with the same semaphore, the same per-op budget and
+// the same tracing. Neither spawns anything gc owns.
+type proxiedProviderOps struct {
+	cityPath string
+	observed *beads.GenerationSet
+}
+
+// Ping asks bd to make the scope's proxy healthy.
+func (o proxiedProviderOps) Ping(ctx context.Context, scopeRoot string) error {
+	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderProbeOp); err != nil {
+		return err
+	}
+	o.noteReady(scopeRoot)
+	return nil
+}
+
+// Recover asks bd to retire and re-establish a proxy that listens but never
+// greets.
+func (o proxiedProviderOps) Recover(ctx context.Context, scopeRoot string) error {
+	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp); err != nil {
+		return err
+	}
+	o.noteReady(scopeRoot)
+	return nil
+}
+
+// noteReady is the readiness memo of design 3.3 step 2: the generation bd
+// published right after a verb succeeded is recorded as one gc has already spent
+// a verb on.
+//
+// The consequence is deliberate and worth stating plainly. Admission's ladder
+// keys its rungs on the generation, so a proxy that goes SILENT immediately after
+// gc pinged it does not get pinged a second time in the same process — it goes
+// straight to the recover rung, which is the right escalation for "we just asked
+// bd for this and this is what we got". Without the memo the ladder would spend
+// its ping on a generation gc itself had just produced.
+//
+// Every read here is best-effort: a record gc cannot read is a memo entry gc
+// does not make, and the ladder simply spends a rung it could have skipped.
+func (o proxiedProviderOps) noteReady(scopeRoot string) {
+	if o.observed == nil {
+		return
+	}
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		return
+	}
+	record, err := proxyendpoint.Read(root)
+	if err != nil {
+		return
+	}
+	// The generation is the {pid, birth} pair alone: one proxy legitimately
+	// serves several databases, and a rung spent on the process is spent for all
+	// of them.
+	o.observed.Add(proxyendpoint.NewPoolKey(record, "").Generation())
+}
+
+// proxiedNativeOpener opens one scope's split store.
+//
+// Every effect that is not a plain file read is a field, so the ladder is
+// provable without a proxy, a database or a bd binary: the provider ops, the
+// process table, the probe, the clock, and the two library opens.
+type proxiedNativeOpener struct {
+	cityPath  string
+	scopeRoot string
+	cityName  string
+	// database is the Dolt database to admit. It is resolved lazily (and
+	// cached here by a test that presets it) rather than at construction,
+	// because the opener is built for EVERY scope and only ever called for a
+	// proxied one: resolving the canonical connection target at construction
+	// would read config files for every direct city in the process.
+	database string
+
+	// openBd builds the WRITE leaf. It is the factory's own bd opener, so the
+	// leaf inside the split store is byte-identical to the store this scope
+	// would fall back to.
+	openBd func() (beads.Store, error)
+
+	ops          beads.ProviderOps
+	processTable proxyendpoint.ProcessTable
+	probe        func(ctx context.Context, ep proxyendpoint.Endpoint, database string) proxyendpoint.ProbeResult
+	observed     *beads.GenerationSet
+	recovered    *beads.GenerationSet
+	now          func() time.Time
+	sleep        func(ctx context.Context, d time.Duration) error
+
+	// openNative and openNativeStorage are the two library opens, injected so a
+	// test can drive the ladder on a host with no Dolt at all.
+	openNative        func(ctx context.Context, scopeRoot string, env map[string]string, opts ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error)
+	openNativeStorage func(ctx context.Context, scopeRoot string, env map[string]string) (beads.NativeStorage, error)
+}
+
+// newProxiedNativeOpener builds the opener for one scope.
+func newProxiedNativeOpener(cityPath, scopeRoot string, cfg *config.City, openBd func() (beads.Store, error)) *proxiedNativeOpener {
+	return &proxiedNativeOpener{
+		cityPath:  cityPath,
+		scopeRoot: scopeRoot,
+		cityName:  proxiedNativeAuthorCityName(cfg),
+		openBd:    openBd,
+		ops: proxiedProviderOps{
+			cityPath: cityPath,
+			observed: proxiedObservedGenerations,
+		},
+		observed:          proxiedObservedGenerations,
+		recovered:         proxiedRecoveredGenerations,
+		openNative:        beads.OpenNativeDoltStoreAtProxied,
+		openNativeStorage: beads.OpenNativeStorageAtProxied,
+	}
+}
+
+// scopeDatabase resolves the database this scope's proxy serves, once per open.
+// An unresolvable one is passed through as empty on purpose: admission refuses
+// an empty database with a TYPED verdict, so the factory falls back to the bd
+// front door with a visible reason instead of the lane quietly not existing.
+func (o *proxiedNativeOpener) scopeDatabase() string {
+	if o.database != "" {
+		return o.database
+	}
+	return proxiedScopeDatabase(o.cityPath, o.scopeRoot)
+}
+
+// proxiedScopeDatabase resolves the Dolt database name for a scope from the
+// canonical connection contract — the same resolution every other gc projection
+// uses, so the native handle and every bd child agree on which database they are
+// talking about. A scope whose config is not authoritative resolves to "", and
+// the lane declines rather than guessing: admission refuses an empty database
+// anyway, because the cursors it gates on are DATABASE()-scoped.
+func proxiedScopeDatabase(cityPath, scopeRoot string) string {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
+	if err != nil || !ok {
+		return ""
+	}
+	return target.Database
+}
+
+// storeOpener is the closure the factory calls.
+func (o *proxiedNativeOpener) storeOpener() func(context.Context, bool) (beads.Store, beads.ProxiedOpenReport, error) {
+	if o == nil {
+		return nil
+	}
+	return o.open
+}
+
+// open runs admission, opens the library against the pinned generation, and
+// joins the two leaves.
+//
+// The order matters and is the whole safety argument: NOTHING is opened until
+// admission has returned a Pin, and a Pin can only come from beads.Admit. A
+// caller that assembled the env map by hand has nothing to pass to
+// beads.NewProxiedStore.
+func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (beads.Store, beads.ProxiedOpenReport, error) {
+	ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(longLived))
+	defer cancel()
+
+	pin, err := o.admit(ctx, longLived)
+	if err != nil {
+		return nil, pin.Report(), err
+	}
+
+	native, err := o.openNative(ctx, o.scopeRoot, nativeDoltProxiedOpenEnvForPin(o.cityName, pin, longLived),
+		// The reconnect hook is where a re-pin actually happens: it re-runs
+		// admission and re-projects the CURRENT generation's endpoint, on the
+		// reader's goroutine.
+		beads.WithNativeReopen(o.reopen(longLived)),
+		// Ten seconds, not the direct lane's ninety: a bd-owned proxy is not
+		// gc's to restart, so a read that cannot reach it should demote in
+		// seconds rather than hold a caller through a minute and a half of
+		// mysql i/o timeouts.
+		beads.WithNativeReadRetryBudget(beads.ProxiedReadBudget()),
+		// The second read-only fence (the first is that the wrapper claims no
+		// graph-apply interface), in case a bare leaf ever escapes the wrapper.
+		beads.WithProxiedReadOnly())
+	if err != nil {
+		return nil, pin.Report(), fmt.Errorf("open native store over bd's proxy at %s: %w", o.scopeRoot, err)
+	}
+
+	bd, err := o.openBd()
+	if err != nil {
+		closeProxiedLeafQuietly(native)
+		return nil, pin.Report(), err
+	}
+	if verdict := proxiedPrefixAgreement(pin, native, bd); verdict != nil {
+		// H10: the two leaves take their id prefix from different authorities —
+		// the bd leaf from config, the native leaf from the database's own
+		// issue_prefix row — and a split whose halves disagree about which beads
+		// are foreign is worse than no split. Both handles are open by now, which
+		// is why this is the opener's check and not admission's: admission never
+		// opens the library and cannot ask the database.
+		closeProxiedLeafQuietly(native)
+		closeProxiedLeafQuietly(bd)
+		return nil, pin.Report(), verdict
+	}
+
+	store, err := beads.NewProxiedStore(native, bd, pin)
+	if err != nil {
+		closeProxiedLeafQuietly(native)
+		closeProxiedLeafQuietly(bd)
+		return nil, pin.Report(), err
+	}
+	if longLived {
+		// Only a store held for the process lifetime is worth a ticker; a
+		// one-shot's evidence cannot go stale inside its own lifetime in any way
+		// a read would not surface.
+		store.StartGuard()
+	}
+	return store, store.Report(), nil
+}
+
+// admit is the escalation ladder: beads.Admit, plus a bounded outer retry for
+// the verdicts that say "ask again".
+//
+// The RUNGS themselves live inside admission — one ping per generation, one
+// recover per generation, the 3-attempt no-greeting wait, the bounded drain —
+// because that is where the evidence is, and because two ladders over one
+// generation set would spend each rung twice. What this loop adds is the part
+// admission cannot decide: whether THIS caller should wait at all.
+//
+//   - A terminal verdict is returned immediately. There is nothing to ask again.
+//   - A one-shot takes the bd front door on the first non-terminal verdict too:
+//     the command in front of it would rather run now on the store it has today
+//     than wait for a proxy to finish draining.
+//   - A long-lived open retries, spaced, inside its budget, because the
+//     alternative is a controller that forks bd for the rest of the process
+//     because of a two-second restart at boot.
+func (o *proxiedNativeOpener) admit(ctx context.Context, longLived bool) (beads.Pin, error) {
+	database := o.scopeDatabase()
+	var lastErr error
+	for pass := 0; pass < proxiedAdmissionPasses; pass++ {
+		pin, err := beads.Admit(ctx, beads.AdmissionInput{
+			ScopeRoot:    o.scopeRoot,
+			Database:     database,
+			ProcessTable: o.processTable,
+			Probe:        o.probe,
+			Ops:          o.ops,
+			LongLived:    longLived,
+			Observed:     o.observed,
+			Recovered:    o.recovered,
+			Now:          o.now,
+			Sleep:        o.sleep,
+		})
+		if err == nil {
+			return pin, nil
+		}
+		lastErr = err
+
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Terminal() || !longLived {
+			return beads.Pin{}, err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return beads.Pin{}, err
+		}
+		if sleepErr := o.backoff(ctx, proxiedAdmissionBackoff); sleepErr != nil {
+			return beads.Pin{}, err
+		}
+	}
+	return beads.Pin{}, lastErr
+}
+
+// reopen is the read path's re-pin: re-run admission, re-project the CURRENT
+// generation's endpoint, and hand back a fresh storage handle.
+//
+// It is the only library open that happens after the store exists, and it
+// happens on the goroutine of the read that needed it — never on the guard
+// tick's, which marks a pool stale and lets the next reader do this. A typed
+// verdict returned from here ends the read on its first pass (the native read
+// path propagates it) so the wrapper can stand the handle down instead of
+// spending the whole read budget re-learning the same refusal.
+func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
+	return func(ctx context.Context) (beads.NativeStorage, error) {
+		pin, err := o.admit(ctx, longLived)
+		if err != nil {
+			return nil, err
+		}
+		return o.openNativeStorage(ctx, o.scopeRoot, nativeDoltProxiedOpenEnvForPin(o.cityName, pin, longLived))
+	}
+}
+
+func (o *proxiedNativeOpener) backoff(ctx context.Context, d time.Duration) error {
+	if o.sleep != nil {
+		return o.sleep(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func proxiedAdmissionBudget(longLived bool) time.Duration {
+	if longLived {
+		return proxiedLongLivedAdmissionBudget
+	}
+	return proxiedOneShotAdmissionBudget
+}
+
+// proxiedPrefixAgreement is H10, checked once, with both handles open.
+//
+// The bd leaf's prefix comes from the scope's config; the native leaf's comes
+// from the database's own issue_prefix row. CachingStore filters foreign bead
+// events by the backing store's prefix, and the two leaves of a split that
+// disagreed would classify the same bead differently depending on which leaf
+// answered. An empty prefix on either side is not a disagreement: an unfenced
+// store is the shipped default for scopes an operator never configured.
+func proxiedPrefixAgreement(pin beads.Pin, native *beads.NativeDoltStore, bd beads.Store) error {
+	nativePrefix := native.IDPrefix()
+	bdPrefix := ""
+	if reporter, ok := bd.(interface{ IDPrefix() string }); ok {
+		bdPrefix = reporter.IDPrefix()
+	}
+	if nativePrefix == "" || bdPrefix == "" || nativePrefix == bdPrefix {
+		return nil
+	}
+	return beads.NewProxiedVerdictError(beads.ProxiedVerdictPrefixMismatch, fmt.Sprintf(
+		"database %s mints %q and the bd front door mints %q", pin.Database(), nativePrefix, bdPrefix), nil)
+}
+
+// closeProxiedLeafQuietly releases a leaf an open is abandoning. A failed open
+// that left a live Dolt connection behind would hold a pool slot against bd's
+// proxy for the process lifetime.
+func closeProxiedLeafQuietly(store any) {
+	if closer, ok := store.(interface{ CloseStore() error }); ok {
+		_ = closer.CloseStore()
+	}
+}
+
+// proxiedNativeStoreOpenerForScope builds the factory's OpenProxiedStore for a
+// city or rig scope.
+//
+// openBd is the factory's own bd opener, passed through rather than rebuilt: the
+// write leaf inside the split store must be the SAME store the scope falls back
+// to, or a demotion would change which store is doing the writing.
+func proxiedNativeStoreOpenerForScope(cityPath, scopeRoot string, cfg *config.City, openBd func() (beads.Store, error)) func(context.Context, bool) (beads.Store, beads.ProxiedOpenReport, error) {
+	return newProxiedNativeOpener(cityPath, scopeRoot, cfg, openBd).storeOpener()
+}

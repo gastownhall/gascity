@@ -1599,6 +1599,15 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 // controller's city store). Those keep the beads library's daemon-sized
 // project pool; every other open is a one-shot CLI open and takes the
 // single-connection cap from nativeDoltOneShotOpenEnvForScope.
+// openStoreFactoryForCity is the beads store factory, behind a seam.
+//
+// The seam exists so the WIRING is assertable: which openers this composition
+// root supplies, and whether it threads the long-lived shape, decides whether a
+// proxied city gets the native read lane at all — and every other way of
+// checking that needs a real Dolt server, which a unit test cannot have. The
+// variable is never reassigned in production.
+var openStoreFactoryForCity = beads.OpenStoreAtForCity
+
 func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
@@ -1628,13 +1637,23 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	if haveMode {
 		mode = modeOverride
 	}
-	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+	// One bd opener, used twice: as the factory's fallback store and as the
+	// WRITE leaf of the proxied split store. They must be the same store, or a
+	// demotion would silently change which store is doing the writing.
+	openBd := func() (beads.Store, error) {
+		if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+			return nil, err
+		}
+		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
+	}
+	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
 		CityPath:          runtimeCityPath,
 		Provider:          provider,
 		PreflightChecker:  newBeadsPreflightChecker(runtimeCityPath, provider),
 		Logger:            slog.Default(),
 		ConditionalWrites: mode,
+		LongLived:         longLived,
 		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
 			flags, resolved := resolvedConditionalWritesFlags(cfg)
 			return lazyConditionalWritesDegradeEmitter(
@@ -1643,12 +1662,12 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		OpenFileStore: func() (beads.Store, error) {
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
-		OpenBdStore: func() (beads.Store, error) {
-			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
-				return nil, err
-			}
-			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
-		},
+		OpenBdStore: openBd,
+		// The proxied-native lane. The factory consults this ONLY for a
+		// persisted proxied-server topology with GC_BEADS_PROXIED_NATIVE on, so
+		// wiring it here changes nothing for any other scope or for a binary
+		// with the flag off.
+		OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
