@@ -7,6 +7,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -466,6 +467,48 @@ func TestSessionEventPumpFlowingGoesFalseAfterStaleness(t *testing.T) {
 	}
 	if !pump.flowing() {
 		t.Error("flowing() did not recover after a fresh event arrived")
+	}
+}
+
+// compositeEventedFake pairs eventedFake's SessionEventProvider with a
+// controllable runtime.CompositeSessionEventStaleness, so pump.flowing() can
+// be tested against a merged provider reporting one backend stale while the
+// stream itself keeps delivering events.
+type compositeEventedFake struct {
+	*eventedFake
+	stale atomic.Bool
+}
+
+func (p *compositeEventedFake) MergedStreamStale() bool { return p.stale.Load() }
+
+var _ runtime.CompositeSessionEventStaleness = (*compositeEventedFake)(nil)
+
+// A merged composite stream can keep lastEventUnixNano fresh off one healthy
+// backend while the other has gone silent; flowing() must consult the
+// composite reporter and not be masked by the healthy backend's traffic.
+func TestSessionEventPumpFlowingConsultsCompositeStaleness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &compositeEventedFake{eventedFake: &eventedFake{Fake: runtime.NewFake()}}
+	pump.restart(fp)
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
+
+	fp.stale.Store(true)
+	if pump.flowing() {
+		t.Error("flowing() = true while composite reports a fanned-in backend stale, want false")
+	}
+
+	fp.stale.Store(false)
+	if !pump.flowing() {
+		t.Error("flowing() did not recover once composite staleness cleared")
 	}
 }
 

@@ -5,6 +5,7 @@ package hybrid
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -16,19 +17,26 @@ type Provider struct {
 	local    runtime.Provider
 	remote   runtime.Provider
 	isRemote func(name string) bool
+
+	// mergedStale tracks the current SubscribeSessionEvents merge's
+	// per-backend staleness, when both backends are event-capable and thus
+	// mergeSessionEvents is in play. Replaced on every SubscribeSessionEvents
+	// call; nil when no merge is active (single-backend or never subscribed).
+	mergedStale atomic.Pointer[sessionEventStaleTracker]
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
-	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.Provider                       = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker      = (*Provider)(nil)
+	_ runtime.InteractionProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider           = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider  = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider   = (*Provider)(nil)
+	_ runtime.RelaunchProvider               = (*Provider)(nil)
+	_ runtime.LivenessObserver               = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError      = (*Provider)(nil)
+	_ runtime.SessionEventProvider           = (*Provider)(nil)
+	_ runtime.CompositeSessionEventStaleness = (*Provider)(nil)
 )
 
 // New creates a hybrid provider. isRemote returns true for sessions
@@ -298,35 +306,67 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	if err != nil {
 		return nil, fmt.Errorf("remote backend: %w", err)
 	}
-	return mergeSessionEvents(ctx, lCh, rCh, runtime.SessionEventStaleAfter), nil
+	tracker := newSessionEventStaleTracker(runtime.SessionEventStaleAfter)
+	p.mergedStale.Store(tracker)
+	return mergeSessionEvents(ctx, lCh, rCh, tracker), nil
+}
+
+// MergedStreamStale reports whether either backend fanned into the current
+// SubscribeSessionEvents merge has gone silent past its staleness bound. It
+// is false when no merge is active (a single event-capable backend, or no
+// subscription yet). See runtime.CompositeSessionEventStaleness.
+func (p *Provider) MergedStreamStale() bool {
+	t := p.mergedStale.Load()
+	if t == nil {
+		return false
+	}
+	return t.stale()
+}
+
+// sessionEventStaleTracker records the last-observed time of each side of a
+// merged session-event stream so staleness can be reported at query time
+// (MergedStreamStale) instead of by closing the merge. See mergeSessionEvents.
+type sessionEventStaleTracker struct {
+	staleAfter time.Duration
+	lastA      atomic.Int64 // UnixNano
+	lastB      atomic.Int64 // UnixNano
+}
+
+func newSessionEventStaleTracker(staleAfter time.Duration) *sessionEventStaleTracker {
+	t := &sessionEventStaleTracker{staleAfter: staleAfter}
+	now := time.Now().UnixNano()
+	t.lastA.Store(now)
+	t.lastB.Store(now)
+	return t
+}
+
+func (t *sessionEventStaleTracker) touchA() { t.lastA.Store(time.Now().UnixNano()) }
+func (t *sessionEventStaleTracker) touchB() { t.lastB.Store(time.Now().UnixNano()) }
+
+func (t *sessionEventStaleTracker) stale() bool {
+	now := time.Now()
+	if now.Sub(time.Unix(0, t.lastA.Load())) >= t.staleAfter {
+		return true
+	}
+	return now.Sub(time.Unix(0, t.lastB.Load())) >= t.staleAfter
 }
 
 // mergeSessionEvents fans two session-event streams into one, closing the
-// output when ctx is done, both inputs close, or either input goes silent
-// past staleAfter while the other is still open.
-//
-// The staleness check matters because a consumer's liveness signal (e.g.
-// cmd/gc's sessionEventPump.flowing()) is computed off the single merged
-// stream: as long as SOME event keeps arriving, that signal reports "live"
-// even if it is only ever the healthy backend's traffic. Without this check
-// a dead backend inside a composite provider would be invisible to every
-// consumer of the merged stream for as long as the other backend kept
-// producing — silently under-covering the dead backend's sessions instead
-// of falling back to patrol polling for them. Ending the merge here instead
-// reuses the pump's existing channel-closed fallback (session liveness
-// reverts fully to patrol) the same way a single-backend stream ending
-// already does. staleAfter is a parameter (not a direct
-// runtime.SessionEventStaleAfter reference) so tests can exercise the path
-// without waiting out the production bound; production always passes
-// runtime.SessionEventStaleAfter (see SubscribeSessionEvents above).
-func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, staleAfter time.Duration) <-chan runtime.SessionEvent {
+// output only when ctx is done or both inputs close. It never closes the
+// output merely because one side has gone quiet: a consumer computing
+// liveness off the single merged stream (e.g. cmd/gc's
+// sessionEventPump.flowing()) would otherwise see the WHOLE composite die
+// whenever either backend went idle for staleAfter, even though the other
+// backend kept delivering — a non-self-healing outage worse than the
+// masking bug this staleness tracking replaced (see
+// runtime.CompositeSessionEventStaleness). Instead, tracker records each
+// side's last-delivery time so a caller can ask MergedStreamStale() whether
+// EITHER side has gone silent, without losing the healthy side's events or
+// needing pump.restart to recover once the stale side resumes.
+func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, tracker *sessionEventStaleTracker) <-chan runtime.SessionEvent {
 	out := make(chan runtime.SessionEvent)
 	go func() {
 		defer close(out)
-		ticker := time.NewTicker(staleAfter / 3)
-		defer ticker.Stop()
-		now := time.Now()
-		lastA, lastB := now, now
 		for a != nil || b != nil {
 			select {
 			case <-ctx.Done():
@@ -336,7 +376,7 @@ func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, s
 					a = nil
 					continue
 				}
-				lastA = time.Now()
+				tracker.touchA()
 				select {
 				case out <- ev:
 				case <-ctx.Done():
@@ -347,17 +387,11 @@ func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, s
 					b = nil
 					continue
 				}
-				lastB = time.Now()
+				tracker.touchB()
 				select {
 				case out <- ev:
 				case <-ctx.Done():
 					return
-				}
-			case <-ticker.C:
-				if a != nil && b != nil {
-					if time.Since(lastA) >= staleAfter || time.Since(lastB) >= staleAfter {
-						return
-					}
 				}
 			}
 		}

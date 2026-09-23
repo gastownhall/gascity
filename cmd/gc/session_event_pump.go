@@ -83,6 +83,20 @@ type sessionEventPump struct {
 	// outage that neither closes the channel nor updates streamGen/
 	// observedGen — see sessionEventFlowingStaleAfter.
 	lastEventUnixNano atomic.Int64
+	// composite holds the current subscription's staleness reporter when sp
+	// implements runtime.CompositeSessionEventStaleness (a merged
+	// multi-backend stream), nil otherwise. flowing() consults it so one
+	// backend's silence is never masked by the other backend's continuing
+	// traffic on the merged channel — see MergedStreamStale.
+	composite atomic.Pointer[compositeStaleHolder]
+}
+
+// compositeStaleHolder wraps a runtime.CompositeSessionEventStaleness so it
+// can live behind an atomic.Pointer (a nil *compositeStaleHolder and "no
+// composite reporter for this subscription" must be distinguishable from a
+// present-but-nil interface value).
+type compositeStaleHolder struct {
+	checker runtime.CompositeSessionEventStaleness
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -115,6 +129,11 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	p.observedGen.Store(0)
 	p.lastEventUnixNano.Store(0)
+	if csep, ok := sp.(runtime.CompositeSessionEventStaleness); ok {
+		p.composite.Store(&compositeStaleHolder{checker: csep})
+	} else {
+		p.composite.Store(nil)
+	}
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
@@ -160,7 +179,17 @@ func (p *sessionEventPump) flowing() bool {
 	if last == 0 {
 		return false
 	}
-	return time.Since(time.Unix(0, last)) < sessionEventFlowingStaleAfter
+	if time.Since(time.Unix(0, last)) >= sessionEventFlowingStaleAfter {
+		return false
+	}
+	// A merged multi-backend stream can keep delivering off one healthy
+	// backend while the other has gone silent; lastEventUnixNano alone would
+	// report that as flowing. Ask the composite reporter (if any) whether
+	// either fanned-in backend is individually stale.
+	if h := p.composite.Load(); h != nil && h.checker != nil && h.checker.MergedStreamStale() {
+		return false
+	}
+	return true
 }
 
 // forward pumps liveness events into the poke channel until the stream ends.

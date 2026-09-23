@@ -115,3 +115,24 @@ const SessionEventStaleAfter = 30 * time.Second
 type EventCapableRouter interface {
 	EventCapableRoute(name string) bool
 }
+
+// CompositeSessionEventStaleness is implemented by composite providers (e.g.
+// auto, hybrid) whose SubscribeSessionEvents fans in more than one backend's
+// stream into one merged channel. MergedStreamStale reports whether any
+// fanned-in backend has gone silent past SessionEventStaleAfter, WITHOUT
+// terminating the merged channel: a consumer computing liveness off the
+// single merged stream (e.g. cmd/gc's sessionEventPump.flowing()) would
+// otherwise never see one backend's outage as long as the other kept
+// producing (see SessionEventStaleAfter). Closing the merged channel to
+// surface that was tried and rejected: a channel close is permanent and the
+// only two production callers of pump.restart are startup and a
+// provider-changing config reload, so a merely-idle-for-30s backend that was
+// never actually broken would have killed event-driven liveness for the
+// WHOLE composite, including the still-healthy backend, until one of those
+// rare events happened to fire. Reporting staleness at query time instead
+// lets the healthy backend's events keep flowing and lets a recovered
+// backend clear its own staleness on its next event, with no restart
+// needed.
+type CompositeSessionEventStaleness interface {
+	MergedStreamStale() bool
+}

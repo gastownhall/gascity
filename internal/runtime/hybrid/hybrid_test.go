@@ -520,17 +520,20 @@ func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
 }
 
 // A healthy backend's continuing traffic must not mask the other backend
-// going silent: without per-source staleness tracking, the merged stream
-// looks alive forever off "a" alone, hiding "b"'s outage from every
-// consumer computing liveness off the single merged channel.
-func TestMergeSessionEvents_ClosesWhenOneSourceGoesStaleWhileOtherKeepsFlowing(t *testing.T) {
+// going silent, but the merge must not destroy itself to report that: it
+// stays open and keeps forwarding the healthy side's events while
+// MergedStreamStale (query-time, via the tracker) reports the silent side.
+// Once the silent side resumes, staleness clears on its own — no restart
+// needed, unlike the old close-on-stale behavior this replaces.
+func TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	a := make(chan runtime.SessionEvent)
 	b := make(chan runtime.SessionEvent)
 	const staleAfter = 30 * time.Millisecond
-	merged := mergeSessionEvents(ctx, a, b, staleAfter)
+	tracker := newSessionEventStaleTracker(staleAfter)
+	merged := mergeSessionEvents(ctx, a, b, tracker)
 
 	// b delivers once, then goes silent (transport wedged, channel never
 	// closed — herdr's actual behavior on a broken transport).
@@ -539,36 +542,50 @@ func TestMergeSessionEvents_ClosesWhenOneSourceGoesStaleWhileOtherKeepsFlowing(t
 		t.Fatalf("first event = %q, want b-sess", ev.Session)
 	}
 
-	// a keeps producing well past staleAfter; merged must still close
-	// because b, not a, is the one that went stale.
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				select {
-				case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
-				case <-stop:
-					return
-				}
-			case <-stop:
-				return
-			}
-		}
-	}()
-	defer close(stop)
-
-	deadline := time.After(2 * time.Second)
-	for {
+	// a keeps producing well past staleAfter; merged must NOT close, and
+	// every one of a's events must still arrive.
+	deadline := time.Now().Add(staleAfter * 5)
+	sawStale := false
+	for time.Now().Before(deadline) {
 		select {
-		case _, ok := <-merged:
-			if !ok {
-				return // merged closed despite a's continuing traffic: correct.
+		case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
+			select {
+			case ev, ok := <-merged:
+				if !ok {
+					t.Fatal("merged stream closed despite b's silence and a's continuing traffic")
+				}
+				if ev.Session != "a-sess" {
+					t.Fatalf("event = %q, want a-sess", ev.Session)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for a's event to be forwarded")
 			}
-		case <-deadline:
-			t.Fatal("merged stream did not close after one source went stale")
+		case <-time.After(time.Second):
+			t.Fatal("timed out sending a's event")
 		}
+		if tracker.stale() {
+			sawStale = true
+		}
+	}
+	if !sawStale {
+		t.Fatal("tracker.stale() never reported true while b was silent past staleAfter")
+	}
+
+	// b resumes: staleness must self-heal without any restart.
+	select {
+	case b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess-2"}:
+	case <-time.After(time.Second):
+		t.Fatal("timed out resuming b")
+	}
+	select {
+	case ev := <-merged:
+		if ev.Session != "b-sess-2" {
+			t.Fatalf("resumed event = %q, want b-sess-2", ev.Session)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for b's resumed event")
+	}
+	if tracker.stale() {
+		t.Fatal("tracker.stale() still true after b resumed delivering")
 	}
 }
