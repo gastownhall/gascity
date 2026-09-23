@@ -387,8 +387,10 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		ProcessTable: g.opts.processTable,
 		Probe:        g.opts.probe,
 		// No Ops: a tick never forks bd. If the new generation needs a provider
-		// verb, the read path spends it through the reopen hook, where a caller
-		// is waiting and the cost is attributable.
+		// verb, this re-admission cannot admit it, and the arm below stands the
+		// leaf down, after which the read path's reopen hook is unreachable
+		// too: no verb is spent through this handle at all (see the cost
+		// paragraphs below and recoverNative).
 		Ops:       nil,
 		LongLived: true,
 		Now:       g.opts.now,
