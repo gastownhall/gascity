@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -34,13 +35,45 @@ func (b *lockedBuffer) String() string {
 // test. It is the logger every site falls back to when it was handed none,
 // which is exactly the path under test, so the test drives it rather than a
 // seam beside it.
+//
+// The cleanup restores the log package too (round3 review, inertness).
+// slog.SetDefault with a non-default handler also points log's output at that
+// handler and zeroes log's flags, and setting the previous default back does
+// NOT undo either — so every later log.Print and slog.Default() line in this
+// test binary went into this test's buffer, which nobody reads.
 func captureDefaultLogger(t *testing.T) *lockedBuffer {
 	t.Helper()
 	buf := &lockedBuffer{}
 	previous := slog.Default()
+	previousWriter, previousFlags := log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
 	return buf
+}
+
+// TestCaptureDefaultLoggerRestoresTheLogPackage pins the cleanup above: once a
+// test that captured the default logger is over, the log package writes where
+// it wrote before, with the flags it had.
+func TestCaptureDefaultLoggerRestoresTheLogPackage(t *testing.T) {
+	writer, flags := log.Writer(), log.Flags()
+	t.Run("capture", func(t *testing.T) {
+		buf := captureDefaultLogger(t)
+		slog.Default().Warn("captured")
+		if !strings.Contains(buf.String(), "captured") {
+			t.Fatalf("the capture caught nothing: %q", buf.String())
+		}
+	})
+	if log.Writer() != writer {
+		t.Errorf("after the capturing test, log writes to %T, not the %T it wrote to before: every later log line "+
+			"in this binary lands in a dead test's buffer", log.Writer(), writer)
+	}
+	if log.Flags() != flags {
+		t.Errorf("after the capturing test, log.Flags() = %d, want %d", log.Flags(), flags)
+	}
 }
 
 // assertHeadMovedLine requires one WARN line in the lane's single incident
