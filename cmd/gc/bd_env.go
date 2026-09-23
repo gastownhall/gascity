@@ -746,8 +746,15 @@ var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 var hostedCredentialProbeBuilds atomic.Int64
 
 // hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
-// per city, keyed by a stamp over city.toml's own size and mtime — the same
-// stat-signature approach as proxiedScopeRuntimeEnvCache in
+// per city, keyed by a stat signature over every file the load actually
+// composed the answer from — city.toml plus the rest of that load's
+// Provenance.Sources (packs, fragments, implicit imports) — not just
+// city.toml alone. A city that splits its storage config into an included
+// fragment can rewrite that fragment without ever touching city.toml, and an
+// answer cached on city.toml's stamp alone would then keep serving a stale
+// decision forever (ga-d39qig round 2).
+//
+// Same stat-signature approach as proxiedScopeRuntimeEnvCache in
 // bd_env_proxied.go, the sibling cache this one is modeled on. Only a
 // successful load is ever stored: an error must never be cached, so a
 // transient failure (or a city.toml the caller is mid-rewrite of) keeps
@@ -755,8 +762,18 @@ var hostedCredentialProbeBuilds atomic.Int64
 var hostedCredentialProbeCache sync.Map // string(normalized cityPath) → hostedCredentialProbeEntry
 
 type hostedCredentialProbeEntry struct {
-	stamp  string
-	hosted bool
+	// rootStamp is city.toml's own stat signature, taken from the SAME stat
+	// already paid for below, before the load — a stat taken only after a
+	// slow load would let a rewrite landing mid-load be recorded as
+	// already-observed (see rememberProxiedScopeRuntimeEnv's own note on why
+	// the pre-build stamp is the one that must be stored).
+	rootStamp string
+	// otherSources is the rest of that load's Provenance.Sources (packs,
+	// fragments, implicit imports) — unknown until the load returns, so
+	// necessarily stat'd after rather than before.
+	otherSources []string
+	otherStamp   string
+	hosted       bool
 }
 
 // forgetCitySelectsHostedBeadsCredentialProvider drops any memoized answer
@@ -768,6 +785,23 @@ func forgetCitySelectsHostedBeadsCredentialProvider(cityPath string) {
 	hostedCredentialProbeCache.Delete(normalizePathForCompare(cityPath))
 }
 
+// hostedCredentialProbeStatSignature builds a combined size.mtime signature
+// covering every path in sources, in order. It returns ok=false if any path
+// can no longer be stat'd, which the caller must treat as a cache miss
+// rather than a match — a missing source means the tree has changed in a
+// way this signature cannot faithfully represent.
+func hostedCredentialProbeStatSignature(sources []string) (signature string, ok bool) {
+	var b strings.Builder
+	for _, src := range sources {
+		info, err := os.Stat(src)
+		if err != nil {
+			return "", false
+		}
+		fmt.Fprintf(&b, "%s:%d.%d;", src, info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String(), true
+}
+
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
 	info, err := os.Stat(cityConfigPath)
@@ -777,24 +811,34 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
 	}
 
-	// Stamped from the SAME stat already paid for above, before the load — a
-	// stat taken only after a slow load would let a rewrite landing mid-load
-	// be recorded as already-observed (see rememberProxiedScopeRuntimeEnv's
-	// own note on why the pre-build stamp is the one that must be stored).
-	stamp := fmt.Sprintf("%d.%d", info.Size(), info.ModTime().UnixNano())
+	rootStamp := fmt.Sprintf("%d.%d", info.Size(), info.ModTime().UnixNano())
 	key := normalizePathForCompare(cityPath)
 	if cached, ok := hostedCredentialProbeCache.Load(key); ok {
-		if entry, ok := cached.(hostedCredentialProbeEntry); ok && entry.stamp == stamp {
-			return entry.hosted, nil
+		if entry, ok := cached.(hostedCredentialProbeEntry); ok && entry.rootStamp == rootStamp {
+			if otherStamp, valid := hostedCredentialProbeStatSignature(entry.otherSources); valid && otherStamp == entry.otherStamp {
+				return entry.hosted, nil
+			}
 		}
 	}
 
-	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
 	hosted := configSelectsHostedBeadsCredentialProvider(cfg)
-	hostedCredentialProbeCache.Store(key, hostedCredentialProbeEntry{stamp: stamp, hosted: hosted})
+	var otherSources []string
+	if prov != nil && len(prov.Sources) > 1 {
+		// Sources[0] is always the root (see newProvenance) — already covered
+		// by rootStamp above.
+		otherSources = append([]string(nil), prov.Sources[1:]...)
+	}
+	otherStamp, _ := hostedCredentialProbeStatSignature(otherSources)
+	hostedCredentialProbeCache.Store(key, hostedCredentialProbeEntry{
+		rootStamp:    rootStamp,
+		otherSources: otherSources,
+		otherStamp:   otherStamp,
+		hosted:       hosted,
+	})
 	hostedCredentialProbeBuilds.Add(1)
 	return hosted, nil
 }
