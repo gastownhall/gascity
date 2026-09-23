@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -521,27 +522,37 @@ func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
 
 // A healthy backend's continuing traffic must not mask the other backend
 // going silent: the merge stays open and keeps forwarding the healthy
-// side's events even long past the point the old close-on-stale behavior
-// would have killed the whole merge.
+// side's events even after real (fake, via synctest) time has advanced well
+// past runtime.SessionEventStaleAfter, the point at which the old
+// close-on-stale behavior would have killed the whole merge. Earlier drafts
+// of this test ran zero elapsed time and passed even with the old
+// close-after-30s ticker restored, so it was proving nothing; this version
+// drives synctest's fake clock past the actual threshold.
 func TestMergeSessionEvents_StaysOpenWhenOneSourceGoesSilent(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	a := make(chan runtime.SessionEvent)
-	b := make(chan runtime.SessionEvent)
-	merged := mergeSessionEvents(ctx, a, b)
+		a := make(chan runtime.SessionEvent)
+		b := make(chan runtime.SessionEvent)
+		merged := mergeSessionEvents(ctx, a, b)
 
-	// b delivers once, then goes silent (transport wedged, channel never
-	// closed — herdr's actual behavior on a broken transport).
-	b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess"}
-	if ev := <-merged; ev.Session != "b-sess" {
-		t.Fatalf("first event = %q, want b-sess", ev.Session)
-	}
+		// b delivers once, then goes silent (transport wedged, channel never
+		// closed — herdr's actual behavior on a broken transport).
+		b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess"}
+		if ev := <-merged; ev.Session != "b-sess" {
+			t.Fatalf("first event = %q, want b-sess", ev.Session)
+		}
 
-	// a keeps producing well past the old staleness threshold; merged must
-	// NOT close, and every one of a's events must still arrive.
-	const rounds = 5
-	for i := 0; i < rounds; i++ {
+		// Let fake time pass well past the old close-on-stale threshold while
+		// b stays silent. synctest.Wait blocks until every other goroutine in
+		// the bubble is durably blocked, so this proves the merge goroutine
+		// is still alive on its select rather than merely that nobody yet
+		// observed a close.
+		<-time.After(runtime.SessionEventStaleAfter * 2)
+		synctest.Wait()
+
+		// a must still be able to deliver past the staleness window.
 		select {
 		case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
 			select {
@@ -553,25 +564,28 @@ func TestMergeSessionEvents_StaysOpenWhenOneSourceGoesSilent(t *testing.T) {
 					t.Fatalf("event = %q, want a-sess", ev.Session)
 				}
 			case <-time.After(time.Second):
-				t.Fatal("timed out waiting for a's event to be forwarded")
+				t.Fatal("timed out waiting for a's event to be forwarded past the staleness window")
 			}
 		case <-time.After(time.Second):
-			t.Fatal("timed out sending a's event")
+			t.Fatal("timed out sending a's event past the staleness window (merge goroutine likely stopped selecting on a after closing on staleness)")
 		}
-	}
 
-	// b resumes: the merge must still be able to forward its events.
-	select {
-	case b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess-2"}:
-	case <-time.After(time.Second):
-		t.Fatal("timed out resuming b")
-	}
-	select {
-	case ev := <-merged:
-		if ev.Session != "b-sess-2" {
-			t.Fatalf("resumed event = %q, want b-sess-2", ev.Session)
+		// b resumes: the merge must still be able to forward its events too.
+		select {
+		case b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess-2"}:
+		case <-time.After(time.Second):
+			t.Fatal("timed out resuming b")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for b's resumed event")
-	}
+		select {
+		case ev, ok := <-merged:
+			if !ok {
+				t.Fatal("merged stream closed before b's resumed event arrived")
+			}
+			if ev.Session != "b-sess-2" {
+				t.Fatalf("resumed event = %q, want b-sess-2", ev.Session)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for b's resumed event")
+		}
+	})
 }
