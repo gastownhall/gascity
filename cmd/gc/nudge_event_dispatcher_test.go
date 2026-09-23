@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -695,17 +696,21 @@ func TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering(t *testing.T) {
 	}
 }
 
-// A second kick for a session whose pass is already running is dropped rather
-// than queued behind it, so a burst of idle events for one session cannot pile
-// up goroutines. The running pass re-reads the queue and the observation, so
-// the dropped kick carries nothing the running pass will not see.
+// A second kick for a session whose pass is already running is deferred
+// rather than run concurrently, so a burst of idle events for one session
+// cannot pile up goroutines; spawnPass re-arms the deferred kick once the
+// running pass clears the key (see spawnPass's doc comment). This drives the
+// real d.inflight bookkeeping through d.stores (gated to block the first
+// pass mid-flight) rather than hand-setting the map: a test that pokes
+// d.inflight directly proves only that spawnPass reads the field it itself
+// wrote, not that a genuinely running pass holds the key.
 func TestNudgeEventDispatcherCoalescesKicksForARunningSession(t *testing.T) {
 	fake := newNudgeEventedFake()
 	_, d, _, _ := newNudgeDispatcherFixture(t, fake)
 
 	const name = "busy-session"
 	release := make(chan struct{})
-	entered := make(chan struct{}, 8)
+	entered := make(chan struct{}, 1)
 	completed := make(chan string, 8)
 	d.observePasses(func(sessionFilter string) {
 		select {
@@ -714,35 +719,55 @@ func TestNudgeEventDispatcherCoalescesKicksForARunningSession(t *testing.T) {
 		}
 	})
 
+	// Gate runPass's store resolution so the FIRST call for this session
+	// blocks inside a real pass until the test releases it. Later calls
+	// pass straight through immediately: sync.Once.Do would serialize a
+	// concurrent second caller behind the first (it blocks until the
+	// running Do call returns), which would mask exactly the concurrency
+	// bug this test exists to catch, so gate with a non-blocking
+	// CompareAndSwap instead.
 	d.mu.Lock()
-	if d.inflight == nil {
-		d.inflight = map[string]bool{}
+	realStores := d.stores
+	var gated int32
+	d.stores = func(cfg *config.City) (beads.NudgesStore, beads.Store) {
+		if atomic.CompareAndSwapInt32(&gated, 0, 1) {
+			close(entered)
+			<-release
+		}
+		return realStores(cfg)
 	}
-	d.inflight[name] = true
 	d.mu.Unlock()
 
 	d.spawnPass(name, 0)
 	select {
 	case <-entered:
-		t.Fatal("spawnPass started a second pass for a session already in flight")
-	case <-completed:
-		t.Fatal("spawnPass ran a pass for a session already in flight")
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(10 * time.Second):
+		t.Fatal("first spawnPass never entered runPass")
 	}
 
-	d.mu.Lock()
-	delete(d.inflight, name)
-	d.mu.Unlock()
-	close(release)
-
+	// The session is now genuinely in flight (spawnPass set d.inflight
+	// under its own lock before starting the goroutine we're blocking).
+	// A second kick for the same session must be deferred, not run.
 	d.spawnPass(name, 0)
 	select {
 	case got := <-completed:
-		if got != name {
-			t.Fatalf("completed pass was %q, want %q", got, name)
+		t.Fatalf("spawnPass ran a concurrent pass for a session already in flight (filter %q)", got)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	close(release)
+
+	// The blocked first pass completes, then the deferred second kick is
+	// rearmed through the same in-flight release path and runs too.
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-completed:
+			if got != name {
+				t.Fatalf("completed pass %d was %q, want %q", i, got, name)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("pass %d did not complete after the in-flight session was released", i)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("spawnPass did not run once the session left the in-flight set")
 	}
 }
 
