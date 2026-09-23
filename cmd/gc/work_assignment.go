@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 
@@ -308,18 +309,28 @@ func releaseWorkAssignmentIfCurrent(store beads.Store, item beads.Bead) (release
 // the pool path in pool_session_name.go, because the subtleties below are easy to
 // get wrong once and impossible to keep in sync twice.
 //
-// It uses a LIVE list query, not Get, and that choice is load-bearing:
-// CachingStore.Get serves a clone straight from the in-memory cache for a bead
-// that is tracked and not dirty (internal/beads/caching_store_reads.go). A
-// cached read here would re-verify the caller's stale snapshot against an
-// equally stale cache and confirm it, which reproduces the exact clobber this
-// guard exists to prevent.
+// It verifies with a single LIVE Get by id, bypassing any cache via
+// beads.HandlesFor(store).Live — never store.Get, which for a CachingStore can
+// serve a clone straight from the in-memory cache for a bead that is tracked
+// and not dirty (internal/beads/caching_store_reads.go). A cached read here
+// would re-verify the caller's stale snapshot against an equally stale cache
+// and confirm it, which reproduces the exact clobber this guard exists to
+// prevent.
+//
+// A raw bd status of "blocked" or "deferred" still maps to Gas City's
+// Status=="open" (mapBdStatus collapses every non-in_progress/closed raw
+// status onto "open"), so wb.Status != expectedStatus alone cannot detect a
+// bead that has been natively gated since the caller's snapshot. Only a live
+// single-bead read exposes NativelyBlocked/IsDeferred; a List-based scan
+// filtered by bd's own native status can reach the same false verdict by
+// coincidence (the gated bead is excluded from `bd list --status=open` too)
+// without ever having checked the gate.
 //
 // expectedStatus must be the status the caller observed: if the bead has since
 // transitioned (a concurrent claim moved open→in_progress, or another release
 // moved in_progress→open) the snapshot's decision is no longer safe. A bead
-// absent from the live result no longer holds that status, so it is not current
-// and not an error.
+// no longer found live, or found but no longer matching that status or
+// natively gated, is not current and not an error.
 //
 // A read failure returns the error rather than a verdict. Writing on an
 // unverified snapshot can destroy a live worker's claim, and reporting the write
@@ -331,21 +342,21 @@ func liveWorkAssignmentAssigneeMatches(store beads.Store, id, expectedStatus, ex
 	if store == nil || id == "" || expectedStatus == "" {
 		return false, nil
 	}
-	work, err := store.List(beads.ListQuery{
-		Status:   expectedStatus,
-		Live:     true,
-		TierMode: beads.TierBoth,
-	})
+	live := beads.HandlesFor(store).Live
+	wb, err := live.Get(id)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
 		return false, fmt.Errorf("live work-assignment verification of %q: %w", id, err)
 	}
-	for _, wb := range work {
-		if wb.ID != id {
-			continue
-		}
-		return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(expectedAssignee), nil
+	if wb.Status != expectedStatus {
+		return false, nil
 	}
-	return false, nil
+	if wb.NativelyBlocked || beads.IsDeferred(wb, time.Now()) {
+		return false, nil
+	}
+	return strings.TrimSpace(wb.Assignee) == strings.TrimSpace(expectedAssignee), nil
 }
 
 // ReassignWorkBead re-homes one WORK bead onto a new session identity, emitting

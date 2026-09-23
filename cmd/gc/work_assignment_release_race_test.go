@@ -17,7 +17,7 @@ import (
 var (
 	_ beads.ConditionalAssignmentReleaser = (*errReleaseStore)(nil)
 	_ beads.ConditionalAssignmentReleaser = (*errGetStore)(nil)
-	_ beads.ConditionalAssignmentReleaser = (*staleGetReleaseStore)(nil)
+	_ beads.ConditionalAssignmentReleaser = (*unsupportedConditionalCachingStore)(nil)
 	_ beads.ConditionalAssignmentReleaser = (*failSecondWriteStore)(nil)
 	_ beads.ConditionalAssignmentReleaser = (*clobberingReleaseStore)(nil)
 )
@@ -36,8 +36,10 @@ func (s *errReleaseStore) ReleaseIfCurrent(string, string) (bool, error) {
 
 // errGetStore fails the tier-2 pre-release verification read. It reports the
 // conditional verb as unsupported so the release is forced onto tier 2. The
-// verification is a LIVE List (not Get), because a cached Get would re-confirm
-// the caller's stale snapshot against an equally stale cache.
+// verification is a single LIVE Get (not a List scan), because a cached Get
+// would re-confirm the caller's stale snapshot against an equally stale
+// cache — so the fake injects its failure on Get, the same call the
+// production path now issues.
 type errGetStore struct {
 	*beads.MemStore
 	err  error
@@ -48,11 +50,11 @@ func (s *errGetStore) ReleaseIfCurrent(string, string) (bool, error) {
 	return false, beads.ErrConditionalReleaseUnsupported
 }
 
-func (s *errGetStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+func (s *errGetStore) Get(id string) (beads.Bead, error) {
 	if s.fail {
-		return nil, s.err
+		return beads.Bead{}, s.err
 	}
-	return s.MemStore.List(q)
+	return s.MemStore.Get(id)
 }
 
 // TestReleaseWorkBead_PropagatesBackendFailures pins the failure DIRECTION for
@@ -165,24 +167,18 @@ func TestReleaseWorkBead_FallbackRouteNeverRidesASecondWrite(t *testing.T) {
 	})
 }
 
-// staleGetReleaseStore answers Get from a stale snapshot while List(Live:true) tells
-// the truth, which is the shape CachingStore has: Get serves a clone from the
-// in-memory cache for a tracked, non-dirty bead. It reports the conditional verb
-// as unsupported so the release is forced onto tier 2.
-type staleGetReleaseStore struct {
-	*beads.MemStore
-	stale beads.Bead
+// unsupportedConditionalCachingStore wraps a real *beads.CachingStore and
+// reports the conditional release verb as unsupported, forcing every release
+// in the test onto tier 2 while keeping the CachingStore's genuine cache/live
+// separation for everything else (HandlesFor's promoted Handles() method still
+// binds to this same embedded CachingStore, so Live.Get still reads the
+// backing store directly).
+type unsupportedConditionalCachingStore struct {
+	*beads.CachingStore
 }
 
-func (s *staleGetReleaseStore) ReleaseIfCurrent(string, string) (bool, error) {
+func (s *unsupportedConditionalCachingStore) ReleaseIfCurrent(string, string) (bool, error) {
 	return false, beads.ErrConditionalReleaseUnsupported
-}
-
-func (s *staleGetReleaseStore) Get(id string) (beads.Bead, error) {
-	if id == s.stale.ID {
-		return s.stale, nil
-	}
-	return s.MemStore.Get(id)
 }
 
 // TestReleaseWorkBead_Tier2DoesNotTrustACachedRead is the cache half of the
@@ -191,21 +187,36 @@ func (s *staleGetReleaseStore) Get(id string) (beads.Bead, error) {
 // clobber a live claim, which is the original bug wearing a guard. The
 // verification must read live.
 func TestReleaseWorkBead_Tier2DoesNotTrustACachedRead(t *testing.T) {
-	mem := beads.NewMemStore()
-	store := &staleGetReleaseStore{MemStore: mem}
-	// Live truth: a fresh worker holds it.
-	claimed := seedClaimedBead(t, mem, "fresh-worker")
-	// The caller's snapshot, and what a cached Get would still answer.
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	store := &unsupportedConditionalCachingStore{CachingStore: cache}
+
+	// Seed through the cache so the cache's own copy is the "retired-session"
+	// claim -- this is what a plain (non-Handles) cache.Get(id) keeps
+	// answering below, once the live truth has moved on without it.
+	claimed := seedClaimedBead(t, cache, "retired-session")
+
+	// Live truth moves on without the cache noticing: simulate an
+	// out-of-band reclaim by writing straight to backing, bypassing cache.
+	freshAssignee := "fresh-worker"
+	if err := backing.Update(claimed.ID, beads.UpdateOpts{Assignee: &freshAssignee}); err != nil {
+		t.Fatalf("simulate out-of-band reclaim: %v", err)
+	}
+
+	// The caller's snapshot, and what the cache's own (non-live) Get would
+	// still answer.
 	stale := claimed
 	stale.Assignee = "retired-session"
-	store.stale = stale
+	if got, err := cache.Get(claimed.ID); err != nil || got.Assignee != "retired-session" {
+		t.Fatalf("test setup: cache.Get = (%+v, %v), want a stale retired-session read for the divergence this test exercises", got, err)
+	}
 
 	wa := workAssignmentForStore(beads.WorkStore{Store: store})
 	if err := wa.ReleaseWorkBead(stale, ""); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
 
-	got, err := mem.Get(claimed.ID)
+	got, err := backing.Get(claimed.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}

@@ -2183,7 +2183,7 @@ type conditionalReleaseProbeStore struct {
 
 	releaseCalls      []releaseProbeCall
 	assignmentUpdates []beads.UpdateOpts
-	liveWorkLists     int
+	liveWorkGets      int
 }
 
 type releaseProbeCall struct {
@@ -2242,11 +2242,18 @@ func (s *conditionalReleaseProbeStore) ReleaseIfCurrent(id, expectedAssignee str
 	return s.mem.ReleaseIfCurrent(id, expectedAssignee)
 }
 
-func (s *conditionalReleaseProbeStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	out, err := s.Store.List(query)
-	if query.Live && query.Status == "in_progress" && query.Label == "" {
-		s.liveWorkLists++
-		if s.claimAfterLiveGate && s.liveWorkLists == 1 {
+// Get intercepts the live single-bead read liveWorkAssignmentAssigneeMatches
+// now issues for the pre-release staleness check (ga-8noaen: verification
+// moved from a whole-live-tier List scan to beads.HandlesFor(store).Live.Get).
+// It answers with the pre-reclaim snapshot on the first call for the bead
+// under test, then injects the concurrent re-claim -- modeling a claim that
+// lands between the staleness check and the release write, exactly as the old
+// List override did for the query shape that check used to issue.
+func (s *conditionalReleaseProbeStore) Get(id string) (beads.Bead, error) {
+	out, err := s.Store.Get(id)
+	if id == s.claimID {
+		s.liveWorkGets++
+		if s.claimAfterLiveGate && s.liveWorkGets == 1 {
 			s.reclaim()
 		}
 	}
