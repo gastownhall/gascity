@@ -139,6 +139,8 @@ type admissionOps struct {
 	recovers int
 	onPing   func() error
 	onRecov  func() error
+	// aimedAt is the generation of every Recover, in order.
+	aimedAt []string
 }
 
 func (o *admissionOps) Ping(context.Context, string) error {
@@ -152,9 +154,10 @@ func (o *admissionOps) Ping(context.Context, string) error {
 	return nil
 }
 
-func (o *admissionOps) Recover(context.Context, string) error {
+func (o *admissionOps) Recover(_ context.Context, _, generation string) error {
 	o.mu.Lock()
 	o.recovers++
+	o.aimedAt = append(o.aimedAt, generation)
 	hook := o.onRecov
 	o.mu.Unlock()
 	if hook != nil {
@@ -1392,6 +1395,58 @@ func TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration(t *testing.T)
 			t.Fatalf("Admit = %v, want the terminal proxy_zombie of a recover bd refused on a generation still current", err)
 		}
 	})
+}
+
+// TestZombieLadderAimsItsRecoverAtTheZombieItSaw is round4 review F3.
+//
+// Admission's recover can queue on gc's per-city lifecycle slot behind the
+// health loop's recover of the same zombie, and that one brings up a healthy
+// generation first. The queued recover used to run `bd dolt stop` on whatever
+// held the port once it got the slot — the healthy proxy — and cold-start hq
+// and every rig a second time. Recover now names the generation it is aimed
+// at, runs nothing once that generation is gone (ErrRecoverTargetMoved), and
+// admission takes that as "the incident moved on": the rung is released, not
+// spent, and the scope re-admits against what is there.
+func TestZombieLadderAimsItsRecoverAtTheZombieItSaw(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	f := newAdmissionFixture(t, "-1")
+	zombie := proxyendpoint.NewPoolKey(f.record, "").Generation()
+	var healthy atomic.Bool
+	ops := &admissionOps{onPing: bdSaysNo}
+	ops.onRecov = func() error {
+		// The health loop held the slot and brought up a healthy generation;
+		// by the time this recover holds it, the zombie is gone.
+		f.writeRecord(6002, "55667788")
+		healthy.Store(true)
+		return fmt.Errorf("provider-owned beads recover: %w", ErrRecoverTargetMoved)
+	}
+	in := baseAdmissionInput(f, ops)
+	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		if healthy.Load() {
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+		}
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+	}
+
+	pin, err := Admit(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Admit = %v, want the generation the health loop brought up admitted", err)
+	}
+	if pin.PoolKey().PID != 6002 {
+		t.Fatalf("admitted pid %d, want 6002", pin.PoolKey().PID)
+	}
+	ops.mu.Lock()
+	aimedAt := append([]string(nil), ops.aimedAt...)
+	ops.mu.Unlock()
+	if len(aimedAt) != 1 || aimedAt[0] != zombie {
+		t.Fatalf("the recover was aimed at %v, want exactly [%s]: the provider can only refuse to stop a "+
+			"healthy proxy if it knows which one was the zombie", aimedAt, zombie)
+	}
+	if st := in.Recovered.rung(zombie); st != (rungState{}) {
+		t.Fatalf("the zombie's recover rung reads %+v after a recover that ran nothing, want released", st)
+	}
 }
 
 // sharedRootRig writes a rig scope whose sidecar names the CITY's proxy root —

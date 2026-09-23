@@ -1168,6 +1168,20 @@ func runProviderOwnedLifecycleOpContext(parent context.Context, cityPath, op str
 }
 
 func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, scopeRoot, op string) error {
+	return runProviderOwnedScopeLifecycleOpGuarded(parent, cityPath, scopeRoot, op, nil)
+}
+
+// runProviderOwnedScopeLifecycleOpGuarded is runProviderOwnedScopeLifecycleOpContext
+// with a precondition checked while the per-city lifecycle slot is HELD, after
+// any wait for it and before the provider script runs. A non-nil error from it
+// is returned as-is and nothing is run.
+//
+// It exists for a verb aimed at a particular state that another holder of the
+// slot may change while this one queues: the proxied admission recover, whose
+// target generation the health loop's own recover of the same zombie may have
+// replaced with a healthy proxy by the time the slot is granted (round4
+// review F3).
+func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, scopeRoot, op string, precondition func() error) error {
 	provider := beadsProvider(cityPath)
 	if !strings.HasPrefix(provider, "exec:") {
 		return fmt.Errorf("provider-owned scope requires an exec beads provider")
@@ -1193,6 +1207,11 @@ func runProviderOwnedScopeLifecycleOpContext(parent context.Context, cityPath, s
 		return err
 	}
 	defer release()
+	if precondition != nil {
+		if err := precondition(); err != nil {
+			return err
+		}
+	}
 	env, err := providerLifecycleProcessEnvForScopeInitWithError(cityPath, scopeRoot, provider)
 	if err != nil {
 		return err

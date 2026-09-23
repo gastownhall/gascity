@@ -270,7 +270,7 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		t.Helper()
 		observed := beads.NewGenerationSet()
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error { return ops.run(op) }
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
 		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
 		return &proxiedNativeOpener{
 			cityPath:     t.TempDir(),
@@ -312,7 +312,7 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		// bd removed the record on an orderly stop. The verb brings it back.
 		f.removeRecord()
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error {
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error {
 			err := ops.run(op)
 			f.writeRecord(7002, "55667788")
 			return err
@@ -385,7 +385,7 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		})
 		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string) error {
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string, _ func() error) error {
 			_ = ops.run(op)
 			if op == proxiedProviderRecoverOp {
 				// `bd dolt stop` then `bd ping`: a new generation, which greets.
@@ -456,7 +456,7 @@ recover) `+tc.recover+` ;;
 *) echo 'Error: ping: invalid connection' >&2; exit 1 ;;
 esac`)
 				restore := providerOwnedScopeLifecycleOp
-				providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string) error {
+				providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string, _ func() error) error {
 					_ = ops.run(op)
 					budget := 30 * time.Second
 					if op == proxiedProviderRecoverOp {
@@ -510,7 +510,7 @@ esac`)
 		var mu sync.Mutex
 		spent := map[string][]string{}
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string) error {
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string, _ func() error) error {
 			mu.Lock()
 			spent[scopeRoot] = append(spent[scopeRoot], op)
 			mu.Unlock()
@@ -606,7 +606,7 @@ esac`)
 		var cityErr error
 		var startCity sync.Once
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string) error {
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string, _ func() error) error {
 			mu.Lock()
 			spent[scopeRoot] = append(spent[scopeRoot], op)
 			mu.Unlock()
@@ -707,7 +707,7 @@ esac`)
 		ops := &scriptedProviderOps{}
 		observed := beads.NewGenerationSet()
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error { return ops.run(op) }
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
 		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
 
 		provider := proxiedProviderOps{cityPath: t.TempDir(), observed: observed}
@@ -742,7 +742,7 @@ func TestProxiedGuardRecoveryAdmitsWithoutForkingBd(t *testing.T) {
 		t.Helper()
 		observed := beads.NewGenerationSet()
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error {
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error {
 			err := ops.run(op)
 			f.writeRecord(7104, "1a2b3c4d")
 			return err
@@ -1018,7 +1018,7 @@ func TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot(t *testing.T) {
 		// pinned in TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity.
 		ops := &scriptedProviderOps{}
 		restore := providerOwnedScopeLifecycleOp
-		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string) error { return ops.run(op) }
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
 		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
 
 		opener := proxiedNativeStoreOpenerForScope(t.TempDir(), t.TempDir(), &config.City{}, func() (beads.Store, error) {
@@ -1599,4 +1599,104 @@ func sharedRootRigScope(t *testing.T, f *proxiedScopeFixture) string {
 		t.Fatal(err)
 	}
 	return rig
+}
+
+// TestProxiedRecoverRunsNothingOnceTheZombieIsGone is round4 review F3, through
+// the production runner and the production precondition.
+//
+// Admission's recover queues on the per-city lifecycle slot. The contender it
+// meets there is the health loop's recover of the same zombie, which brings up
+// a healthy proxy first; the queued recover then ran `bd dolt stop` on that
+// healthy proxy and cold-started hq and every rig a second time. The test
+// holds the slot itself (the health loop's recover), replaces the record while
+// admission's recover waits, and releases it.
+func TestProxiedRecoverRunsNothingOnceTheZombieIsGone(t *testing.T) {
+	setup := func(t *testing.T) (*proxiedScopeFixture, string, string) {
+		t.Helper()
+		f := newProxiedScopeFixture(t)
+		logPath := filepath.Join(t.TempDir(), "provider-invocations")
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.scopeRoot, "city.toml"),
+			[]byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f, logPath, proxyendpoint.NewPoolKey(f.record, "").Generation()
+	}
+	// recoverUnderHeldSlot runs the production Recover while the test holds
+	// the city's slot, runs during() with it held, then releases it.
+	recoverUnderHeldSlot := func(t *testing.T, f *proxiedScopeFixture, generation string, during func()) error {
+		t.Helper()
+		release, err := acquireProviderSemaphore(context.Background(), f.scopeRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- proxiedProviderOps{cityPath: f.scopeRoot}.Recover(context.Background(), f.scopeRoot, generation)
+		}()
+		select {
+		case err := <-done:
+			release()
+			t.Fatalf("Recover returned %v while another holder had the lifecycle slot", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		during()
+		release()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("Recover never returned after the slot was released")
+			return nil
+		}
+	}
+	invocations := func(t *testing.T, logPath string) string {
+		t.Helper()
+		data, err := os.ReadFile(logPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	t.Run("the health loop replaced the zombie while the recover waited: nothing runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		err := recoverUnderHeldSlot(t, f, zombie, func() { f.writeRecord(7002, "55667788") })
+		if !errors.Is(err, beads.ErrRecoverTargetMoved) {
+			t.Fatalf("Recover = %v, want ErrRecoverTargetMoved", err)
+		}
+		if errors.Is(err, beads.ErrProviderReportedFailure) {
+			t.Fatalf("Recover = %v is marked as bd's answer, but bd was never asked", err)
+		}
+		if got := invocations(t, logPath); got != "" {
+			t.Fatalf("the provider ran %q against a proxy nobody saw as a zombie, want nothing", got)
+		}
+	})
+
+	t.Run("the record is gone while the recover waited: nothing runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		err := recoverUnderHeldSlot(t, f, zombie, f.removeRecord)
+		if !errors.Is(err, beads.ErrRecoverTargetMoved) {
+			t.Fatalf("Recover = %v, want ErrRecoverTargetMoved: `bd dolt stop` is never aimed at a proxy gc cannot name", err)
+		}
+		if got := invocations(t, logPath); got != "" {
+			t.Fatalf("the provider ran %q, want nothing", got)
+		}
+	})
+
+	t.Run("control: the zombie is still there once the slot is granted, and the recover runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		if err := recoverUnderHeldSlot(t, f, zombie, func() {}); err != nil {
+			t.Fatalf("Recover = %v, want the provider's recover run", err)
+		}
+		if got := invocations(t, logPath); got != proxiedProviderRecoverOp {
+			t.Fatalf("the provider ran %q, want exactly %q", got, proxiedProviderRecoverOp)
+		}
+	})
 }

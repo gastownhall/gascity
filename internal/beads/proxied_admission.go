@@ -38,8 +38,23 @@ type ProviderOps interface {
 	// Ping's, and the mark decides more here: only a marked failure may end
 	// the lane for the handle (proxy_zombie is terminal); every other failure
 	// holds the recover rung for failedRecoverBackoff and is non-terminal.
-	Recover(ctx context.Context, scopeRoot string) error
+	//
+	// generation is the proxy generation admission saw as a zombie. Recover
+	// may wait for whatever serializes provider verbs (gc's per-city
+	// lifecycle slot), and another recover of the same zombie — the health
+	// loop's — may have replaced it by then with a healthy proxy. So once it
+	// holds that serialization, Recover must re-read the scope's proxy record
+	// and run nothing unless it still names generation; otherwise it returns
+	// an error wrapping ErrRecoverTargetMoved (round4 review F3). A record it
+	// cannot read counts as moved: `bd dolt stop` is never aimed at a proxy
+	// gc cannot name.
+	Recover(ctx context.Context, scopeRoot, generation string) error
 }
+
+// ErrRecoverTargetMoved is what errors.Is finds on a ProviderOps.Recover that
+// ran nothing because, by the time it could run, the scope's proxy was no
+// longer the generation admission asked it to recover. See ProviderOps.Recover.
+var ErrRecoverTargetMoved = errors.New("the proxy generation the recover was aimed at is no longer current")
 
 // ErrProviderReportedFailure is what errors.Is finds on a ProviderOps failure
 // the PROVIDER reported: bd ran the verb to completion and said it could not
@@ -1012,7 +1027,21 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 func (in AdmissionInput) spendRecover(ctx context.Context, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	generation := key.Generation()
 	defer in.Recovered.settle(generation)
-	if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
+	err := in.Ops.Recover(ctx, in.ScopeRoot, generation)
+	if errors.Is(err, ErrRecoverTargetMoved) {
+		// Nothing ran: the zombie was replaced while the recover waited for
+		// the lifecycle slot, usually by the health loop's own recover of it
+		// (round4 review F3). Before this check the queued recover ran `bd
+		// dolt stop` on whatever held the port by then — a healthy proxy
+		// nobody had seen as a zombie — and cold-started hq and every rig a
+		// second time. No recover was spent on this generation, so its rung
+		// is released rather than settled, and this scope re-admits against
+		// what is there now.
+		in.Recovered.Release(generation)
+		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the generation moved while the provider recover waited to run; it ran nothing, re-admitting", err)
+	}
+	if err != nil {
 		retry, verdict := in.recoverFailed(ctx, root, key, err)
 		return Pin{}, retry, verdict
 	}

@@ -81,8 +81,10 @@ var (
 // providerOwnedScopeLifecycleOp is the seam the proxied lane runs provider verbs
 // through. Production is the real, semaphore-guarded, traced provider op; tests
 // script it to assert WHICH verbs a ladder spent, which is the only way to prove
-// "at most one ping and one recover per generation" without a bd binary.
-var providerOwnedScopeLifecycleOp = runProviderOwnedScopeLifecycleOpContext
+// "at most one ping and one recover per generation" without a bd binary. The
+// precondition, when non-nil, is checked with the lifecycle slot held and
+// before the verb runs (see runProviderOwnedScopeLifecycleOpGuarded).
+var providerOwnedScopeLifecycleOp = runProviderOwnedScopeLifecycleOpGuarded
 
 // proxiedProviderOps is the ENTIRE bd-verb surface admission may reach, bound to
 // one city.
@@ -101,7 +103,7 @@ type proxiedProviderOps struct {
 // because it is the evidence admission's no-greeting ladder escalates to a
 // recover on, and a failure of gc's own is not. See markProviderReportedFailure.
 func (o proxiedProviderOps) Ping(ctx context.Context, scopeRoot string) error {
-	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderProbeOp); err != nil {
+	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderProbeOp, nil); err != nil {
 		return markProviderReportedFailure(err)
 	}
 	o.noteReady(scopeRoot)
@@ -145,12 +147,43 @@ func markProviderReportedFailure(err error) error {
 // everything else — gc's own read budget SIGKILLing a cold start, the
 // lifecycle slot the health loop's recover of the same zombie holds, an
 // environment gc could not build.
-func (o proxiedProviderOps) Recover(ctx context.Context, scopeRoot string) error {
-	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp); err != nil {
+//
+// It is aimed at one generation (round4 review F3): the recover queues on the
+// per-city lifecycle slot, and the health loop's recover of the same zombie
+// may hold it and bring up a healthy proxy first. So the provider's recover —
+// `bd dolt stop` then `bd ping` — runs only if, with the slot held, the
+// scope's proxy record still names that generation; otherwise nothing runs
+// and the error wraps beads.ErrRecoverTargetMoved (unmarked: bd was not asked).
+func (o proxiedProviderOps) Recover(ctx context.Context, scopeRoot, generation string) error {
+	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp,
+		proxiedRecoverStillAimed(scopeRoot, generation)); err != nil {
 		return markProviderReportedFailure(err)
 	}
 	o.noteReady(scopeRoot)
 	return nil
+}
+
+// proxiedRecoverStillAimed is Recover's precondition: the scope's proxy record
+// still names generation. A root or record it cannot read counts as moved,
+// because `bd dolt stop` is never aimed at a proxy gc cannot name — and the
+// admission ladder that asked re-reads the record and asks again if the
+// zombie really is still there.
+func proxiedRecoverStillAimed(scopeRoot, generation string) func() error {
+	return func() error {
+		root, err := proxyendpoint.ProviderRoot(scopeRoot)
+		if err != nil {
+			return fmt.Errorf("proxied recover of %s: resolving the proxy root: %w: %w", scopeRoot, err, beads.ErrRecoverTargetMoved)
+		}
+		record, err := proxyendpoint.Read(root)
+		if err != nil {
+			return fmt.Errorf("proxied recover of %s: reading the proxy record: %w: %w", scopeRoot, err, beads.ErrRecoverTargetMoved)
+		}
+		if current := proxyendpoint.NewPoolKey(record, "").Generation(); current != generation {
+			return fmt.Errorf("proxied recover of %s: aimed at generation %s, the proxy is now %s: %w",
+				scopeRoot, generation, current, beads.ErrRecoverTargetMoved)
+		}
+		return nil
+	}
 }
 
 // noteReady is the readiness memo of design 3.3 step 2: the generation bd
