@@ -3523,10 +3523,25 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 // runs on the same goroutine as tick, so no concurrent call can race
 // cr.nudgeWakeListener here.
 func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
-	if cr.nudgeWakeListener != nil || cr.cityPath == "" {
+	if cr.cityPath == "" {
 		return
 	}
-	if !nudgeDispatcherIsSupervisor(cr.cfg) && (cr.nudgeEvents == nil || !cr.nudgeEvents.active()) {
+	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if cr.nudgeWakeListener != nil {
+		if !gateOpen {
+			// A stale listener still answering after a reload into legacy
+			// mode makes DispatcherIsHosting a false positive: it suppresses
+			// the deferred-submit fallback poller while neither dispatch
+			// path (event-dispatcher or supervisor patrol) drains the
+			// queue, since both require the same gate this function checks.
+			if err := cr.nudgeWakeListener.Close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+			cr.nudgeWakeListener = nil
+		}
+		return
+	}
+	if !gateOpen {
 		return
 	}
 	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
