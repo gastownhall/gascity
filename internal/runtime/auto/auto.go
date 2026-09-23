@@ -74,6 +74,16 @@ func (p *Provider) route(name string) runtime.Provider {
 	return p.defaultSP
 }
 
+// EventCapableRoute reports whether the backend name currently routes to
+// supports a session-event stream. Callers that gate sidecar poller
+// suppression on SessionEventProvider must ask per-session here instead of
+// asserting the composite type: routes[name] can send a session to a
+// non-event-capable backend even when the other backend is event-capable.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
+}
+
 // SupportsTransport reports whether this provider can route the requested
 // session transport.
 func (p *Provider) SupportsTransport(transport string) bool {

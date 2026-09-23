@@ -60,6 +60,11 @@ type sessionEventPump struct {
 	// 0 when none. Forward goroutines clear only their own generation, so
 	// a late close from a replaced subscription cannot mask a live one.
 	streamGen atomic.Int64
+
+	// observedGen is set only after the current stream delivers an event. A
+	// successful Subscribe call may merely start a disconnected retry loop, so
+	// it is not sufficient evidence for stretching patrol liveness checks.
+	observedGen atomic.Int64
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -90,6 +95,7 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	}
 	p.gen++
 	p.streamGen.Store(0)
+	p.observedGen.Store(0)
 	sep, ok := sp.(runtime.SessionEventProvider)
 	if !ok {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
@@ -119,6 +125,13 @@ func (p *sessionEventPump) streaming() bool {
 	return p.streamGen.Load() != 0
 }
 
+// flowing reports whether the current subscription has actually delivered at
+// least one event (normally its contract-required leading resync).
+func (p *sessionEventPump) flowing() bool {
+	gen := p.streamGen.Load()
+	return gen != 0 && p.observedGen.Load() == gen
+}
+
 // forward pumps liveness events into the poke channel until the stream ends.
 func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan runtime.SessionEvent) {
 	resyncTimer := time.NewTimer(p.resyncDelay)
@@ -132,6 +145,7 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 		select {
 		case <-ctx.Done():
 			p.streamGen.CompareAndSwap(gen, 0)
+			p.observedGen.CompareAndSwap(gen, 0)
 			return
 		case <-resyncTimer.C:
 			resyncArmed = false
@@ -141,7 +155,11 @@ func (p *sessionEventPump) forward(ctx context.Context, gen int64, events <-chan
 				if p.streamGen.CompareAndSwap(gen, 0) && ctx.Err() == nil {
 					fmt.Fprintf(p.stderr, "%s: session-event stream ended; session liveness falls back to patrol polling\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 				}
+				p.observedGen.CompareAndSwap(gen, 0)
 				return
+			}
+			if p.streamGen.Load() == gen {
+				p.observedGen.Store(gen)
 			}
 			switch ev.Kind {
 			case runtime.SessionEventExited, runtime.SessionEventClosed:

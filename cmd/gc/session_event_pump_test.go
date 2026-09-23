@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -350,6 +351,40 @@ func TestSessionEventPumpRestartSwitchesProviders(t *testing.T) {
 	})
 }
 
+// TestSessionEventPumpStaleGenerationEventDoesNotMarkFlowing is the
+// regression test for the delivery race the flowing()/observedGen port
+// fixes: a forward goroutine for a superseded generation is still running
+// (its ctx not yet canceled) when it delivers an event. Before the fix,
+// forward's write side stored the event's generation unconditionally, so a
+// stale generation's event could still flip liveness. This constructs that
+// window directly — a live gen-2 stream plus a still-running gen-1 forward
+// goroutine — rather than racing a real restart, so the outcome is
+// deterministic instead of depending on select's case-choice order.
+func TestSessionEventPumpStaleGenerationEventDoesNotMarkFlowing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, _, cancel := newTestPump(t)
+		defer cancel()
+
+		pump.gen = 2
+		pump.streamGen.Store(2)
+
+		staleCtx, staleCancel := context.WithCancel(context.Background())
+		defer staleCancel()
+		staleEvents := make(chan runtime.SessionEvent, 1)
+		go pump.forward(staleCtx, 1, staleEvents)
+
+		staleEvents <- runtime.SessionEvent{Kind: runtime.SessionEventResync}
+		synctest.Wait()
+
+		if pump.flowing() {
+			t.Fatal("flowing() = true after a stale-generation forward goroutine delivered an event")
+		}
+		if got := pump.observedGen.Load(); got != 0 {
+			t.Fatalf("observedGen = %d, a stale generation's event must not set it", got)
+		}
+	})
+}
+
 func TestSessionEventPumpRestartToNonStreamingProviderDeactivates(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pump, _, cancel := newTestPump(t)
@@ -392,4 +427,148 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		cancel()
 		waitStreaming(t, pump, false)
 	})
+}
+
+func stretchTestRuntime(t *testing.T, stretch string, pump *sessionEventPump) *CityRuntime {
+	t.Helper()
+	return &CityRuntime{
+		cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: stretch,
+			},
+		},
+		sessionEvents: pump,
+	}
+}
+
+// streamingPump returns a pump whose stream has both established AND
+// delivered at least one event (flowing() == true), matching what
+// sessionPhaseStretchActive requires. A pump that has only subscribed
+// (streaming() but not flowing()) must not activate the stretch — see
+// TestSessionPhasesDuePatrolStretchIgnoredWithoutDelivery.
+func streamingPump(t *testing.T) (*sessionEventPump, context.CancelFunc) {
+	t.Helper()
+	pokeCh := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	pump := newSessionEventPump(ctx, pokeCh, &bytes.Buffer{}, "test")
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp)
+	if !pump.streaming() {
+		t.Fatal("test pump failed to stream")
+	}
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "crew-1", Time: time.Now()})
+	waitPoke(t, pokeCh)
+	if !pump.flowing() {
+		t.Fatal("test pump failed to deliver an event")
+	}
+	return pump, cancel
+}
+
+func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now // just ran
+	for _, trigger := range []string{"poke", "startup-poke"} {
+		if !cr.sessionPhasesDue(trigger, false, now) {
+			t.Errorf("sessionPhasesDue(%q) = false, want true", trigger)
+		}
+	}
+}
+
+func TestSessionPhasesDuePatrolWithoutStretchRuns(t *testing.T) {
+	cr := stretchTestRuntime(t, "", nil)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("sessionPhasesDue(patrol) = false with stretching unset, want true")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchSkipsWithinWindow(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	// sessionPhasesDue is a pure read; production callers stamp
+	// sessionPhasesLast themselves only once the session phases are
+	// confirmed to run (see city_runtime.go tick()), so the test does the
+	// same to exercise the real contract.
+	if !cr.sessionPhasesDue("patrol", false, now) {
+		t.Fatal("first patrol tick must run the session phases")
+	}
+	cr.sessionPhasesLast = now
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute)) {
+		t.Error("patrol tick inside the stretch window ran the session phases")
+	}
+	if !cr.sessionPhasesDue("patrol", false, now.Add(11*time.Minute)) {
+		t.Error("patrol tick past the stretch window skipped the session phases")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchIgnoredWithoutStream(t *testing.T) {
+	cr := stretchTestRuntime(t, "10m", nil) // no pump wired
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("stretch honored without a session-event stream")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idle := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	idle.restart(runtime.NewFake()) // provider without a stream
+	cr = stretchTestRuntime(t, "10m", idle)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("stretch honored while the pump is not streaming")
+	}
+}
+
+// TestSessionPhasesDuePatrolStretchIgnoredWithoutDelivery covers the herdr
+// case streaming()'s doc comment warns about: SubscribeSessionEvents can
+// succeed and return a channel before the provider actually connects behind
+// it (herdr retries forever with capped backoff). A subscribed-but-silent
+// stream must not activate the stretch, or session liveness would degrade
+// to the stretched cadence with no event pokes ever arriving to cover it.
+func TestSessionPhasesDuePatrolStretchIgnoredWithoutDelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp) // subscribed, but no event ever emitted
+	if !pump.streaming() {
+		t.Fatal("test pump failed to stream")
+	}
+	if pump.flowing() {
+		t.Fatal("test pump delivered before any event was emitted")
+	}
+	cr := stretchTestRuntime(t, "10m", pump)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+		t.Error("stretch honored while the stream has established but never delivered")
+	}
+}
+
+func TestSessionPhasesDueStretchNotLongerThanPatrolIgnored(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	for _, stretch := range []string{"30s", "10s"} {
+		cr := stretchTestRuntime(t, stretch, pump)
+		cr.sessionPhasesLast = time.Now()
+		if !cr.sessionPhasesDue("patrol", false, time.Now()) {
+			t.Errorf("stretch %q (not longer than patrol) skipped the session phases", stretch)
+		}
+	}
+}
+
+func TestSessionPhasesDueConfigPendingRuns(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now
+	if !cr.sessionPhasesDue("patrol", true, now) {
+		t.Error("pending config change did not force the session phases")
+	}
 }
