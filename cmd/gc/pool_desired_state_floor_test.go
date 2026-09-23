@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -105,6 +106,87 @@ func TestComputePoolDesiredStates_ExistingSessionsPrecedeCompetingFloor(t *testi
 
 	if counts["a"] != 2 || counts["b"] != 0 {
 		t.Fatalf("request counts = %#v, want a=2 and b=0: floors must not displace existing sessions", counts)
+	}
+}
+
+func TestComputePoolDesiredStates_RigCappedExistingSessionPrecedesCompetingFloor(t *testing.T) {
+	rigMax := 1
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "r", Path: "/tmp/r", MaxActiveSessions: &rigMax}},
+		Agents: []config.Agent{
+			poolAgent("b", "r", nil, 1),
+			poolAgent("a", "r", nil, 0),
+		},
+	}
+	work := []beads.Bead{workBead("work-1", "r/a", "session-1", "in_progress", 1)}
+	sessions := []beads.Bead{sessionBead("session-1", "open")}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	counts := poolDesiredRequestCounts(result)
+
+	if counts["r/a"] != 1 || counts["r/b"] != 0 {
+		t.Fatalf("request counts = %#v, want r/a=1 and r/b=0: a rig floor must not displace an existing session", counts)
+	}
+	if ids := poolDesiredSessionIDs(result, "r/a"); len(ids) != 1 || ids[0] != "session-1" {
+		t.Fatalf("r/a session IDs = %#v, want [session-1]", ids)
+	}
+}
+
+func TestComputePoolDesiredStates_InFlightSessionsPrecedeCompetingFloor(t *testing.T) {
+	now := time.Date(2026, 9, 23, 21, 0, 0, 0, time.UTC)
+	for _, floorName := range []string{"aaa", "zzz"} {
+		t.Run(floorName, func(t *testing.T) {
+			workspaceMax := 2
+			cfg := &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+				Agents: []config.Agent{
+					poolAgent("claude", "", nil, 0),
+					poolAgent(floorName, "", nil, 2),
+				},
+			}
+			sessions := []beads.Bead{
+				pendingPoolSessionBeadAt("session-1", now.Add(-30*time.Second)),
+				pendingPoolSessionBeadAt("session-2", now.Add(-20*time.Second)),
+			}
+
+			result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), map[string]int{"claude": 0}, now)
+			counts := poolDesiredRequestCounts(result)
+
+			if counts["claude"] != 2 || counts[floorName] != 0 {
+				t.Fatalf("request counts = %#v, want claude=2 and %s=0: a floor must not displace in-flight sessions", counts, floorName)
+			}
+			ids := poolDesiredSessionIDs(result, "claude")
+			if len(ids) != 2 || ids[0] != "session-1" || ids[1] != "session-2" {
+				t.Fatalf("claude session IDs = %#v, want [session-1 session-2]", ids)
+			}
+		})
+	}
+}
+
+func TestComputePoolDesiredStates_ProtectedSessionsPrecedeCompetingFloor(t *testing.T) {
+	now := time.Date(2026, 9, 23, 21, 0, 0, 0, time.UTC)
+	for _, floorName := range []string{"aaa", "zzz"} {
+		t.Run(floorName, func(t *testing.T) {
+			workspaceMax := 2
+			cfg := &config.City{
+				Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+				Agents: []config.Agent{
+					poolAgent("claude", "", nil, 0),
+					poolAgent(floorName, "", nil, 2),
+				},
+			}
+			sessions := []beads.Bead{
+				protectedPoolSessionBeadAt("session-1", now.Add(-30*time.Second)),
+				protectedPoolSessionBeadAt("session-2", now.Add(-20*time.Second)),
+			}
+
+			result := ComputePoolDesiredStatesAt(cfg, nil, sessionInfosFromBeads(sessions), nil, now)
+			counts := poolDesiredRequestCounts(result)
+
+			if counts["claude"] != 2 || counts[floorName] != 0 {
+				t.Fatalf("request counts = %#v, want claude=2 and %s=0: a floor must not displace protected sessions", counts, floorName)
+			}
+		})
 	}
 }
 
@@ -336,4 +418,17 @@ func poolDesiredRequestCounts(states []PoolDesiredState) map[string]int {
 		counts[state.Template] = len(state.Requests)
 	}
 	return counts
+}
+
+func poolDesiredSessionIDs(states []PoolDesiredState, template string) []string {
+	var ids []string
+	for _, state := range states {
+		if state.Template != template {
+			continue
+		}
+		for _, request := range state.Requests {
+			ids = append(ids, request.SessionBeadID)
+		}
+	}
+	return ids
 }
