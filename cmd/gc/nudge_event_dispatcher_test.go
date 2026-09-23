@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -711,5 +712,57 @@ func writeCityRuntimeConfigWithDaemonMode(t *testing.T, tomlPath, provider, nudg
 	data := append(append([]byte{}, existing...), suffix...)
 	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
+	}
+}
+
+// TestNudgeEventDispatcherRunPassPreservesRelocatedStoreAcrossPasses drives
+// (*nudgeEventDispatcher).runPass itself -- not a hand-rolled simulation of
+// its open/close sequence -- against a city whose nudges class is relocated
+// onto a shared binding, across two passes, the way the worker loop actually
+// calls it (nudge_event_dispatcher.go:290/293). A mutant that closes
+// unconditionally (`if nudgeBeadStoreOwned(...)` -> `if true`) must fail
+// this: TestNudgeEventDispatcherRunPassClosesBeadStore only replays the same
+// open/close decision inline without calling runPass, so it cannot catch a
+// regression in runPass's own wiring of that guard.
+func TestNudgeEventDispatcherRunPassPreservesRelocatedStoreAcrossPasses(t *testing.T) {
+	cityPath := t.TempDir()
+	entry := cliStorageRoutesEntryFor(cityPath)
+	var closes atomic.Int64
+	shared := &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &closes}
+	entry.once.Do(func() {
+		entry.routes = &storageRoutes{
+			binding: "infra",
+			stores: map[coordclass.Class]beads.Store{
+				coordclass.ClassNudges: shared,
+			},
+		}
+	})
+	t.Cleanup(func() {
+		cliStorageRoutesMu.Lock()
+		delete(cliStorageRoutesByCity, cityPath)
+		cliStorageRoutesMu.Unlock()
+	})
+
+	d := &nudgeEventDispatcher{
+		parent:     context.Background(),
+		cityPath:   cityPath,
+		stderr:     io.Discard,
+		logPrefix:  "test",
+		quiescence: defaultNudgePollQuiescence,
+		cfg:        &config.City{},
+		sp:         runtime.NewFake(),
+		pending:    make(map[string]nudgeEventKick),
+		kicked:     make(chan struct{}, 1),
+		workerDone: make(chan struct{}),
+	}
+
+	// Two passes, exactly as the worker loop drives them: a full pass then a
+	// targeted one (nudge_event_dispatcher.go:290/293). No queued nudge is
+	// needed -- the close guard runs before any delivery attempt.
+	d.runPass("", nudgeEventRetryBudget)
+	d.runPass("some-session", 0)
+
+	if got := closes.Load(); got != 0 {
+		t.Fatalf("runPass closed the shared relocated-class store %d time(s) across two passes, want 0 (only closeCLIStorageRoutes may close it, at process exit)", got)
 	}
 }

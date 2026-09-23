@@ -108,3 +108,31 @@ func TestNudgeEventDispatcherRunPassClosesBeadStore(t *testing.T) {
 		t.Fatalf("shared relocated store was closed %d time(s) across dispatch passes, want 0", got)
 	}
 }
+
+// TestCloseDiscardedNudgeWorkStoreClosesOnlyWhenDiscarded pins
+// closeDiscardedNudgeWorkStore's two branches: resolveNudgesStore handing
+// back the SAME handle it was given (identity, not relocated) leaves it
+// open for the caller to use and close itself, while a DIFFERENT resolved
+// store (relocated: the just-opened work-store handle was discarded in
+// favor of the shared binding) must have that discarded handle closed here,
+// at the open seam -- gc-3javuo's defect class, where nothing closed it.
+func TestCloseDiscardedNudgeWorkStoreClosesOnlyWhenDiscarded(t *testing.T) {
+	var identityCloses, discardedCloses atomic.Int64
+	opened := &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &identityCloses}
+
+	if err := closeDiscardedNudgeWorkStore("city-not-relocated", opened, opened); err != nil {
+		t.Fatalf("closeDiscardedNudgeWorkStore (identity): %v", err)
+	}
+	if got := identityCloses.Load(); got != 0 {
+		t.Fatalf("closeDiscardedNudgeWorkStore closed the opened handle %d time(s) when resolved == opened, want 0 (caller's own handle, not discarded)", got)
+	}
+
+	opened = &runPassCloseCountingStore{Store: beads.NewMemStore(), closes: &discardedCloses}
+	shared := beads.NewMemStore()
+	if err := closeDiscardedNudgeWorkStore("city-relocated", opened, shared); err != nil {
+		t.Fatalf("closeDiscardedNudgeWorkStore (discarded): %v", err)
+	}
+	if got := discardedCloses.Load(); got != 1 {
+		t.Fatalf("closeDiscardedNudgeWorkStore closed the discarded work-store handle %d time(s) when resolved != opened, want exactly 1 (leaked handle, gc-3javuo)", got)
+	}
+}

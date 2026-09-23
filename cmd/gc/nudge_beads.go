@@ -46,7 +46,29 @@ var openNudgeBeadStoreErr = func(cityPath string) (beads.NudgesStore, error) {
 	if err != nil {
 		return beads.NudgesStore{}, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
-	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, nil
+	resolved := resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)
+	if err := closeDiscardedNudgeWorkStore(cityPath, store, resolved); err != nil {
+		return beads.NudgesStore{}, err
+	}
+	return beads.NudgesStore{Store: resolved}, nil
+}
+
+// closeDiscardedNudgeWorkStore closes opened when resolveNudgesStore
+// discarded it in favor of the relocated class's shared, process-scoped
+// store (resolved != opened). Nothing else owns that discarded handle, so
+// this seam must close it rather than leak one per call -- openNudgeBeadStoreErr
+// is called once per dispatch pass, far more often than the class-relocation
+// case is rare (gc-3javuo: runPass's ownership guard correctly declines to
+// close the shared store it got back, but nothing was closing the handle
+// resolveNudgesStore dropped to produce it).
+func closeDiscardedNudgeWorkStore(cityPath string, opened, resolved beads.Store) error {
+	if resolved == opened {
+		return nil
+	}
+	if closeErr := closeBeadStoreHandle(opened); closeErr != nil {
+		return fmt.Errorf("closing discarded work-store handle for %q: %w", cityPath, closeErr)
+	}
+	return nil
 }
 
 // nudgeBeadStoreOwned reports whether the store openNudgeBeadStore(cityPath)
