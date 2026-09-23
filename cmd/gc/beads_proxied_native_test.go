@@ -409,6 +409,86 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		}
 	})
 
+	t.Run("only a recover bd ran and refused ends the lane", func(t *testing.T) {
+		// round4 recheck M1, through the PRODUCTION runner. A recover is `bd
+		// dolt stop` plus a `bd ping` that cold-starts Dolt; the row that
+		// matters is the runner SIGKILLing it at gc's deadline, which used to
+		// come back a terminal proxy_zombie and demote the handle for the
+		// process. The ping exits 1 in every row (the real zombie), so each
+		// row reaches the recover in the same open.
+		//
+		// The open is LONG-LIVED, the read path's reopen shape, so the
+		// opener's own passes run after the first: a non-terminal row's final
+		// answer is the held rung's, and it must still have spent one recover.
+		for _, tc := range []struct {
+			name     string
+			recover  string
+			budget   time.Duration
+			terminal bool
+		}{
+			{
+				name:    "gc's own op budget SIGKILLed the recover mid-cold-start",
+				recover: "exec sleep 30",
+				budget:  300 * time.Millisecond,
+			},
+			{
+				name:    "the script declined the recover (its not-needed status)",
+				recover: "exit 2",
+				budget:  30 * time.Second,
+			},
+			{
+				name:     "bd ran the recover and refused",
+				recover:  "echo 'Error: ping: invalid connection' >&2; exit 1",
+				budget:   30 * time.Second,
+				terminal: true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newProxiedScopeFixture(t)
+				ops := &scriptedProviderOps{}
+				silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+					return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+				}
+				opener := newOpener(t, f, ops, silent)
+				script := writeExitingProviderScript(t, t.TempDir(), `case "$1" in
+recover) `+tc.recover+` ;;
+*) echo 'Error: ping: invalid connection' >&2; exit 1 ;;
+esac`)
+				restore := providerOwnedScopeLifecycleOp
+				providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string) error {
+					_ = ops.run(op)
+					budget := 30 * time.Second
+					if op == proxiedProviderRecoverOp {
+						budget = tc.budget
+					}
+					return runProviderOwnedOpStrict(ctx, budget, script, nil, op)
+				}
+				t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+				start := time.Now()
+				_, err := opener.admit(context.Background(), true)
+				verdict, typed := beads.ProxiedVerdictOf(err)
+				if !typed {
+					t.Fatalf("admit = %v, want a typed verdict", err)
+				}
+				if tc.terminal && verdict.Verdict != beads.ProxiedVerdictProxyZombie {
+					t.Fatalf("admit = %v, want the proxy_zombie verdict", err)
+				}
+				if verdict.Terminal() != tc.terminal {
+					t.Fatalf("terminal = %v, want %v for %v: a long-lived handle may be demoted for the process only on "+
+						"a recover bd ran and refused", verdict.Terminal(), tc.terminal, err)
+				}
+				if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp+","+proxiedProviderRecoverOp {
+					t.Fatalf("verbs spent = [%s], want exactly [probe recover]: the long-lived ladder's later passes "+
+						"must hold the failed recover's rung, not re-fork it", spent)
+				}
+				if elapsed := time.Since(start); elapsed > 15*time.Second {
+					t.Fatalf("admit took %s: the recover was not ended at gc's budget", elapsed)
+				}
+			})
+		}
+	})
+
 	t.Run("a ping that failed on gc's side never reaches the recover", func(t *testing.T) {
 		// The semaphore wait or the op budget running out is a deadline, not
 		// bd's answer (council A-F5): one probe, no recover, non-terminal.

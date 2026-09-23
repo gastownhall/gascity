@@ -1097,6 +1097,202 @@ func TestZombieLadderRecoversWhenBdReportsThePingFailed(t *testing.T) {
 	})
 }
 
+// expiringContext is a live context the test ends on demand, with the error
+// of its choice. It makes "gc's own clock ran out DURING the recover" a fact of
+// the fixture rather than a race against the wall clock on a loaded box.
+type expiringContext struct {
+	context.Context
+	once sync.Once
+	mu   sync.Mutex
+	err  error
+	done chan struct{}
+}
+
+func newExpiringContext() *expiringContext {
+	return &expiringContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringContext) Done() <-chan struct{} { return c.done }
+
+func (c *expiringContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *expiringContext) expire(err error) {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.err = err
+		c.mu.Unlock()
+		close(c.done)
+	})
+}
+
+// TestZombieLadderEndsTheLaneOnlyOnARecoverBdRefused is round4 recheck M1.
+//
+// The marked-ping arm sends a real zombie to the recover rung, and a recover
+// failure used to be a terminal proxy_zombie whatever caused it. The read
+// path's reopen runs this ladder under the read's 10s retry budget, a recover
+// is `bd dolt stop` plus a `bd ping` that cold-starts Dolt in 30-45s, and the
+// runner SIGKILLs it at gc's deadline — so gc's own clock demoted a long-lived
+// handle for the process, and so did the lifecycle slot the controller's
+// health loop holds while it recovers the same zombie. Design v2 3.4 ends the
+// lane only when bd has been asked to recover and could not.
+//
+// One row per outcome class. Every non-terminal row also proves the rung is
+// held for a backoff rather than spent (the next open inside it spends no
+// verb) and released after it (the open after it recovers).
+func TestZombieLadderEndsTheLaneOnlyOnARecoverBdRefused(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	silent := proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+
+	for _, tc := range []struct {
+		name string
+		// recoverFails is the recover's failure. It may end ctx first, which
+		// is how gc's own clock or cancellation reaches the ladder.
+		recoverFails func(ctx *expiringContext, cancel context.CancelFunc, scopeRoot string) error
+		// useCancel runs the row under a real cancelable context instead of
+		// the expiring one.
+		useCancel bool
+		want      ProxiedVerdict
+		terminal  bool
+	}{
+		{
+			name: "gc's own deadline SIGKILLed the recover mid-cold-start",
+			recoverFails: func(ctx *expiringContext, _ context.CancelFunc, _ string) error {
+				ctx.expire(context.DeadlineExceeded)
+				return fmt.Errorf("provider-owned beads recover: %w", context.DeadlineExceeded)
+			},
+			want: ProxiedVerdictBudgetExhausted,
+		},
+		{
+			name:      "gc's own cancellation ended the recover",
+			useCancel: true,
+			recoverFails: func(_ *expiringContext, cancel context.CancelFunc, _ string) error {
+				cancel()
+				return fmt.Errorf("provider-owned beads recover: %w", context.Canceled)
+			},
+			want: ProxiedVerdictBudgetExhausted,
+		},
+		{
+			name: "the lifecycle slot the health loop's recover of the same zombie holds ran out",
+			recoverFails: func(_ *expiringContext, _ context.CancelFunc, scopeRoot string) error {
+				return fmt.Errorf("waiting for provider lifecycle slot for %q: %w", scopeRoot, context.DeadlineExceeded)
+			},
+			want: ProxiedVerdictBudgetExhausted,
+		},
+		{
+			name: "the recover failed before bd could answer (a signal, an environment gc could not build)",
+			recoverFails: func(*expiringContext, context.CancelFunc, string) error {
+				return errors.New("provider-owned beads recover: signal: killed")
+			},
+			want: ProxiedVerdictBackendUnreachable,
+		},
+		{
+			name: "bd's refusal raced gc's own clock",
+			recoverFails: func(ctx *expiringContext, _ context.CancelFunc, _ string) error {
+				ctx.expire(context.DeadlineExceeded)
+				return ProviderReportedFailure(errors.New("provider-owned beads recover: exit status 1"))
+			},
+			want: ProxiedVerdictBudgetExhausted,
+		},
+		{
+			name: "bd ran the recover and refused: the one terminal outcome",
+			recoverFails: func(*expiringContext, context.CancelFunc, string) error {
+				return ProviderReportedFailure(errors.New("provider-owned beads recover: Error: ping: invalid connection"))
+			},
+			want:     ProxiedVerdictProxyZombie,
+			terminal: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdmissionFixture(t, "-1")
+			generation := proxyendpoint.NewPoolKey(f.record, "").Generation()
+			expiring := newExpiringContext()
+			var ctx context.Context = expiring
+			cancel := context.CancelFunc(func() {})
+			if tc.useCancel {
+				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
+			}
+
+			recovered := false
+			failRecover := true
+			ops := &admissionOps{onPing: bdSaysNo}
+			ops.onRecov = func() error {
+				if failRecover {
+					return tc.recoverFails(expiring, cancel, f.scopeRoot)
+				}
+				// `bd dolt stop` then `bd ping`: a new generation, which greets.
+				f.writeRecord(6002, "55667788")
+				recovered = true
+				return nil
+			}
+			in := baseAdmissionInput(f, ops)
+			in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				if recovered {
+					return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+				}
+				return silent
+			}
+			clock := time.Now()
+			in.Recovered.now = func() time.Time { return clock }
+
+			_, err := Admit(ctx, in)
+			verdict, ok := ProxiedVerdictOf(err)
+			if !ok || verdict.Verdict != tc.want {
+				t.Fatalf("Admit = %v, want verdict %s", err, tc.want)
+			}
+			if verdict.Terminal() != tc.terminal {
+				t.Fatalf("terminal = %v, want %v for %v: only a recover bd ran and refused may end the lane "+
+					"for the handle, and gc's own clock, cancellation or contention never may", verdict.Terminal(), tc.terminal, err)
+			}
+			if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+				t.Fatalf("the ladder spent %d ping(s) and %d recover(s), want exactly 1 and 1", pings, recovers)
+			}
+
+			// A second open inside the window spends nothing, whichever way
+			// the first ended: a terminal one because the rung is spent, a
+			// non-terminal one because it is held for a backoff.
+			_, err = Admit(context.Background(), in)
+			verdict, ok = ProxiedVerdictOf(err)
+			if !ok || verdict.Terminal() != tc.terminal {
+				t.Fatalf("the second open = %v, want terminal = %v", err, tc.terminal)
+			}
+			if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+				t.Fatalf("the second open of the same generation spent more: %d ping(s), %d recover(s), want 1 and 1",
+					pings, recovers)
+			}
+			if tc.terminal {
+				return
+			}
+			if _, backing := in.Recovered.BackingOff(generation); !backing {
+				t.Fatal("a recover that failed on gc's side left no backoff on its rung")
+			}
+
+			// Once the backoff runs out the rung may be spent again — here,
+			// with gc's contention gone, and bd's recover works.
+			clock = clock.Add(failedRecoverBackoff)
+			failRecover = false
+			pin, err := Admit(context.Background(), in)
+			if err != nil {
+				t.Fatalf("the open after the backoff = %v, want the recovered generation admitted", err)
+			}
+			if pin.PoolKey().PID != 6002 {
+				t.Fatalf("admitted pid %d, want the generation the second recover produced (6002)", pin.PoolKey().PID)
+			}
+			if pings, recovers := ops.counts(); pings != 1 || recovers != 2 {
+				t.Fatalf("the open after the backoff spent %d ping(s) and %d recover(s) in total, want 1 and 2: "+
+					"bd already answered this generation's ping, and the recover rung gc's side failed is owed once more",
+					pings, recovers)
+			}
+		})
+	}
+}
+
 // TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing is
 // council pr2 E-S6.
 //

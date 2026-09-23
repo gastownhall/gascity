@@ -115,9 +115,12 @@ const providerOpExitNotNeeded = 2
 // markProviderReportedFailure marks a provider-op failure as bd's own answer
 // when, and only when, the script RAN and exited with a status of its own.
 //
-// On a proxied scope the probe op's arm is exactly `bd ping`, so that status is
-// bd's: the real zombie (a Dolt child that exited 0 behind a proxy that lives
-// on) makes it exit 1, and that is the design's trigger for the recover rung.
+// On a proxied scope the probe op's arm is exactly `bd ping` and the recover
+// op's is `bd dolt stop` then `bd ping`, so that status is bd's: the real
+// zombie (a Dolt child that exited 0 behind a proxy that lives on) makes the
+// ping exit 1, and that is the design's trigger for the recover rung; a
+// recover bd refused the same way is the one recover failure that ends the
+// lane (round4 recheck M1).
 // Everything else stays unmarked, because none of it is an answer about the
 // proxy: the lifecycle semaphore or the op budget running out (a deadline, not
 // an exit), an ownership or environment refusal before the script started, a
@@ -133,9 +136,16 @@ func markProviderReportedFailure(err error) error {
 
 // Recover asks bd to retire and re-establish a proxy that listens but never
 // greets.
+//
+// Its failure is marked on exactly Ping's terms, and here the mark decides
+// whether the handle survives (round4 recheck M1): admission ends the lane
+// only on a recover bd ran and refused, and holds the rung for a backoff on
+// everything else — gc's own read budget SIGKILLing a cold start, the
+// lifecycle slot the health loop's recover of the same zombie holds, an
+// environment gc could not build.
 func (o proxiedProviderOps) Recover(ctx context.Context, scopeRoot string) error {
 	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp); err != nil {
-		return err
+		return markProviderReportedFailure(err)
 	}
 	o.noteReady(scopeRoot)
 	return nil

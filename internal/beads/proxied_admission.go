@@ -33,7 +33,10 @@ type ProviderOps interface {
 	// first and never on the second.
 	Ping(ctx context.Context, scopeRoot string) error
 	// Recover asks bd to retire and re-establish a proxy that is listening but
-	// not answering.
+	// not answering. Its failures carry the same mark on the same terms as
+	// Ping's, and the mark decides more here: only a marked failure may end
+	// the lane for the handle (proxy_zombie is terminal); every other failure
+	// holds the recover rung for failedRecoverBackoff and is non-terminal.
 	Recover(ctx context.Context, scopeRoot string) error
 }
 
@@ -129,6 +132,12 @@ const generationMemoTTL = 5 * time.Minute
 // before a later open may fork bd for it again. See Backoff.
 const failedPingBackoff = 30 * time.Second
 
+// failedRecoverBackoff is the same bound for a provider recover that failed
+// on gc's side or with an outcome gc cannot read (round4 recheck M1). It is
+// its own name because it is its own rung: the recover ledger is a different
+// GenerationSet, and a later reader tuning one must not silently tune both.
+const failedRecoverBackoff = failedPingBackoff
+
 // NewGenerationSet returns an empty set with the default TTL.
 func NewGenerationSet() *GenerationSet {
 	return &GenerationSet{seen: map[string]generationEntry{}, ttl: generationMemoTTL, now: time.Now}
@@ -191,6 +200,12 @@ func (s *GenerationSet) Release(generation string) {
 // asked and could not help. A ping bd itself reported as failed never gets
 // here from the no-greeting ladder: that is the evidence, and the ladder
 // spends the recover on it (see escalateZombie).
+//
+// The recover ledger uses it the same way (round4 recheck M1): a recover gc's
+// own budget or cancellation cut short, or one whose outcome gc cannot read,
+// holds the recover rung for failedRecoverBackoff instead of spending it, so
+// it is neither re-forked on every open nor read as "bd was asked to recover
+// and could not" — which is the only reading that may end the lane.
 func (s *GenerationSet) Backoff(generation string, d time.Duration) {
 	if s == nil || generation == "" {
 		return
@@ -742,6 +757,9 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // pass), or the ping succeeded and the generation it left is still silent (a
 // later pass finds the rung spent). A ping that failed on gc's side reaches
 // neither: it holds the rung for failedPingBackoff (council A-F5, D-F9).
+//
+// Only a recover bd itself refused is terminal (round4 recheck M1); see
+// recoverFailed for every other way a recover can fail.
 func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	if in.ProbeOnce {
 		// The first rung is "ask again", and a background tick asks again by
@@ -834,11 +852,20 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 		}
 	}
 
+	// A recover that failed on gc's side holds its rung for a backoff (round4
+	// recheck M1). While it holds, this generation has had no recover bd
+	// answered, so the terminal line below — "a recover was already spent" —
+	// is not true of it yet.
+	if remaining, backing := in.Recovered.BackingOff(generation); backing {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			fmt.Sprintf("the endpoint accepts and never greets, and the provider recover for this generation failed "+
+				"before bd could answer; not re-forking it for another %s", remaining.Round(time.Second)), ep.Err)
+	}
+
 	// One recover per generation, ever.
 	if in.Recovered.Add(generation) {
 		if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
-			return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
-				"the endpoint accepts and never greets, and the provider could not recover it", err)
+			return in.recoverFailed(ctx, generation, err)
 		}
 		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"recovered the provider; re-admitting", nil)
@@ -846,6 +873,61 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 
 	return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 		"the endpoint still accepts and never greets after a recover was already spent on generation "+generation, ep.Err)
+}
+
+// recoverFailed classifies a provider recover that did not succeed (round4
+// recheck M1).
+//
+// proxy_zombie is terminal: the handle that takes it stands down for the rest
+// of the process and every read goes through bd. The design earns that only
+// when bd has been asked to recover and could not (v2 3.4: "if the recovered
+// generation is again a zombie"), so ONLY a determinate refusal from the
+// sanctioned verb is terminal: the script ran to completion inside gc's
+// budget and bd answered with a status of its own (ProviderReportedFailure,
+// and gc's context still live, and nothing about the error a timeout).
+//
+// Everything else is non-terminal, because none of it is bd's answer:
+//
+//   - gc's own clock or cancellation. The read path's reopen runs this ladder
+//     under the read's retry budget (10s), and a recover is `bd dolt stop`
+//     followed by a `bd ping` that cold-starts Dolt in 30-45s on a real data
+//     dir: the runner SIGKILLs it mid-start at gc's deadline. A marked
+//     failure that lands after gc's context ended is counted here too — the
+//     outcome raced gc's own clock, and "undetermined is never a pass" cuts
+//     the same way for a demotion.
+//   - a timeout of any spelling (IsIndeterminate) — the op's own budget, or
+//     the in-process lifecycle slot another recover of the same zombie holds
+//     (the controller's health loop), which waits out as a deadline.
+//   - an unmarked failure: an environment or ownership refusal before the
+//     script ran, a child killed by a signal, the script's "not needed"
+//     status. bd never answered.
+//
+// Each holds the recover rung for failedRecoverBackoff rather than spending it
+// (see GenerationSet.Backoff): the next open inside the window spends no verb,
+// and the one after it may ask again once gc's contention has cleared. Before
+// this, every one of them was a terminal proxy_zombie, and a long-lived handle
+// whose read budget ran out mid-recover was demoted for the process.
+func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, err error) (Pin, bool, error) {
+	ctxErr := ctx.Err()
+	indeterminate := ctxErr != nil || proxyendpoint.IsIndeterminate(err)
+	if !indeterminate && errors.Is(err, ErrProviderReportedFailure) {
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+			"the endpoint accepts and never greets, and bd ran the provider recover and reported it could not recover it", err)
+	}
+	in.Recovered.Backoff(generation, failedRecoverBackoff)
+	if indeterminate {
+		if ctxErr != nil && !errors.Is(err, ctxErr) {
+			// A failure that raced gc's clock keeps its own text and gains
+			// the clock's, so the operator sees both.
+			err = errors.Join(err, ctxErr)
+		}
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+			"the endpoint accepts and never greets, and the provider recover was cut short by gc's own clock or "+
+				"cancellation; that says nothing about whether bd can recover this proxy, so the lane is not ended on it", err)
+	}
+	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+		"the endpoint accepts and never greets, and the provider recover failed before bd could answer; "+
+			"not ending the lane on a failure that says nothing about the proxy", err)
 }
 
 // escalateWithPing spends the single ping a stopped or stale record is worth.
