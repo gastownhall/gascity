@@ -661,6 +661,7 @@ func init() {
 	events.RegisterPayload(events.SessionSuspended, events.NoPayload{})
 	events.RegisterPayload(events.SessionUpdated, events.NoPayload{})
 	events.RegisterPayload(events.SessionDrainAckedWithAssignedWork, SessionDrainAckedWithAssignedWorkPayload{})
+	events.RegisterPayload(events.SessionDrainStopEscalated, SessionLifecyclePayload{})
 	events.RegisterPayload(events.SessionStranded, SessionStrandedPayload{})
 	events.RegisterPayload(events.SessionUnknownState, SessionUnknownStatePayload{})
 	events.RegisterPayload(events.SessionWakeRefused, SessionWakeRefusedPayload{})

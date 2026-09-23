@@ -1330,7 +1330,8 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 			step.Assignee = ""
 			return
 		}
-		step.Assignee = binding.sessionName
+		// Config-agent work is routed by alias; a concrete session binds on claim.
+		step.Assignee = ""
 		return
 	}
 
@@ -1424,7 +1425,6 @@ type attemptRouteBinding struct {
 	qualifiedName    string
 	metadataOnly     bool
 	independentSteps bool
-	sessionName      string
 	directSessionID  string
 }
 
@@ -1463,7 +1463,6 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
-			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
 		}
 	}

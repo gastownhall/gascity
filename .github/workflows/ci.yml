@@ -804,7 +804,15 @@ jobs:
       - changes
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 5
+    # 5 minutes budgeted compile time, not test time: the job's six tests run
+    # in well under a second, but runner-policy resolves runner_32vcpu to
+    # ubuntu-latest (4 vCPU) unless the calling workflow sets force_blacksmith
+    # or the run is a PR from a .github/blacksmith-allowlist.txt author
+    # (pushes to main are downgraded too), so `go build ./cmd/gc` under -tags
+    # productmetrics_testhook alone took 92-95% of the old budget on main, and
+    # any go.sum change (cold actions/setup-go cache) pushed it over and
+    # canceled the job with no failing test in the log (#6396).
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
