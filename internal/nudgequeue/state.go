@@ -49,6 +49,28 @@ func DispatcherIsHosting(cityPath string) bool {
 	return true
 }
 
+// PingWakeSocket sends a best-effort wake signal to a supervisor-hosted
+// nudge dispatcher. Callers invoke this AFTER an item lands in the queue: the
+// dispatcher's accept loop fires its wake on the connection alone, before any
+// payload is read, so a dial issued before the enqueue (e.g. a preceding
+// DispatcherIsHosting probe) can spend that wake on a pass that finds nothing
+// to deliver yet. Failures (no listener, dial or write timeout) are
+// intentionally silent: the patrol-tick fallback in supervisor mode and the
+// per-session poller in legacy mode each guarantee eventual delivery without
+// this ping.
+func PingWakeSocket(cityPath string) {
+	if strings.TrimSpace(cityPath) == "" {
+		return
+	}
+	conn, err := net.DialTimeout("unix", WakeSocketPath(cityPath), wakeSocketDialTimeout)
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // best-effort signaling
+	_ = conn.SetWriteDeadline(time.Now().Add(wakeSocketDialTimeout))
+	_, _ = conn.Write([]byte{1})
+}
+
 // wakeSocketPathLimit caps the canonical socket path length below the
 // platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches
 // the controllerSocketPathLimit pattern in cmd/gc/controller.go.

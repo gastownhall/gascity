@@ -604,7 +604,14 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	// (harmless), never toward suppressing the only deliverer.
 	if !dispatcherHosting && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
+		return nil
 	}
+	// dispatcherHosting was probed before this item existed in the queue, so
+	// the dial that answered it may already have spent the dispatcher's
+	// accept-loop wake on a pass that found nothing (see PingWakeSocket).
+	// Ping again now that the item is actually queued, so a live dispatcher
+	// picks it up promptly instead of waiting for the next patrol tick.
+	nudgequeue.PingWakeSocket(m.cityPath)
 	return nil
 }
 
