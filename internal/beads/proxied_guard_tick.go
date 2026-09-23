@@ -38,12 +38,16 @@ import (
 // 648-654): a bd proxy restart is ordinary operation, and a store that fell to
 // the bd front door for the rest of the process on every restart would make the
 // whole lane worthless on a Finite-idle city. When the new generation does not
-// admit on the tick that sees it, the handle stands down NON-terminally and the
-// next tick's recovery re-pins it (council pr2 E-S1): on row 2 the old socket
+// admit on the tick that sees it, the handle stands down NON-terminally and a
+// later tick's recovery re-pins it (council pr2 E-S1): on row 2 the old socket
 // keeps serving the moved database, so "leave it and ask again" was serving the
-// wrong database for an interval. Row 3 is the one demotion the design asks for
-// (563-565), because a cursor pair that moved is a fact about the database that
-// re-pinning cannot change.
+// wrong database for an interval. "A later tick", not "the next": the recovery
+// is one probe session per tick, so the handle reads through the bd front door
+// until one of those sessions admits — on the loaded box that made the first
+// one indeterminate, that can be many intervals (see checkGeneration for what
+// that costs against the read-path re-pin it replaced). Row 3 is the one
+// demotion the design asks for (563-565), because a cursor pair that moved is a
+// fact about the database that re-pinning cannot change.
 //
 // # Why the tick does not open the library WHILE THE LEAF IS SERVING
 //
@@ -69,9 +73,11 @@ import (
 //
 // Per tick: two 200-byte file reads (the record, and the root identity behind
 // Validate), one probe session, and — every proxiedGuardOwnerEvery-th tick — a
-// /proc read. It holds NO ProviderOps: a tick never forks bd. An escalation rung
-// is the read path's to spend, through the reopen hook, where a caller is waiting
-// for an answer and the cost is attributable.
+// /proc read. It holds NO ProviderOps: a tick never forks bd. While the leaf is
+// SERVING, an escalation rung is the read path's to spend, through the reopen
+// hook, where a caller is waiting for an answer and the cost is attributable.
+// Once it has stood down there is no read on the native leaf, so nothing in
+// this handle spends one; see recoverNative.
 //
 // A RECOVERY tick (recoverNative, for a handle that stood down non-terminally)
 // is held to the same session budget, and that is a contract on the installed
@@ -405,8 +411,8 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 			g.store.standDown(verdict)
 			return proxiedGuardStoodDown
 		}
-		// Everything else stands the native leaf down NON-terminally, and the
-		// next tick's recovery (recoverNative) re-admits it. This arm used to
+		// Everything else stands the native leaf down NON-terminally, and a
+		// later tick's recovery (recoverNative) re-admits it. This arm used to
 		// leave the pin and the leaf alone and report Undecided, and that was
 		// wrong on the one shape this file exists for (council pr2 E-S1).
 		//
@@ -427,11 +433,28 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		//
 		// Standing down is what A-F1 forbade, and A-F1 was right at the time:
 		// with no recovery path a non-terminal stand-down was permanent. That
-		// is no longer true. A non-terminally stood-down long-lived handle is
-		// recovered by the next tick through the NativeLeafReopener (one probe
-		// session, no fork, see recoverNative), so the cost of this arm is the
-		// bd front door for at most one interval, and the thing it buys is that
-		// no read is served from a generation the record says is gone.
+		// is no longer true: a non-terminally stood-down long-lived handle is
+		// recovered by a later tick through the NativeLeafReopener (see
+		// recoverNative). What this arm buys is that no read is served from a
+		// generation the record says is gone.
+		//
+		// What it costs is NOT bounded by one interval, and an earlier version
+		// of this comment said it was (round3 review). Every read goes to the bd
+		// front door — one fork per read — until some tick's recovery admits,
+		// and that recovery is ONE probe session with no provider ops. The
+		// session that just failed to admit here is the same kind of session,
+		// on the same box: when it failed because the box is loaded (the
+		// budget_exhausted this arm usually sees), the next ones tend to fail
+		// too, and the handle stays on bd for as long as the load lasts.
+		//
+		// On row 1 that is a regression against what it replaced. Before this
+		// arm the old pool's socket was dead, so the first read failed, reached
+		// the reopen hook and re-ran the FULL admission on the reader's
+		// goroutine — every pass, the no-greeting ladder, the provider ping —
+		// within the read's budget, and re-pinned. Standing the leaf down makes
+		// that hook unreachable. The trade is deliberate (a read path that
+		// cannot see row 2 must not be the only guard against it), and it
+		// fails safe: non-terminal, and never a read from the wrong generation.
 		//
 		// The typed verdict is kept when there is one (draining,
 		// budget_exhausted, backend_unreachable, proxy_gone), with the
@@ -466,7 +489,7 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 // generation replaced which.
 func repinRefusedVerdict(pin Pin, record proxyendpoint.Record, err error) *ProxiedVerdictError {
 	moved := fmt.Sprintf("the proxy generation moved (%s -> %s) and the new generation did not admit on this tick; "+
-		"standing down until the next tick's recovery rather than serving the replaced generation",
+		"standing down until a later tick's recovery admits it rather than serving the replaced generation",
 		pin.Generation(), proxyendpoint.NewPoolKey(record, pin.Database()).Generation())
 	if verdict, ok := ProxiedVerdictOf(err); ok {
 		detail := moved
@@ -547,10 +570,15 @@ func cursorDriftAgainst(pinned, observed proxyendpoint.Cursors) (lane, dir strin
 //
 // It spends NO provider verb. The reopener admission runs with nil Ops, so the
 // tick's "never forks bd" invariant survives: a recovery that needs bd to make
-// its proxy healthy comes back non-terminal, the tick stays Undecided, and the
-// rung is spent later by the read path's reopen hook, where a caller is waiting
-// and the cost is attributable. And it spends at most ONE probe session: see
-// "What the tick may spend" above.
+// its proxy healthy comes back non-terminal and the tick stays Undecided. The
+// rung is NOT "spent later by the read path's reopen hook", which this comment
+// used to say (round3 review): the hook is reached only from a read the native
+// leaf serves, and this handle's leaf is nil. Nothing in this handle spends it;
+// its reads go through the bd front door, bd's own client of its proxy, and a
+// provider verb is spent only by an open that runs the full ladder — another
+// command's. And it spends at most ONE probe session per tick: see "What the
+// tick may spend" above, and checkGeneration for how long that can keep the
+// handle on bd.
 func (g *proxiedGuard) recoverNative(ctx context.Context) proxiedGuardStep {
 	reopen := g.store.nativeReopener()
 	if reopen == nil {

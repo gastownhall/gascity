@@ -458,9 +458,13 @@ func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, si
 //
 // It re-runs admission with NO provider ops. That is what keeps the tick's
 // "never forks bd" invariant true through the recovery: a proxy that needs bd
-// to make it healthy comes back with a non-terminal verdict, the tick stays
-// undecided, and the rung is spent later by a read through the reconnect hook,
-// where a caller is waiting for the answer and the cost is attributable to it.
+// to make it healthy comes back with a non-terminal verdict and the tick stays
+// undecided. This comment used to add that "the rung is spent later by a read
+// through the reconnect hook"; it is not (round3 review). The reconnect hook
+// is reached only from a read the native leaf serves, and a handle that needs
+// this recovery has no native leaf: its reads go through the bd front door
+// until a tick's one-session recovery admits, however many intervals that
+// takes, and no provider verb is spent through it at all.
 //
 // It is always the LONG-LIVED admission shape, because only a long-lived store
 // has a guard: the finite-idle rule must apply to the replacement exactly as it
