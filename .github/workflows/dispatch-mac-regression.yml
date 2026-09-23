@@ -23,6 +23,8 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    outputs:
+      trusted: ${{ steps.trust-check.outputs.trusted }}
     steps:
       # This workflow never checks out or runs pull request code. The base-ref
       # checkout below exists only to make the trust boundary explicit before
@@ -35,9 +37,43 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
+      # The mac-regression job below inherits the caller's secrets. Gate it on
+      # the same author_association/allowlist trust check
+      # dispatch-labeled-pr-suite.yml uses before its own dispatch, so an
+      # untrusted fork PR can't reach secrets through this automatic
+      # (unlabeled) trigger either.
+      - name: Check author trust
+        id: trust-check
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          author = os.environ.get("PR_AUTHOR", "").strip()
+          association = os.environ.get("PR_ASSOCIATION", "").strip().upper()
+
+          allowlist = set()
+          for raw_line in Path(".github/blacksmith-allowlist.txt").read_text(encoding="utf-8").splitlines():
+              line = raw_line.split("#", 1)[0].strip()
+              if line:
+                  allowlist.add(line.lower())
+
+          trusted = association in {"OWNER", "MEMBER", "COLLABORATOR"} or author.lower() in allowlist
+          gh_output = os.environ["GITHUB_OUTPUT"]
+          with open(gh_output, "a", encoding="utf-8") as fh:
+              fh.write(f"trusted={'true' if trusted else 'false'}\n")
+
+          if not trusted:
+              print(f"PR author {author or '<unknown>'} is not trusted for auto-dispatched Mac Regression")
+          PY
+
   mac-regression:
     name: Mac Regression (fork PR)
     needs: checkout-base
+    if: needs.checkout-base.outputs.trusted == 'true'
     permissions:
       checks: write
       contents: read
