@@ -590,15 +590,17 @@ func TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGo
 	}
 }
 
-// TestProvider_MergedStreamStale_RealSubscribeWiring exercises the actual
-// wiring exposed via SubscribeSessionEvents and MergedStreamStale, not just
-// the tracker in isolation. TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent
-// above proves the tracker itself works, but a mutation that makes the real
-// Provider.MergedStreamStale() return false unconditionally, or removes
-// p.mergedStale.Store(tracker) from SubscribeSessionEvents, survives that
-// test untouched: nothing calls SubscribeSessionEvents and then asks the
-// Provider (not the tracker) whether it thinks the merge is stale.
-func TestProvider_MergedStreamStale_RealSubscribeWiring(t *testing.T) {
+// TestProvider_SubscribeSessionEventsStale_RealSubscribeWiring exercises the
+// actual wiring exposed via SubscribeSessionEventsStale's returned checker,
+// not just the tracker in isolation.
+// TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent
+// above proves the tracker itself works, but a mutation that makes
+// SubscribeSessionEventsStale return a checker that always reports false, or
+// stops wiring the tracker returned by mergeSessionEvents into it, survives
+// that test untouched: nothing calls SubscribeSessionEventsStale and then
+// asks its returned checker (not the tracker directly) whether the merge is
+// stale.
+func TestProvider_SubscribeSessionEventsStale_RealSubscribeWiring(t *testing.T) {
 	orig := sessionEventStaleAfter
 	sessionEventStaleAfter = 20 * time.Millisecond
 	defer func() { sessionEventStaleAfter = orig }()
@@ -607,15 +609,14 @@ func TestProvider_MergedStreamStale_RealSubscribeWiring(t *testing.T) {
 	remote := newFakeEventProvider()
 	h := New(local, remote, isRemote)
 
-	if h.MergedStreamStale() {
-		t.Fatal("MergedStreamStale() = true before any subscription, want false")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	merged, err := h.SubscribeSessionEvents(ctx)
+	merged, stale, err := h.SubscribeSessionEventsStale(ctx)
 	if err != nil {
-		t.Fatalf("SubscribeSessionEvents: %v", err)
+		t.Fatalf("SubscribeSessionEventsStale: %v", err)
+	}
+	if stale == nil {
+		t.Fatal("SubscribeSessionEventsStale returned a nil checker for a dual-backend merge")
 	}
 
 	// Both sides emit: not stale.
@@ -628,8 +629,8 @@ func TestProvider_MergedStreamStale_RealSubscribeWiring(t *testing.T) {
 			t.Fatal("timed out waiting for initial merged events")
 		}
 	}
-	if h.MergedStreamStale() {
-		t.Fatal("MergedStreamStale() = true while both backends are emitting, want false")
+	if stale() {
+		t.Fatal("stale() = true while both backends are emitting, want false")
 	}
 
 	// remote goes silent past the staleness window; local keeps emitting.
@@ -645,11 +646,11 @@ func TestProvider_MergedStreamStale_RealSubscribeWiring(t *testing.T) {
 			}
 		default:
 		}
-		if h.MergedStreamStale() {
+		if stale() {
 			sawStale = true
 		}
 	}
 	if !sawStale {
-		t.Fatal("MergedStreamStale() never reported true via the real Provider after remote went silent")
+		t.Fatal("stale() never reported true after remote went silent")
 	}
 }

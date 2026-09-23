@@ -83,20 +83,23 @@ type sessionEventPump struct {
 	// outage that neither closes the channel nor updates streamGen/
 	// observedGen — see sessionEventFlowingStaleAfter.
 	lastEventUnixNano atomic.Int64
-	// composite holds the current subscription's staleness reporter when sp
-	// implements runtime.CompositeSessionEventStaleness (a merged
+	// composite holds this subscription's own staleness checker when sp
+	// implements runtime.StaleAwareSessionEventProvider (a merged
 	// multi-backend stream), nil otherwise. flowing() consults it so one
 	// backend's silence is never masked by the other backend's continuing
-	// traffic on the merged channel — see MergedStreamStale.
+	// traffic on the merged channel. Scoped to this specific subscription
+	// (not shared provider-wide state) so a second, independent subscriber
+	// of the same provider — e.g. the nudge-event dispatcher — can never
+	// overwrite the pump's own staleness view.
 	composite atomic.Pointer[compositeStaleHolder]
 }
 
-// compositeStaleHolder wraps a runtime.CompositeSessionEventStaleness so it
+// compositeStaleHolder wraps this subscription's staleness checker so it
 // can live behind an atomic.Pointer (a nil *compositeStaleHolder and "no
 // composite reporter for this subscription" must be distinguishable from a
-// present-but-nil interface value).
+// present-but-nil func value).
 type compositeStaleHolder struct {
-	checker runtime.CompositeSessionEventStaleness
+	checker func() bool
 }
 
 // newSessionEventPump returns a pump whose subscriptions live within parent
@@ -129,18 +132,23 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	p.observedGen.Store(0)
 	p.lastEventUnixNano.Store(0)
-	if csep, ok := sp.(runtime.CompositeSessionEventStaleness); ok {
-		p.composite.Store(&compositeStaleHolder{checker: csep})
+	p.composite.Store(nil)
+	ctx, cancel := context.WithCancel(p.parent)
+	var events <-chan runtime.SessionEvent
+	var err error
+	if sasep, ok := sp.(runtime.StaleAwareSessionEventProvider); ok {
+		var stale func() bool
+		events, stale, err = sasep.SubscribeSessionEventsStale(ctx)
+		if err == nil && stale != nil {
+			p.composite.Store(&compositeStaleHolder{checker: stale})
+		}
+	} else if sep, ok := sp.(runtime.SessionEventProvider); ok {
+		events, err = sep.SubscribeSessionEvents(ctx)
 	} else {
-		p.composite.Store(nil)
-	}
-	sep, ok := sp.(runtime.SessionEventProvider)
-	if !ok {
+		cancel()
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 		return
 	}
-	ctx, cancel := context.WithCancel(p.parent)
-	events, err := sep.SubscribeSessionEvents(ctx)
 	if err != nil {
 		cancel()
 		fmt.Fprintf(p.stderr, "%s: session-event subscribe: %v (session liveness stays on patrol polling)\n", p.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -186,7 +194,7 @@ func (p *sessionEventPump) flowing() bool {
 	// backend while the other has gone silent; lastEventUnixNano alone would
 	// report that as flowing. Ask the composite reporter (if any) whether
 	// either fanned-in backend is individually stale.
-	if h := p.composite.Load(); h != nil && h.checker != nil && h.checker.MergedStreamStale() {
+	if h := p.composite.Load(); h != nil && h.checker != nil && h.checker() {
 		return false
 	}
 	return true

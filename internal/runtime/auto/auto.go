@@ -23,12 +23,6 @@ type Provider struct {
 
 	mu     sync.RWMutex
 	routes map[string]bool // true = ACP
-
-	// mergedStale tracks the current SubscribeSessionEvents merge's
-	// per-backend staleness, when both backends are event-capable and thus
-	// mergeSessionEvents is in play. Replaced on every SubscribeSessionEvents
-	// call; nil when no merge is active (single-backend or never subscribed).
-	mergedStale atomic.Pointer[sessionEventStaleTracker]
 }
 
 var (
@@ -43,7 +37,7 @@ var (
 	_ runtime.LivenessObserver               = (*Provider)(nil)
 	_ runtime.LivenessObserverWithError      = (*Provider)(nil)
 	_ runtime.SessionEventProvider           = (*Provider)(nil)
-	_ runtime.CompositeSessionEventStaleness = (*Provider)(nil)
+	_ runtime.StaleAwareSessionEventProvider = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -462,48 +456,45 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 // reconcile poke, falling back to patrol polling with no underlying
 // capability loss to explain it.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	events, _, err := p.SubscribeSessionEventsStale(ctx)
+	return events, err
+}
+
+// SubscribeSessionEventsStale is like SubscribeSessionEvents but also
+// returns a staleness checker scoped to this specific subscription. See
+// runtime.StaleAwareSessionEventProvider.
+func (p *Provider) SubscribeSessionEventsStale(ctx context.Context) (<-chan runtime.SessionEvent, func() bool, error) {
 	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
 	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
 	if !dok && !aok {
-		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+		return nil, nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
 	}
 	if dok && !aok {
-		return dSEP.SubscribeSessionEvents(ctx)
+		ch, err := dSEP.SubscribeSessionEvents(ctx)
+		return ch, nil, err
 	}
 	if aok && !dok {
-		return aSEP.SubscribeSessionEvents(ctx)
+		ch, err := aSEP.SubscribeSessionEvents(ctx)
+		return ch, nil, err
 	}
 
 	dCh, err := dSEP.SubscribeSessionEvents(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("default backend: %w", err)
+		return nil, nil, fmt.Errorf("default backend: %w", err)
 	}
 	aCh, err := aSEP.SubscribeSessionEvents(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("ACP backend: %w", err)
+		return nil, nil, fmt.Errorf("ACP backend: %w", err)
 	}
 	tracker := newSessionEventStaleTracker(sessionEventStaleAfter)
-	p.mergedStale.Store(tracker)
-	return mergeSessionEvents(ctx, dCh, aCh, tracker), nil
+	return mergeSessionEvents(ctx, dCh, aCh, tracker), tracker.stale, nil
 }
 
 // sessionEventStaleAfter is runtime.SessionEventStaleAfter by default;
 // tests override it to a short duration so real-provider staleness wiring
-// (SubscribeSessionEvents -> tracker -> MergedStreamStale) can be exercised
-// without waiting out the production bound.
+// (SubscribeSessionEventsStale -> tracker -> the returned checker) can be
+// exercised without waiting out the production bound.
 var sessionEventStaleAfter = runtime.SessionEventStaleAfter
-
-// MergedStreamStale reports whether either backend fanned into the current
-// SubscribeSessionEvents merge has gone silent past its staleness bound. It
-// is false when no merge is active (a single event-capable backend, or no
-// subscription yet). See runtime.CompositeSessionEventStaleness.
-func (p *Provider) MergedStreamStale() bool {
-	t := p.mergedStale.Load()
-	if t == nil {
-		return false
-	}
-	return t.stale()
-}
 
 // sessionEventStaleTracker records the last-observed time of each side of a
 // merged session-event stream so staleness can be reported at query time

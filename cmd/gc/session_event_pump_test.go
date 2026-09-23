@@ -471,7 +471,7 @@ func TestSessionEventPumpFlowingGoesFalseAfterStaleness(t *testing.T) {
 }
 
 // compositeEventedFake pairs eventedFake's SessionEventProvider with a
-// controllable runtime.CompositeSessionEventStaleness, so pump.flowing() can
+// controllable runtime.StaleAwareSessionEventProvider, so pump.flowing() can
 // be tested against a merged provider reporting one backend stale while the
 // stream itself keeps delivering events.
 type compositeEventedFake struct {
@@ -479,9 +479,12 @@ type compositeEventedFake struct {
 	stale atomic.Bool
 }
 
-func (p *compositeEventedFake) MergedStreamStale() bool { return p.stale.Load() }
+func (p *compositeEventedFake) SubscribeSessionEventsStale(ctx context.Context) (<-chan runtime.SessionEvent, func() bool, error) {
+	events, err := p.SubscribeSessionEvents(ctx)
+	return events, p.stale.Load, err
+}
 
-var _ runtime.CompositeSessionEventStaleness = (*compositeEventedFake)(nil)
+var _ runtime.StaleAwareSessionEventProvider = (*compositeEventedFake)(nil)
 
 // A merged composite stream can keep lastEventUnixNano fresh off one healthy
 // backend while the other has gone silent; flowing() must consult the
