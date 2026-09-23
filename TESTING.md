@@ -953,6 +953,15 @@ target instead of turning it into a green no-op. Through the general
 yourself — `TEST_ENV` is `env -i`, so exporting the variable in your shell is
 not enough.
 
+The same switch covers a row's own precondition. The required
+`Beads / proxied-native acceptance` job runs `TestProxiedNativeLifecycle` and
+`TestProxiedNativeSafety` under `GC_REQUIRE_ACCEPTANCE_TOOLING=1`, and a row
+there whose precondition the `bd` under test does not produce (a database with
+no ignored-lane row to remove, a proxy record `bd` cleaned up after a SIGKILL)
+calls `helpers.MissingPrecondition`, which skips locally and fails in that job.
+Those files never call `t.Skip` in a row;
+`scripts/acceptance_run_selection_test.go` enforces it.
+
 The legacy shape needs its own binary because no `gc init` on this tree can
 produce it: every fresh scope is journaled provider-owned. Build one from a
 commit that predates the journal and point the variable at it; without it that

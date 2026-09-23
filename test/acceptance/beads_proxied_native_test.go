@@ -428,7 +428,10 @@ func TestProxiedNativeLifecycle(t *testing.T) {
 			t.Fatalf("the proxy survived SIGKILL: %v", alive)
 		}
 		if _, err := os.Stat(filepath.Join(c.proxyDir, "proxy.pid")); err != nil {
-			t.Skipf("bd removed its record on SIGKILL (%v), so this host cannot produce the dead-record arm", err)
+			// Not a skip: the row runs in a required job, and a bd that now
+			// cleans up after a SIGKILL has changed the arm this row exists
+			// to measure.
+			helpers.MissingPrecondition(t, "bd removed its record on SIGKILL (%v), so this host cannot produce the dead-record arm", err)
 		}
 
 		c.reset(t)

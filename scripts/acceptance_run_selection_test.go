@@ -199,3 +199,45 @@ func TestAcceptancePerfGateHasALane(t *testing.T) {
 			"runs the suite with the perf gate silently off:\n%s", gate, recipe)
 	}
 }
+
+// inRowSkipPattern matches a call that skips a test from inside it: t.Skip,
+// t.Skipf, t.SkipNow on any receiver. A line whose code is commented out does
+// not count.
+var inRowSkipPattern = regexp.MustCompile(`\.Skip(f|Now)?\(`)
+
+// TestProxiedAcceptanceRowsNeverSkipInRow is round4's missed completeness low.
+//
+// Every function in these files runs in a job that sets
+// GC_REQUIRE_ACCEPTANCE_TOOLING — Beads / proxied-native acceptance is a
+// required check — and that switch is what turns a missing precondition into
+// a failure. An in-row t.Skip bypasses it: no-migrate-behind-ignored (the only
+// acceptance proof that an exported BD_ALLOW_REMOTE_MIGRATE never reaches the
+// library on the ignored lane) and dead-record-one-ping each carried one, and
+// on a bd that produced their skip condition the job reported success with the
+// row unrun, visible only in a step summary nothing gates on. A row whose
+// precondition is missing calls helpers.MissingPrecondition (or
+// MissingTooling), which skips locally and fails under the switch.
+func TestProxiedAcceptanceRowsNeverSkipInRow(t *testing.T) {
+	root := repoRoot(t)
+	matches, err := filepath.Glob(filepath.Join(root, "test", "acceptance", "beads_proxied_*_test.go"))
+	if err != nil {
+		t.Fatalf("glob the proxied acceptance files: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("no test/acceptance/beads_proxied_*_test.go files found; the guard has nothing to guard")
+	}
+	for _, path := range matches {
+		body, err := os.ReadFile(path) //nolint:gosec // a path this test globbed inside the repo
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for n, line := range strings.Split(string(body), "\n") {
+			code, _, _ := strings.Cut(line, "//")
+			if inRowSkipPattern.MatchString(code) {
+				t.Errorf("%s:%d skips from inside a row that runs in a required job under GC_REQUIRE_ACCEPTANCE_TOOLING:\n\t%s\n"+
+					"call helpers.MissingPrecondition instead, so the job fails rather than passing with the row unrun",
+					filepath.Base(path), n+1, strings.TrimSpace(line))
+			}
+		}
+	}
+}

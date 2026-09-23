@@ -310,7 +310,10 @@ func TestProxiedNativeSafety(t *testing.T) {
 		db := proxiedScopeSQL(t, cityRoot)
 		beforeMain, beforeIgnored := proxiedCursors(t, db)
 		if beforeIgnored == 0 {
-			t.Skipf("this database's ignored lane is already at 0; there is no top row to remove")
+			// Not a skip: this row is the only acceptance proof of the
+			// ignored-lane consent fence, and it runs in a required job.
+			helpers.MissingPrecondition(t, "this database's ignored lane is already at 0; there is no top row to remove, "+
+				"so the ignored-lane consent fence cannot be measured")
 		}
 		t.Cleanup(func() {
 			proxiedExec(t, db, "INSERT IGNORE INTO ignored_schema_migrations (version) VALUES (?)", beforeIgnored)
