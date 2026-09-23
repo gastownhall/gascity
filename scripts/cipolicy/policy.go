@@ -48,9 +48,9 @@ const (
 	// only job that stands up the proxied shapes and ci-required accepted the
 	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
 	// internal packages, so the filter is now the graph itself.
-	// Also includes the reviewed #6396 productmetrics testhook timeout increase
-	// from 5 to 12 minutes; no other workflow execution change is introduced by
-	// this PR on top of current main.
+	//
+	// reviewed delta: cmd-gc-productmetrics-testhook timeout-minutes 5 -> 12
+	// (#6396: canceled at the 5-minute budget with no failing test).
 	expectedCIExecutionHash      = "2031411e7a08368893efa4e5bbcaf11dac7f8a53d6653f1d633a54873b2e386c"
 	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
