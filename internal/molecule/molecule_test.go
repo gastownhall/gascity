@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -206,7 +207,10 @@ func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Clean(filepath.Join(cwd, "..", ".."))
+	}
 	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
 	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
 		"subject":           "PR-123",

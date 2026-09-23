@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestAuthoritativeDocsUseSingularOverlayDirectory(t *testing.T) {
@@ -14,7 +16,10 @@ func TestAuthoritativeDocsUseSingularOverlayDirectory(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	}
 
 	var docs []string
 	for _, dir := range []string{

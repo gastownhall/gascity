@@ -42,9 +42,16 @@ go_test(
         "telemetry_handle_conformance_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:repo_source_tree",
+        "//internal/worker/fakecmd",
+    ],
     embed = [":workertest"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
         "//internal/events",
         "//internal/runtime",
@@ -58,4 +65,27 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
+)
+
+exports_files(
+    glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "testdata",
+    srcs = glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

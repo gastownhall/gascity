@@ -8,7 +8,9 @@ go_library(
         "connection.go",
         "files.go",
         "identity.go",
+        "init_intent.go",
         "metadata.go",
+        "mode.go",
         "preflight.go",
         "preflight_checker.go",
     ],
@@ -27,23 +29,48 @@ go_library(
 
 go_test(
     name = "contract_test",
-    # identity_test.go scans the source checkout via runtime.Caller; retain it
-    # in the Go package suite but defer it from the hermetic Bazel pilot.
     srcs = [
         "backend_registry_test.go",
+        "connection_bd_external_binding_test.go",
+        "connection_bd_owned_direct_binding_test.go",
+        "connection_bd_owned_server_test.go",
+        "connection_dolt_mode_precedence_test.go",
         "connection_test.go",
+        "files_atomic_write_test.go",
         "files_custom_types_test.go",
         "files_test.go",
         "identity_test.go",
+        "init_intent_test.go",
         "metadata_test.go",
+        "migrate_journal_test.go",
+        "mode_test.go",
         "preflight_checker_test.go",
         "preflight_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":contract"],
     deps = [
+        "//internal/bazeltest",
         "//internal/fsys",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

@@ -35,6 +35,7 @@ go_library(
         "provider_resolution.go",
         "resolve.go",
         "sleep_reason.go",
+        "startup_health.go",
         "state_machine.go",
         "store.go",
         "store_resolve.go",
@@ -56,8 +57,10 @@ go_library(
         "//internal/beads",
         "//internal/citylayout",
         "//internal/clock",
+        "//internal/config",
         "//internal/execenv",
         "//internal/fsys",
+        "//internal/git",
         "//internal/nudgepoller",
         "//internal/nudgequeue",
         "//internal/pathutil",
@@ -96,6 +99,7 @@ go_test(
         "lifecycle_projection_test.go",
         "lifecycle_timers_test.go",
         "lifecycle_transition_test.go",
+        "lifecycle_vocabulary_test.go",
         "list_all_characterization_test.go",
         "list_all_test.go",
         "list_from_infos_test.go",
@@ -107,6 +111,7 @@ go_test(
         "name_claim_sweep_test.go",
         "named_config_info_equiv_test.go",
         "named_config_test.go",
+        "named_session_ineligible_conflict_test.go",
         "names_test.go",
         "overlay_test.go",
         "pending_create_lease_test.go",
@@ -116,6 +121,7 @@ go_test(
         "provider_resolution_test.go",
         "resolve_test.go",
         "sleep_reason_test.go",
+        "startup_health_test.go",
         "state_machine_test.go",
         "store_resolve_test.go",
         "store_test.go",
@@ -135,14 +141,28 @@ go_test(
         "wedge_repro_test.go",
         "worker_dir_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//cmd/gc:cmd_session.go",
+        "//cmd/gc:doctor_session_model.go",
+        "//cmd/gc:session_beads.go",
+        "//cmd/gc:session_reconcile.go",
+        "//internal/api:handler_sessions.go",
+    ],
     embed = [":session"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/citylayout",
         "//internal/clock",
+        "//internal/config",
         "//internal/execenv",
         "//internal/nudgepoller",
         "//internal/nudgequeue",
@@ -155,4 +175,16 @@ go_test(
         "//internal/testutil",
         "@org_modernc_sqlite//:sqlite",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

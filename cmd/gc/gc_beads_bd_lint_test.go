@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 var bdConfigSetPattern = regexp.MustCompile(`bd[a-zA-Z_]*[[:space:]]+.*config[[:space:]]+set`)
@@ -344,6 +346,9 @@ func formatOffender(path string, line int, content string) string {
 
 func repoRootForLint(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatalf("abs cwd: %v", err)
