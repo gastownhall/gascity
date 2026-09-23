@@ -143,8 +143,17 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // was handed, and this runs underneath call sites a command may reach with a
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
+// cliStorageRoutesLoad declines the load-time revision snapshot. This is a
+// routing read for a one-shot command: nothing downstream ever calls
+// config.Revision() on the result, and building the snapshot content-hashes
+// every file of every pack directory. On maintainer-city that hash alone was
+// 10 s of an 11 s `gc ready` once the bd-env loads were memoized (cherry,
+// 2026-09-23). Same rule as cmd_agent.go and the bd_env.go probe (ga-s3cnmy);
+// TestCLIStorageRoutesDeclineTheRevisionSnapshot pins it.
+var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
 	}
