@@ -54,6 +54,29 @@ func TestWorkspaceTrustDialogDoesNotConfirmNoExit(t *testing.T) {
 	}
 }
 
+func TestWorkspaceTrustDialogSeparatesSelectionFromConfirmation(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	var sends [][]string
+	err := acceptWorkspaceTrustDialog(
+		context.Background(),
+		newStartupDialogBudget(time.Second),
+		func(int) (string, error) { return realTrustDialogNoExitSelected, nil },
+		func(keys ...string) error {
+			sends = append(sends, append([]string(nil), keys...))
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialog() error = %v", err)
+	}
+
+	want := [][]string{{"Down"}, {"Enter"}}
+	if !reflect.DeepEqual(sends, want) {
+		t.Fatalf("acceptWorkspaceTrustDialog() sends = %v, want %v; selection movement must settle before confirmation", sends, want)
+	}
+}
+
 func TestWorkspaceTrustConfirmKeysTrustPreSelected(t *testing.T) {
 	const content = ` Quick safety check: Is this a project you created or one you trust?
 

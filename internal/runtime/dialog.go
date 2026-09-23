@@ -610,11 +610,7 @@ func acceptWorkspaceTrustDialog(
 		if containsWorkspaceTrustDialog(content) {
 			if keys, ok := workspaceTrustConfirmKeys(content); ok {
 				budget.observe()
-				if err := sendKeys(keys...); err != nil {
-					return err
-				}
-				sleep(ctx, startupDialogAcceptDelay)
-				return nil
+				return sendDialogKeys(ctx, sendKeys, keys, startupDialogAcceptDelay)
 			}
 		}
 
