@@ -450,13 +450,46 @@ func (p *Provider) RemoveMeta(name, key string) error {
 }
 
 // ListRunning returns the names of tmux sessions whose names have the prefix.
+//
+// A non-zero `list-sessions` exit is reported as a [runtime.PartialListError]
+// rather than an empty success. The remote tmux fails this way for "no server
+// running", "lost server", a busy or stale socket, and a missing tmux binary —
+// and the connection drops the remote stderr on a non-zero exit, so none of
+// them can be told apart here. Every one of them is a failed observation, which
+// [runtime.Provider.ListRunning] requires be surfaced as an error: returning
+// `([], nil)` made "I could not look at this box" read as "no session of yours
+// is there", which the pending-create rollback treats as positive proof of
+// absence before it closes a bead and frees an alias. This mirrors the local
+// tmux adapter, which maps the same outage to a PartialListError
+// (adapter.go ListRunning, pinned by TestProviderListRunningReportsPartialOnNoServer).
+//
+// ServerAbsent is deliberately NOT set: it is the carve-out for callers holding
+// independent proof of death, and a dropped stderr cannot prove the remote tmux
+// server was absent rather than unreachable. An exit-0 listing with no output is
+// still a genuine empty success — the server answered.
+//
+// That is a DEFERRED question, not a closed one — ga-d1uks. "No tmux server on
+// the box" is the normal steady state of an idle box, not an outage, so as long
+// as this stays unset, pendingCreateRuntimeAbsenceConfirmed in cmd/gc can never
+// confirm absence for an ssh runtime: the drift rollback and the `gc session
+// reset` rescue are inert there, and reset degrades to an ordinary in-place
+// restart. The stderr is recoverable (p.conn.Exec takes an argv, so the probe
+// can run under `sh -c '… 2>&1'`), which would make the classification possible.
+// The bead records the trap that stops it being a one-liner: the local
+// classifier folds "error connecting to" into the same ErrNoServer, and over a
+// transport that is unobservable rather than absent.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	out, code, err := p.tmux(context.Background(), "", "list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		return nil, err
 	}
-	if code != 0 || out == "" {
-		return []string{}, nil // no server / no sessions
+	if code != 0 {
+		return nil, &runtime.PartialListError{
+			Err: fmt.Errorf("ssh %s: tmux list-sessions exited %d", p.conn.ep.target(), code),
+		}
+	}
+	if out == "" {
+		return []string{}, nil // the server answered: no sessions
 	}
 	var names []string
 	for _, line := range strings.Split(out, "\n") {

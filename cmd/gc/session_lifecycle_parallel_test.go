@@ -3350,6 +3350,7 @@ func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing
 }
 
 func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3410,6 +3411,7 @@ func TestCommitAsyncStartResult_IgnoresStaleSessionSnapshot(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -3468,6 +3470,7 @@ func TestCommitAsyncStartResult_IgnoresClosedSessionSnapshot(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_StopsMatchingRuntimeForStaleSnapshot(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 45, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4127,6 +4130,7 @@ func TestRollbackPendingCreateClearingClaimRunsRetiredCleanupWhenPostCloseFails(
 }
 
 func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4188,7 +4192,17 @@ func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testi
 	}
 }
 
-func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T) {
+// TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringStartup
+// replaces the former ..._IgnoresCommandChangedDuringStartup, whose
+// "pending_create_claim = true, want true for pending-create retry" assertion
+// encoded the ga-6wkhl defect as a contract. Retrying is exactly what cannot
+// work here: the drifted side of the compare is the persisted command, only a
+// completed create rewrites it, so every retry re-derives the same discard while
+// the row keeps its claim and its alias. The start is still discarded and the
+// stale runtime still stopped; what changes is that the pending create is now
+// rolled back instead of retained.
+func TestCommitAsyncStartResult_RollsBackPendingCreateWhenCommandChangedDuringStartup(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 6, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4260,8 +4274,11 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 	if got := updated.Metadata["last_woke_at"]; got != "" {
 		t.Fatalf("last_woke_at = %q, want cleared so the new command can retry next tick", got)
 	}
-	if got := updated.Metadata["pending_create_claim"]; got != "true" {
-		t.Fatalf("pending_create_claim = %q, want true for pending-create retry", got)
+	if got := updated.Metadata["pending_create_claim"]; got == "true" {
+		t.Fatalf("pending_create_claim = %q, want cleared: a drifted pending create must be rolled back, not retried against a command only a completed create could rewrite", got)
+	}
+	if updated.Status != "closed" {
+		t.Fatalf("status = %q, want closed so the row surrenders its identifiers and the next tick recreates it against the current command", updated.Status)
 	}
 	if got := updated.Metadata["command"]; got != "CUSTOM_VERSION=v2 report" {
 		t.Fatalf("command = %q, want current config preserved", got)
@@ -4269,6 +4286,7 @@ func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T)
 }
 
 func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := &getErrorStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 2, 50, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4331,6 +4349,7 @@ func TestCommitAsyncStartResult_PreservesRuntimeWhenRefreshFails(t *testing.T) {
 }
 
 func TestCommitAsyncStartResult_RecoversCommitPanic(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := &panicMetadataBatchStore{MemStore: beads.NewMemStore()}
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 3, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4379,6 +4398,7 @@ func TestCommitAsyncStartResult_RecoversCommitPanic(t *testing.T) {
 }
 
 func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 0, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4429,6 +4449,7 @@ func TestCommitAsyncStartResultWithContext_SkipsCanceledCommit(t *testing.T) {
 }
 
 func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateRuntime(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 15, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4502,6 +4523,7 @@ func TestCommitAsyncStartResultWithContext_StopsCanceledSuccessfulPendingCreateR
 }
 
 func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 4, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -4554,6 +4576,7 @@ func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateError(t
 }
 
 func TestCommitAsyncStartResultWithContext_RollsBackCanceledPendingCreateSuccess(t *testing.T) {
+	isolatedAsyncStartFailures(t)
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 4, 17, 11, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{

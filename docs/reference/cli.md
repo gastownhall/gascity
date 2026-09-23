@@ -4095,7 +4095,7 @@ gc session
 | [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old dormant sessions |
 | [gc session rename](#gc-session-rename) | Rename a session |
-| [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
+| [gc session reset](#gc-session-reset) | Restart a session fresh (rolls back a dead unfinished create) |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
 | [gc session suspend](#gc-session-suspend) | Suspend a session (save state, free resources) |
 | [gc session unpin](#gc-session-unpin) | Remove a session awake pin |
@@ -4330,13 +4330,19 @@ gc session rename <session-id-or-alias> <title> [flags]
 
 ## gc session reset
 
-Request a fresh restart for an existing session without closing its bead.
+Request a fresh restart for an existing session, normally without closing its bead.
 
 The controller stops the current runtime and starts the same session again with
 fresh provider conversation state. Session identity, alias, mail, and queued
 work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
+
+One case is not an in-place restart: a session whose create never completed and
+is no longer in flight cannot be restarted, because its stale identity is what
+blocks it. Reset rolls that session back instead — closing the bead and
+releasing its alias so the controller can build a replacement. A create that is
+still spawning, or one whose runtime is alive, is never rolled back.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 

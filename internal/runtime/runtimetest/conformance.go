@@ -286,6 +286,19 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 	})
 
+	// A stopped session must never be reported as running. Both contract-legal
+	// answers satisfy that, and the suite has to accept each: a listing that
+	// succeeded and omits the name, or a [runtime.PartialListError] saying the
+	// listing could not be completed. The second is not a weaker pass — it is
+	// what the ListRunning contract REQUIRES of a provider that could not
+	// observe (see internal/runtime.Provider.ListRunning), and stopping the only
+	// session routinely produces it: a tmux server exits with its last session,
+	// so the very next listing finds nothing to ask. Demanding a nil error here
+	// would demand that a provider report a failed observation as an empty
+	// success, which is the fail-open this contract exists to forbid. Either way
+	// the substantive assertion below still runs against whatever names came
+	// back, so a provider cannot hide a still-listed stopped session behind a
+	// partial error.
 	t.Run("ListRunning_ExcludesStopped", func(t *testing.T) {
 		sp, cfg, name := newSession(t)
 		startOrSkip(t, opts, sp, name, cfg, "Start")
@@ -294,7 +307,7 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 		}
 
 		names, err := sp.ListRunning(name)
-		if err != nil {
+		if err != nil && !runtime.IsPartialListError(err) {
 			t.Fatalf("ListRunning: %v", err)
 		}
 		if contains(names, name) {

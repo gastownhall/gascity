@@ -1929,29 +1929,74 @@ func commitAsyncStartResultWithContext(
 	}()
 
 	refreshBegin := time.Now()
-	refreshed, ok, cleanupRuntime, releaseInFlight := refreshAsyncStartResult(result, store, stderr)
+	refreshed, verdict := refreshAsyncStartResult(result, store, stderr)
 	commitRefreshElapsed := time.Since(refreshBegin)
 	// Carry the per-phase timings forward: refresh's elapsed time is
 	// commit-side, distinct from the start phases captured in
 	// runPreparedStartCandidate. Both flow into the lifecycle log.
 	refreshed.phases.CommitRefresh = commitRefreshElapsed
-	if !ok {
-		// refreshAsyncStartResult returns result unchanged on every !ok
-		// branch (store.Get error, stale prepared command, stale runtime
-		// session), so refreshed.phases already carries the original
+	sessionID := result.prepared.candidate.info.ID
+	if !verdict.commit {
+		// refreshAsyncStartResult returns result unchanged on every
+		// non-commit branch (store.Get error, stale prepared command, stale
+		// runtime session), so refreshed.phases already carries the original
 		// start_call / post_start_observe; only commit_refresh was
 		// stamped above. No restore needed.
-		if cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
+		// The rollback releases the alias, so it may only proceed once the
+		// runtime this start spawned is CONFIRMED gone. Releasing it while a
+		// process still holds the chair name would leave a live agent with no
+		// bead owning it, and every replacement start would then fail with
+		// ErrSessionExists. When the runtime survives, this tick keeps the
+		// superseded disposition instead.
+		//
+		// startOutcomeDefersCommit gates the rollback for the same reason it
+		// gates the cleanup this arm replaced: TraceOutcomeSessionInitializing
+		// and TraceOutcomeDeferred both mean "the runtime is there but this tick
+		// could not decide about it", which is not a state to destroy a bead and
+		// free an alias from. A deferred outcome falls through to releaseInFlight
+		// and retries next tick; nothing regresses to the ga-6wkhl shape, because
+		// the PreWakePatch half of this fix makes the isStaleCreating reaper
+		// reachable again and it still collects a genuinely dead row.
+		rollback := verdict.rollbackPendingCreate && !startOutcomeDefersCommit(result.outcome)
+		if rollback {
+			rollback = pendingCreateRuntimeClearedForRollback(verdict.current, name, sp, stderr)
+		} else if verdict.cleanupRuntime && !startOutcomeDefersCommit(result.outcome) {
 			stopStaleAsyncStartRuntime(result, sp, stderr)
 		}
 		outcome := "stale_async_start"
-		if releaseInFlight {
-			clearPendingStartInFlightLease(result.prepared.candidate.info.ID, sessFront, stderr)
+		switch {
+		case rollback && rollbackPendingCreateConfirmed(verdict.current, sessFront, clk.Now().UTC(), stderr):
+			// rollbackPendingCreate clears last_woke_at inside its own Tx, so
+			// this arm does not also release the in-flight lease. The rollback
+			// resolves the run, so the consecutive-failure counter is dropped.
+			outcome = "async_start_drift_rolled_back"
+			asyncStartFailures.forget(sessionID)
+			emitAsyncStartDriftRollback(rec, name, verdict, template, outcome)
+		case verdict.releaseInFlight || verdict.rollbackPendingCreate:
+			// Either an ordinary refresh failure, or a drift rollback that was
+			// refused (live runtime) or did not land (store failure). All three
+			// leave the row holding its claim, so all three keep counting toward
+			// the escalation rather than reporting a rollback that never happened.
 			outcome = "async_start_refresh_failed"
+			clearPendingStartInFlightLease(sessionID, sessFront, stderr)
+			escalateAsyncStartRefreshFailure(rec, name, sessionID, template, outcome, verdict, stderr)
+		default:
+			// The stale-attempt arm: this start lost its row to a newer
+			// incarnation (the still-current reject, or a drifted attempt that
+			// failed the identity fence). It deliberately writes NOTHING — the
+			// in-flight lease belongs to the incarnation that is still spawning,
+			// not to this attempt — but it is still a repeating non-commit arm,
+			// so it counts toward the escalation. Leaving it uncounted was the
+			// one arm on which a session could loop forever in silence, which is
+			// the shape this counter exists to surface; leaving it unclear()ed
+			// would instead let a session alternating between the two arms trip
+			// the threshold on ticks no single run produced.
+			escalateAsyncStartRefreshFailure(rec, name, sessionID, template, outcome, verdict, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, outcome, result.started, time.Now(), nil, refreshed.phases)
 		return false
 	}
+	asyncStartFailures.clear(sessionID)
 	if refreshed.err != nil && refreshed.rollbackPending && runningSessionMatchesPendingCreateInfo(refreshed.prepared.candidate.info, refreshed.prepared.candidate.name(), sp) {
 		refreshed.err = nil
 		refreshed.outcome = TraceOutcomeSessionExistsConverged
@@ -1997,26 +2042,67 @@ func commitAsyncStartResultWithContext(
 // TestRefreshAsyncStartRejectsNonSessionBead. candidate.info is refreshed to the
 // re-read Info; the prepared side (result.prepared.candidate.info) is the enqueue-time
 // twin the gates compare against.
-func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, bool, bool, bool) {
+func refreshAsyncStartResult(result startResult, store beads.Store, stderr io.Writer) (startResult, asyncStartRefreshVerdict) {
 	preparedInfo := result.prepared.candidate.info
 	if store == nil || strings.TrimSpace(preparedInfo.ID) == "" {
-		return result, true, false, false
+		return result, asyncStartRefreshVerdict{commit: true}
 	}
 	currentInfo, _, err := sessionFrontDoor(store).GetPersistedResponse(preparedInfo.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: refreshing async start %s: %v\n", result.prepared.candidate.name(), err) //nolint:errcheck
-		return result, false, false, true
+		return result, asyncStartRefreshVerdict{releaseInFlight: true}
 	}
 	if asyncStartPreparedCommandStaleInfo(result.prepared, currentInfo) {
+		verdict := asyncStartRefreshVerdict{
+			cleanupRuntime:  true,
+			current:         currentInfo,
+			preparedCommand: result.prepared.candidate.tp.Command,
+			currentCommand:  currentInfo.Command,
+		}
+		// A create that never committed cannot converge on its own: the stale
+		// side of this compare is the persisted command, and only a completed
+		// create rewrites it. Roll the pending create back so the claim and the
+		// alias are released and the next tick recreates the row against the
+		// current template command (ga-6wkhl). A live row keeps the superseded
+		// verdict — see asyncStartDriftRollbackEligibleInfo.
+		//
+		// The identity fence is applied HERE, not left to the still-current gate
+		// below. This gate runs first, and while the drift arm only discarded
+		// that ordering was harmless; the rollback arm writes — it closes the
+		// bead and frees the alias. A late attempt whose in-flight lease has
+		// expired can reach this point after the reconciler has already spawned a
+		// NEWER incarnation, and it must never destroy the identity of a row it
+		// does not own (stopStaleAsyncStartRuntime correctly refuses to stop that
+		// newer runtime, so the rollback would strand a live agent under a freed
+		// alias).
+		identityMatches := asyncStartIdentityMatchesInfo(preparedInfo, currentInfo)
+		if asyncStartDriftRollbackEligibleInfo(currentInfo) && identityMatches {
+			fmt.Fprintf(stderr, "session reconciler: rolling back pending create for %s: desired command changed before its create committed\n", result.prepared.candidate.name()) //nolint:errcheck
+			verdict.rollbackPendingCreate = true
+			return result, verdict
+		}
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s: desired command changed during startup\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, true, true
+		// last_woke_at is the in-flight lease of whichever incarnation currently
+		// owns the row, so only the attempt that owns it may release it — the
+		// same rule the still-current gate below already applies. A late attempt
+		// clearing a newer incarnation's lease mid-spawn now matters more than it
+		// did: with pending_create_started_at anchored to the episode rather than
+		// re-stamped per attempt, an unprotected spawn gap inside an episode older
+		// than pendingCreateNeverStartedTimeout is reapable.
+		if identityMatches {
+			verdict.releaseInFlight = true
+		}
+		return result, verdict
 	}
 	if !asyncStartSessionStillCurrentInfo(preparedInfo, currentInfo) {
 		fmt.Fprintf(stderr, "session reconciler: ignoring stale async start result for %s\n", result.prepared.candidate.name()) //nolint:errcheck
-		return result, false, asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo), false
+		return result, asyncStartRefreshVerdict{
+			cleanupRuntime: asyncStartStaleRuntimeCleanupAllowedInfo(preparedInfo, currentInfo),
+			current:        currentInfo,
+		}
 	}
 	result.prepared.candidate.info = currentInfo
-	return result, true, false, false
+	return result, asyncStartRefreshVerdict{commit: true, current: currentInfo}
 }
 
 // asyncStartPreparedCommandStaleInfo is the async-start command-drift gate: it

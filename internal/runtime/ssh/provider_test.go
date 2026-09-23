@@ -400,6 +400,59 @@ func TestProvider_ListRunningFiltersByPrefix(t *testing.T) {
 	}
 }
 
+// TestProvider_ListRunningReportsPartialOnListFailure is the ssh analog of the
+// tmux adapter's TestProviderListRunningReportsPartialOnNoServer. A non-zero
+// remote `list-sessions` exit ("no server running", "lost server", a busy or
+// stale socket, a missing tmux binary — the connection drops the remote stderr,
+// so they are indistinguishable here) is a failed observation. Returning it as
+// an empty SUCCESS let callers that free identifiers on absence — the
+// pending-create rollback closes the bead and releases the alias — read "I
+// could not look at this box" as "your session is gone", stranding a live
+// remote agent under the chair name.
+func TestProvider_ListRunningReportsPartialOnListFailure(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("list-sessions")(argv) {
+			return nil, 1, nil // remote tmux failed; ssh itself worked
+		}
+		return nil, 0, nil
+	}}
+
+	got, err := providerWith(f).ListRunning("")
+	if err == nil {
+		t.Fatalf("ListRunning = %v, nil; a failed remote listing must not be an empty success", got)
+	}
+	if !runtime.IsPartialListError(err) {
+		t.Fatalf("ListRunning err = %v, want a runtime.PartialListError so reconciler guards defer", err)
+	}
+	if runtime.IsRuntimeServerAbsent(err) {
+		t.Fatal("ServerAbsent must stay unset: the dropped remote stderr cannot prove the server was absent rather than unreachable")
+	}
+	if len(got) != 0 {
+		t.Errorf("ListRunning names = %v, want none alongside the failure", got)
+	}
+}
+
+// TestProvider_ListRunningEmptySuccessIsGenuine keeps the fix narrow: an exit-0
+// listing with no output means the remote tmux server answered and holds no
+// sessions. That is a real observation and must stay a clean empty success, or
+// every rollback and orphan sweep on a healthy idle box would defer forever.
+func TestProvider_ListRunningEmptySuccessIsGenuine(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("list-sessions")(argv) {
+			return []byte(""), 0, nil // the server answered: no sessions
+		}
+		return nil, 0, nil
+	}}
+
+	got, err := providerWith(f).ListRunning("")
+	if err != nil {
+		t.Fatalf("ListRunning: %v, want a clean empty success when the server answered", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListRunning = %v, want no names", got)
+	}
+}
+
 func TestProvider_GetMeta(t *testing.T) {
 	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
 		if isTmux("show-environment")(argv) {

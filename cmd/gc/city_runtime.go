@@ -3393,7 +3393,14 @@ func isStaleCreating(bead beads.Bead) bool {
 
 // isStaleCreatingInfo is the session.Info mirror of isStaleCreating.
 func isStaleCreatingInfo(i sessionpkg.Info) bool {
-	now := time.Now()
+	return isStaleCreatingInfoAt(i, time.Now())
+}
+
+// isStaleCreatingInfoAt is isStaleCreatingInfo against an explicit now, for the
+// callers that already hold an injected clock (the reset rescue leases against
+// one for the in-flight arm, and deciding the two arms of one gate against two
+// different clocks makes a test that pins the clock pin only half of it).
+func isStaleCreatingInfoAt(i sessionpkg.Info, now time.Time) bool {
 	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
 		return !now.Before(started.Add(staleCreatingStateTimeout))
 	}
