@@ -82,6 +82,32 @@ func TestComputePoolDesiredStates_UnresolvedRigPreservesExistingSession(t *testi
 	}
 }
 
+func TestComputePoolDesiredStates_ExistingSessionsPrecedeCompetingFloor(t *testing.T) {
+	workspaceMax := 2
+	cfg := &config.City{
+		Workspace: config.Workspace{MaxActiveSessions: &workspaceMax},
+		Agents: []config.Agent{
+			poolAgent("a", "", nil, 0),
+			poolAgent("b", "", nil, 2),
+		},
+	}
+	work := []beads.Bead{
+		workBead("work-1", "a", "session-1", "in_progress", 1),
+		workBead("work-2", "a", "session-2", "in_progress", 1),
+	}
+	sessions := []beads.Bead{
+		sessionBead("session-1", "open"),
+		sessionBead("session-2", "open"),
+	}
+
+	result := ComputePoolDesiredStates(cfg, work, sessionInfosFromBeads(sessions), nil)
+	counts := poolDesiredRequestCounts(result)
+
+	if counts["a"] != 2 || counts["b"] != 0 {
+		t.Fatalf("request counts = %#v, want a=2 and b=0: floors must not displace existing sessions", counts)
+	}
+}
+
 func TestComputePoolDesiredStates_UnresolvedRigPreservesInFlightSession(t *testing.T) {
 	agent := poolAgent("claude", "", nil, 0)
 	agent.Scope = "rig"

@@ -933,11 +933,12 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
-	floorConsumed := reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, trace)
+	consumed := acceptConcreteNestedCapRequests(requests, limits, &usage, accepted, trace)
+	reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, consumed, trace)
 
 	// Walk demand not already used by a floor, accepting by priority.
 	for i, req := range requests {
-		if floorConsumed[i] {
+		if consumed[i] {
 			continue
 		}
 		template := req.Template
@@ -976,6 +977,40 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 	return result
 }
 
+// acceptConcreteNestedCapRequests reserves capacity for sessions that already
+// exist, are being resumed, or are in flight. Floors may preempt anonymous new
+// demand, but must not displace concrete capacity that reconciliation is
+// already responsible for preserving.
+func acceptConcreteNestedCapRequests(
+	requests []SessionRequest,
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	trace *sessionReconcilerTraceCycle,
+) []bool {
+	consumed := make([]bool, len(requests))
+	for i, request := range requests {
+		if !isResumeLikeTier(request.Tier) && request.SessionBeadID == "" {
+			continue
+		}
+		if usage.isDuplicateSessionRequest(request) {
+			consumed[i] = true
+			continue
+		}
+		if site, reason, payload, rejected := usage.rejection(request, limits); rejected {
+			if trace != nil {
+				trace.RecordDecision(site, reason, TraceOutcomeRejected, request.Template, "", payload)
+			}
+			consumed[i] = true
+			continue
+		}
+		accepted[request.Template] = append(accepted[request.Template], request)
+		usage.accept(request, limits)
+		consumed[i] = true
+	}
+	return consumed
+}
+
 type nestedCapFloor struct {
 	template string
 	minimum  int
@@ -988,8 +1023,9 @@ func reserveNestedCapFloors(
 	limits nestedCapLimits,
 	usage *nestedCapUsage,
 	accepted map[string][]SessionRequest,
+	consumed []bool,
 	trace *sessionReconcilerTraceCycle,
-) []bool {
+) {
 	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
@@ -1004,7 +1040,6 @@ func reserveNestedCapFloors(
 	}
 	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
 
-	consumed := make([]bool, len(requests))
 	for _, floor := range floors {
 		if limits.agentRigUnresolved[floor.template] {
 			log.Printf("pool desired state: template %q rig_resolution_error: refusing min_active_sessions floor %d for non-city agent",
@@ -1038,7 +1073,6 @@ func reserveNestedCapFloors(
 			}
 		}
 	}
-	return consumed
 }
 
 func acceptNestedCapFloor(
