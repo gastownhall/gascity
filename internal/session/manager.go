@@ -1525,6 +1525,15 @@ func (m *Manager) Kill(id string) error {
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.
+//
+// Population warning for a new caller: this stamps drain_at (BeginDrainPatch),
+// and drain_at is the durable clock cmd/gc's poolSlotDrainRetireDeadline bound
+// reads to decide that a pool seat's drain has outlived its deadline and its
+// runtime may be killed and its bead force-retired. That bound's safety
+// argument currently rests on drain_at being stamped only by the controller's
+// drain-ack path — this exported entry point has no production caller today —
+// so wiring an operator-facing drain here widens the bound's population.
+// Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
 func (m *Manager) BeginDrain(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)

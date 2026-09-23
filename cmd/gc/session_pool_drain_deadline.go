@@ -83,13 +83,21 @@ func swapWorktreePruneForTest(fn func(sessionpkg.Info, string, *config.City, io.
 // which excludes the live seat whose drain was CANCELED (scale-back-up) and
 // which therefore kept its pre-drain last_woke_at and lost its sleep_reason.
 //
-// state=draining is deliberately NOT matched. In production it is unreachable
-// here: BeginDrainPatch is the sole writer of both state=draining and drain_at,
-// its only non-test caller is DrainAckStopPendingPatch, and every row that pairs
-// produces is intercepted by reconcileDrainAckStopPending, which continues
-// before this gate. That population converges through its own machinery when its
-// runtime is killable (measured: 3 ticks); when the runtime is NOT killable it
-// stays open — correctly, because no bound may close a bead over a live agent.
+// state=draining is deliberately NOT matched, and the premise for that is
+// narrower than it first looks. BeginDrainPatch is the sole writer of both
+// state=draining and drain_at, but it has TWO callers, not one:
+// DrainAckStopPendingPatch, whose rows reconcileDrainAckStopPending intercepts
+// and continues before this gate, and the exported session.Manager.BeginDrain,
+// which has no production caller today (only tests). So the real premise is
+// "drain_at is stamped on the controller's drain-ack path", and it holds by
+// call-graph accident rather than by invariant: wiring an operator-facing drain
+// to Manager.BeginDrain would widen this bound's population with nothing
+// failing. That is why gate 1 (poolSlotRetireOwnsSeat) enforces the identity
+// and state exclusions instead of arguing them from reachability.
+//
+// The drain-ack population converges through its own machinery when its runtime
+// is killable (measured: 3 ticks); when the runtime is NOT killable it stays
+// open — correctly, because no bound may close a bead over a live agent.
 func sessionInUnfinalizedDrain(info sessionpkg.Info, drainAt time.Time) bool {
 	if raw := strings.TrimSpace(info.LastWokeAt); raw != "" {
 		wokeAt, err := time.Parse(time.RFC3339, raw)
@@ -123,6 +131,133 @@ func poolSlotDrainAgePastDeadline(info sessionpkg.Info, now time.Time) (time.Dur
 		return 0, false
 	}
 	return age, true
+}
+
+// poolSlotRetireTemplate resolves the template name this retirement gates on
+// and reports.
+//
+// The reconciler passes the DESIRED template, which is the zero value for a
+// seat whose name is absent from desiredState. The seat's own projected
+// info.Template is the durable answer for that case. For the legacy-manual
+// shape, what it buys is ATTRIBUTION rather than seat safety: an empty template
+// resolves no config agent, so for a seat that merely left the desired set
+// while its agent is STILL configured the legacy-manual exclusion in
+// poolSlotRetireOwnsSeat does degrade to a no-op — but gate 1's marker-less
+// refusal then catches that seat on the nil-agent arm instead, so it is refused
+// either way and only the check doing the refusing differs. Separately, for a
+// seat that IS retired while absent from desiredState, both emitted events
+// would name an empty template, one of the two fields the payload doc names for
+// reading the age distribution per pool.
+//
+// There is one shape whose OUTCOME turns on this fallback, and it turns toward
+// acting rather than refusing: the derived-ephemeral seat gate 1 deliberately
+// admits — raw-empty session_origin, slot-shaped name, multi-session agent —
+// reaches its agent only through info.Template, and an empty template would
+// send it to the marker-less refusal instead of freeing the slot name it
+// squats. That population is "undesired and pre-backfill", so it is exactly the
+// population this fallback exists for.
+//
+// It cannot recover the case where the agent itself left config, because then
+// no name resolves an agent at all — there the unattributable-identity check in
+// poolSlotRetireOwnsSeat, not this fallback, is what holds the bound off the
+// seat.
+func poolSlotRetireTemplate(info sessionpkg.Info, desiredTemplate string) string {
+	if template := strings.TrimSpace(desiredTemplate); template != "" {
+		return template
+	}
+	return strings.TrimSpace(info.Template)
+}
+
+// poolSlotRetireOwnsSeat is gate 1: whether this bound may act on info's seat
+// at all. Each paragraph below is an exclusion the rest of the ladder assumes.
+//
+// Identity. isPoolManagedSessionInfo is satisfied by session_origin=ephemeral
+// ALONE, and that is exactly the shape the repo's own
+// isLegacyManualSessionInfoForAgent defines as a legacy USER-created seat
+// (ephemeral origin, no pool_managed, no pool_slot — sessions persisted before
+// the manual-origin backfill). So the pool predicate by itself does not deliver
+// "a named or manual session's identity is not disposable". The sibling
+// pool-freeable close pairs the same predicate with !isNamedSessionInfo; this
+// path needs the manual exclusion too, and needs it more, because it answers
+// with a Kill of a LIVE runtime rather than a close over an already-dead one.
+//
+// Attribution. That exclusion is only as good as the pool it resolves. Narrow
+// the population to what can still reach this point — admitted by the pool
+// predicate, already past the named check, and carrying NO positive pool marker
+// — and three of isLegacyManualSessionInfoForAgent's bail-out clauses are dead
+// by construction (named, pool_managed, pool_slot). Four stay live, and a seat
+// slips the legacy arm on any one of them: a nil agent; an agent that resolves
+// but is not multi-session (no namepool and max_active_sessions=1 — see
+// config.Agent.SupportsMultipleSessions); info.DependencyOnly; and a raw
+// info.SessionOrigin that is not "ephemeral".
+//
+// That last one is live because admission never required a STAMPED origin.
+// sessionOriginInfo DERIVES "ephemeral" from a raw-empty origin — on
+// DependencyOnly alone, or on a slot-shaped session name via resolvePoolSlot —
+// while the legacy predicate tests the raw field. It also fires FIRST, ahead of
+// the DependencyOnly clause, so for this file's own dependency-only fixture,
+// which deliberately stamps no session_origin, the origin bail-out is what
+// slips the legacy arm rather than that final clause.
+//
+// The refusal below covers three of those four shapes: nil agent,
+// single-session agent, and dependency-only. The first two collapse into a
+// single term because SupportsMultipleSessions is false on a nil receiver; the
+// third is a separate OR because a dependency-only seat's agent need not be
+// single-session, and ANDing the terms would leave exactly that seat admitted.
+// The fourth shape stays deliberately ADMITTED: a raw-empty-origin seat with a
+// slot-shaped name under a multi-session agent is squatting a pool slot name,
+// which is the exact contention this bound exists to free.
+//
+// The condition is not "no agent resolves" — it is "no agent resolves a POOL".
+// An unattributable seat cannot be proven disposable either way, and a
+// dependency-only one holds no pool slot at all (sessionOriginInfo calls it
+// ephemeral on DependencyOnly alone, with no marker required), so retiring it
+// would free nothing this bound exists to free while still killing a live
+// runtime. Multi-session capability arrives here as a side effect of reusing
+// the legacy predicate's own semantics: it is a MIGRATION-eligibility condition
+// upstream, so the refusal mirrors it rather than importing it as a
+// disposability test in its own right.
+//
+// The refusal stays narrowed to seats carrying NO positive pool marker, because
+// a pool_managed/pool_slot seat whose agent left config is exactly the stuck
+// population this bound exists to retire — failing closed on it would turn the
+// gate into a feature-off switch. Markers are written by this reconciler;
+// ephemeral origin alone is not.
+//
+// Every refusal here is deliberately silent: this is a pure predicate over
+// every session on every tick, so a log line belongs with the gate's other
+// observability rather than inside it. When the bound never fires on a seat you
+// expected it to free, read pool_managed/pool_slot on the bead first — their
+// absence is the precondition for the refusal above, and a marker-bearing seat
+// never reaches it.
+//
+// State. This gate runs ABOVE the reconciler's !isKnownStateInfo skip, and
+// sessionInUnfinalizedDrain's sleep_reason arm matches without consulting state
+// at all — so without this check an older reconciler rolled back under a newer
+// writer could kill and close a bead parked in a state it has never seen, which
+// is precisely the population that skip exists to leave alone. The precedent
+// that also acts pre-skip (reconcileDrainAckStopPending) matches one exact
+// state it owns outright; this path matches a provenance marker, so it is the
+// first pre-skip handler that can fire on a state it has never seen and it must
+// respect the allowlist itself. Both shapes this bound targets — drained, and
+// the awake ghost the heal decays it into — are in knownSessionStates, so
+// nothing in scope is lost. draining is NOT in that set (it is exactly the
+// forward-compat example the skip's own comment names), which makes the
+// "state=draining is deliberately NOT matched" claim above structural here
+// rather than an argument from reachability.
+func poolSlotRetireOwnsSeat(info sessionpkg.Info, cfg *config.City, template string) bool {
+	if !isPoolManagedSessionInfo(info) {
+		return false
+	}
+	cfgAgent := findAgentByTemplate(cfg, template)
+	if isNamedSessionInfo(info) || isManualSessionInfoForAgent(info, cfgAgent) {
+		return false
+	}
+	if !info.PoolManaged && strings.TrimSpace(info.PoolSlot) == "" &&
+		(!cfgAgent.SupportsMultipleSessions() || info.DependencyOnly) {
+		return false
+	}
+	return isKnownStateInfo(info)
 }
 
 // poolSlotRetireBlocker names the advisory hold that forbids retiring info, or
@@ -191,8 +326,16 @@ func poolSlotRetireHasAssignedWork(
 //
 // The order of the gates is the safety argument, and it is not rearrangeable:
 //
-//  1. Pool-managed only. A named or manual session's identity is not
-//     disposable, and nothing about it can starve a pool to zero seats.
+//  1. A seat this bound owns (poolSlotRetireOwnsSeat): pool-managed, never a
+//     named or manual identity — including the LEGACY manual shape that the
+//     pool predicate alone admits — attributable to a configured POOL (an agent
+//     that resolves and is multi-session, and not a dependency-only seat) unless
+//     it carries this reconciler's own markers, and in a state this reconciler
+//     recognizes. A human-owned identity is not disposable, an unattributable
+//     one cannot be shown to be otherwise, a dependency-only one holds no slot
+//     to free, nothing about any of them can starve a pool to zero seats, and a
+//     state written by a newer version belongs to the forward-compat skip below
+//     this call site, not to this path.
 //  2. Not a degraded tick. A partial store enumeration cannot prove a seat is
 //     idle, and the boot tick defers session closes because this exact
 //     per-candidate multi-store fan-out is what #3288 moved off the readiness
@@ -238,7 +381,8 @@ func retirePoolSlotAtDrainDeadline(
 	if storeQueryPartial || deferClosesOnBoot {
 		return nil, false
 	}
-	if !isPoolManagedSessionInfo(info) {
+	template = poolSlotRetireTemplate(info, template)
+	if !poolSlotRetireOwnsSeat(info, cfg, template) {
 		return nil, false
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
@@ -267,6 +411,28 @@ func retirePoolSlotAtDrainDeadline(
 	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, stderr)
 	if !stopped {
 		return nil, false
+	}
+	if performedStop {
+		// A stop this path performed is a fact the moment the kill is
+		// re-observed, and it is recorded here rather than after the close
+		// because everything below can still refuse: the final work fence, the
+		// provenance stamp, and the close each return early. Emitting only on
+		// the successful path loses the stop outright on those arms — the next
+		// tick finds the runtime already absent, retires with
+		// performedStop=false, and never emits it — so a real agent stop would
+		// be permanently invisible to the stop counter and the lifecycle
+		// timeline. Only the retirement event below belongs to the close.
+		telemetry.RecordAgentStop(context.Background(), name, sessionAgentMetricIdentityInfo(info, cfg), "drain-deadline", nil)
+		if rec != nil {
+			rec.Record(events.Event{
+				Type:      events.SessionStopped,
+				Actor:     "gc",
+				Subject:   template,
+				Message:   "stopped at the pool-slot drain deadline",
+				SessionID: info.ID,
+				Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain deadline"),
+			})
+		}
 	}
 
 	now := clk.Now().UTC()
@@ -300,23 +466,7 @@ func retirePoolSlotAtDrainDeadline(
 	poolSlotRetireWorktreePrune(info, cityPath, cfg, stderr)
 
 	fmt.Fprintf(stderr, "session reconciler: retired pool slot %s at the drain deadline after %s in an unfinalized drain; its runtime name is free again\n", name, drainAge.Round(time.Second)) //nolint:errcheck
-	if performedStop {
-		// A stop this path performed is a real agent stop: it belongs in the
-		// stop counter and on the session.stopped envelope, or the lifecycle
-		// timeline for a retired seat ends with no stop at all.
-		telemetry.RecordAgentStop(context.Background(), name, sessionAgentMetricIdentityInfo(info, cfg), "drain-deadline", nil)
-	}
 	if rec != nil {
-		if performedStop {
-			rec.Record(events.Event{
-				Type:      events.SessionStopped,
-				Actor:     "gc",
-				Subject:   template,
-				Message:   "stopped at the pool-slot drain deadline",
-				SessionID: info.ID,
-				Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain deadline"),
-			})
-		}
 		rec.Record(events.Event{
 			Type:      events.SessionPoolSlotRetiredAtDrainDeadline,
 			Actor:     "gc",

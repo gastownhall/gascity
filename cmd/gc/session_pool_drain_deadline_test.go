@@ -78,6 +78,40 @@ func drainDeadlineRetiredEvents(rec *events.Fake) []events.Event {
 	return out
 }
 
+// The safety case for this bound is an ORDERING, not a number: the deadline
+// must sit well above the machinery that finalizes an ordinary drain, so it
+// only ever sees seats that machinery has already given up on. Every other test
+// in this file expresses its clock relative to poolSlotDrainRetireDeadline
+// itself, so lowering the constant to 60s would leave the whole suite green
+// while inverting exactly the relationship its comment calls load-bearing.
+// Pin the relationship in the build instead of in prose.
+//
+// One floor, not a list. strandedRepairConfirmGrace is the LARGEST of the
+// ordinary post-drain_at bounds (2m, against drainAckReleaseBudget's 15s and
+// the drainAckStopConfirmDeadTimeout var's 6s default), so clearing it clears
+// every one of the others. Asserting the smaller ones alongside it would read
+// as enforcing several relationships while enforcing exactly this one — such a
+// row cannot go red while this row passes. If a new bound ever exceeds this
+// grace, add it here and this comment stops being true.
+func TestPoolSlotDrainRetireDeadlineOutlastsTheOrdinaryDrainMachinery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		floor time.Duration
+		why   string
+	}{
+		{
+			name:  "strandedRepairConfirmGrace",
+			floor: strandedRepairConfirmGrace,
+			why:   "the stranded-worker repair must get its full confirm window before any deadline forces the seat",
+		},
+	} {
+		if poolSlotDrainRetireDeadline <= tc.floor {
+			t.Fatalf("poolSlotDrainRetireDeadline = %v, want strictly greater than %s (%v): %s",
+				poolSlotDrainRetireDeadline, tc.name, tc.floor, tc.why)
+		}
+	}
+}
+
 // Pin 1 (RED before the fix). A pool-managed seat stuck in drain past the
 // retire deadline, with no assigned work, is stopped and force-retired: the
 // bead closes with the drained close reason plus greppable deadline
@@ -141,6 +175,9 @@ func TestReconcileSessionBeads_DrainedPoolSlotIsRetiredAtTheDeadline(t *testing.
 			}
 			if payload["session_name"] != poolSeatName {
 				t.Fatalf("payload session_name = %v, want worker-1-pool (payload=%v)", payload["session_name"], payload)
+			}
+			if payload["template"] != "worker" {
+				t.Fatalf("payload template = %v, want worker — template is how an operator reads the age distribution per pool (payload=%v)", payload["template"], payload)
 			}
 			if payload["drain_at"] == "" || payload["drain_at"] == nil {
 				t.Fatalf("payload drain_at missing; the age of the stuck drain is the whole diagnostic (payload=%v)", payload)
@@ -377,6 +414,314 @@ func TestReconcileSessionBeads_DrainDeadlineRetireSkipsNonPoolSession(t *testing
 	}
 	if got.Metadata[drainFinalizeMetadataKey] == drainFinalizeDeadline {
 		t.Fatalf("non-pool session retired by the pool-slot deadline path: metadata=%v", got.Metadata)
+	}
+}
+
+// Pin 6b (negative). The legacy manual shape gate 1 promises to exclude but
+// isPoolManagedSessionInfo alone admits: a user-created session persisted
+// before the manual-origin backfill carries session_origin=ephemeral with NO
+// pool_managed and NO pool_slot, which is exactly what
+// isLegacyManualSessionInfoForAgent still defines as manual. That identity is
+// not disposable, and this path would answer for it with a Kill of a live
+// runtime rather than a close over an already-dead one.
+//
+// The undesired arm exercises the info.Template fallback: the reconciler passes
+// the DESIRED template, which is empty for a seat missing from desiredState,
+// and an empty template resolves no config agent — so without the fallback the
+// legacy exclusion silently degrades to a no-op. The seat survives either way,
+// because gate 1's marker-less refusal then catches it on the nil-agent arm
+// instead, which is why the outcome assertions at the bottom cannot tell the
+// two apart. That arm's premise check is what does tell them apart: it is red
+// unless the seat's OWN projected template resolves the agent and the
+// legacy-manual exclusion is the check that refuses the seat.
+//
+// The third arm is the one the fallback CANNOT reach. When the agent itself is
+// gone from config, every name resolves nil, isLegacyManualSessionInfoForAgent
+// returns false on a nil agent, and the exclusion degrades to
+// isManualSessionInfo alone — which this legacy shape does not satisfy. Only an
+// explicit unattributable-identity refusal keeps the bound off the seat, so
+// this arm is red against a gate that resolves the agent but does not fail
+// closed when the resolution comes back empty.
+//
+// The fourth arm is the SIBLING of the third, and the reason the refusal keys
+// on the capability rather than on nil. isLegacyManualSessionInfoForAgent bails
+// on `cfgAgent == nil || !cfgAgent.SupportsMultipleSessions()` — two arms — and
+// an agent that resolves but carries no namepool and max_active_sessions=1
+// takes the second. The seat is the identical user-created legacy shape, the
+// agent is present, and multi-session capability is the sole differentiator, so
+// a refusal narrowed to the nil arm alone leaves this seat admitted and answers
+// for it with the same Kill. SupportsMultipleSessions is a
+// MIGRATION-eligibility condition, not a disposability one; this arm is what
+// keeps the bound from silently inheriting it.
+func TestReconcileSessionBeads_DrainDeadlineRetireSkipsLegacyManualSeat(t *testing.T) {
+	const legacySeatName = "worker-legacy"
+	for _, tc := range []struct {
+		name          string
+		desired       bool
+		dropAgent     bool
+		singleSession bool
+		pinsFallback  bool
+	}{
+		{name: "template_from_desired_state", desired: true},
+		{name: "template_from_the_seats_own_projection", desired: false, pinsFallback: true},
+		{name: "agent_removed_from_config", desired: false, dropAgent: true},
+		{name: "single_session_agent", desired: false, singleSession: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := poolSeatEnv()
+			if tc.dropAgent {
+				env.cfg.Agents = nil
+			}
+			if tc.singleSession {
+				env.cfg.Agents = []config.Agent{{
+					Name:              "worker",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}}
+				// Premise of this arm: the agent RESOLVES (so the nil refusal
+				// cannot be what excludes the seat) and is not multi-session (so
+				// the legacy exclusion bails on its capability arm). Without both,
+				// the arm would pass for the third arm's reason instead of its own.
+				cfgAgent := findAgentByTemplate(env.cfg, "worker")
+				if cfgAgent == nil {
+					t.Fatal("fixture resolves no config agent; this arm would duplicate agent_removed_from_config")
+				}
+				if cfgAgent.SupportsMultipleSessions() {
+					t.Fatal("fixture agent is still multi-session, so the legacy exclusion would catch the seat on its own")
+				}
+			}
+			if tc.desired {
+				env.addDesired(legacySeatName, "worker", false)
+			}
+			seat := env.createSessionBead(legacySeatName, "worker")
+			env.setSessionMetadata(&seat, map[string]string{
+				"state":        "drained",
+				"sleep_reason": "drained",
+				"last_woke_at": "",
+				// Legacy manual: ephemeral origin, and deliberately no
+				// pool_managed / pool_slot markers.
+				"session_origin": "ephemeral",
+				"drain_at":       env.clk.Now().Add(-poolSlotDrainRetireDeadline - time.Minute).UTC().Format(time.RFC3339),
+			})
+			if err := env.sp.Start(context.Background(), legacySeatName, runtime.Config{Command: "test-cmd"}); err != nil {
+				t.Fatalf("start legacy manual runtime: %v", err)
+			}
+			if tc.pinsFallback {
+				// Premise of this arm, and the only thing separating it from
+				// agent_removed_from_config: this arm adds no desiredState entry,
+				// so the seat's OWN projection must supply the template that
+				// resolves the agent, and the legacy-manual exclusion must be what
+				// refuses the seat. Without the info.Template fallback the
+				// resolution is nil and the refusal falls through to gate 1's
+				// nil-agent arm — same outcome, different check, which is exactly
+				// what the assertions below cannot see.
+				info := env.sessionInfo(seat.ID)
+				resolved := poolSlotRetireTemplate(info, "")
+				if !isManualSessionInfoForAgent(info, findAgentByTemplate(env.cfg, resolved)) {
+					t.Fatalf("the seat's own projection resolved template %q, which does not reach the legacy-manual exclusion; this arm has stopped pinning the info.Template fallback", resolved)
+				}
+			}
+
+			env.reconcile([]beads.Bead{seat})
+
+			got, err := env.store.Get(seat.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", seat.ID, err)
+			}
+			if got.Metadata[drainFinalizeMetadataKey] == drainFinalizeDeadline {
+				t.Fatalf("legacy manual seat retired by the pool-slot deadline path; a user-created identity is not disposable: metadata=%v", got.Metadata)
+			}
+			if !env.sp.IsRunning(legacySeatName) {
+				t.Fatal("KILLED the live runtime of a legacy manual (user-created) session")
+			}
+		})
+	}
+}
+
+// Positive control for the narrowing in the arm above. The
+// unattributable-identity refusal must stay a narrow exclusion, not a
+// feature-off switch: a seat carrying this reconciler's OWN pool markers is
+// still retired when its agent has left config, because that is precisely the
+// stuck population the bound exists to free — and an agent removed from config
+// is one of the likelier reasons a seat got stuck in the first place. Refusing
+// every nil-agent seat instead (the blunt reading of the same fix) would
+// silently disable the whole path while leaving all three legacy-manual arms
+// above green, so the narrowing needs its own guard in the build.
+func TestReconcileSessionBeads_DrainDeadlineRetiresMarkedSeatWhoseAgentLeftConfig(t *testing.T) {
+	env := poolSeatEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	// The same unattributable input the legacy arm refuses: no name resolves a
+	// config agent. The pool markers are the only differentiator.
+	env.cfg.Agents = nil
+	info := env.sessionInfo(seat.ID)
+	if !info.PoolManaged && strings.TrimSpace(info.PoolSlot) == "" {
+		t.Fatal("fixture no longer carries a positive pool marker, so it cannot control the narrowing")
+	}
+	if findAgentByTemplate(env.cfg, "worker") != nil {
+		t.Fatal("fixture still resolves a config agent; the control is not exercising the nil-agent path")
+	}
+
+	env.reconcile([]beads.Bead{seat})
+
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Metadata[drainFinalizeMetadataKey] != drainFinalizeDeadline {
+		t.Fatalf("a marker-bearing pool seat was NOT retired after its agent left config; the identity narrowing widened into a feature-off switch (metadata=%v)", got.Metadata)
+	}
+	if env.sp.IsRunning(poolSeatName) {
+		t.Fatal("seat retired without freeing the runtime name its slot is pinned to")
+	}
+	if fired := drainDeadlineRetiredEvents(rec); len(fired) != 1 {
+		t.Fatalf("emitted %d retirement events, want exactly 1", len(fired))
+	}
+}
+
+// Pin 6d (negative). The THIRD admission ground of isPoolManagedSessionInfo,
+// and the one that carries no pool at all. sessionOriginInfo returns
+// "ephemeral" on info.DependencyOnly ALONE — no pool marker required — so a
+// dependency-only session is admitted by the pool predicate, while
+// isLegacyManualSessionInfoForAgent ends in `return !info.DependencyOnly` and
+// so does not catch it on the way back out.
+//
+// A dependency-only session holds no pool slot. Retiring it frees no slot and
+// serves none of this bound's stated purpose ("a pool slot cannot route around
+// its own name"), yet the path would kill its live runtime and force-close it.
+// Excluding it is the decision this pin records: the gate acts on seats that
+// hold a pool slot, and a seat with no slot to free is not one of them.
+//
+// This arm is NOT covered by the single_session_agent arm above: its agent is
+// multi-session, so the capability term is false and only the DependencyOnly
+// term refuses it. That is why the two terms are a disjunction in the guard and
+// not a conjunction — ANDing them would leave exactly this seat admitted.
+func TestReconcileSessionBeads_DrainDeadlineRetireSkipsDependencyOnlySeat(t *testing.T) {
+	const dependencySeatName = "worker-dependency"
+	env := poolSeatEnv()
+	seat := env.createSessionBead(dependencySeatName, "worker")
+	env.setSessionMetadata(&seat, map[string]string{
+		"state":        "drained",
+		"sleep_reason": "drained",
+		"last_woke_at": "",
+		// Dependency-only: no pool_managed, no pool_slot, and deliberately no
+		// session_origin either, so the admission runs through the
+		// DependencyOnly arm of sessionOriginInfo rather than a literal marker.
+		"dependency_only": boolMetadata(true),
+		"drain_at":        env.clk.Now().Add(-poolSlotDrainRetireDeadline - time.Minute).UTC().Format(time.RFC3339),
+	})
+	if err := env.sp.Start(context.Background(), dependencySeatName, runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("start dependency-only runtime: %v", err)
+	}
+
+	// Fixture premises, so this cannot go vacuously green by failing to reach
+	// the gate at all: the seat IS admitted by the pool predicate, it carries no
+	// positive pool marker, and its agent is multi-session (so neither the
+	// nil-agent nor the capability term is what refuses it).
+	info := env.sessionInfo(seat.ID)
+	if !info.DependencyOnly {
+		t.Fatal("fixture is not dependency-only, so it does not exercise this admission ground")
+	}
+	if info.PoolManaged || strings.TrimSpace(info.PoolSlot) != "" {
+		t.Fatal("fixture carries a positive pool marker; the seat would be in scope for a different reason")
+	}
+	if !isPoolManagedSessionInfo(info) {
+		t.Fatal("fixture is not admitted by the pool predicate, so the gate is never reached")
+	}
+	cfgAgent := findAgentByTemplate(env.cfg, "worker")
+	if cfgAgent == nil || !cfgAgent.SupportsMultipleSessions() {
+		t.Fatal("fixture agent is absent or single-session; this arm would duplicate the legacy-manual arms")
+	}
+
+	env.reconcile([]beads.Bead{seat})
+
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Metadata[drainFinalizeMetadataKey] == drainFinalizeDeadline {
+		t.Fatalf("dependency-only seat retired by the pool-slot deadline path; it holds no pool slot, so retiring it frees nothing: metadata=%v", got.Metadata)
+	}
+	if !env.sp.IsRunning(dependencySeatName) {
+		t.Fatal("KILLED the live runtime of a dependency-only session")
+	}
+}
+
+// Pin 6c (negative). This gate runs ABOVE the reconciler's unknown-state skip,
+// and the drain match keys on sleep_reason without consulting state at all — so
+// an older reconciler rolled back under a newer writer must not kill and close
+// a bead parked in a state it has never seen. That is exactly the population
+// the skip directly beneath this call site exists to leave alone.
+func TestReconcileSessionBeads_DrainDeadlineRetireSkipsUnknownState(t *testing.T) {
+	env := poolSeatEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	// A state only a newer version writes, still carrying the drain provenance
+	// this bound matches on.
+	env.setSessionMetadata(&seat, map[string]string{"state": "hibernating"})
+	if isKnownStateInfo(env.sessionInfo(seat.ID)) {
+		t.Fatal("fixture no longer models an unrecognized state")
+	}
+
+	env.reconcile([]beads.Bead{seat})
+
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("closed a bead in a state this reconciler does not recognize: metadata=%v", got.Metadata)
+	}
+	if got.Metadata[drainFinalizeMetadataKey] != "" {
+		t.Fatalf("%s = %q stamped on an unknown-state seat", drainFinalizeMetadataKey, got.Metadata[drainFinalizeMetadataKey])
+	}
+	if !env.sp.IsRunning(poolSeatName) {
+		t.Fatal("killed the runtime of a seat in a state written by a newer version")
+	}
+	if fired := drainDeadlineRetiredEvents(rec); len(fired) != 0 {
+		t.Fatalf("emitted %d retirement events for an unknown-state seat, want 0", len(fired))
+	}
+}
+
+// A seat that has dropped out of the DESIRED set — its agent is still
+// configured, but nothing wants this seat minted right now — makes the
+// reconciler pass an empty template. Both emitted surfaces must still name the
+// pool: template is one of the two fields the payload doc points operators at
+// for reading the age distribution per pool, and the session.stopped envelope's
+// Subject is how the stop is attributed at all. (A seat whose AGENT left config
+// is a different case and never reaches these events: gate 1 refuses it unless
+// it carries a pool marker — see DrainDeadlineRetireSkipsLegacyManualSeat's
+// agent_removed_from_config arm and its positive control.)
+func TestReconcileSessionBeads_DrainDeadlineRetireNamesTheSeatsOwnTemplate(t *testing.T) {
+	env := poolSeatEnv()
+	rec := events.NewFake()
+	env.rec = rec
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	// Drop the seat from the desired set: its template is gone from config.
+	delete(env.desiredState, poolSeatName)
+
+	env.reconcile([]beads.Bead{seat})
+
+	if got, _ := env.store.Get(seat.ID); got.Status != "closed" {
+		t.Fatalf("precondition: seat not retired (metadata=%v)", got.Metadata)
+	}
+	fired := drainDeadlineRetiredEvents(rec)
+	if len(fired) != 1 {
+		t.Fatalf("emitted %d retirement events, want 1", len(fired))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(fired[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal retire payload: %v", err)
+	}
+	if payload["template"] != "worker" {
+		t.Fatalf("payload template = %v, want worker for a seat absent from the desired set (payload=%v)", payload["template"], payload)
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionStopped && e.SessionID == seat.ID && e.Subject != "worker" {
+			t.Fatalf("session.stopped Subject = %q, want worker — an unattributable stop is the whole complaint", e.Subject)
+		}
 	}
 }
 
@@ -828,6 +1173,14 @@ func (s *closeFailsStore) Tx(label string, fn func(beads.Tx) error) error {
 // it on a still-open bead would hand false deadline provenance to whatever
 // close comes later — over-counting the residual drain tail this fix exists to
 // keep honest.
+//
+// The kill, by contrast, is NOT rolled back and cannot be: the agent is already
+// gone by the time the close is attempted. So this refused-close arm is also
+// the pin that a performed stop still reaches the stop event. Emitting it only
+// after a successful close would lose it forever here — the next tick observes
+// the runtime already absent, retires with performedStop=false, and never
+// emits — and "a stop invisible to the stop event and counter" is the exact gap
+// this path exists not to reintroduce.
 func TestReconcileSessionBeads_DrainDeadlineFailedCloseRollsBackProvenance(t *testing.T) {
 	env := poolSeatEnv()
 	rec := events.NewFake()
@@ -851,5 +1204,18 @@ func TestReconcileSessionBeads_DrainDeadlineFailedCloseRollsBackProvenance(t *te
 	}
 	if fired := drainDeadlineRetiredEvents(rec); len(fired) != 0 {
 		t.Fatalf("emitted %d retirement events for a failed close, want 0", len(fired))
+	}
+	if env.sp.IsRunning(poolSeatName) {
+		t.Fatal("precondition: the runtime was supposed to be killed before the close was attempted")
+	}
+	stops := 0
+	for _, e := range rec.Events {
+		if e.Type == events.SessionStopped && e.SessionID == seat.ID {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("emitted %d %s events for a kill this path performed, want 1 — the close refused, but the stop already happened",
+			stops, events.SessionStopped)
 	}
 }
