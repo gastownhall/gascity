@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -657,14 +658,46 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 // which nothing else holds and so cannot outlive this call. A caller's canceled
 // or expired context reaches the same returns through db.Conn and the queries,
 // so a probe the caller has already abandoned still closes its session here.
+//
+// One probe is exactly one TCP session, and the dial is made HERE, outside
+// database/sql, rather than by db.Conn. db.Conn runs its acquisition through
+// DB.retry, which re-dials on any error that errors.Is driver.ErrBadConn — up
+// to maxBadConnRetries (2) more times — so a connector whose handshake failure
+// is spelled ErrBadConn would cost bd's proxy three accepts for one probe. That
+// is three sessions against bd's idle watcher, three greetings withheld where
+// the probe reports one, and three rungs of the zombie ladder from one check.
+// go-sql-driver v1.10.0 spells a failed greeting ErrInvalidConn, so today's
+// driver does not reach that path, but earlier releases rewrote exactly that
+// error to ErrBadConn "for sql.Driver to retry", and nothing in the probe's
+// contract may rest on a driver's spelling of the day. Dialing directly returns
+// the first failure to the classifier as it was produced, and the handle is
+// then opened over a oneSessionConnector that can hand database/sql that one
+// connection and never dial another.
+//
+// Everything after acquisition runs on the pinned *sql.Conn, where database/sql
+// does not retry: Conn.PingContext and Conn.QueryContext go straight to the
+// driver connection they hold (pingDC, queryDC), and a bad-connection error
+// there is returned and the connection discarded.
 func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorReport, error) {
 	var report CursorReport
-	db := sql.OpenDB(connector)
+	// A caller who has already given up is owed no dial at all.
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	session, err := connector.Connect(ctx)
+	if err != nil {
+		return report, err
+	}
+	one := &oneSessionConnector{session: session, driver: connector.Driver()}
+	db := sql.OpenDB(one)
 	// One connection, never idle: the probe needs exactly one session, and it
 	// must leave nothing behind for anything to reuse.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(0)
 	defer db.Close() //nolint:errcheck // the probe's own handle, closed on every path
+	// If database/sql never took the session — a context that expired between
+	// the dial and db.Conn — nothing else will close it.
+	defer one.closeUntaken()
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return report, err
@@ -691,6 +724,50 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 	// D-F11): every read this session owed has completed.
 	report.Reality.checked = true
 	return report, nil
+}
+
+// errProbeRedial is what a probe's handle gets if database/sql ever asks for a
+// second connection. It must never happen — every statement runs on the one
+// pinned connection — and if it does it is refused rather than dialed, and it
+// is deliberately NOT connection-level: a second session is gc's bug, not
+// evidence about the proxy, so it classifies as unknown and never as a verdict.
+var errProbeRedial = errors.New("proxyendpoint: probe session asked for a second connection; one probe is one session")
+
+// oneSessionConnector hands database/sql the probe's one already-dialed session,
+// once. It is the cap that makes a second dial impossible rather than merely
+// unlikely: whatever database/sql's retry policy is, this connector has nothing
+// to dial with.
+type oneSessionConnector struct {
+	driver driver.Driver
+
+	mu      sync.Mutex
+	session driver.Conn
+	taken   bool
+}
+
+func (c *oneSessionConnector) Connect(context.Context) (driver.Conn, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.taken {
+		return nil, errProbeRedial
+	}
+	c.taken = true
+	return c.session, nil
+}
+
+func (c *oneSessionConnector) Driver() driver.Driver { return c.driver }
+
+// closeUntaken closes the session if database/sql never took it. Once taken,
+// the session is database/sql's to close, and the pinned connection's close
+// does it.
+func (c *oneSessionConnector) closeUntaken() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.taken {
+		return
+	}
+	c.taken = true
+	_ = c.session.Close() //nolint:errcheck // an untaken session the probe is abandoning
 }
 
 // readIgnoredReality asks the live schema how much of the ignored lane's cursor
