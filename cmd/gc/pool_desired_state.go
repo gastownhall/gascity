@@ -571,8 +571,12 @@ func computePoolDesiredStatesAt(
 		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
 		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
-		protectedCount := minInt(len(protected), newCount)
-		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
+		concreteLimit := newCount
+		if limits.agentRigUnresolved[template] {
+			concreteLimit = minInt(effectiveDemand, len(protected)+len(inFlight))
+		}
+		protectedCount := minInt(len(protected), concreteLimit)
+		inFlightCount := minInt(len(inFlight), concreteLimit-protectedCount)
 		reusedCount := protectedCount + inFlightCount
 		selectedConcrete := make([]SessionRequest, 0, reusedCount)
 		selectedConcrete = append(selectedConcrete, protected[:protectedCount]...)
@@ -585,7 +589,7 @@ func computePoolDesiredStatesAt(
 				"in_flight":     len(inFlight),
 				"protected":     len(protected),
 				"reused":        reusedCount,
-				"anonymous_new": newCount - reusedCount,
+				"anonymous_new": max(0, newCount-reusedCount),
 			})
 		}
 		for _, req := range selectedConcrete {
@@ -1002,6 +1006,18 @@ func reserveNestedCapFloors(
 
 	consumed := make([]bool, len(requests))
 	for _, floor := range floors {
+		if limits.agentRigUnresolved[floor.template] {
+			log.Printf("pool desired state: template %q rig_resolution_error: refusing min_active_sessions floor %d for non-city agent",
+				floor.template, floor.minimum)
+			if trace != nil {
+				trace.RecordDecision(TraceSitePoolRigCap, TraceReasonRigCap, TraceOutcomeRejected, floor.template, "", traceRecordPayload{
+					"floor_template":       floor.template,
+					"floor_min":            floor.minimum,
+					"rig_resolution_error": true,
+				})
+			}
+			continue
+		}
 		for i, request := range requests {
 			if usage.agentCount[floor.template] >= floor.minimum {
 				break
@@ -1057,10 +1073,11 @@ func acceptNestedCapFloor(
 }
 
 type nestedCapLimits struct {
-	workspaceMax int
-	rigMax       map[string]int
-	agentMax     map[string]int
-	agentRig     map[string]string
+	workspaceMax       int
+	rigMax             map[string]int
+	agentMax           map[string]int
+	agentRig           map[string]string
+	agentRigUnresolved map[string]bool
 }
 
 type nestedCapUsage struct {
@@ -1075,10 +1092,11 @@ type nestedCapFloorReservations map[string]int
 
 func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	limits := nestedCapLimits{
-		workspaceMax: -1,
-		rigMax:       make(map[string]int),
-		agentMax:     make(map[string]int),
-		agentRig:     make(map[string]string),
+		workspaceMax:       -1,
+		rigMax:             make(map[string]int),
+		agentMax:           make(map[string]int),
+		agentRig:           make(map[string]string),
+		agentRigUnresolved: make(map[string]bool),
 	}
 	if cfg.Workspace.MaxActiveSessions != nil {
 		limits.workspaceMax = *cfg.Workspace.MaxActiveSessions
@@ -1093,7 +1111,7 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		template := agent.QualifiedName()
-		limits.agentRig[template] = nestedCapAgentRigName(agent, cfg.Rigs)
+		limits.agentRig[template], limits.agentRigUnresolved[template] = nestedCapAgentRigName(agent, cfg.Rigs)
 		resolved := agent.ResolvedMaxActiveSessions(cfg)
 		if resolved != nil {
 			limits.agentMax[template] = *resolved
@@ -1104,23 +1122,29 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	return limits
 }
 
-func nestedCapAgentRigName(agent *config.Agent, rigs []config.Rig) string {
+// nestedCapAgentRigName distinguishes no rig cap ("", false), a resolved rig
+// (name, false), and an explicitly rig-scoped agent with no matching rig ("", true).
+func nestedCapAgentRigName(agent *config.Agent, rigs []config.Rig) (string, bool) {
 	if rigName := agentRigScopeName(agent, rigs); rigName != "" {
-		return rigName
+		return rigName, false
 	}
-	if agent == nil || strings.TrimSpace(agent.Scope) == "city" {
-		return ""
+	if agent == nil {
+		return "", false
+	}
+	scope := strings.TrimSpace(agent.Scope)
+	if scope == "city" {
+		return "", false
 	}
 	agentDir := filepath.Clean(strings.TrimSpace(agent.Dir))
 	if agentDir == "." {
-		return ""
+		return "", scope == "rig"
 	}
 	for _, rig := range rigs {
 		if rig.Path != "" && filepath.Clean(rig.Path) == agentDir {
-			return rig.Name
+			return rig.Name, false
 		}
 	}
-	return ""
+	return "", scope == "rig"
 }
 
 func newNestedCapUsage() nestedCapUsage {
@@ -1180,6 +1204,9 @@ func newNestedCapFloorReservations(
 	rigReserved := make(map[string]int)
 	workspaceReserved := 0
 	for _, floor := range floors {
+		if limits.agentRigUnresolved[floor.template] {
+			continue
+		}
 		grant := floor.minimum - usage.agentCount[floor.template]
 		if rig := limits.agentRig[floor.template]; rig != "" {
 			if rigMax := limits.rigMax[rig]; rigMax >= 0 {
@@ -1206,6 +1233,9 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, floors nest
 		return 0
 	}
 	template := agent.QualifiedName()
+	if limits.agentRigUnresolved[template] {
+		return 0
+	}
 	remaining := demand
 	if agentMax := limits.agentMax[template]; agentMax >= 0 {
 		remaining = minInt(remaining, agentMax-usage.agentCount[template])
@@ -1310,7 +1340,28 @@ func recordNewDemandCapTrace(
 	scaleCount int,
 	newCount int,
 ) {
-	if trace == nil || scaleCount <= 0 || newCount >= scaleCount {
+	if scaleCount <= 0 || newCount >= scaleCount {
+		return
+	}
+	if limits.agentRigUnresolved[template] {
+		log.Printf("pool desired state: template %q rig_resolution_error: refusing %d new session(s) for non-city agent scope=%q dir=%q",
+			template, scaleCount-newCount, strings.TrimSpace(agent.Scope), strings.TrimSpace(agent.Dir))
+		if trace != nil {
+			trace.RecordDecision(TraceSitePoolNewDemandCap, TraceReasonRigCap, TraceOutcomeRejected, template, "", traceRecordPayload{
+				"scale_check":          scaleCount,
+				"accepted_new":         newCount,
+				"blocked_new":          scaleCount - newCount,
+				"current":              usage.agentCount[template],
+				"max":                  0,
+				"blocking_sessions":    []string{},
+				"blocking_work_beads":  []string{},
+				"active_capacity_kind": "rig_resolution_error",
+				"rig_resolution_error": true,
+			})
+		}
+		return
+	}
+	if trace == nil {
 		return
 	}
 	site, reason, capMax, current, blockers := newDemandBlockingScope(template, agent, limits, usage, newCount)
