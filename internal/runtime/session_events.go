@@ -95,15 +95,17 @@ type SessionEventProvider interface {
 // silent before it is no longer trusted as live. A provider's stream
 // self-heals without ever closing on a transient transport failure (see
 // SessionEventProvider's contract), so silence — not a channel close — is
-// the only signal an outage leaves behind. Composite providers (auto,
-// hybrid) use this to detect partial backend failure when fanning in
-// multiple backends' streams: without a per-backend bound, a healthy
-// backend's traffic keeps the merged stream looking alive indefinitely even
-// while the other backend's stream has gone silent, masking that backend's
-// outage from every consumer of the merged stream. 30s is 6x herdr's max
-// reconnect backoff (5s, internal/runtime/herdr/events.go), giving margin
-// for reconnect latency and scheduling jitter before declaring a source
-// stale.
+// the only signal an outage leaves behind. 30s is 6x herdr's max reconnect
+// backoff (5s, internal/runtime/herdr/events.go), giving margin for
+// reconnect latency and scheduling jitter before declaring a source stale.
+//
+// Currently unused: no production consumer detects partial-backend failure
+// in a merged composite stream (auto, hybrid) against this bound today — see
+// MergeSessionEvents, which never closes on one-sided silence and reports no
+// per-backend staleness. A healthy backend's traffic keeps a merged stream
+// looking alive indefinitely even while the other backend has gone silent.
+// Wire a consumer against this constant before relying on partial-backend
+// failure being observable through the merged stream.
 const SessionEventStaleAfter = 30 * time.Second
 
 // EventCapableRouter is implemented by composite providers (e.g. auto,

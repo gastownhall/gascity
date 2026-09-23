@@ -382,6 +382,9 @@ func (d *nudgeEventDispatcher) worker(ctx context.Context) {
 	}
 	defer timer.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		now := time.Now()
 		d.mu.Lock()
 		full := d.fullPassDue
@@ -664,6 +667,15 @@ func (d *nudgeEventDispatcher) runPass(sessionFilter string, retriesLeft int) {
 			return
 		}
 		for _, name := range names {
+			// A sweep that blocked past shutdown's drain grace (drainDeliveries
+			// gives up waiting after nudgeEventDeliveryDrainGrace, not on
+			// cancellation) must not keep fanning out fresh per-session passes
+			// against a city that is tearing down its stores. Each new pass
+			// would be additional work started after teardown already gave up
+			// on this sweep, not merely an already-running one finishing.
+			if d.parent.Err() != nil {
+				return
+			}
 			d.spawnPass(name, 0)
 		}
 		return
