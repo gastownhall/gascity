@@ -6,6 +6,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -1317,5 +1321,193 @@ func TestProviderRetiresNudgePollersChecksPerTargetRoute_Auto(t *testing.T) {
 	}
 	if providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-acp"}, sp) {
 		t.Fatal("session routed to the non-event-capable ACP backend must NOT have its poller suppressed")
+	}
+}
+
+// TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload proves
+// ensureNudgeWakeListener's gate logic: a plain provider under legacy
+// dispatcher mode starts no listener, but swapping in an event-capable
+// provider (what a config reload does) opens one.
+func TestCityRuntimeEnsureNudgeWakeListenerActivatesOnReload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cr := &CityRuntime{
+		cfg:         &config.City{}, // legacy dispatcher mode (nudgeDispatcherIsSupervisor == false)
+		cityPath:    dir,
+		stderr:      testWriter(t),
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, dir, cr.stderr, cr.logPrefix, testNudgeDispatchStores(dir))
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+
+	// Startup: a plain (non-event) provider under legacy mode satisfies
+	// neither half of the gate. No listener should start.
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+	}
+
+	// Simulate a config reload that swaps in an event-capable provider,
+	// exactly what reloadConfigTraced does: update() first (which the
+	// dispatcher uses to decide active()), then ensureNudgeWakeListener.
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	if !cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must report active() after swapping to an event-capable provider")
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("wake listener was not started after a reload made the provider event-capable")
+	}
+}
+
+// TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses proves the
+// fix for a false-positive nudgequeue.DispatcherIsHosting result: a listener
+// left running after a reload drops back to legacy dispatch on a non-event
+// provider would still answer dials, so a deferred submit would suppress its
+// fallback sidecar poller believing the supervisor still delivers, while
+// neither nudgeDispatchTick's event-dispatcher path nor its supervisor path
+// picks the item up. The listener must close when the activation gate it
+// itself uses stops being satisfied, so the socket stops answering and the
+// fallback poller is no longer suppressed.
+func TestCityRuntimeEnsureNudgeWakeListenerTearsDownWhenGateCloses(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cr := &CityRuntime{
+		cfg:         &config.City{},
+		cityPath:    dir,
+		stderr:      testWriter(t),
+		logPrefix:   "test",
+		nudgeWakeCh: make(chan struct{}, 1),
+	}
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, dir, cr.stderr, cr.logPrefix, testNudgeDispatchStores(dir))
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+
+	// Bring the gate up with an event-capable provider and confirm the
+	// listener is live and answering.
+	cr.nudgeEvents.update(newNudgeEventedFake(), cr.cfg, true)
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("precondition: wake listener did not start for an event-capable provider")
+	}
+	if !testWakeSocketIsHosting(dir) {
+		t.Fatal("precondition: socket must answer while the listener is up")
+	}
+
+	// Reload back onto a non-event provider under legacy dispatcher mode:
+	// neither half of the gate is satisfied any more.
+	cr.nudgeEvents.update(runtime.NewFake(), cr.cfg, true)
+	if cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must not report active() for a non-event provider")
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener was not torn down after the gate closed")
+	}
+	if testWakeSocketIsHosting(dir) {
+		t.Fatal("socket still answers after the wake listener was torn down; a deferred submit would wrongly suppress its fallback poller")
+	}
+}
+
+// testWakeSocketIsHosting dials the supervisor nudge wake socket the same
+// way pingNudgeWakeSocket does, reporting whether a listener answered.
+func testWakeSocketIsHosting(cityPath string) bool {
+	conn, err := net.DialTimeout("unix", nudgequeue.WakeSocketPath(cityPath), pingNudgeWakeSocketDialTimeout)
+	if err != nil {
+		return false
+	}
+	defer conn.Close() //nolint:errcheck // best-effort test probe
+	return true
+}
+
+// TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener drives
+// reloadConfigTraced itself, not a hand-rolled stand-in for it. The unit
+// tests above assert the gate logic in ensureNudgeWakeListener is correct;
+// this one asserts reloadConfigTraced actually calls it. A version of
+// reloadConfigTraced that dropped that call would leave the unit tests above
+// passing, because they invoke cr.ensureNudgeWakeListener directly rather
+// than going through reloadConfigTraced -- exactly the gap this test closes.
+func TestCityRuntimeReloadConfigTracedActivatesNudgeWakeListener(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: testWriter(t),
+	})
+	cr.sessionDrains = newDrainTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cr.nudgeWakeCh = make(chan struct{}, 1)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix, testNudgeDispatchStores(cityPath))
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
+	// Startup: legacy dispatcher mode on a non-event provider satisfies
+	// neither half of the gate. No listener should start.
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener started for a non-event provider under legacy dispatcher mode, want none")
+	}
+
+	// Swap in an event-capable provider directly (the config's session
+	// provider name is unchanged, so reloadConfigTraced will not rebuild
+	// it from the registry -- it carries this cr.sp forward as nextSp).
+	// This is the reload reloadConfigTraced itself must wire up correctly;
+	// unlike the unit tests above, nothing here calls
+	// cr.ensureNudgeWakeListener directly.
+	cr.sp = newNudgeEventedFake()
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
+	}
+	if !cr.nudgeEvents.active() {
+		t.Fatal("precondition: dispatcher must report active() after reloadConfigTraced observes the event-capable provider")
+	}
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("reloadConfigTraced did not start the wake listener after the provider became event-capable")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -212,6 +213,7 @@ type CityRuntime struct {
 	nudgeEvents         *nudgeEventDispatcher        // provider idle events → queued-nudge delivery; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
+	nudgeWakeListener   net.Listener                 // wake socket listener, once started; nil until ensureNudgeWakeListener claims ownership
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
 	onStarted           func()
@@ -845,11 +847,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// (kicked by this listener and by idle events) owns queued delivery.
 	// Legacy mode on polled providers skips the listener entirely;
 	// per-session pollers continue to own delivery.
-	if (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active()) && cr.cityPath != "" {
-		if _, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix); err != nil {
-			fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		}
-	}
+	cr.ensureNudgeWakeListener(ctx)
 
 	// Bridge the provider's push session-event stream (if it has one) into
 	// pokeCh: a session death pokes the reconciler within seconds instead of
@@ -1517,6 +1515,53 @@ func (cr *CityRuntime) tick(
 	completeManualReload()
 	completion = TraceCompletionCompleted
 	tickCompleted = true
+}
+
+// ensureNudgeWakeListener starts the supervisor nudge wake-socket listener
+// if it is not already running and the current provider/config now satisfy
+// its activation gate, and tears it down if a later reload no longer
+// satisfies the gate. It is idempotent (safe to call on every reload) and
+// callers serialize it: startup (run()) and reload (reloadConfigTraced)
+// both execute on the reconciler goroutine, so no lock is needed around the
+// cr.nudgeWakeListener nil-check.
+//
+// The listener's presence is also read cross-process:
+// nudgequeue.DispatcherIsHosting dials the socket to decide whether a
+// deferred submit's fallback sidecar poller is redundant (see
+// internal/session/submit.go's enqueueDeferredSubmitLocked). Leaving a stale
+// listener answering after a reload drops back to legacy dispatch on a
+// non-event provider — the gate this function itself uses to decide whether
+// anything still drains the queue — would make that check a false positive:
+// the socket answers, the fallback poller is suppressed, and neither
+// nudgeDispatchTick's event-dispatcher path nor its supervisor path picks up
+// the work (both require the gate this function checks), so the queued item
+// has no deliverer at all. A dial that finds nothing listening is a safe,
+// documented false negative (harmless duplicate contender); a listener that
+// outlives its gate is not. So the gate is re-checked on every call, in both
+// directions.
+func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
+	if cr.cityPath == "" {
+		return
+	}
+	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	if cr.nudgeWakeListener != nil {
+		if !gateOpen {
+			if err := cr.nudgeWakeListener.Close(); err != nil {
+				fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: closing wake listener: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+			}
+			cr.nudgeWakeListener = nil
+		}
+		return
+	}
+	if !gateOpen {
+		return
+	}
+	lis, err := startNudgeWakeListener(ctx, cr.cityPath, cr.nudgeWakeCh, cr.stderr, cr.logPrefix)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v (falling back to patrol-only delivery)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	cr.nudgeWakeListener = lis
 }
 
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
@@ -2298,6 +2343,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	if cr.nudgeEvents != nil {
 		cr.nudgeEvents.update(nextSp, nextCfg, providerChanged)
 	}
+	cr.ensureNudgeWakeListener(ctx)
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
