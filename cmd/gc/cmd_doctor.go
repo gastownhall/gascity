@@ -369,6 +369,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
+	// storePreflightPassed is strictly stronger than storeOK: it means the
+	// probe actually ran and the controller's own read succeeded. storeOK stays
+	// true when the probe is skipped and when it failed in a non-outage shape
+	// (isBeadStoreUnreachable deliberately excludes missing/uninitialized
+	// stores). Only a check that asserts a differential against the controller
+	// needs the stronger signal.
+	storePreflightPassed := false
 	var storePreflightErr error
 	var activeRigs []config.Rig
 	if cfgErr == nil && cfg != nil {
@@ -386,6 +393,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		var probeErr error
 		if !opts.SkipStorePreflight {
 			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
+			storePreflightPassed = probeErr == nil
 		}
 		if isBeadStoreUnreachable(probeErr) {
 			storeOK = false
@@ -416,7 +424,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
-			register(newGateSandboxReadCheck(cityPath))
+			// The check's message asserts that control ("the same read
+			// succeeded for the controller"), so it needs the preflight to
+			// have actually run and passed — storeOK alone also holds when the
+			// probe was skipped or failed in a non-outage shape, and in both
+			// of those the assertion would be false.
+			if storePreflightPassed {
+				register(newGateSandboxReadCheck(cityPath))
+			}
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
