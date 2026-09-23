@@ -1195,3 +1195,160 @@ func TestOpenStoreAtForCityProxiedFlagOnWithoutAnOpenerFallsBack(t *testing.T) {
 		t.Errorf("an unwired binary reported a proxied account: %+v", result.Diagnostic.Proxied)
 	}
 }
+
+// TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone is the unit
+// fence for the matrix's "one regression shape" (round3 review, completeness).
+//
+// The rollout flag must change what a PROXIED scope opens and nothing else:
+// with it on, a direct, embedded, legacy or unsupported scope must open exactly
+// the store — and report exactly the diagnostic — it opens with the flag off,
+// and the proxied opener must never be consulted for it. The acceptance matrix
+// was meant to pin that (M2's native-lane and every non-proxied shape's
+// payload), but CI runs only M1 of it, and every flag-on unit test used a
+// proxied fixture, so a factory that consulted the proxied lane for every
+// scope passed the whole package. Each row runs both lanes over the same
+// inputs and compares them.
+func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	serverCtx := contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}
+
+	for _, tc := range []struct {
+		name     string
+		metadata string // .beads/metadata.json on disk; "" writes none
+		config   string // .beads/config.yaml on disk; "" writes none
+		provider string
+		// preflight builds the checker for the scope; nil means the row must
+		// not reach preflight at all.
+		preflight func(scope string) contract.PreflightChecker
+		wantStore string
+	}{
+		{
+			name:     "a direct server-mode scope, native eligible",
+			metadata: `{"backend":"dolt","dolt_mode":"server"}`,
+			provider: "bd",
+			preflight: func(scope string) contract.PreflightChecker {
+				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+			},
+			wantStore: storeNameNativeDoltStore,
+		},
+		{
+			name:     "an embedded scope",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
+			provider: "bd",
+			preflight: func(scope string) contract.PreflightChecker {
+				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+			},
+			wantStore: storeNameNativeDoltStore,
+		},
+		{
+			name:     "a scope with no persisted mode (preflight decides)",
+			provider: "bd",
+			preflight: func(scope string) contract.PreflightChecker {
+				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+			},
+			wantStore: storeNameNativeDoltStore,
+		},
+		{
+			name:     "a legacy config.yaml proxied-server marker, which is drift and not authority",
+			config:   "dolt.mode: proxied-server\n",
+			provider: "bd",
+			preflight: func(scope string) contract.PreflightChecker {
+				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), serverCtx)
+			},
+			wantStore: storeNameNativeDoltStore,
+		},
+		{
+			name:     "a scope whose preflight refuses (bd context drift)",
+			metadata: `{"backend":"dolt","dolt_mode":"server"}`,
+			provider: "bd",
+			preflight: func(scope string) contract.PreflightChecker {
+				return factoryPreflightChecker(scope, factoryPreflightDoltMetadata(),
+					contract.PreflightBDContext{Backend: "dolt", DoltMode: "embedded"})
+			},
+			wantStore: storeNameBdStore,
+		},
+		{
+			name:      "an unsupported persisted dolt_mode",
+			metadata:  `{"backend":"dolt","dolt_mode":"mystery"}`,
+			provider:  "bd",
+			wantStore: storeNameBdStore,
+		},
+		{
+			name:      "a provider off the bd contract",
+			metadata:  `{"backend":"dolt","dolt_mode":"server"}`,
+			provider:  "unknown",
+			wantStore: storeNameBdStore,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			beadsDir := filepath.Join(scope, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.metadata != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.config != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tc.config), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			native, fallback := NewMemStore(), NewMemStore()
+
+			open := func(t *testing.T, flag string) StoreOpenResult {
+				t.Helper()
+				t.Setenv(proxiedNativeEnv, flag)
+				checker := contract.PreflightChecker{
+					FS: fsys.NewFake(),
+					BDContext: func(string) (contract.PreflightBDContext, error) {
+						t.Error("preflight ran for a row that decides before it")
+						return contract.PreflightBDContext{}, nil
+					},
+				}
+				if tc.preflight != nil {
+					checker = tc.preflight(scope)
+				}
+				result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+					ScopeRoot:        scope,
+					Provider:         tc.provider,
+					PreflightChecker: checker,
+					LongLived:        true,
+					OpenBdStore:      func() (Store, error) { return fallback, nil },
+					OpenNativeStore:  func() (Store, error) { return native, nil },
+					OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+						t.Fatalf("GC_BEADS_PROXIED_NATIVE=%q consulted the proxied opener for a scope that is not proxied-server", flag)
+						return nil, ProxiedOpenReport{}, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("OpenStoreAtForCity (flag %q): %v", flag, err)
+				}
+				return result
+			}
+
+			off := open(t, "")
+			on := open(t, "1")
+			if off.Diagnostic.Store != tc.wantStore {
+				t.Fatalf("flag-off store = %q, want %q: the row does not exercise the shape it names (%+v)",
+					off.Diagnostic.Store, tc.wantStore, off.Diagnostic)
+			}
+			if on.Store != off.Store {
+				t.Fatalf("flag on opened %T, flag off %T: the flag changed a non-proxied scope's store", on.Store, off.Store)
+			}
+			offJSON, err := json.Marshal(off.Diagnostic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			onJSON, err := json.Marshal(on.Diagnostic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(onJSON, offJSON) {
+				t.Fatalf("flag-on diagnostic =\n  %s\nflag-off =\n  %s\nthe flag changed what a non-proxied scope reports", onJSON, offJSON)
+			}
+		})
+	}
+}

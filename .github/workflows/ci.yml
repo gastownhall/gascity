@@ -482,7 +482,15 @@ jobs:
   # evidence worth paying for. M5-legacy-gc-managed costs nothing today (it
   # skips, see below) and is listed so the gap stays visible in the log rather
   # than being quietly forgotten. M2, the external shapes (M3a, M3b, M4), M6
-  # and M7 are left to a fuller scheduled run.
+  # and M7 run in NO job: this comment used to leave them to "a fuller
+  # scheduled run", and no such run exists (nightly.yml runs no matrix). That
+  # includes their flag-on native lanes and every non-proxied shape's flag-off
+  # payload. What stands in for M2's regression fence — the flag changes
+  # nothing for a scope that is not proxied-server, and never consults the
+  # proxied opener for one — is the unit test
+  # TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone
+  # (internal/beads), which the unit jobs run. Adding a scheduled full-matrix
+  # run needs those rows qualified on a runner first.
   #
   # M5 and the two migration tests need a gc from before the ownership journal.
   # Building one from the v1.4.1 tag was tried and does not work: the fixture
