@@ -1720,6 +1720,16 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		maybeStartNudgePoller(target)
 	} else {
 		maybeStartNudgePoller(target)
+		if canRequestManagedNudgeWake(target, store) {
+			sessFront := cliSessionFrontDoor(store, target.cfg, target.cityPath)
+			if err := requestManagedNudgeWake(target, sessFront); err != nil {
+				// WakeConflictError (e.g. a closed target) is expected here and
+				// not fatal to the sling: the nudge is already queued above, so
+				// this falls back to today's queue-and-poke behavior rather
+				// than surfacing a hard sling failure.
+				fmt.Fprintf(stderr, "Session %q is asleep; managed wake request failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
+			}
+		}
 		if err := pokeController(cityPath); err != nil {
 			fmt.Fprintf(stderr, "Session %q is asleep; poke failed: %v\n", target.agent.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
