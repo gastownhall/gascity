@@ -523,7 +523,8 @@ func computePoolDesiredStatesAt(
 		protectedNewRequests[req.Template] = candidates[1:]
 	}
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
-	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, usage)
+	floorUsage := acceptedNestedCapUsage(limits, concreteNestedCapRequests(cfg, resumeRequests, protectedNewRequests, inFlightNewRequests))
+	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, floorUsage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
@@ -647,6 +648,21 @@ func computePoolDesiredStatesAt(
 	}
 
 	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+}
+
+func concreteNestedCapRequests(
+	cfg *config.City,
+	resumeRequests []SessionRequest,
+	protectedRequests map[string][]SessionRequest,
+	inFlightRequests map[string][]SessionRequest,
+) []SessionRequest {
+	requests := append([]SessionRequest(nil), resumeRequests...)
+	for i := range cfg.Agents {
+		template := cfg.Agents[i].QualifiedName()
+		requests = append(requests, protectedRequests[template]...)
+		requests = append(requests, inFlightRequests[template]...)
+	}
+	return requests
 }
 
 // allocateScaleDemandToConcrete matches concrete reused capacity against scale
