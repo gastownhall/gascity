@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_test")
 go_test(
     name = "scripts_test",
     srcs = [
+        "acceptance_run_selection_test.go",
         "bazel_backtest_cwd_test.go",
         "bazel_canary_test.go",
         "bd_version_pin_test.go",
