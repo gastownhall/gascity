@@ -35,7 +35,7 @@ const (
 	ProxiedHeadMovedMessage = "proxied_native_head_moved"
 	// ProxiedPostOpenUnobservedMessage is what the opener logs at WARN when the
 	// post-open re-read itself failed, so the check concluded nothing about
-	// what the open did. See cmd/gc's headUnmoved.
+	// what the open did. See cmd/gc's openUnmoved (beads_proxied_native.go).
 	ProxiedPostOpenUnobservedMessage = "proxied_native_post_open_unobserved"
 
 	// ProxiedIncidentSiteOpen is a store's first library open.
