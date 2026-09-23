@@ -915,6 +915,14 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		f := newProxiedScopeFixture(t)
 		var n counters
 		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "after11111", nil })
+		// A REAL leaf over a close-counting storage, so "close the leaf it
+		// opened" is asserted rather than claimed (council pr2 E-I5): with the
+		// fixture's nil leaf, deleting the close left this row green while
+		// production leaked a live pool on bd's proxy per head_moved.
+		leafStorage := &closeCountingStorage{}
+		opener.openNative = func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(leafStorage), nil
+		}
 
 		pin, err := opener.admit(context.Background(), false)
 		if err != nil {
@@ -946,6 +954,10 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		}
 		if n.probes != 1 {
 			t.Fatalf("the open spent %d probe session(s), want only admission's 1: the re-read must ride the library's pool", n.probes)
+		}
+		if leafStorage.closed != 1 {
+			t.Fatalf("the refused open closed the leaf it opened %d time(s), want 1: an unclosed leaf is a live "+
+				"pool on bd's proxy for the process lifetime, per head_moved", leafStorage.closed)
 		}
 
 		// The memoized pin carries no hash, so an open served from it would walk
