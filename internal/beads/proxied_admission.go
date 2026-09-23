@@ -968,7 +968,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 	// One recover per generation, ever. The claim is in flight until the verb
 	// returns (round4 review F1), so no other ladder reads it as spent early.
 	if in.Recovered.begin(generation) {
-		return in.spendRecover(ctx, generation)
+		return in.spendRecover(ctx, root, key)
 	}
 
 	// The rung was already claimed. Which way decides the answer, and all of
@@ -1009,10 +1009,12 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 // spendRecover runs the recover this ladder has just claimed, and ends the
 // claim however the verb comes back: settle, deferred, turns an in-flight rung
 // into a spent one unless recoverFailed has already put a backoff on it.
-func (in AdmissionInput) spendRecover(ctx context.Context, generation string) (Pin, bool, error) {
+func (in AdmissionInput) spendRecover(ctx context.Context, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
+	generation := key.Generation()
 	defer in.Recovered.settle(generation)
 	if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
-		return Pin{}, false, in.recoverFailed(ctx, generation, err)
+		retry, verdict := in.recoverFailed(ctx, root, key, err)
+		return Pin{}, retry, verdict
 	}
 	return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 		"recovered the provider; re-admitting", nil)
@@ -1094,7 +1096,10 @@ func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.
 // generation is again a zombie"), so ONLY a determinate refusal from the
 // sanctioned verb is terminal: the script ran to completion inside gc's
 // budget and bd answered with a status of its own (ProviderReportedFailure,
-// and gc's context still live, and nothing about the error a timeout).
+// and gc's context still live, and nothing about the error a timeout) on a
+// generation that is still current. A refusal after which the record names a
+// new generation re-admits instead: that generation is the recovered one, and
+// only its own ladder can say it is again a zombie (round4 review F2).
 //
 // Everything else is non-terminal, because none of it is bd's answer:
 //
@@ -1117,11 +1122,27 @@ func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.
 // and the one after it may ask again once gc's contention has cleared. Before
 // this, every one of them was a terminal proxy_zombie, and a long-lived handle
 // whose read budget ran out mid-recover was demoted for the process.
-func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, err error) error {
+func (in AdmissionInput) recoverFailed(ctx context.Context, root string, key proxyendpoint.PoolKey, err error) (retry bool, verdict error) {
+	generation := key.Generation()
 	ctxErr := ctx.Err()
 	indeterminate := ctxErr != nil || proxyendpoint.IsIndeterminate(err)
 	if !indeterminate && errors.Is(err, ErrProviderReportedFailure) {
-		return NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+		if !in.sameGeneration(root, key) {
+			// bd refused, but its `bd dolt stop` ran and a new proxy wrote
+			// its record before the ping inside the recover gave up — the
+			// shape of a Dolt cold start longer than the proxy's own
+			// serverReadyTimeout. That refusal is about the start, not about
+			// the generation it left, which nobody has probed. The design
+			// re-runs 3.3 on the recovered generation and ends the lane only
+			// if IT is again a zombie (round4 review F2), so re-admit, as the
+			// ping arm does when the generation moves under a failed ping.
+			// This generation's rung stays spent (settle): if the record was
+			// merely unreadable and the generation has not moved, the next
+			// pass finds the recover spent and answers terminal.
+			return true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the provider recover reported failure but the generation moved; re-admitting against the one it left", err)
+		}
+		return false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 			"the endpoint accepts and never greets, and bd ran the provider recover and reported it could not recover it", err)
 	}
 	in.Recovered.Backoff(generation, failedRecoverBackoff)
@@ -1131,11 +1152,11 @@ func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, e
 			// the clock's, so the operator sees both.
 			err = errors.Join(err, ctxErr)
 		}
-		return NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+		return false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
 			"the endpoint accepts and never greets, and the provider recover was cut short by gc's own clock or "+
 				"cancellation; that says nothing about whether bd can recover this proxy, so the lane is not ended on it", err)
 	}
-	return NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+	return false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 		"the endpoint accepts and never greets, and the provider recover failed before bd could answer; "+
 			"not ending the lane on a failure that says nothing about the proxy", err)
 }

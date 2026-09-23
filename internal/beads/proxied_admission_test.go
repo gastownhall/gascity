@@ -1294,6 +1294,106 @@ func TestZombieLadderEndsTheLaneOnlyOnARecoverBdRefused(t *testing.T) {
 	}
 }
 
+// TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration is round4
+// review F2.
+//
+// Design v2 3.4 runs the provider recover, re-runs 3.3, and ends the lane only
+// if the RECOVERED generation is again a zombie. A recover is `bd dolt stop`
+// then `bd ping`, and the new proxy stops its backend and exits when the Dolt
+// child takes longer than its serverReadyTimeout to start, so `bd ping`
+// reports a failure after the stop already ran and the new proxy already
+// wrote its record. That refusal used to be terminal without anyone probing
+// the generation it left; now the ladder re-admits against it, and only that
+// generation's own answer decides.
+func TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	coldStartTimedOut := func() error {
+		return ProviderReportedFailure(errors.New(
+			"provider-owned beads recover: Error: ping: query failed: timed out waiting for dolt server"))
+	}
+
+	t.Run("the recovered generation serves: admitted in the same open", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		var up atomic.Bool
+		ops := &admissionOps{onPing: bdSaysNo}
+		ops.onRecov = func() error {
+			// The stop ran and the new proxy is up; its backend came up
+			// just after bd's ping inside the recover gave up.
+			f.writeRecord(6002, "55667788")
+			up.Store(true)
+			return coldStartTimedOut()
+		}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if up.Load() {
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit = %v, want the generation the recover left (6002) admitted: bd's refusal was about "+
+				"the cold start, and the generation it left was never probed", err)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Fatalf("admitted pid %d, want 6002", pin.PoolKey().PID)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("the ladder spent %d ping(s) and %d recover(s), want 1 and 1", pings, recovers)
+		}
+	})
+
+	t.Run("the recovered generation is not up yet: non-terminal, and the next open admits it", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		var up atomic.Bool
+		ops := &admissionOps{onPing: bdSaysNo}
+		ops.onRecov = func() error {
+			f.writeRecord(6002, "55667788")
+			return coldStartTimedOut()
+		}
+		in := baseAdmissionInput(f, ops)
+		// The zombie greets nothing; after the recover the new record's port
+		// refuses until its backend is up.
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			switch _, recovers := ops.counts(); {
+			case recovers == 0:
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+			case up.Load():
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+			default:
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused, Err: errors.New("connection refused")}
+			}
+		}
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Terminal() {
+			t.Fatalf("Admit = %v, want non-terminal: the generation the recover left is not again a zombie", err)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("the first open spent %d ping(s) and %d recover(s), want 1 and 1", pings, recovers)
+		}
+		up.Store(true)
+		pin, err := Admit(context.Background(), in)
+		if err != nil || pin.PoolKey().PID != 6002 {
+			t.Fatalf("the next Admit = (pid %d, %v), want 6002 admitted", pin.PoolKey().PID, err)
+		}
+	})
+
+	t.Run("control: a refusal that left the generation where it was is terminal", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{onPing: bdSaysNo, onRecov: coldStartTimedOut}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+		_, err := Admit(context.Background(), in)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("Admit = %v, want the terminal proxy_zombie of a recover bd refused on a generation still current", err)
+		}
+	})
+}
+
 // sharedRootRig writes a rig scope whose sidecar names the CITY's proxy root —
 // the shape `gc beads city migrate-proxied` leaves, one proxy and one Dolt
 // child serving hq and every rig. The root_path is RELATIVE and climbs out of
