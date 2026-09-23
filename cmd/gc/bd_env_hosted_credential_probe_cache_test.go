@@ -81,3 +81,79 @@ func TestCitySelectsHostedBeadsCredentialProviderNeverCachesTheErrorPath(t *test
 		t.Fatalf("error-path calls incremented the memoised-build counter (built = %d), want 0 — errors must never be cached", built)
 	}
 }
+
+// TestCitySelectsHostedBeadsCredentialProviderFollowsIncludedFragmentRewrites
+// pins ga-d39qig round 2 (Guardrail #2): the memoized stat signature must
+// cover every file LoadWithIncludesOptions actually composed the answer
+// from, not just city.toml's own mtime/size. A city that splits its storage
+// config into an included fragment can change that fragment without
+// touching city.toml at all; a cache keyed on city.toml alone would then
+// keep serving a hosted decision that no longer matches the tree on disk.
+func TestCitySelectsHostedBeadsCredentialProviderFollowsIncludedFragmentRewrites(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Cleanup(func() { forgetCitySelectsHostedBeadsCredentialProvider(cityPath) })
+
+	cityTOML := "include = [\"storage.toml\"]\n\n[workspace]\nname = \"hosted-provider-test\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fragmentPath := filepath.Join(cityPath, "storage.toml")
+	hostedFragment := `[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "beads-workspace"
+config_ref = "infra"
+url = "https://beads.example/workspaces/infra"
+auth = "gasworks"
+`
+	if err := os.WriteFile(fragmentPath, []byte(hostedFragment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := hostedCredentialProbeBuilds.Load()
+	hosted, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		t.Fatalf("citySelectsHostedBeadsCredentialProvider: %v", err)
+	}
+	if !hosted {
+		t.Fatal("hosted = false, want true before any rewrite")
+	}
+	if built := hostedCredentialProbeBuilds.Load() - before; built != 1 {
+		t.Fatalf("initial call loaded config %d times, want 1", built)
+	}
+
+	// Rewrite ONLY the included fragment -- city.toml itself is never
+	// touched -- to a shape that no longer selects the hosted provider.
+	notHostedFragment := `[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "beads-workspace"
+config_ref = "infra"
+`
+	if err := os.WriteFile(fragmentPath, []byte(notHostedFragment), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hosted, err = citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		t.Fatalf("citySelectsHostedBeadsCredentialProvider after fragment rewrite: %v", err)
+	}
+	if hosted {
+		t.Fatal("hosted = true after the included fragment dropped url/auth, want false — city.toml alone was never touched, so a cache keyed only on city.toml's stat signature must not treat this as a hit")
+	}
+	if built := hostedCredentialProbeBuilds.Load() - before; built != 2 {
+		t.Fatalf("a rewritten included fragment did not rebuild the probe (builds = %d), want 2 — the cache is keyed on city.toml's stat signature alone and missed the fragment change", built)
+	}
+}
