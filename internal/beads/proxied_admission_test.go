@@ -1268,10 +1268,16 @@ func TestAdmitRefusesAnUncheckedCursorReality(t *testing.T) {
 // half.
 //
 // Both "did not move" and "could not tell" are legitimate answers, and the whole
-// value of the check turns on their not being the same answer: the probe's head
-// read degrades to "" rather than failing its session, and a memoized pin
-// carries none, so an empty-means-equal comparison would report every one of
-// those as a clean open and the check would quietly stop existing.
+// value of the check turns on their not being the same answer. A probe that
+// cannot read HEAD does NOT degrade to "": it fails its session, which
+// classifies ProbeUnknown and admits nothing (readMainCursorAndHead;
+// TestProbeSessionReadsHeadOnItsFirstStatement's "a HEAD the server cannot
+// answer" row). What does reach this function with an empty head is a
+// memoized pin (Pin.withoutHead) and, in principle, a SQL NULL hash — so an
+// empty-means-equal comparison would report those as clean opens and the check
+// would quietly stop existing. (An earlier version of this doc said the probe
+// degrades to "" on a failed read; that was the stopped lane's design, which
+// the D-F3 round removed — council pr2 E-I4.)
 func TestProxiedOpenUnmovedDeclinesRatherThanAgrees(t *testing.T) {
 	pinAt := func(head string) Pin {
 		return Pin{admitted: true, database: "beads", head: head, cursors: pinnedCursors()}
