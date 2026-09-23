@@ -887,8 +887,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			// Patrol scans every reconciler state authoritatively, so any
-			// pending event-driven fires are redundant — drop them.
-			pokeDB.cancelPending()
+			// pending event-driven fires are redundant — drop them. Except
+			// a pending poke under stretched session-phase patrol
+			// (sessionPhaseStretchActive): that patrol tick can skip
+			// session reconciliation entirely (see sessionPhasesDue), so
+			// canceling here would silently strand a session-exit signal
+			// until the stretched interval elapses. Only drop the poke
+			// when this patrol tick is guaranteed to cover session phases.
+			if !cr.sessionPhaseStretchActive() {
+				pokeDB.cancelPending()
+			}
 			ctrlDB.cancelPending()
 			runTick("patrol")
 		case <-cr.pokeCh:

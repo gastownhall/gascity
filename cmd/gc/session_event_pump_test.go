@@ -525,3 +525,29 @@ func TestSessionPhasesDueConfigPendingRuns(t *testing.T) {
 		t.Error("pending config change did not force the session phases")
 	}
 }
+
+// TestSessionPhaseStretchActiveGatesPokeCancellation covers the run loop's
+// patrol-tick guard: a pending poke must only be dropped as redundant when
+// this patrol tick is guaranteed to cover session phases. If stretching is
+// active, sessionPhaseStretchActive() must report true so the guard keeps
+// the poke alive — otherwise a session-exit event arriving just before a
+// stretched (session-phase-skipping) patrol tick would be silently dropped
+// and reconciliation would wait out the full stretched interval.
+func TestSessionPhaseStretchActiveGatesPokeCancellation(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	if !cr.sessionPhaseStretchActive() {
+		t.Fatal("stretch configured longer than patrol with a flowing stream must report active")
+	}
+
+	crNoStretch := stretchTestRuntime(t, "", pump)
+	if crNoStretch.sessionPhaseStretchActive() {
+		t.Error("no stretch configured must report inactive")
+	}
+
+	idleCr := stretchTestRuntime(t, "10m", nil)
+	if idleCr.sessionPhaseStretchActive() {
+		t.Error("stretch configured but no session-event stream must report inactive")
+	}
+}
