@@ -1,9 +1,11 @@
 package acceptancehelpers
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,6 +24,13 @@ import (
 //     time a test reads the log cannot be looked up afterwards.
 //   - sql-server is distinguished from every other verb. gc legitimately runs
 //     `dolt version`; what it must never do is start a server.
+//
+// And one property of its trap mode (round4 missed low: the library-level
+// no-spawn control), in the same table so the instrument's one proof covers
+// both of its modes: armed for this process, the sentinel is the dolt this
+// process resolves BY NAME — the way the linked library's exec.LookPath does —
+// and it records the exec with this process as parent and then refuses,
+// without running the real dolt.
 func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "ran")
@@ -36,35 +45,74 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 		t.Fatalf("a fresh sentinel already recorded %d invocation(s)", len(got))
 	}
 
-	cmd := exec.Command(sentinel.Path, "sql-server", "--config", "a b.yaml") //nolint:gosec // resolved shim
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("run the sentinel: %v\n%s", err, out)
-	}
-	ran, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatalf("the sentinel did not exec the real dolt: %v", err)
-	}
-	if got := strings.Fields(string(ran)); len(got) != 4 || got[0] != "sql-server" {
-		t.Errorf("the real dolt received %q, want the shim's own argv", strings.TrimSpace(string(ran)))
-	}
+	for _, tc := range []struct {
+		name string
+		trap bool
+	}{
+		{name: "pass-through"},
+		{name: "trapped in this process", trap: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sentinel.Reset()
+			if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			name := sentinel.Path
+			if tc.trap {
+				sentinel.TrapThisProcess(t)
+				name = "dolt"
+			}
+			cmd := exec.Command(name, "sql-server", "--config", "a b.yaml") //nolint:gosec // resolved shim
+			if cmd.Path != sentinel.Path {
+				t.Fatalf("%q resolved to %q, want the sentinel %q", name, cmd.Path, sentinel.Path)
+			}
+			out, err := cmd.CombinedOutput()
+			ran, readErr := os.ReadFile(marker)
+			if tc.trap {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != sentinelDoltTrapStatus {
+					t.Fatalf("a trapped dolt exited %v, want status %d:\n%s", err, sentinelDoltTrapStatus, out)
+				}
+				if readErr == nil {
+					t.Fatal("the trapped sentinel ran the real dolt; an in-process control would start a server")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("run the sentinel: %v\n%s", err, out)
+				}
+				if readErr != nil {
+					t.Fatalf("the sentinel did not exec the real dolt: %v", readErr)
+				}
+				if got := strings.Fields(string(ran)); len(got) != 4 || got[0] != "sql-server" {
+					t.Errorf("the real dolt received %q, want the shim's own argv", strings.TrimSpace(string(ran)))
+				}
+			}
 
-	invocations := sentinel.Invocations()
-	if len(invocations) != 1 {
-		t.Fatalf("recorded %d invocation(s), want 1:\n%s", len(invocations), sentinel.Describe())
+			invocations := sentinel.Invocations()
+			if len(invocations) != 1 {
+				t.Fatalf("recorded %d invocation(s), want 1:\n%s", len(invocations), sentinel.Describe())
+			}
+			got := invocations[0]
+			if !got.IsServer() {
+				t.Errorf("IsServer() = false for %v", got.Argv)
+			}
+			if want := []string{"sql-server", "--config", "a b.yaml"}; strings.Join(got.Argv, "|") != strings.Join(want, "|") {
+				t.Errorf("argv = %v, want %v (an argument with a space must stay one argument)", got.Argv, want)
+			}
+			// The parent is this test binary, which is the only process that ran it.
+			if got.Parent == "" {
+				t.Errorf("no parent command line recorded; the ancestry signal is the whole point:\n%s", sentinel.Describe())
+			} else if got.ParentCommand() != filepath.Base(os.Args[0]) {
+				t.Errorf("ParentCommand() = %q (from parent %q), want this test binary %q",
+					got.ParentCommand(), got.Parent, filepath.Base(os.Args[0]))
+			}
+			if mine := sentinel.FromThisProcess(); len(mine) != 1 {
+				t.Errorf("FromThisProcess = %v, want the one exec this process made", mine)
+			}
+		})
 	}
-	got := invocations[0]
-	if !got.IsServer() {
-		t.Errorf("IsServer() = false for %v", got.Argv)
-	}
-	if want := []string{"sql-server", "--config", "a b.yaml"}; strings.Join(got.Argv, "|") != strings.Join(want, "|") {
-		t.Errorf("argv = %v, want %v (an argument with a space must stay one argument)", got.Argv, want)
-	}
-	// The parent is this test binary, which is the only process that ran it.
-	if got.Parent == "" {
-		t.Errorf("no parent command line recorded; the ancestry signal is the whole point:\n%s", sentinel.Describe())
-	} else if got.ParentCommand() != filepath.Base(os.Args[0]) {
-		t.Errorf("ParentCommand() = %q (from parent %q), want this test binary %q",
-			got.ParentCommand(), got.Parent, filepath.Base(os.Args[0]))
+	if os.Getenv(SentinelDoltTrapEnv) != "" {
+		t.Fatalf("%s outlived the subtest that armed it", SentinelDoltTrapEnv)
 	}
 	// The trap the no-spawn row fell into: a substring match on the whole parent
 	// command line answers yes for any process whose ARGUMENTS happen to mention
@@ -94,5 +142,28 @@ func TestParseSentinelDoltRefusesAnInterleavedRecord(t *testing.T) {
 	bad := "sql-server" + fieldSeparator + "123" + fieldSeparator + recordSeparator + "\n"
 	if _, err := parseSentinelDolt([]byte(bad)); err == nil {
 		t.Fatal("parseSentinelDolt accepted a record whose first field is not a pid; a dropped record would read as proof that gc spawned nothing")
+	}
+}
+
+// TestSentinelDoltFromThisProcessKeepsOnlyThisProcesssExecs pins the filter the
+// library-level rows count with, over a hand-written log: an exec whose parent
+// is any other process — gc, bd, a shell this test started — is not the linked
+// library's.
+func TestSentinelDoltFromThisProcessKeepsOnlyThisProcesssExecs(t *testing.T) {
+	dir := t.TempDir()
+	s := &SentinelDolt{t: t, logPath: filepath.Join(dir, "invocations.log")}
+	record := func(ppid, parent string, argv ...string) string {
+		return ppid + fieldSeparator + parent + fieldSeparator + strings.Join(argv, fieldSeparator) + fieldSeparator + recordSeparator + "\n"
+	}
+	self := strconv.Itoa(os.Getpid())
+	log := record(self, os.Args[0], "version") +
+		record(strconv.Itoa(os.Getpid()+1), "/usr/bin/bd db-proxy-child", "sql-server") +
+		record(self, os.Args[0], "sql-server", "--port", "0")
+	if err := os.WriteFile(s.logPath, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mine := s.FromThisProcess()
+	if len(mine) != 2 || mine[0].Subcommand() != "version" || !mine[1].IsServer() {
+		t.Fatalf("FromThisProcess = %v, want this process's version and sql-server execs only", mine)
 	}
 }

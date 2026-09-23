@@ -279,6 +279,125 @@ func TestProxiedNativeSafety(t *testing.T) {
 		}
 	})
 
+	// The library's OWN fence (round4 missed low; plan P2-16, design 5.2 U12).
+	//
+	// The two rows above are about gc's commands, and every command opens the
+	// library only after admission has pinged bd's proxy — so the linked
+	// library never dials a dead port there, and its auto-start fence
+	// (BEADS_DOLT_SERVER_MODE=1 makes the server externally managed,
+	// BEADS_DOLT_AUTO_START=0 opts out; beads v1.3.0 internal/storage/dolt/open.go:215 resolveAutoStart)
+	// is never exercised. A beads bump that stopped honouring it would pass
+	// them, and the admission-to-open race, or a reopen after the proxy died,
+	// would then have the library start a gc-parented `dolt sql-server` on
+	// bd's data dir. These two rows open the library in THIS process, through
+	// the production proxied window, against bd's stopped proxy — that race
+	// made deterministic — with the sentinel armed for this process in trap
+	// mode: first on this process's PATH (the library resolves dolt with
+	// exec.LookPath), recording every exec and refusing it, so neither the
+	// control nor a broken fence can start a server.
+	//
+	// The endpoint map is the production shape, built while the proxy is still
+	// up (bd removes the record on an orderly stop, and the port is in it).
+	fixture.heal(t, "before the library-level no-spawn rows")
+	productionEnv := proxiedAuthorWindowEnv(t, cityRoot, city)
+	if out, err := fixture.bd(t, "dolt", "stop"); err != nil {
+		t.Fatalf("bd dolt stop before the library-level rows: %v\n%s", err, out)
+	}
+	if leaked := waitForNoDoltProcesses(t, cityRoot, 30*time.Second); len(leaked) > 0 {
+		t.Fatalf("bd dolt stop left processes behind, so the port the library dials may still answer:\n%s", strings.Join(leaked, "\n"))
+	}
+
+	t.Run("library-no-spawn-control", func(t *testing.T) {
+		// The instrument, before the claim: the library's auto-start, in this
+		// process, finds the sentinel, and every exec it makes is recorded with
+		// this process as its parent.
+		//
+		// Design 5.2's control clears BEADS_DOLT_SERVER_MODE and
+		// BEADS_DOLT_AUTO_START "against a stopped proxy". On a proxied-server
+		// scope that shape cannot reach the auto-start at beads v1.3.0, and is
+		// not safe to try: without BEADS_DOLT_SERVER_MODE=1,
+		// configfile.IsDoltServerMode is false for dolt_mode "proxied-server"
+		// (configfile.go:364-390), so OpenBestAvailable takes the EMBEDDED
+		// engine (beads_cgo.go:44-61) — no dolt exec at all, and bd's database
+		// opened in-process. So the control is a scratch scope whose metadata
+		// says plain dolt_mode "server" with no port (ResolveServerMode:
+		// owned), opened through the SAME production window, with the SAME
+		// endpoint map less the two gate keys, against the SAME dead port. The
+		// only differences from the row below are the two keys and the mode
+		// that makes the library server-backed without them.
+		sentinel.Reset()
+		sentinel.TrapThisProcess(t)
+
+		scratch := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(scratch, ".beads", "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := fmt.Sprintf(`{"backend":"dolt","dolt_mode":"server","dolt_database":%q}`, productionEnv["BEADS_DOLT_SERVER_DATABASE"])
+		if err := os.WriteFile(filepath.Join(scratch, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		controlEnv := make(map[string]string, len(productionEnv))
+		for key, value := range productionEnv {
+			controlEnv[key] = value
+		}
+		delete(controlEnv, "BEADS_DOLT_SERVER_MODE")
+		delete(controlEnv, "BEADS_DOLT_AUTO_START")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		store, err := beads.OpenNativeDoltStoreAtProxied(ctx, scratch, controlEnv)
+		if err == nil {
+			store.CloseStore() //nolint:errcheck // unexpected handle
+			t.Fatalf("the control's open SUCCEEDED against the stopped proxy's port %s, so something is serving it and neither row below is about a dead port",
+				productionEnv["BEADS_DOLT_SERVER_PORT"])
+		}
+		t.Logf("control open error: %v", err)
+
+		mine := sentinel.FromThisProcess()
+		t.Logf("sentinel recorded %d dolt exec(s) from this process (pid %d):\n%s", len(mine), os.Getpid(), sentinel.Describe())
+		if len(mine) == 0 {
+			t.Fatalf("with the two gates cleared the library's auto-start recorded NO dolt exec from this process, so the sentinel is not the dolt the library resolves and the negative row below would pass by construction; open error: %v",
+				err)
+		}
+		if leaked := waitForNoDoltProcesses(t, scratch, 10*time.Second); len(leaked) > 0 {
+			t.Errorf("the trapped control left dolt processes under its scratch scope:\n%s", strings.Join(leaked, "\n"))
+		}
+	})
+
+	t.Run("library-no-spawn", func(t *testing.T) {
+		// The claim: the flag-on lane's own open, with the production endpoint
+		// map, against bd's stopped proxy, execs no dolt at all. It fails —
+		// that is the right outcome, and the reopen hook's caller turns it into
+		// a verdict — but it fails by dialing a dead port, never by starting
+		// something to dial.
+		sentinel.Reset()
+		sentinel.TrapThisProcess(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		store, err := beads.OpenNativeDoltStoreAtProxied(ctx, cityRoot, productionEnv)
+		if err == nil {
+			store.CloseStore() //nolint:errcheck // unexpected handle
+			t.Fatalf("the production open SUCCEEDED against bd's stopped proxy on port %s:\n%s",
+				productionEnv["BEADS_DOLT_SERVER_PORT"], sentinel.Describe())
+		}
+		t.Logf("production open error against the stopped proxy: %v", err)
+
+		if mine := sentinel.FromThisProcess(); len(mine) != 0 {
+			t.Errorf("the production proxied open exec'd dolt %d time(s) from this process against a scope bd owns; the library's auto-start fence did not hold:\n%s",
+				len(mine), sentinel.Describe())
+		}
+		// Any other process's exec is logged, not failed: the claim is about
+		// the library in this process, and a straggling bd child from an
+		// earlier row is not evidence about it.
+		if all := sentinel.Invocations(); len(all) != 0 {
+			t.Logf("dolt ran %d time(s) from other processes during the production open:\n%s", len(all), sentinel.Describe())
+		}
+		if leaked := waitForNoDoltProcesses(t, cityRoot, 10*time.Second); len(leaked) > 0 {
+			t.Errorf("a dolt process appeared under the city during the production open:\n%s", strings.Join(leaked, "\n"))
+		}
+	})
+
 	// Everything below needs a served lane again.
 	healed := fixture.heal(t, "before the no-migrate rows")
 	t.Logf("the safety city is serving natively again at generation %s", healed)

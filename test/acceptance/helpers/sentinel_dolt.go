@@ -30,6 +30,12 @@ import (
 //
 // The recording is a side effect of a real run: the shim execs the pinned dolt,
 // so the city behaves exactly as it would without it.
+//
+// It has a second mode for the one place a pass-through instrument would be a
+// hazard: an open of the linked library in the TEST's own process (see
+// TrapThisProcess). There the sentinel records and REFUSES, so the control
+// that proves the library's auto-start reaches it cannot start a Dolt server,
+// and a regression in the fence it watches cannot either.
 type SentinelDolt struct {
 	// Dir holds the shim and is what a test prepends to PATH.
 	Dir string
@@ -41,6 +47,15 @@ type SentinelDolt struct {
 	t       *testing.T
 	logPath string
 }
+
+// SentinelDoltTrapEnv switches the shim from recording-then-exec to
+// recording-then-refusing, for any process that inherits it. TrapThisProcess
+// sets it for the calling test's own process only.
+const SentinelDoltTrapEnv = "GC_ACCEPTANCE_SENTINEL_DOLT_TRAP"
+
+// sentinelDoltTrapStatus is the shim's exit status when it refuses. It is not
+// one dolt uses, so a refusal is recognizable in a library error.
+const sentinelDoltTrapStatus = 97
 
 // SentinelDoltInvocation is one recorded dolt exec.
 type SentinelDoltInvocation struct {
@@ -134,6 +149,10 @@ func NewSentinelDolt(t *testing.T, realDolt string) *SentinelDolt {
 	// separators into spaces. Failures are swallowed on purpose: an instrument
 	// must not be able to fail the city it is observing, and a parent that has
 	// already exited is a legitimate answer of "unknown".
+	//
+	// In trap mode (SentinelDoltTrapEnv set) the record is written FIRST and the
+	// shim then refuses without exec'ing anything, so a trapped exec is always
+	// in the log and never runs.
 	script := fmt.Sprintf(`#!/bin/sh
 us='%s'
 rs='%s'
@@ -143,8 +162,12 @@ for arg in "$@"; do
 	record="$record$arg$us"
 done
 printf '%%s\n' "$record$rs" >>%s 2>/dev/null || true
+if [ -n "${%s:-}" ]; then
+	printf 'sentinel dolt: trapped, not running: dolt %%s\n' "$*" >&2
+	exit %d
+fi
 exec %s "$@"
-`, fieldSeparator, recordSeparator, shellQuote(s.logPath), shellQuote(resolved))
+`, fieldSeparator, recordSeparator, shellQuote(s.logPath), SentinelDoltTrapEnv, sentinelDoltTrapStatus, shellQuote(resolved))
 	if err := os.WriteFile(s.Path, []byte(script), 0o755); err != nil { //nolint:gosec // the shim must be executable
 		t.Fatalf("write sentinel dolt shim: %v", err)
 	}
@@ -198,6 +221,40 @@ func parseSentinelDolt(data []byte) ([]SentinelDoltInvocation, error) {
 		})
 	}
 	return out, nil
+}
+
+// TrapThisProcess arms the sentinel for the calling test's OWN process, for the
+// rest of t: the sentinel's directory goes first on this process's PATH, and
+// the trap switch is set, so every `dolt` this process execs — which is every
+// dolt the linked library execs, because its auto-start resolves dolt with
+// exec.LookPath — is recorded and refused.
+//
+// Refused, because the rows that need it open the library in-process against
+// a scope whose Dolt data a spawn would touch: the positive control exists to
+// make the library's auto-start run, and the negative row exists to catch a
+// fence that stopped holding. A pass-through instrument would start a real
+// server in either case. Processes the test starts with an explicit
+// environment (gc, bd, through helpers.Env) do not inherit either change.
+//
+// It uses t.Setenv, so it cannot be called from a parallel test.
+func (s *SentinelDolt) TrapThisProcess(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", s.Dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(SentinelDoltTrapEnv, "1")
+}
+
+// FromThisProcess returns the recorded execs whose parent is the test process
+// itself — the only ones the linked library, running in-process, can produce.
+func (s *SentinelDolt) FromThisProcess() []SentinelDoltInvocation {
+	s.t.Helper()
+	self := strconv.Itoa(os.Getpid())
+	var out []SentinelDoltInvocation
+	for _, i := range s.Invocations() {
+		if i.PPID == self {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // Reset discards the recorded history so a count can be attributed to one step.
