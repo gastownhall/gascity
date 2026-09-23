@@ -1134,3 +1134,68 @@ func TestCloseStoreDuringAGuardRecoveryClosesTheRecoveredLeaf(t *testing.T) {
 		t.Fatal("the leaf the recovery opened was never closed: a live library pool on bd's proxy for the rest of the process")
 	}
 }
+
+// TestProxiedGuardTickStandsDownALeafTheReadPathAlreadyRepinned pins a cost of
+// E-S1's stand-down, as it stands, so it cannot change silently in either
+// direction (round3 review, safety).
+//
+// Row 1, a bd proxy restart, seen by the READ path first: a read fails on the
+// dead socket and the reopen hook re-points the pool at the new generation.
+// The hook never updates the wrapper's pin, so the next tick still sees the
+// generation "move", re-admits on one probe session, and — on a loaded box,
+// where that session is indeterminate — stands down a leaf that is serving the
+// right generation. The one-session recovery then keeps it on the bd front
+// door for as long as the load lasts. It fails safe (non-terminal, nothing
+// read from a wrong generation) and it is an availability cost; checkGeneration
+// says so. If the reopen hook ever adopts the pin it admitted, the first
+// assertion fails: update that comment with this test.
+func TestProxiedGuardTickStandsDownALeafTheReadPathAlreadyRepinned(t *testing.T) {
+	f := newGuardFixture(t)
+	f.installRecovery()
+	f.start()
+	before := f.store.Pin()
+
+	// bd restarted its proxy, and a read met the dead socket first: the read
+	// path's reconnect, through the reopen hook.
+	f.admitted.writeRecord(6002, "99887766")
+	_, gen, release, err := f.native.acquireStorageGen()
+	if err != nil {
+		t.Fatalf("acquire the leaf's storage: %v", err)
+	}
+	release()
+	if err := f.native.reconnect(context.Background(), gen); err != nil {
+		t.Fatalf("the read path's reconnect: %v", err)
+	}
+	<-f.reopens
+	if f.store.Pin().Generation() != before.Generation() {
+		t.Fatalf("the read path's reopen moved the wrapper's pin to %s: the cost this test documents is gone, "+
+			"so update checkGeneration's comment (and this test) to say what the tick does now", f.store.Pin().Generation())
+	}
+
+	// A loaded box: the tick's one re-admission session learns nothing.
+	f.probeResult = func() proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeUnknown, Err: context.DeadlineExceeded}
+	}
+	if step := f.tick(); step != proxiedGuardStoodDown || !f.store.Demoted() {
+		t.Fatalf("tick = %s, demoted = %v: want the documented stand-down of the already-repinned leaf", step, f.store.Demoted())
+	}
+	if verdict := f.store.Verdict(); verdict == nil || verdict.Terminal() {
+		t.Fatalf("verdict = %v, want a NON-terminal stand-down: the leaf was never wrong", verdict)
+	}
+	for pass := 0; pass < 2; pass++ {
+		if step := f.tick(); step != proxiedGuardUndecided || !f.store.Demoted() {
+			t.Fatalf("loaded tick %d = %s, demoted = %v: want undecided and still on bd while the one-session recovery learns nothing",
+				pass, step, f.store.Demoted())
+		}
+	}
+
+	// The load lifts: the next recovery re-pins onto the generation the leaf
+	// was serving all along.
+	f.probeResult = nil
+	if step := f.tick(); step != proxiedGuardRepinned || f.store.Demoted() {
+		t.Fatalf("tick after the load = %s, demoted = %v: want the recovery to re-pin", step, f.store.Demoted())
+	}
+	if got := f.store.Pin().PoolKey().PID; got != 6002 {
+		t.Fatalf("re-pinned to pid %d, want the restarted proxy (6002)", got)
+	}
+}

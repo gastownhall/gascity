@@ -456,6 +456,19 @@ func (g *proxiedGuard) checkGeneration(ctx context.Context, pin Pin, native *Nat
 		// cannot see row 2 must not be the only guard against it), and it
 		// fails safe: non-terminal, and never a read from the wrong generation.
 		//
+		// And on row 1 it can stand down a leaf that was ALREADY right (round3
+		// review, safety). When a read meets the dead socket before a tick
+		// does, the reopen hook admits the new generation, runs the post-open
+		// check and re-points the pool — but it never updates this store's
+		// pin (only adoptPin and repin write it). So the next tick still sees
+		// "generation moved", re-admits on one session, and on an
+		// indeterminate one stands down a leaf serving the correct generation.
+		// TestProxiedGuardTickStandsDownALeafTheReadPathAlreadyRepinned pins
+		// that cost as it stands. Closing it means the reopen hook reporting
+		// the pin it admitted to the wrapper, so the tick can adopt it instead
+		// of re-litigating it — a new surface across the single-flight install
+		// path, left as a follow-up rather than made in a review repair.
+		//
 		// The typed verdict is kept when there is one (draining,
 		// budget_exhausted, backend_unreachable, proxy_gone), with the
 		// generation move in its detail, so doctor says why. An UNTYPED error —
