@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // selfImportPath is the package this guard fences off.
@@ -147,6 +149,10 @@ func TestImportScanRootIsNeverPruned(t *testing.T) {
 // subprocess in a test file, which the resource census counts and ratchets.
 func repoRoot(t *testing.T) string {
 	t.Helper()
+
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	dir, err := filepath.Abs(".")
 	if err != nil {
 		t.Fatalf("abs cwd: %v", err)

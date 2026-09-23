@@ -9,6 +9,7 @@ go_library(
         "builder_storeset.go",
         "cache_graph.go",
         "endpoint.go",
+        "engine_fence.go",
         "engine_opener.go",
         "events.go",
         "health_bindings.go",
@@ -37,6 +38,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/events",
         "//internal/extmsg",
@@ -61,6 +63,7 @@ go_test(
         "builder_storeset_test.go",
         "cache_graph_test.go",
         "census_sources_nested_worktree_test.go",
+        "engine_fence_test.go",
         "health_bindings_test.go",
         "lifecycle_bindings_test.go",
         "lifecycle_events_test.go",
@@ -91,9 +94,18 @@ go_test(
         "storebinding_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":storebinding"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/extmsg",
         "//internal/mail",
@@ -130,4 +142,16 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

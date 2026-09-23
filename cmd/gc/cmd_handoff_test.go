@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -1258,7 +1259,13 @@ func handoffCommandSource(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	path := filepath.Join(filepath.Dir(currentFile), "cmd_handoff.go")
+	srcDir := ""
+	if root := bazeltest.OverrideRoot(); root != "" {
+		srcDir = filepath.Join(root, "cmd", "gc")
+	} else {
+		srcDir = filepath.Dir(currentFile)
+	}
+	path := filepath.Join(srcDir, "cmd_handoff.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", path, err)

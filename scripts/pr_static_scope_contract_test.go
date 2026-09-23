@@ -956,6 +956,10 @@ func (f prStaticScopeFixture) commandEnv() []string {
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
 		if name == "HOME" ||
+			// A forwarded GOROOT can pair a 1.2x driver with a different
+			// toolchain's compile binaries (bazel forwards GOROOT for its own
+			// type-checking tests); the real go must resolve its own.
+			name == "GOROOT" ||
 			name == "STATIC_SCOPE_LINT_LOG" ||
 			name == "STATIC_SCOPE_GO_LOG" ||
 			name == "STATIC_SCOPE_REAL_GO" ||
@@ -981,6 +985,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 		"GOFLAGS=-mod=readonly",
 		"GOENV=off",
 		"GOWORK=off",
+		"GOTOOLCHAIN=local",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 	)

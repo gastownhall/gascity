@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -20,6 +21,9 @@ import (
 )
 
 func exampleDir() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "examples", "swarm")
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Dir(filename)
 }

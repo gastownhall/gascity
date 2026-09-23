@@ -4,6 +4,7 @@ go_library(
     name = "molecule",
     srcs = [
         "artifact.go",
+        "claim_exact.go",
         "cleanup.go",
         "graph_apply.go",
         "molecule.go",
@@ -28,15 +29,25 @@ go_test(
         "artifact_test.go",
         "attach_conditional_test.go",
         "attach_test.go",
+        "claim_exact_test.go",
         "cleanup_test.go",
+        "cook_choosing_store_test.go",
         "molecule_test.go",
         "native_step_topology_test.go",
         "testenv_import_test.go",
         "tutorial_regression_test.go",
         "workflow_bead_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":molecule"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/formula",
@@ -45,4 +56,16 @@ go_test(
         "//internal/rollout/gate",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

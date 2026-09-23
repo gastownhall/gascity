@@ -4,16 +4,22 @@ go_test(
     name = "scripts_test",
     srcs = [
         "acceptance_run_selection_test.go",
-        "bazel_backtest_cwd_test.go",
-        "bazel_canary_test.go",
+        "add_testenv_import_test.go",
         "bd_version_pin_test.go",
         "build_provenance_test.go",
         "check_core_boundary_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
+        "ci_required_coverage_test.go",
+        "complexity_test.go",
+        "complexity_workflow_test.go",
+        "container_scan_fail_fast_test.go",
         "container_tool_security_test.go",
         "docker_session_protocol_test.go",
         "dolt_version_pin_test.go",
+        "git_test_env_test.go",
+        "githooks_beads_chain_test.go",
+        "githooks_pre_push_stdin_test.go",
         "go_test_observable_test.go",
         "gomod_replace_guard_test.go",
         "harness_reap_test.go",
@@ -27,6 +33,11 @@ go_test(
         "rebase_resolve_lib_test.go",
         "release_binary_metadata_test.go",
         "residency_boundary_test.go",
+        "residency_expression_rules_test.go",
+        "residency_grep_rule_test.go",
+        "residency_halves_agree_test.go",
+        "residency_ratchet_test.go",
+        "residency_signature_rule_test.go",
         "runtime_tmux_manifest_test.go",
         "shard_cgo_test.go",
         "sign_darwin_local_test.go",
@@ -37,8 +48,22 @@ go_test(
         "test_timing_plan_test.go",
         "testenv_import_test.go",
         "tmpdir_default_test.go",
+        "worker_inference_make_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:Makefile",
+        "//:go.mod",
+        "//:repo_meta",
+        "//:repo_source_tree",
+        "//contrib:all_files",
+        "//scripts/testdata/test-go-test-shard/env_required:pkg_files",
+        "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
     ],
     deps = [
+        "//internal/bazeltest",
         "//internal/deps",
         "//internal/runtime",
         "//internal/runtime/exec",
@@ -49,4 +74,16 @@ go_test(
         "//internal/testutil",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
