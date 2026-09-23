@@ -667,9 +667,14 @@ func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot strin
 
 // NewNativeDoltStoreOverStorageForTest wraps a caller-supplied storage handle in
 // a NativeDoltStore, for tests in OTHER packages that need a real leaf — one
-// whose CloseStore reaches the storage's Close — without a Dolt server. cmd/gc's
-// proxied opener tests use it to prove a refused open closes the leaf it opened
-// (council pr2 E-I5). Production opens only through OpenNativeDoltStoreAt* and
+// whose CloseStore reaches the storage's Close. cmd/gc's proxied opener tests
+// use it without a Dolt server to prove a refused open closes the leaf it
+// opened (council pr2 E-I5). The proxied-native safety acceptance row uses it
+// over OpenNativeStorageAtProxied's storage to WRITE through the proxied
+// window's author latch, because every handle OpenNativeDoltStoreAtProxied
+// returns is read-only latched (council B-F5) and PR2 ships no writable one.
+// The handle it returns carries no read-only latch, no reopen hook and no
+// issue prefix. Production opens only through OpenNativeDoltStoreAt* and
 // OpenNativeDoltStoreAtProxied.
 func NewNativeDoltStoreOverStorageForTest(storage NativeStorage) *NativeDoltStore {
 	return newNativeDoltStoreForTest(storage)

@@ -337,6 +337,96 @@ func TestProxiedOpenIsReadOnlyWithoutBeingAsked(t *testing.T) {
 	}
 }
 
+// TestProxiedAuthorPinWritesThroughTheWindowWithoutAWritableProxiedOpen is the
+// dolt-free replay of the proxied-native safety acceptance row
+// author-latched-at-open (round3 review, completeness).
+//
+// That row wrote through OpenNativeDoltStoreAtProxied, and since B-F5 every
+// handle that function returns is read-only latched, so its Create was refused
+// before it reached the library and the row failed on every run of the
+// required proxied-native job — while nothing else pinned PR3's author. The
+// control row below is that old shape. The row now opens the BARE storage
+// through the same window and writes through gc's own Create over it; this
+// asserts that shape writes, and that the library's open saw the window's
+// author pair (the latch the acceptance row then reads back from dolt_log)
+// rather than the ambient shell's.
+func TestProxiedAuthorPinWritesThroughTheWindowWithoutAWritableProxiedOpen(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "whoever-ran-git-last")
+	t.Setenv("GIT_AUTHOR_EMAIL", "someone@elsewhere")
+	env := map[string]string{
+		"BEADS_DOLT_SERVER_MODE":     "1",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     "44561",
+		"BEADS_DOLT_SERVER_USER":     "root",
+		"BEADS_DOLT_SERVER_DATABASE": "gc",
+		"BEADS_DOLT_AUTO_START":      "0",
+		"BEADS_DOLT_MAX_CONNS":       "1",
+		"GIT_AUTHOR_NAME":            "gc",
+		"GIT_AUTHOR_EMAIL":           "gc@demo",
+	}
+	var (
+		creates                    int
+		openedName, openedEmail    string
+		openedPort, openedDatabase string
+	)
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		// What the library's applyConfigDefaults would latch, read at the
+		// moment of the open.
+		openedName, openedEmail = os.Getenv("GIT_AUTHOR_NAME"), os.Getenv("GIT_AUTHOR_EMAIL")
+		openedPort, openedDatabase = os.Getenv("BEADS_DOLT_SERVER_PORT"), os.Getenv("BEADS_DOLT_SERVER_DATABASE")
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+			createIssue: func(context.Context, *beadslib.Issue, string) error {
+				creates++
+				return nil
+			},
+		}, nil
+	}
+	priority := 2
+	bead := Bead{Title: "author pin", Type: "task", Status: "open", Priority: &priority}
+	scope := filepath.Join(t.TempDir(), "scope")
+
+	t.Run("control: the read handle refuses the write, which is why the row cannot use it", func(t *testing.T) {
+		creates = 0
+		store, err := OpenNativeDoltStoreAtProxied(context.Background(), scope, env)
+		if err != nil {
+			t.Fatalf("OpenNativeDoltStoreAtProxied: %v", err)
+		}
+		t.Cleanup(func() { _ = store.CloseStore() })
+		if _, err := store.Create(bead); !errors.Is(err, ErrProxiedNativeReadOnly) || creates != 0 {
+			t.Fatalf("Create = %v with %d library write(s), want ErrProxiedNativeReadOnly and none", err, creates)
+		}
+	})
+
+	t.Run("the row's shape writes, and the open saw the window's author", func(t *testing.T) {
+		creates = 0
+		storage, err := OpenNativeStorageAtProxied(context.Background(), scope, env)
+		if err != nil {
+			t.Fatalf("OpenNativeStorageAtProxied: %v", err)
+		}
+		store := NewNativeDoltStoreOverStorageForTest(storage)
+		t.Cleanup(func() { _ = store.CloseStore() })
+		if _, err := store.Create(bead); err != nil {
+			t.Fatalf("Create through the author-pin shape: %v", err)
+		}
+		if creates != 1 {
+			t.Fatalf("the write reached the library %d time(s), want 1", creates)
+		}
+		if openedName != "gc" || openedEmail != "gc@demo" {
+			t.Fatalf("the library opened with author %q <%q>, want the window's gc <gc@demo>: the latch "+
+				"the acceptance row reads back would name the ambient shell's identity", openedName, openedEmail)
+		}
+		if openedPort != "44561" || openedDatabase != "gc" {
+			t.Fatalf("the library opened against port %q database %q, want the window's 44561/gc", openedPort, openedDatabase)
+		}
+		if got := os.Getenv("GIT_AUTHOR_NAME"); got != "whoever-ran-git-last" {
+			t.Fatalf("the window did not restore the ambient author: GIT_AUTHOR_NAME = %q", got)
+		}
+	})
+}
+
 // poolStorage is a library handle whose only real surface is the pool it
 // exports through UnderlyingDB — the accessor server-mode *dolt.DoltStore
 // carries, and the only thing the post-open observation touches.

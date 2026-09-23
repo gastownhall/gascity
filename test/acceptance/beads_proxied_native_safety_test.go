@@ -412,11 +412,25 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// It opens the store directly rather than through a gc command because
 		// there is no product path that writes through a proxied window in PR2 —
 		// which is exactly why the pin cannot wait for one.
+		//
+		// And it opens the BARE storage through the proxied window, not
+		// OpenNativeDoltStoreAtProxied (round3 review, completeness). Every
+		// handle that function returns is read-only latched, structurally
+		// (council B-F5), so a Create through it is refused before it reaches
+		// the library and this row could only fail. OpenNativeStorageAtProxied
+		// is the same window — the same BEADS_/BD_ withholding, the same
+		// projection of this env map, the same library open that latches the
+		// author — so the author the library commits with is decided exactly
+		// as it is for the read handle. The write goes through gc's own
+		// NativeDoltStore.Create over that storage, built with the exported
+		// test constructor, because a writable proxied handle is PR3's to ask
+		// for by name (WithProxiedWritable) and PR2 must not ship one.
 		writeEnv := proxiedAuthorWindowEnv(t, cityRoot, city)
-		store, err := beads.OpenNativeDoltStoreAtProxied(context.Background(), cityRoot, writeEnv)
+		storage, err := beads.OpenNativeStorageAtProxied(context.Background(), cityRoot, writeEnv)
 		if err != nil {
 			t.Fatalf("open the library over bd's proxy with the proxied window's env: %v", err)
 		}
+		store := beads.NewNativeDoltStoreOverStorageForTest(storage)
 		defer store.CloseStore() //nolint:errcheck // test handle
 
 		priority := 2
