@@ -97,3 +97,37 @@ func TestHostedCredentialProbeDoesNotCacheErrorsOrMissingCities(t *testing.T) {
 		t.Fatalf("config loads after repair = %d, want 1", got)
 	}
 }
+
+// TestHostedCredentialProbeInvalidatesOnRootRewrite pins that an edit to
+// city.toml ITSELF invalidates the memo. The include-only case is covered
+// above; this is the other half, and it depends on the root path being the
+// first entry the load reports in Provenance.Sources.
+func TestHostedCredentialProbeInvalidatesOnRootRewrite(t *testing.T) {
+	resetHostedCredentialProbeCache()
+	t.Cleanup(resetHostedCredentialProbeCache)
+	cityPath := t.TempDir()
+	stamp := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	writeHostedProbeCity(t, cityPath, true, stamp)
+
+	if _, err := citySelectsHostedBeadsCredentialProvider(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	loadsBefore := hostedCredentialProbeLoads.Load()
+
+	// Rewrite ONLY city.toml; storage.toml keeps its content and mtime.
+	cityConfig := filepath.Join(cityPath, "city.toml")
+	body := "include = [\"storage.toml\"]\n[workspace]\nname = \"probe-cache-rewritten\"\n"
+	if err := os.WriteFile(cityConfig, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := stamp.Add(time.Second)
+	if err := os.Chtimes(cityConfig, next, next); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := citySelectsHostedBeadsCredentialProvider(cityPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := hostedCredentialProbeLoads.Load() - loadsBefore; got != 1 {
+		t.Fatalf("config loads after city.toml was rewritten = %d, want 1 (the root must invalidate)", got)
+	}
+}
