@@ -1872,10 +1872,11 @@ func TestGenerationSetInFlightRungIsNeitherSpendableNorSpent(t *testing.T) {
 	set.now = func() time.Time { return now }
 	const g = "6001:abcd"
 
-	if !set.begin(g) {
+	first, ok := set.begin(g)
+	if !ok {
 		t.Fatal("the first begin did not claim the rung")
 	}
-	if set.begin(g) || set.Add(g) {
+	if _, again := set.begin(g); again || set.Add(g) {
 		t.Fatal("a rung in flight was claimable again: the verb would run twice")
 	}
 	if st := set.rung(g); !st.inFlight || st.spent || st.backoff != 0 {
@@ -1889,7 +1890,7 @@ func TestGenerationSetInFlightRungIsNeitherSpendableNorSpent(t *testing.T) {
 		t.Fatalf("an in-flight rung expired under a slow verb: %+v", st)
 	}
 
-	set.settle(g)
+	set.settle(g, first)
 	if st := set.rung(g); !st.spent || st.inFlight {
 		t.Fatalf("rung after settle = %+v, want spent", st)
 	}
@@ -1903,20 +1904,22 @@ func TestGenerationSetInFlightRungIsNeitherSpendableNorSpent(t *testing.T) {
 	}
 
 	// The failure arms write over the claim, and settle leaves their answer.
-	if !set.begin(g) {
+	second, ok := set.begin(g)
+	if !ok {
 		t.Fatal("an expired rung could not be claimed again")
 	}
-	set.Backoff(g, failedRecoverBackoff)
-	set.settle(g)
+	set.backoff(g, second, failedRecoverBackoff)
+	set.settle(g, second)
 	if st := set.rung(g); st.backoff != failedRecoverBackoff || st.spent || st.inFlight {
 		t.Fatalf("rung after Backoff then settle = %+v, want the backoff to stand", st)
 	}
 	set.Release(g)
-	if !set.begin(g) {
+	third, ok := set.begin(g)
+	if !ok {
 		t.Fatal("a released rung could not be claimed")
 	}
-	set.Release(g)
-	set.settle(g)
+	set.release(g, third)
+	set.settle(g, third)
 	if st := set.rung(g); st != (rungState{}) {
 		t.Fatalf("settle resurrected a released claim: %+v", st)
 	}
@@ -2672,5 +2675,48 @@ func TestGenerationSetIssuesOneStopPerGeneration(t *testing.T) {
 	}
 	if !set.IssueStop("6002:ef01") {
 		t.Fatal("another generation's stop was refused")
+	}
+}
+
+// TestGenerationSetOnlyTheClaimerEndsItsClaim is round5 recheck L1.
+//
+// spendRecover's target-moved arm releases its claim and its deferred settle
+// runs after. A second ladder that begins the same generation in between —
+// working from a read that still names it — owns the rung from then on, and
+// the first ladder's settle marked THAT claim spent while its recover still
+// ran: a third ladder then read "a recover was already spent" and went
+// terminal. Every write that ends a claim now carries it.
+func TestGenerationSetOnlyTheClaimerEndsItsClaim(t *testing.T) {
+	const g = "6001:abcd"
+	set := NewGenerationSet()
+
+	a, ok := set.begin(g)
+	if !ok {
+		t.Fatal("A could not claim the rung")
+	}
+	set.release(g, a) // A: the target moved, nothing ran
+	b, ok := set.begin(g)
+	if !ok {
+		t.Fatal("B could not claim a released rung")
+	}
+	if a == b {
+		t.Fatalf("two begins handed out the same claim %d", a)
+	}
+	set.settle(g, a) // A's deferred settle
+	if st := set.rung(g); !st.inFlight || st.spent {
+		t.Fatalf("rung while B's recover runs = %+v after A's settle, want B's claim still in flight", st)
+	}
+	set.release(g, a)
+	set.backoff(g, a, failedRecoverBackoff)
+	if st := set.rung(g); !st.inFlight {
+		t.Fatalf("A's stale release or backoff ended B's claim: %+v", st)
+	}
+	set.settle(g, 0)
+	if st := set.rung(g); !st.inFlight {
+		t.Fatalf("the zero claim ended B's claim: %+v", st)
+	}
+	set.settle(g, b)
+	if st := set.rung(g); !st.spent || st.inFlight {
+		t.Fatalf("B's own settle = %+v, want spent", st)
 	}
 }

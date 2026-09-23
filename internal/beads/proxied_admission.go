@@ -145,9 +145,16 @@ type GenerationSet struct {
 	// recover (`bd dolt stop`) on. It never expires and nothing releases it:
 	// see IssueStop.
 	stops map[string]struct{}
-	ttl   time.Duration
-	now   func() time.Time
+	// claims issues the token each begin hands its caller (see claim).
+	claims uint64
+	ttl    time.Duration
+	now    func() time.Time
 }
+
+// claim identifies one begin: the ladder that claimed a rung. Only a write
+// carrying the claim the entry still holds may end it (round5 recheck L1).
+// The zero claim is never issued.
+type claim uint64
 
 // generationEntry is one spent rung: when it stops counting, whether the verb
 // that spent it FAILED (see Backoff), and whether that verb is still RUNNING
@@ -159,6 +166,10 @@ type generationEntry struct {
 	// does not expire: the verb's own budget bounds it, and settle — which the
 	// spender defers — ends it whichever way the verb came back.
 	inFlight bool
+	// claim is the token of the begin that put the entry in flight. settle,
+	// release and backoff of a claim end the entry only while it still
+	// carries that token.
+	claim claim
 	// settledAt is when settle ended an in-flight claim: when the verb's
 	// answer landed. Zero for an entry Add wrote (no verb ran under it) and
 	// for a failure arm's Backoff. See answeredSince.
@@ -233,9 +244,13 @@ func (s *GenerationSet) Add(generation string) bool {
 // ladder over the same generation — a rig on the city's proxy root, a second
 // open of the city — reached it while the recover that would fix the proxy
 // was in flight, and stood its long-lived handle down for the process.
-func (s *GenerationSet) begin(generation string) bool {
+//
+// It returns the claim the caller must present to end it (round5 recheck
+// L1): settle, release and backoff take the claim, and do nothing unless the
+// entry is still the one this begin wrote.
+func (s *GenerationSet) begin(generation string) (claim, bool) {
 	if s == nil || generation == "" {
-		return false
+		return 0, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -243,27 +258,70 @@ func (s *GenerationSet) begin(generation string) bool {
 		s.seen = map[string]generationEntry{}
 	}
 	if entry, ok := s.seen[generation]; ok && entry.live(s.clock()) {
-		return false
+		return 0, false
 	}
-	s.seen[generation] = generationEntry{inFlight: true}
-	return true
+	s.claims++
+	c := claim(s.claims)
+	s.seen[generation] = generationEntry{inFlight: true, claim: c}
+	return c, true
 }
 
-// settle ends a rung begin put in flight: it is spent from now, for the TTL.
+// holds reports whether generation's entry is still the in-flight claim c.
+// The caller holds s.mu.
+func (s *GenerationSet) holds(generation string, c claim) bool {
+	entry, ok := s.seen[generation]
+	return ok && entry.inFlight && c != 0 && entry.claim == c
+}
+
+// settle ends a rung begin put in flight under claim c: it is spent from
+// now, for the TTL.
 //
 // A spender defers it, so the rung stops being in flight however the verb
-// came back. It changes nothing a later write already decided: a Backoff (the
-// verb failed on gc's side) or a Release replaced the in-flight entry, and
-// that answer stands.
-func (s *GenerationSet) settle(generation string) {
+// came back. It changes nothing a later write already decided: a backoff (the
+// verb failed on gc's side) or a release replaced the in-flight entry, and
+// that answer stands. And it changes nothing that is not its own claim
+// (round5 recheck L1): after a release, another ladder may begin the same
+// generation before this one's deferred settle runs, and an untokened settle
+// found THAT ladder's in-flight entry and marked it spent while its recover
+// still ran — the terminal proxy_zombie of round4 review F1 again, for any
+// third ladder that read it.
+func (s *GenerationSet) settle(generation string, c claim) {
 	if s == nil || generation == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if entry, ok := s.seen[generation]; ok && entry.inFlight {
+	if s.holds(generation, c) {
 		now := s.clock()
 		s.seen[generation] = generationEntry{expires: now.Add(s.memoTTL()), settledAt: now}
+	}
+}
+
+// release drops a rung begin put in flight under claim c, so it may be
+// claimed again at once: the verb ran nothing. Like settle, it touches only
+// its own claim.
+func (s *GenerationSet) release(generation string, c claim) {
+	if s == nil || generation == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.holds(generation, c) {
+		delete(s.seen, generation)
+	}
+}
+
+// backoff is Backoff for a rung begin put in flight under claim c: the verb
+// failed on gc's side, and the rung is held for d. Like settle, it touches
+// only its own claim.
+func (s *GenerationSet) backoff(generation string, c claim, d time.Duration) { //nolint:unparam // failedPingBackoff and failedRecoverBackoff are separate rungs that happen to share a value
+	if s == nil || generation == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.holds(generation, c) {
+		s.seen[generation] = generationEntry{expires: s.clock().Add(d), failed: true}
 	}
 }
 
@@ -1008,15 +1066,15 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 	// (which must never lead to a stop: council A-F5, D-F9) or came back
 	// healthy (a slow-to-greet proxy, generation unchanged), the stop had
 	// already been issued on it.
-	if in.Observed.begin(generation) {
+	if pingClaim, claimed := in.Observed.begin(generation); claimed {
 		// A panic in the verb must not strand the claim in flight for ever;
 		// on every ordinary path the rung has already been written by then
 		// and this is a no-op.
-		defer in.Observed.settle(generation)
+		defer in.Observed.settle(generation, pingClaim)
 		err := in.Ops.Ping(ctx, in.ScopeRoot)
 		switch {
 		case err == nil:
-			in.Observed.settle(generation)
+			in.Observed.settle(generation, pingClaim)
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"pinged the provider; re-admitting", nil)
 		case !in.sameGeneration(root, key):
@@ -1031,7 +1089,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// `bd dolt stop` with no successful ping on this generation, the
 			// cascade D-F9 says a failed ping never causes. If the generation
 			// really moved, the backoff sits on a key nobody asks about again.
-			in.Observed.Backoff(generation, failedPingBackoff)
+			in.Observed.backoff(generation, pingClaim, failedPingBackoff)
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the generation moved during the ping; re-admitting", err)
 		case errors.Is(err, ErrProviderReportedFailure):
@@ -1048,7 +1106,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// ping took the backoff arm below, so a real zombie — whose ping
 			// can only fail — was pinged once per backoff window for ever and
 			// never recovered.
-			in.Observed.settle(generation)
+			in.Observed.settle(generation, pingClaim)
 		default:
 			// The ping failed on gc's side — the lifecycle semaphore, the op
 			// budget, an environment gc could not build — and nothing moved.
@@ -1059,7 +1117,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// than released, so a later open asks again once it runs out and
 			// not on every open before then (council pr2 D-F9). The answer is
 			// non-terminal.
-			in.Observed.Backoff(generation, failedPingBackoff)
+			in.Observed.backoff(generation, pingClaim, failedPingBackoff)
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the endpoint accepts and never greets, and the provider ping failed before bd could answer; "+
 					"not escalating to a recover on a failure that says nothing about the proxy", err)
@@ -1101,8 +1159,8 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 
 	// One recover per generation, ever. The claim is in flight until the verb
 	// returns (round4 review F1), so no other ladder reads it as spent early.
-	if in.Recovered.begin(generation) {
-		return in.spendRecover(ctx, root, key)
+	if recoverClaim, claimed := in.Recovered.begin(generation); claimed {
+		return in.spendRecover(ctx, root, key, recoverClaim)
 	}
 
 	// The rung was already claimed. Which way decides the answer, and all of
@@ -1142,10 +1200,12 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 
 // spendRecover runs the recover this ladder has just claimed, and ends the
 // claim however the verb comes back: settle, deferred, turns an in-flight rung
-// into a spent one unless recoverFailed has already put a backoff on it.
-func (in AdmissionInput) spendRecover(ctx context.Context, root string, key proxyendpoint.PoolKey) (Pin, bool, error) {
+// into a spent one unless recoverFailed has already put a backoff on it or the
+// target-moved arm has released it. Every one of those writes carries c, so
+// none of them can end another ladder's claim (round5 recheck L1).
+func (in AdmissionInput) spendRecover(ctx context.Context, root string, key proxyendpoint.PoolKey, c claim) (Pin, bool, error) {
 	generation := key.Generation()
-	defer in.Recovered.settle(generation)
+	defer in.Recovered.settle(generation, c)
 	err := in.Ops.Recover(ctx, in.ScopeRoot, generation)
 	if errors.Is(err, ErrRecoverTargetMoved) {
 		// Nothing ran: the zombie was replaced while the recover waited for
@@ -1156,7 +1216,7 @@ func (in AdmissionInput) spendRecover(ctx context.Context, root string, key prox
 		// second time. No recover was spent on this generation, so its rung
 		// is released rather than settled, and this scope re-admits against
 		// what is there now.
-		in.Recovered.Release(generation)
+		in.Recovered.release(generation, c)
 		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"the generation moved while the provider recover waited to run; it ran nothing, re-admitting", err)
 	}
@@ -1166,13 +1226,13 @@ func (in AdmissionInput) spendRecover(ctx context.Context, root string, key prox
 		// A second `bd dolt stop` of one generation is never issued, so the
 		// rung is held for the backoff — no fork on every open — and the
 		// answer is non-terminal: nothing here is bd's answer either.
-		in.Recovered.Backoff(generation, failedRecoverBackoff)
+		in.Recovered.backoff(generation, c, failedRecoverBackoff)
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"the endpoint accepts and never greets, and this process has already issued the provider recover on "+
 				"this generation; not issuing a second `bd dolt stop`", err)
 	}
 	if err != nil {
-		retry, verdict := in.recoverFailed(ctx, root, key, err)
+		retry, verdict := in.recoverFailed(ctx, root, key, c, err)
 		return Pin{}, retry, verdict
 	}
 	return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
@@ -1283,7 +1343,7 @@ func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.
 // and the one after it may ask again once gc's contention has cleared. Before
 // this, every one of them was a terminal proxy_zombie, and a long-lived handle
 // whose read budget ran out mid-recover was demoted for the process.
-func (in AdmissionInput) recoverFailed(ctx context.Context, root string, key proxyendpoint.PoolKey, err error) (retry bool, verdict error) {
+func (in AdmissionInput) recoverFailed(ctx context.Context, root string, key proxyendpoint.PoolKey, c claim, err error) (retry bool, verdict error) {
 	generation := key.Generation()
 	ctxErr := ctx.Err()
 	indeterminate := ctxErr != nil || proxyendpoint.IsIndeterminate(err)
@@ -1306,7 +1366,7 @@ func (in AdmissionInput) recoverFailed(ctx context.Context, root string, key pro
 		return false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 			"the endpoint accepts and never greets, and bd ran the provider recover and reported it could not recover it", err)
 	}
-	in.Recovered.Backoff(generation, failedRecoverBackoff)
+	in.Recovered.backoff(generation, c, failedRecoverBackoff)
 	if indeterminate {
 		if ctxErr != nil && !errors.Is(err, ctxErr) {
 			// A failure that raced gc's clock keeps its own text and gains
