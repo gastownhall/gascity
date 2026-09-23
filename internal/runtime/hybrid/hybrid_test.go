@@ -535,7 +535,7 @@ func TestMergeSessionEvents_StaysOpenWhenOneSourceGoesSilent(t *testing.T) {
 
 		a := make(chan runtime.SessionEvent)
 		b := make(chan runtime.SessionEvent)
-		merged := mergeSessionEvents(ctx, a, b)
+		merged := runtime.MergeSessionEvents(ctx, a, b)
 
 		// b delivers once, then goes silent (transport wedged, channel never
 		// closed — herdr's actual behavior on a broken transport).

@@ -115,3 +115,45 @@ const SessionEventStaleAfter = 30 * time.Second
 type EventCapableRouter interface {
 	EventCapableRoute(name string) bool
 }
+
+// MergeSessionEvents fans two session-event streams into one, closing the
+// output only when ctx is done or both inputs close. It never closes the
+// output merely because one side has gone quiet: a consumer computing
+// liveness off the single merged stream would otherwise see the WHOLE
+// composite die whenever either backend went idle for SessionEventStaleAfter,
+// even though the other backend kept delivering — a non-self-healing outage.
+// Used by composite providers (auto, hybrid) to merge two event-capable
+// backends' streams.
+func MergeSessionEvents(ctx context.Context, a, b <-chan SessionEvent) <-chan SessionEvent {
+	out := make(chan SessionEvent)
+	go func() {
+		defer close(out)
+		for a != nil || b != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-a:
+				if !ok {
+					a = nil
+					continue
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case ev, ok := <-b:
+				if !ok {
+					b = nil
+					continue
+				}
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
+}

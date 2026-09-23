@@ -474,46 +474,5 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	if err != nil {
 		return nil, fmt.Errorf("ACP backend: %w", err)
 	}
-	return mergeSessionEvents(ctx, dCh, aCh), nil
-}
-
-// mergeSessionEvents fans two session-event streams into one, closing the
-// output only when ctx is done or both inputs close. It never closes the
-// output merely because one side has gone quiet: a consumer computing
-// liveness off the single merged stream would otherwise see the WHOLE
-// composite die whenever either backend went idle for
-// runtime.SessionEventStaleAfter, even though the other backend kept
-// delivering — a non-self-healing outage.
-func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent) <-chan runtime.SessionEvent {
-	out := make(chan runtime.SessionEvent)
-	go func() {
-		defer close(out)
-		for a != nil || b != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-a:
-				if !ok {
-					a = nil
-					continue
-				}
-				select {
-				case out <- ev:
-				case <-ctx.Done():
-					return
-				}
-			case ev, ok := <-b:
-				if !ok {
-					b = nil
-					continue
-				}
-				select {
-				case out <- ev:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-	return out
+	return runtime.MergeSessionEvents(ctx, dCh, aCh), nil
 }
