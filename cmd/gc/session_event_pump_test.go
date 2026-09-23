@@ -194,6 +194,45 @@ func TestSessionEventPumpLivenessEventsPoke(t *testing.T) {
 	})
 }
 
+// TestSessionEventPumpFlowingGoesStaleWithoutRecentEvents guards against a
+// stream that delivered its leading resync and then silently stopped: the
+// SessionEventProvider contract self-heals a transport failure by
+// reconnecting with backoff, but delivers nothing (not even a resync) while a
+// reconnect attempt is failing, so a one-time "has this gen ever delivered"
+// latch cannot tell that outage apart from a healthy, connected, quiet
+// stream. flowing() must revert to false once the gap since the last event
+// exceeds sessionEventFlowingStaleness, so sessionPhaseStretchActive stops
+// trusting a stream that has gone dark and patrol reverts to its unstretched
+// cadence.
+func TestSessionEventPumpFlowingGoesStaleWithoutRecentEvents(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pump, _, cancel := newTestPump(t)
+		defer cancel()
+		fp := &eventedFake{Fake: runtime.NewFake()}
+		pump.restart(fp)
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+		synctest.Wait()
+		if !pump.flowing() {
+			t.Fatal("flowing() = false immediately after the leading resync")
+		}
+
+		// Simulate a reconnect that never delivers again: nothing further is
+		// emitted on the channel, mirroring a provider stuck retrying a dead
+		// transport. Once the staleness window elapses, flowing() must drop.
+		time.Sleep(sessionEventFlowingStaleness + time.Second)
+		if pump.flowing() {
+			t.Fatal("flowing() stayed true past sessionEventFlowingStaleness with no further events — a dead reconnect loop would keep patrol wrongly stretched")
+		}
+
+		// A fresh event revives it.
+		fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync, Time: time.Now()})
+		synctest.Wait()
+		if !pump.flowing() {
+			t.Fatal("flowing() = false after a fresh event following staleness")
+		}
+	})
+}
+
 func TestSessionEventPumpResyncPokesAfterTrailingDelay(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pump, pokeCh, cancel := newTestPump(t)
