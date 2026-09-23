@@ -25,13 +25,14 @@ import (
 // here — never silently unwitnessed.
 //
 // The reasons matter as much as the names. An exemption is normally a promise that
-// a copy which changed this field is still a faithful copy, and two of these five
+// a copy which changed this field is still a faithful copy, and two of these six
 // are only true because something else witnesses the same state.
-// IndefinitelyDeferred is the one exemption that does not carry that promise: the
-// destination cannot hold it, so the deferral genuinely does not cross. It is
-// exempt because comparing it would refuse every copy of a deferred infra row
-// without preserving anything — not because the copy stays faithful. Do not cite
-// it as precedent for exempting a field the destination could hold.
+// IndefinitelyDeferred and NativelyBlocked are the two exemptions that do not
+// carry that promise: the destination cannot hold either one, so the deferred or
+// blocked status genuinely does not cross. They are exempt because comparing them
+// would refuse every copy of a deferred or blocked infra row without preserving
+// anything — not because the copy stays faithful. Do not cite either as precedent
+// for exempting a field the destination could hold.
 var beadCopyExemptFields = map[string]string{
 	"Revision": "store-internal optimistic-concurrency token. Each store mints and bumps its own; the destination's row is a fresh create, so its revision is unrelated to the source's by construction.",
 	"ClaimFence": "store-internal ownership fence, maintained per store like Revision. " +
@@ -47,6 +48,13 @@ var beadCopyExemptFields = map[string]string{
 		"bead_json — so it is structurally absent from the destination and comparing it would refuse EVERY copy of a " +
 		"deferred infra row, identically on each retry. What does not cross is the deferral itself: the binding reads such " +
 		"a row as plainly open.",
+	"NativelyBlocked": "not a property of the copy but of READING the source, mirroring IndefinitelyDeferred: it is the " +
+		"read-time normalization of bd's richer status vocabulary (beads.normalizedBdReadState), re-derived on every " +
+		"work-store read; the destination stores Gas City's three-state status verbatim and has no richer status to " +
+		"normalize. Both sides therefore agree on the Status this stage does compare, and the field itself is json:\"-\" " +
+		"while SQLiteStore persists beads through bead_json — so it is structurally absent from the destination and " +
+		"comparing it would refuse EVERY copy of a blocked infra row, identically on each retry. What does not cross is " +
+		"the blocked status itself: the binding reads such a row as plainly open.",
 }
 
 // infraEqualityFixture is a source row with every durable field populated to a
@@ -85,6 +93,9 @@ func infraEqualityFixture() beads.Bead {
 		// happens — a source row carrying the marker against a destination that
 		// cannot hold it — rather than the destination inventing one.
 		IndefinitelyDeferred: true,
+		// Same rationale as IndefinitelyDeferred immediately above, for bd's
+		// "blocked" status rather than "deferred".
+		NativelyBlocked: true,
 	}
 }
 
@@ -142,6 +153,10 @@ func beadCopyExemptMutations() map[string]func(beads.Bead) beads.Bead {
 		// a destination that cannot hold what the source read produced. This is
 		// the mutation that must NOT be refused, or the migration wedges.
 		"IndefinitelyDeferred": func(b beads.Bead) beads.Bead { b.IndefinitelyDeferred = false; return b },
+		// Same rationale as IndefinitelyDeferred: the fixture carries the
+		// marker, so clearing it here is the real loss, and it must NOT be
+		// refused.
+		"NativelyBlocked": func(b beads.Bead) beads.Bead { b.NativelyBlocked = false; return b },
 	}
 }
 
