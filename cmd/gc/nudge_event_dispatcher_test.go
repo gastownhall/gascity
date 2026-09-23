@@ -720,18 +720,10 @@ func TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering(t *testing.T) {
 // have come from a sweep that ran (or kept running) past the cancel.
 //
 // worker()'s own `ctx.Err() != nil` check (nudge_event_dispatcher.go, top of
-// the scheduler loop) is NOT exercised by this test, and mutation testing
-// against this suite confirms it: deleting that check alone leaves every
-// test in this file green. Proving it deterministically would require racing
-// a real cancellation against worker()'s internal `select` between its
-// idle/timer wait and the top of its loop — a window with no exposed seam,
-// since both the ctx.Done() and d.kicked cases in that select can be
-// simultaneously ready, making the outcome depend on Go's unspecified
-// multi-case select order rather than on anything the test controls. Forcing
-// determinism there needs a new seam (e.g. an injectable post-wakeup hook)
-// that does not exist yet; until one is added, that specific guard is
-// defense-in-depth on the coarser sweep-scheduling loop, untested, layered
-// behind the runPass-level guard this test does prove.
+// the scheduler loop) is NOT exercised by this test — see
+// TestNudgeEventDispatcherWorkerStopsAtEntryWhenParentAlreadyCancelled below
+// for that guard's own regression test, which drives worker() directly
+// instead of racing it through kickAll.
 func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
 	fake := newNudgeEventedFake()
 	t.Setenv("GC_BEADS", "file")
@@ -829,6 +821,65 @@ func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
 	state := queueStateSnapshot(t, dir)
 	if len(state.Pending) == 0 {
 		t.Fatal("the post-cancel nudge for 'later' was consumed by a sweep that should have refused to run after cancellation")
+	}
+}
+
+// TestNudgeEventDispatcherWorkerStopsAtEntryWhenParentAlreadyCancelled is the
+// regression test for worker()'s own top-of-loop `ctx.Err() != nil` check,
+// the guard TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel does
+// not reach.
+//
+// Racing worker() through kickAll (cancel, then send a wakeup, and see which
+// branch its internal select picks) is not deterministic: once the parent is
+// canceled, worker()'s ctx.Done() case and d.kicked case can both be ready
+// at once, and Go's select makes no guarantee about which fires when more
+// than one case is ready. Racing that decision from a test would make the
+// test's own outcome depend on a coin flip the guard is specifically there to
+// make irrelevant.
+//
+// This test avoids the race by removing it: it builds the dispatcher as a
+// bare struct (bypassing newNudgeEventDispatcher, which starts its own
+// worker() goroutine against a still-live context) with the parent context
+// already canceled BEFORE worker() is ever called, then calls d.worker(ctx)
+// directly in the test goroutine. With the guard present, ctx.Err() is
+// already non-nil on entry, so worker() returns before it ever reads
+// fullPassDue or spawns anything — a pre-armed full pass must never run.
+// Deleting the guard lets that first loop iteration read fullPassDue and call
+// spawnPass before the loop's OTHER cancellation check (at the bottom, after
+// due/full processing) gets a chance to stop it, so the pre-armed pass fires
+// exactly once. cfg is left nil so that spawned pass's own runPass call
+// returns immediately without needing a real provider or store, isolating
+// the assertion to "did worker() call spawnPass at all", which is exactly
+// what the top-of-loop guard decides.
+func TestNudgeEventDispatcherWorkerStopsAtEntryWhenParentAlreadyCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	d := &nudgeEventDispatcher{
+		parent:     ctx,
+		cityPath:   t.TempDir(),
+		stderr:     testWriter(t),
+		logPrefix:  "test",
+		pending:    make(map[string]nudgeEventKick),
+		kicked:     make(chan struct{}, 1),
+		workerDone: make(chan struct{}),
+
+		fullPassDue: true,
+	}
+	observed := make(chan string, 1)
+	d.observePasses(func(sessionFilter string) { observed <- sessionFilter })
+
+	d.worker(ctx)
+
+	select {
+	case <-d.workerDone:
+	default:
+		t.Fatal("worker() returned without closing workerDone")
+	}
+	select {
+	case filter := <-observed:
+		t.Fatalf("a pass ran (filter %q) even though the parent was already canceled before worker() started", filter)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
