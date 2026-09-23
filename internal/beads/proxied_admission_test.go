@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1499,6 +1500,274 @@ func TestZombieLadderLeavesTheSharedRootsRecoverToTheCity(t *testing.T) {
 				"root's recover is the city's", pings, recovers)
 		}
 	})
+}
+
+// TestZombieLadderNeverEndsTheLaneOnARecoverStillInFlight is round4 review F1.
+//
+// The recover ledger is read as a verdict — "a recover was already spent on
+// this generation and it is still silent" is what makes proxy_zombie terminal
+// — and it used to record the recover as spent BEFORE the recover ran. So a
+// second ladder over the same generation that reached the rung while the first
+// ladder's recover was queued on the lifecycle slot or running went terminal,
+// and the recover then fixed the proxy under a handle that had already stood
+// down for the process. The rows above run the two scopes one after the
+// other and could not see it; every row here runs them concurrently, in the
+// orders production produces.
+func TestZombieLadderNeverEndsTheLaneOnARecoverStillInFlight(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+
+	type pair struct {
+		f               *admissionFixture
+		city, rig       AdmissionInput
+		cityOps, rigOps *admissionOps
+		recovered       *atomic.Bool
+		generation      string
+	}
+	build := func(t *testing.T) pair {
+		t.Helper()
+		f := newAdmissionFixture(t, "-1")
+		rig := sharedRootRig(t, f)
+		var recovered atomic.Bool
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered.Load() {
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+		cityOps, rigOps := &admissionOps{}, &admissionOps{}
+		rigOps.onRecov = func() error {
+			t.Error("the rig spent a recover: the rung is the city's")
+			return nil
+		}
+		// ONE pair of ledgers, as in production.
+		observed, recoveredSet := NewGenerationSet(), NewGenerationSet()
+
+		city := baseAdmissionInput(f, cityOps)
+		city.CityRoot = f.scopeRoot
+		city.Probe = probe
+		city.Observed, city.Recovered = observed, recoveredSet
+
+		rigIn := baseAdmissionInput(f, rigOps)
+		rigIn.ScopeRoot = rig
+		rigIn.Database = "rig"
+		rigIn.CityRoot = f.scopeRoot
+		rigIn.Probe = probe
+		rigIn.Observed, rigIn.Recovered = observed, recoveredSet
+
+		return pair{
+			f: f, city: city, rig: rigIn, cityOps: cityOps, rigOps: rigOps, recovered: &recovered,
+			generation: proxyendpoint.NewPoolKey(f.record, "").Generation(),
+		}
+	}
+	// cityRecovers is the city's `bd dolt stop` then `bd ping`: a new
+	// generation, which greets.
+	cityRecovers := func(p pair) {
+		p.f.writeRecord(6002, "55667788")
+		p.recovered.Store(true)
+	}
+	wantNonTerminal := func(t *testing.T, who string, err error) {
+		t.Helper()
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok || verdict.Terminal() {
+			t.Fatalf("%s = %v, want a non-terminal verdict: the recover that fixes this proxy had not returned, "+
+				"so nothing bd answered can end the lane yet", who, err)
+		}
+	}
+	wantFollows := func(t *testing.T, who string, in AdmissionInput) {
+		t.Helper()
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("%s Admit after the city's recover = %v, want the recovered generation admitted", who, err)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Fatalf("%s admitted pid %d, want the generation the city's recover produced (6002)", who, pin.PoolKey().PID)
+		}
+	}
+
+	t.Run("rig first: the city claims its recover while the rig's ping holds the lifecycle slot", func(t *testing.T) {
+		// The order the per-city lifecycle slot makes deterministic: the rig's
+		// `bd ping` holds the slot, the city's ladder finds the ping spent,
+		// claims the recover and queues on the slot, and the rig's ping comes
+		// back (exit 1) before the city's `bd dolt stop` has run.
+		p := build(t)
+		rigPinging := make(chan struct{})
+		cityRecoverQueued := make(chan struct{})
+		rigDone := make(chan struct{})
+		p.rigOps.onPing = func() error {
+			close(rigPinging)
+			<-cityRecoverQueued
+			return bdSaysNo()
+		}
+		p.cityOps.onPing = func() error {
+			t.Error("the city pinged a generation bd has already been asked about")
+			return nil
+		}
+		p.cityOps.onRecov = func() error {
+			close(cityRecoverQueued)
+			<-rigDone // the slot, granted once the rig's ping released it
+			cityRecovers(p)
+			return nil
+		}
+
+		var rigErr error
+		go func() {
+			defer close(rigDone)
+			_, rigErr = Admit(context.Background(), p.rig)
+		}()
+		<-rigPinging
+		cityPin, cityErr := Admit(context.Background(), p.city)
+		<-rigDone
+
+		wantNonTerminal(t, "rig Admit while the city's recover was queued", rigErr)
+		if cityErr != nil {
+			t.Fatalf("city Admit = %v, want the generation its recover produced", cityErr)
+		}
+		if cityPin.PoolKey().PID != 6002 {
+			t.Fatalf("the city admitted pid %d, want 6002", cityPin.PoolKey().PID)
+		}
+		if pings, recovers := p.rigOps.counts(); pings != 1 || recovers != 0 {
+			t.Fatalf("the rig spent %d ping(s) and %d recover(s), want 1 and 0", pings, recovers)
+		}
+		if pings, recovers := p.cityOps.counts(); pings != 0 || recovers != 1 {
+			t.Fatalf("the city spent %d ping(s) and %d recover(s), want 0 and 1", pings, recovers)
+		}
+		wantFollows(t, "rig", p.rig)
+	})
+
+	t.Run("city first: a rig ladder reaches the rung while the city's recover runs", func(t *testing.T) {
+		// Pass 2 or 3 of a long-lived rig's admitWith loop finishing its
+		// probes before `bd dolt stop` has taken the zombie away.
+		p := build(t)
+		p.cityOps.onPing = bdSaysNo
+		var rigErr error
+		p.cityOps.onRecov = func() error {
+			if st := p.city.Recovered.rung(p.generation); !st.inFlight {
+				t.Errorf("while the city's recover runs its rung reads %+v, want in flight", st)
+			}
+			_, rigErr = Admit(context.Background(), p.rig)
+			cityRecovers(p)
+			return nil
+		}
+
+		cityPin, cityErr := Admit(context.Background(), p.city)
+		wantNonTerminal(t, "rig Admit during the city's recover", rigErr)
+		if cityErr != nil || cityPin.PoolKey().PID != 6002 {
+			t.Fatalf("city Admit = (pid %d, %v), want pid 6002", cityPin.PoolKey().PID, cityErr)
+		}
+		if pings, recovers := p.rigOps.counts(); pings != 0 || recovers != 0 {
+			t.Fatalf("the rig spent %d ping(s) and %d recover(s), want 0 and 0: bd already answered this "+
+				"generation's ping for the city, and the recover is the city's", pings, recovers)
+		}
+		if st := p.city.Recovered.rung(p.generation); !st.spent {
+			t.Fatalf("after the city's recover returned its rung reads %+v, want spent", st)
+		}
+		wantFollows(t, "rig", p.rig)
+	})
+
+	t.Run("a second open of the city during its own recover runs nothing and does not end the lane", func(t *testing.T) {
+		// The owning scope's own terminal line had the same reading: a second
+		// long-lived handle on the city, or another pass, found the rung
+		// "spent" by a recover that had not come back.
+		p := build(t)
+		p.cityOps.onPing = bdSaysNo
+		var secondErr error
+		p.cityOps.onRecov = func() error {
+			if _, recovers := p.cityOps.counts(); recovers == 1 {
+				_, secondErr = Admit(context.Background(), p.city)
+			}
+			cityRecovers(p)
+			return nil
+		}
+
+		pin, err := Admit(context.Background(), p.city)
+		wantNonTerminal(t, "the second city Admit during the first one's recover", secondErr)
+		if err != nil || pin.PoolKey().PID != 6002 {
+			t.Fatalf("city Admit = (pid %d, %v), want pid 6002", pin.PoolKey().PID, err)
+		}
+		if pings, recovers := p.cityOps.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("the city spent %d ping(s) and %d recover(s), want 1 and 1: an in-flight recover is not run twice",
+				pings, recovers)
+		}
+	})
+
+	t.Run("control: once the city's recover has returned and failed to fix it, the rig is terminal", func(t *testing.T) {
+		p := build(t)
+		p.cityOps.onPing = bdSaysNo
+		p.cityOps.onRecov = func() error {
+			return ProviderReportedFailure(errors.New("provider-owned beads recover: Error: ping: invalid connection"))
+		}
+		_, err := Admit(context.Background(), p.city)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("city Admit = %v, want the terminal proxy_zombie of a recover bd refused", err)
+		}
+		_, err = Admit(context.Background(), p.rig)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("rig Admit after the city's returned recover = %v, want a terminal proxy_zombie", err)
+		}
+	})
+}
+
+// TestGenerationSetInFlightRungIsNeitherSpendableNorSpent pins the ledger half
+// of round4 review F1: a claim made by begin holds the rung (no second verb),
+// is not read as spent (no terminal verdict) until settle, does not expire
+// while the verb runs, and yields to a Backoff or Release written by the
+// failure arms.
+func TestGenerationSetInFlightRungIsNeitherSpendableNorSpent(t *testing.T) {
+	now := time.Now()
+	set := NewGenerationSet()
+	set.now = func() time.Time { return now }
+	const g = "6001:abcd"
+
+	if !set.begin(g) {
+		t.Fatal("the first begin did not claim the rung")
+	}
+	if set.begin(g) || set.Add(g) {
+		t.Fatal("a rung in flight was claimable again: the verb would run twice")
+	}
+	if st := set.rung(g); !st.inFlight || st.spent || st.backoff != 0 {
+		t.Fatalf("rung while in flight = %+v, want in flight only", st)
+	}
+	if !set.Has(g) {
+		t.Fatal("Has does not see a rung in flight")
+	}
+	now = now.Add(2 * generationMemoTTL)
+	if st := set.rung(g); !st.inFlight {
+		t.Fatalf("an in-flight rung expired under a slow verb: %+v", st)
+	}
+
+	set.settle(g)
+	if st := set.rung(g); !st.spent || st.inFlight {
+		t.Fatalf("rung after settle = %+v, want spent", st)
+	}
+	now = now.Add(generationMemoTTL - time.Second)
+	if st := set.rung(g); !st.spent {
+		t.Fatalf("a settled rung's TTL did not run from settle: %+v", st)
+	}
+	now = now.Add(2 * time.Second)
+	if st := set.rung(g); st != (rungState{}) {
+		t.Fatalf("a settled rung outlived its TTL: %+v", st)
+	}
+
+	// The failure arms write over the claim, and settle leaves their answer.
+	if !set.begin(g) {
+		t.Fatal("an expired rung could not be claimed again")
+	}
+	set.Backoff(g, failedRecoverBackoff)
+	set.settle(g)
+	if st := set.rung(g); st.backoff != failedRecoverBackoff || st.spent || st.inFlight {
+		t.Fatalf("rung after Backoff then settle = %+v, want the backoff to stand", st)
+	}
+	set.Release(g)
+	if !set.begin(g) {
+		t.Fatal("a released rung could not be claimed")
+	}
+	set.Release(g)
+	set.settle(g)
+	if st := set.rung(g); st != (rungState{}) {
+		t.Fatalf("settle resurrected a released claim: %+v", st)
+	}
 }
 
 // TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing is

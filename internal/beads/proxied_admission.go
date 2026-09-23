@@ -119,11 +119,34 @@ type GenerationSet struct {
 	now  func() time.Time
 }
 
-// generationEntry is one spent rung: when it stops counting, and whether the
-// verb that spent it FAILED (see Backoff).
+// generationEntry is one spent rung: when it stops counting, whether the verb
+// that spent it FAILED (see Backoff), and whether that verb is still RUNNING
+// (see begin).
 type generationEntry struct {
 	expires time.Time
 	failed  bool
+	// inFlight marks a rung whose verb has started and not yet returned. It
+	// does not expire: the verb's own budget bounds it, and settle — which the
+	// spender defers — ends it whichever way the verb came back.
+	inFlight bool
+}
+
+// live reports whether the entry still holds its rung at now.
+func (e generationEntry) live(now time.Time) bool {
+	return e.inFlight || now.Before(e.expires)
+}
+
+// rungState is one generation's standing in a ledger, read under one lock so
+// a caller never combines two answers from two different moments.
+type rungState struct {
+	// inFlight: a verb was started on the rung and has not returned.
+	inFlight bool
+	// backoff is how much longer a FAILED verb holds the rung; zero when the
+	// last verb did not fail or its backoff has run out.
+	backoff time.Duration
+	// spent: a verb was spent on the rung, returned without failing, and the
+	// entry has not expired.
+	spent bool
 }
 
 // generationMemoTTL is how long a spent rung stays spent. See GenerationSet.
@@ -158,11 +181,79 @@ func (s *GenerationSet) Add(generation string) bool {
 		s.seen = map[string]generationEntry{}
 	}
 	now := s.clock()
-	if entry, ok := s.seen[generation]; ok && now.Before(entry.expires) {
+	if entry, ok := s.seen[generation]; ok && entry.live(now) {
 		return false
 	}
 	s.seen[generation] = generationEntry{expires: now.Add(s.memoTTL())}
 	return true
+}
+
+// begin is Add for a rung whose verb is about to RUN: it claims the rung
+// exactly as Add does, and marks it in flight until settle (round4 review F1).
+//
+// Add records a success-shaped entry before the verb has run, which is fine
+// for a ledger nothing reads as a verdict. The recover ledger is read as one:
+// "the recover was spent on this generation and it is still silent" is what
+// makes proxy_zombie terminal. Recorded at Add, that sentence was true of a
+// recover still queued on the lifecycle slot or still running, so a second
+// ladder over the same generation — a rig on the city's proxy root, a second
+// open of the city — reached it while the recover that would fix the proxy
+// was in flight, and stood its long-lived handle down for the process.
+func (s *GenerationSet) begin(generation string) bool {
+	if s == nil || generation == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]generationEntry{}
+	}
+	if entry, ok := s.seen[generation]; ok && entry.live(s.clock()) {
+		return false
+	}
+	s.seen[generation] = generationEntry{inFlight: true}
+	return true
+}
+
+// settle ends a rung begin put in flight: it is spent from now, for the TTL.
+//
+// A spender defers it, so the rung stops being in flight however the verb
+// came back. It changes nothing a later write already decided: a Backoff (the
+// verb failed on gc's side) or a Release replaced the in-flight entry, and
+// that answer stands.
+func (s *GenerationSet) settle(generation string) {
+	if s == nil || generation == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry, ok := s.seen[generation]; ok && entry.inFlight {
+		s.seen[generation] = generationEntry{expires: s.clock().Add(s.memoTTL())}
+	}
+}
+
+// rung reports a generation's standing in one read. See rungState.
+func (s *GenerationSet) rung(generation string) rungState {
+	if s == nil || generation == "" {
+		return rungState{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.seen[generation]
+	if !ok {
+		return rungState{}
+	}
+	if entry.inFlight {
+		return rungState{inFlight: true}
+	}
+	remaining := entry.expires.Sub(s.clock())
+	if remaining <= 0 {
+		return rungState{}
+	}
+	if entry.failed {
+		return rungState{backoff: remaining}
+	}
+	return rungState{spent: true}
 }
 
 // Release drops a generation, so the rung it stood for may be spent again at
@@ -243,7 +334,7 @@ func (s *GenerationSet) Has(generation string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.seen[generation]
-	return ok && s.clock().Before(entry.expires)
+	return ok && entry.live(s.clock())
 }
 
 func (s *GenerationSet) clock() time.Time {
@@ -772,6 +863,9 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // recoverFailed for every other way a recover can fail. And only a scope that
 // can cycle its proxy root spends the recover at all: a rig on the city's
 // root leaves it to the city scope (round4 recheck M2, leaveRecoverToCity).
+// "Spent" means the recover has RETURNED: a ladder that reaches the rung
+// while another open's recover of the same generation is still queued or
+// running answers non-terminal and runs nothing (round4 review F1).
 func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	if in.ProbeOnce {
 		// The first rung is "ask again", and a background tick asks again by
@@ -871,27 +965,57 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 		return in.leaveRecoverToCity(generation, ep)
 	}
 
-	// A recover that failed on gc's side holds its rung for a backoff (round4
-	// recheck M1). While it holds, this generation has had no recover bd
-	// answered, so the terminal line below — "a recover was already spent" —
-	// is not true of it yet.
-	if remaining, backing := in.Recovered.BackingOff(generation); backing {
+	// One recover per generation, ever. The claim is in flight until the verb
+	// returns (round4 review F1), so no other ladder reads it as spent early.
+	if in.Recovered.begin(generation) {
+		return in.spendRecover(ctx, generation)
+	}
+
+	// The rung was already claimed. Which way decides the answer, and all of
+	// it comes from one read of the ledger.
+	rung := in.Recovered.rung(generation)
+	switch {
+	case rung.inFlight:
+		// Another open in this process is running this generation's recover
+		// now — a second long-lived handle on the city, or the pass of an
+		// admitWith loop that reached the rung while the recover it is
+		// waiting for is queued on the lifecycle slot. bd has not answered
+		// it yet, so "a recover was already spent" is not true of it, and a
+		// second recover of the same proxy is exactly what the ledger exists
+		// to prevent. Once it returns the generation has moved (and this
+		// scope re-admits) or its answer is on the rung.
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets, and another open in this process is running the provider "+
+				"recover for this generation now; not running a second one, and not ending the lane before bd has answered it", ep.Err)
+	case rung.backoff > 0:
+		// A recover that failed on gc's side holds its rung for a backoff
+		// (round4 recheck M1). While it holds, this generation has had no
+		// recover bd answered, so the terminal line below — "a recover was
+		// already spent" — is not true of it yet.
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			fmt.Sprintf("the endpoint accepts and never greets, and the provider recover for this generation failed "+
-				"before bd could answer; not re-forking it for another %s", remaining.Round(time.Second)), ep.Err)
-	}
-
-	// One recover per generation, ever.
-	if in.Recovered.Add(generation) {
-		if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
-			return in.recoverFailed(ctx, generation, err)
-		}
+				"before bd could answer; not re-forking it for another %s", rung.backoff.Round(time.Second)), ep.Err)
+	case rung.spent:
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+			"the endpoint still accepts and never greets after a recover was already spent on generation "+generation, ep.Err)
+	default:
+		// The claim that refused this one expired or was released between
+		// the two reads. Nothing was spent by this pass; ask again.
 		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
-			"recovered the provider; re-admitting", nil)
+			"the recover rung for this generation was released while this pass read it; re-admitting", ep.Err)
 	}
+}
 
-	return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
-		"the endpoint still accepts and never greets after a recover was already spent on generation "+generation, ep.Err)
+// spendRecover runs the recover this ladder has just claimed, and ends the
+// claim however the verb comes back: settle, deferred, turns an in-flight rung
+// into a spent one unless recoverFailed has already put a backoff on it.
+func (in AdmissionInput) spendRecover(ctx context.Context, generation string) (Pin, bool, error) {
+	defer in.Recovered.settle(generation)
+	if err := in.Ops.Recover(ctx, in.ScopeRoot); err != nil {
+		return Pin{}, false, in.recoverFailed(ctx, generation, err)
+	}
+	return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+		"recovered the provider; re-admitting", nil)
 }
 
 // sharesCityProxyRoot reports whether this scope is not the city but resolves
@@ -934,13 +1058,26 @@ func (in AdmissionInput) sharesCityProxyRoot(root string) bool {
 // scope's, spent by the city's own ladder, and once it has run the generation
 // moves and this scope re-admits. Its answer turns terminal on exactly the
 // city's terms and no sooner — the city's recover has been SPENT on this
-// generation (not merely held for a backoff after a gc-side failure) and the
+// generation and has RETURNED (not merely held for a backoff after a gc-side
+// failure, and not still queued or running: round4 review F1) and the
 // generation is still silent.
+//
+// The in-flight case is the ordinary one, not a corner. The rig's `bd ping`
+// and the city's recover share the city's lifecycle slot, so when the rig
+// reaches the zombie first the city's ladder claims the recover while the
+// rig's ping still holds the slot, and the rig's ladder arrives here before
+// the city's `bd dolt stop` has run at all.
 func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.Endpoint) (Pin, bool, error) {
-	if _, backing := in.Recovered.BackingOff(generation); !backing && in.Recovered.Has(generation) {
+	rung := in.Recovered.rung(generation)
+	if rung.spent {
 		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 			"the endpoint still accepts and never greets after the city scope's recover was already spent on generation "+
 				generation+", whose proxy root this scope shares", ep.Err)
+	}
+	if rung.inFlight {
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets, and the city scope's recover of this generation, whose proxy root "+
+				"this scope shares, is running now; not ending the lane before bd has answered it", ep.Err)
 	}
 	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 		"the endpoint accepts and never greets, and this scope shares the city's proxy root: its own recover would only "+
@@ -980,11 +1117,11 @@ func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.
 // and the one after it may ask again once gc's contention has cleared. Before
 // this, every one of them was a terminal proxy_zombie, and a long-lived handle
 // whose read budget ran out mid-recover was demoted for the process.
-func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, err error) (Pin, bool, error) {
+func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, err error) error {
 	ctxErr := ctx.Err()
 	indeterminate := ctxErr != nil || proxyendpoint.IsIndeterminate(err)
 	if !indeterminate && errors.Is(err, ErrProviderReportedFailure) {
-		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+		return NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 			"the endpoint accepts and never greets, and bd ran the provider recover and reported it could not recover it", err)
 	}
 	in.Recovered.Backoff(generation, failedRecoverBackoff)
@@ -994,11 +1131,11 @@ func (in AdmissionInput) recoverFailed(ctx context.Context, generation string, e
 			// the clock's, so the operator sees both.
 			err = errors.Join(err, ctxErr)
 		}
-		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
+		return NewNonTerminalProxiedVerdictError(ProxiedVerdictBudgetExhausted,
 			"the endpoint accepts and never greets, and the provider recover was cut short by gc's own clock or "+
 				"cancellation; that says nothing about whether bd can recover this proxy, so the lane is not ended on it", err)
 	}
-	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+	return NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 		"the endpoint accepts and never greets, and the provider recover failed before bd could answer; "+
 			"not ending the lane on a failure that says nothing about the proxy", err)
 }

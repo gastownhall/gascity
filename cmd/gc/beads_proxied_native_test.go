@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -496,23 +497,7 @@ esac`)
 		// hits the dead pool first may; the city's ladder must still run its
 		// recover afterwards.
 		f := newProxiedScopeFixture(t)
-		rig := t.TempDir()
-		rigBeads := filepath.Join(rig, ".beads")
-		if err := os.MkdirAll(rigBeads, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		rel, err := filepath.Rel(rigBeads, f.root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
-			[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"rig"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(proxyendpoint.SidecarPath(rigBeads),
-			[]byte(`{"root_path":"`+rel+`","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		rig := sharedRootRigScope(t, f)
 
 		recovered := false
 		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
@@ -556,7 +541,7 @@ esac`)
 			}
 		}
 
-		_, err = opener(rig, "rig").admit(context.Background(), true)
+		_, err := opener(rig, "rig").admit(context.Background(), true)
 		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Terminal() {
 			t.Fatalf("rig admit = %v, want non-terminal: the rig cannot cycle the shared proxy", err)
 		}
@@ -574,6 +559,102 @@ esac`)
 		}
 		if got := strings.Join(spent[f.scopeRoot], ","); got != proxiedProviderRecoverOp {
 			t.Fatalf("the city spent [%s], want exactly [recover]: bd already answered this generation's ping", got)
+		}
+	})
+
+	t.Run("a shared-root rig stays non-terminal while the city's recover waits for the rig's ping", func(t *testing.T) {
+		// round4 review F1, through two production openers, long-lived (the
+		// reopen shape), sharing one ledger pair. The rig reaches the zombie
+		// first and its `bd ping` (the production runner, exit 1) holds the
+		// city's lifecycle slot; meanwhile the city's ladder finds the ping
+		// spent, claims the recover and queues behind it. The seam holds the
+		// city's recover until the rig's open has returned, which is the order
+		// the slot imposes: every pass of the rig's admitWith loop runs while
+		// the city's recover is in flight, and none of them may end its lane.
+		f := newProxiedScopeFixture(t)
+		rig := sharedRootRigScope(t, f)
+		var recovered atomic.Bool
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered.Load() {
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+
+		observed, recoveredSet := beads.NewGenerationSet(), beads.NewGenerationSet()
+		opener := func(scopeRoot, database string) *proxiedNativeOpener {
+			return &proxiedNativeOpener{
+				cityPath:     f.scopeRoot,
+				scopeRoot:    scopeRoot,
+				database:     database,
+				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed},
+				processTable: f.processTable(),
+				probe:        probe,
+				observed:     observed,
+				recovered:    recoveredSet,
+				sleep:        func(context.Context, time.Duration) error { return nil },
+			}
+		}
+
+		var mu sync.Mutex
+		spent := map[string][]string{}
+		cityRecoverQueued := make(chan struct{})
+		rigDone := make(chan struct{})
+		cityDone := make(chan struct{})
+		var cityPin beads.Pin
+		var cityErr error
+		var startCity sync.Once
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string) error {
+			mu.Lock()
+			spent[scopeRoot] = append(spent[scopeRoot], op)
+			mu.Unlock()
+			switch {
+			case scopeRoot == rig && op == proxiedProviderProbeOp:
+				startCity.Do(func() {
+					go func() {
+						defer close(cityDone)
+						cityPin, cityErr = opener(f.scopeRoot, "beads").admit(context.Background(), true)
+					}()
+					<-cityRecoverQueued
+				})
+				return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+			case scopeRoot == f.scopeRoot && op == proxiedProviderRecoverOp:
+				close(cityRecoverQueued)
+				<-rigDone
+				// The city's `bd dolt stop` then `bd ping`: a new generation.
+				f.writeRecord(7004, "99887766")
+				recovered.Store(true)
+				return nil
+			default:
+				return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+			}
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		_, rigErr := opener(rig, "rig").admit(context.Background(), true)
+		close(rigDone)
+		<-cityDone
+
+		if verdict, typed := beads.ProxiedVerdictOf(rigErr); !typed || verdict.Terminal() {
+			t.Fatalf("rig admit = %v, want non-terminal: the city's recover of the shared proxy was still in flight, "+
+				"and it then succeeded", rigErr)
+		}
+		if cityErr != nil || cityPin.PoolKey().PID != 7004 {
+			t.Fatalf("city admit = (pid %d, %v), want the generation its recover produced (7004)", cityPin.PoolKey().PID, cityErr)
+		}
+		pin, err := opener(rig, "rig").admit(context.Background(), true)
+		if err != nil || pin.PoolKey().PID != 7004 {
+			t.Fatalf("the rig's next admit = (pid %d, %v), want it to follow the city onto 7004", pin.PoolKey().PID, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got := strings.Join(spent[rig], ","); got != proxiedProviderProbeOp {
+			t.Fatalf("the rig spent [%s], want exactly [probe]", got)
+		}
+		if got := strings.Join(spent[f.scopeRoot], ","); got != proxiedProviderRecoverOp {
+			t.Fatalf("the city spent [%s], want exactly [recover]", got)
 		}
 	})
 
@@ -1492,4 +1573,30 @@ func TestProxiedPingMarksOnlyBdsOwnAnswer(t *testing.T) {
 	if want := "provider-owned beads probe: Error: ping: invalid connection"; err == nil || err.Error() != want {
 		t.Fatalf("runner error = %v, want %q", err, want)
 	}
+}
+
+// sharedRootRigScope writes a rig scope whose sidecar names the CITY fixture's
+// proxy root through a relative `..` path — the shape `gc beads city
+// migrate-proxied` leaves, one proxy and one Dolt child serving hq and every
+// rig — and returns the rig's root.
+func sharedRootRigScope(t *testing.T, f *proxiedScopeFixture) string {
+	t.Helper()
+	rig := t.TempDir()
+	rigBeads := filepath.Join(rig, ".beads")
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(rigBeads, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"rig"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.SidecarPath(rigBeads),
+		[]byte(`{"root_path":"`+rel+`","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return rig
 }
