@@ -221,3 +221,68 @@ func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionAPIClientsRouteToSupervisor(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origAlive
+		apiRouteSupervisorClientHook = origSup
+	})
+
+	clients := map[string]func(string) (*api.Client, string){
+		"list": sessionListAPIClient,
+		"peek": sessionPeekAPIClient,
+	}
+
+	t.Run("alive-no-api-port-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForSession := range clients {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForSession(dir)
+				if got != sentinel || reason != "" {
+					t.Fatalf("%s client = (%p, %q), want supervisor client (%p, \"\")", name, got, reason, sentinel)
+				}
+			})
+		}
+	})
+
+	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "1")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		apiRouteSupervisorClientHook = func(string) *api.Client {
+			t.Fatal("supervisor client must not bypass GC_NO_API")
+			return nil
+		}
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForSession := range clients {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForSession(dir)
+				if got != nil || reason != "escape-hatch" {
+					t.Fatalf("%s client = (%p, %q), want (nil, escape-hatch)", name, got, reason)
+				}
+			})
+		}
+	})
+
+	t.Run("controller-fully-down-still-falls-back-local", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 0 }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+		for name, clientForSession := range clients {
+			t.Run(name, func(t *testing.T) {
+				got, reason := clientForSession(dir)
+				if got != nil || reason != "controller-down" {
+					t.Fatalf("%s client = (%p, %q), want (nil, controller-down)", name, got, reason)
+				}
+			})
+		}
+	})
+}

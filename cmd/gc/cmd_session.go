@@ -747,12 +747,14 @@ func newSessionListCmd(stdout, stderr io.Writer) *cobra.Command {
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var sessionListAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper rather than plain
+// apiClient: a supervisor-managed city with no standalone [api] port in
+// city.toml — the common case — otherwise falls straight to nil here even
+// though the supervisor is reachable, forcing `gc session list` onto the
+// expensive local fallback (full session bead load, union scan, and provider
+// context construction).
+var sessionListAPIClient = supervisorFallthroughAPIClient
 
 // routeSessionList dispatches `session list` to the supervisor API when a
 // controller is up; otherwise falls back to the local iterator. Emits
@@ -2188,12 +2190,11 @@ type sessionPeekJSONResult struct {
 // sessionPeekAPIClient returns (client, "") when the API path is available,
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests can inject one.
-var sessionPeekAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper rather than plain
+// apiClient: routes session peek through the supervisor API when reachable
+// on a supervisor-managed city without a standalone [api] port.
+var sessionPeekAPIClient = supervisorFallthroughAPIClient
 
 // routeSessionPeek dispatches `session peek` to the supervisor API when a
 // controller is up; otherwise falls back to the local runtime provider.

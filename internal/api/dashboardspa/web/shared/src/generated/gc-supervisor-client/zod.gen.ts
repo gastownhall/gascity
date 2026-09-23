@@ -3017,6 +3017,7 @@ export const zSessionResponse = z.object({
     active_bead: z.string().optional(),
     activity: z.string().optional(),
     agent_kind: z.string().optional(),
+    agent_name: z.string().optional(),
     alias: z.string().optional(),
     attached: z.boolean(),
     configured_named_session: z.boolean().optional(),
