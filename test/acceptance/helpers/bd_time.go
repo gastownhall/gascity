@@ -125,7 +125,9 @@ func (b *BDTrace) ChildMillis() int64 {
 // by the process that spawned them, so concurrent forks sum to more than the
 // wall clock they ran in — and a negative number read as "gc took less than no
 // time" would pass every upper-bound assertion ever written against it. Zero is
-// the honest floor: this run's shape cannot attribute time to gc.
+// the honest floor: this run's shape cannot attribute time to gc. It is a
+// REPORT's floor, not a gate's: under an upper bound zero passes, so a budget
+// gate uses PassthroughGCSide, which refuses the shape instead.
 func (b *BDTrace) GCSide(wall time.Duration) time.Duration {
 	b.t.Helper()
 	gcSide := wall - time.Duration(b.ChildMillis())*time.Millisecond
@@ -133,6 +135,61 @@ func (b *BDTrace) GCSide(wall time.Duration) time.Duration {
 		return 0
 	}
 	return gcSide
+}
+
+// BDPassthroughTraceSource is the tag cmd/gc/cmd_bd.go traces the `gc bd ...`
+// passthrough exec under.
+const BDPassthroughTraceSource = "go:gc-bd-passthrough"
+
+// PassthroughGCSide is one sample's gc-side time for a `gc bd ...` passthrough:
+// wall minus the summed traced bd-child time — refusing, instead of clamping,
+// the two shapes in which that difference is not gc's side at all (round3
+// review, completeness).
+//
+// GCSide clamps a negative difference to zero, which is honest for a report
+// and wrong for a gate: under an upper bound, zero PASSES, so a trace that
+// over-reported child time (children that overlapped, or records that were
+// not this command's) turned the gc-side budget into one that passed whatever
+// gc bolted onto the passthrough. A passthrough's children run one after
+// another inside gc's own process lifetime, so their sum cannot exceed the
+// wall clock around that process; when it does, the sample is not measuring
+// this command. And a trace with no passthrough record is not a sample of the
+// passthrough at all.
+func PassthroughGCSide(records []BDTraceRecord, wall time.Duration) (time.Duration, error) {
+	var child time.Duration
+	passthrough := false
+	for _, record := range records {
+		child += time.Duration(record.DurMs) * time.Millisecond
+		if record.Source == BDPassthroughTraceSource {
+			passthrough = true
+		}
+	}
+	if !passthrough {
+		return 0, fmt.Errorf("the trace has no %s record among %d: this sample did not measure the passthrough", BDPassthroughTraceSource, len(records))
+	}
+	if child > wall {
+		return 0, fmt.Errorf("the traced bd children sum to %s, past the %s the whole command took: they overlapped or are not this command's, so gc's side cannot be attributed", child, wall)
+	}
+	return wall - child, nil
+}
+
+// MarginalOverFloor is a command's gc-side time over the bare-process floor
+// measured beside it, and refuses a floor that is not one.
+//
+// The floor (`gc --help`) does strictly less than any command, so a small
+// inversion is noise and reads as a zero marginal — which is also the truth,
+// since the command's gc side is then within noise of starting a process at
+// all. An inversion larger than the budget itself is not noise: the floor has
+// stopped measuring "start gc", and a clamped zero would pass any gc side up
+// to that inflated floor.
+func MarginalOverFloor(gcSide, floor, budget time.Duration) (time.Duration, error) {
+	if floor > gcSide+budget {
+		return 0, fmt.Errorf("the process floor (%s) exceeds the command's own gc side (%s) by more than the %s budget: the floor is not measuring a bare gc start, and a zero marginal would pass anything under it", floor, gcSide, budget)
+	}
+	if marginal := gcSide - floor; marginal > 0 {
+		return marginal, nil
+	}
+	return 0, nil
 }
 
 // Reset discards the trace so a measurement can be attributed to one step of a

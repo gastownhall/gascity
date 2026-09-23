@@ -113,3 +113,37 @@ func TestParseBDTraceRefusesAnUndecodableLine(t *testing.T) {
 		t.Errorf("the refusal does not name the offending line: %v", err)
 	}
 }
+
+// TestPassthroughGCSideRefusesAMeasurementOfNothing pins the two ways the
+// `gc bd list --json` gc-side budget could pass vacuously (round3 review,
+// completeness): a clamped-to-zero gc side from over-reported child time, and a
+// clamped-to-zero marginal under a floor that is not a floor. Under an upper
+// bound zero passes, so each is refused rather than clamped.
+func TestPassthroughGCSideRefusesAMeasurementOfNothing(t *testing.T) {
+	passthrough := BDTraceRecord{Source: BDPassthroughTraceSource, Args: []string{"list", "--json"}, DurMs: 420}
+	provider := BDTraceRecord{Source: "go:provider-script", Args: []string{"gc-beads-bd", "probe"}, DurMs: 80}
+
+	if got, err := PassthroughGCSide([]BDTraceRecord{passthrough, provider}, 1200*time.Millisecond); err != nil || got != 700*time.Millisecond {
+		t.Fatalf("PassthroughGCSide(1.2s around 500ms of children) = (%v, %v), want (700ms, nil): every child is subtracted", got, err)
+	}
+	if got, err := PassthroughGCSide([]BDTraceRecord{passthrough, provider}, 450*time.Millisecond); err == nil {
+		t.Errorf("children summing past the wall clock gave gc side %v with no error; clamped to zero it passes every budget", got)
+	}
+	if got, err := PassthroughGCSide([]BDTraceRecord{provider}, time.Second); err == nil {
+		t.Errorf("a trace with no passthrough record gave gc side %v with no error; it did not measure the passthrough", got)
+	}
+	if _, err := PassthroughGCSide(nil, time.Second); err == nil {
+		t.Error("an empty trace was accepted as a passthrough sample")
+	}
+
+	const budget = 100 * time.Millisecond
+	if got, err := MarginalOverFloor(180*time.Millisecond, 100*time.Millisecond, budget); err != nil || got != 80*time.Millisecond {
+		t.Fatalf("MarginalOverFloor(180ms over 100ms) = (%v, %v), want (80ms, nil)", got, err)
+	}
+	if got, err := MarginalOverFloor(95*time.Millisecond, 100*time.Millisecond, budget); err != nil || got != 0 {
+		t.Errorf("MarginalOverFloor(a 5ms inversion) = (%v, %v), want (0, nil): noise, and the command is within noise of the floor", got, err)
+	}
+	if got, err := MarginalOverFloor(150*time.Millisecond, 2*time.Second, budget); err == nil {
+		t.Errorf("a floor 1.85s above the command's gc side gave marginal %v with no error; it would pass any gc side under 2s", got)
+	}
+}

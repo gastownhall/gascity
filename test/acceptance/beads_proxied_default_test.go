@@ -1216,19 +1216,17 @@ func assertProxiedNativePerfHeadroom(t *testing.T, label string, wall, target ti
 // The mean of a fixed cost plus one-sided noise is a measure of the noise. The
 // minimum is the closest any sample got to the quantity, and a regression that
 // really did add work to gc's side raises every sample, including the best one.
-func bestOfGCSide(t *testing.T, n int, sample func() (wall, child time.Duration)) time.Duration {
+//
+// Each sample returns its gc-side time already attributed. It used to return
+// (wall, child) and clamp a negative difference to zero here, and under an
+// upper bound zero passes: over-reported child time made the gate pass
+// whatever gc did (round3 review, completeness). A sample that cannot be
+// attributed now fails the row where it is measured (helpers.PassthroughGCSide).
+func bestOfGCSide(t *testing.T, n int, sample func() time.Duration) time.Duration {
 	t.Helper()
 	best := time.Duration(-1)
 	for i := 0; i < n; i++ {
-		wall, child := sample()
-		gcSide := wall - child
-		if gcSide < 0 {
-			// Children are timed by the process that spawned them, so a
-			// concurrent pair can sum past the wall clock they ran in. Zero is
-			// the honest floor; a negative would pass every upper bound.
-			gcSide = 0
-		}
-		if best < 0 || gcSide < best {
+		if gcSide := sample(); best < 0 || gcSide < best {
 			best = gcSide
 		}
 	}
@@ -1398,11 +1396,17 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		// at all.
 		//
 		// Both numbers are reported. The raw one is the artifact the plan asks
-		// for; the marginal one is the gate.
-		floor := bestOfGCSide(t, 5, func() (time.Duration, time.Duration) {
+		// for; the marginal one is the gate. That is a deliberate departure from
+		// plan 3.2, whose line is the raw `wall - sum(traced bd-child dur_ms) <=
+		// 0.1s`, for the reason above, and it has a cost the raw line does not:
+		// two subtractions, each of which can go vacuous. Neither is allowed to
+		// (round3 review, completeness): a sample whose children cannot be
+		// attributed fails, and so does a floor that stopped being one — see
+		// helpers.PassthroughGCSide and helpers.MarginalOverFloor.
+		floor := bestOfGCSide(t, 5, func() time.Duration {
 			start := time.Now()
 			helpers.RunGC(lane, cityRoot, "--help") //nolint:errcheck // the exit status of --help is not the measurement
-			return time.Since(start), 0
+			return time.Since(start)
 		})
 
 		trace := helpers.NewBDTrace(t)
@@ -1412,7 +1416,7 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			lastRecords int
 			describe    string
 		)
-		gcSide := bestOfGCSide(t, 5, func() (time.Duration, time.Duration) {
+		gcSide := bestOfGCSide(t, 5, func() time.Duration {
 			trace.Reset()
 			bdCalls.Reset()
 			start := time.Now()
@@ -1429,12 +1433,16 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			lastChild = time.Duration(trace.ChildMillis()) * time.Millisecond
 			lastRecords = len(records)
 			describe = trace.Describe()
-			return wall, lastChild
+			sampleGCSide, err := helpers.PassthroughGCSide(records, wall)
+			if err != nil {
+				t.Fatalf("gc bd list --json: %v\n%s", err, describe)
+			}
+			return sampleGCSide
 		})
 
-		marginal := gcSide - floor
-		if marginal < 0 {
-			marginal = 0
+		marginal, err := helpers.MarginalOverFloor(gcSide, floor, proxiedNativeGCSideBudget)
+		if err != nil {
+			t.Fatalf("gc bd list --json, best of 5: %v", err)
 		}
 		// The artifact: bd-bound and machine-bound, recorded so the delta is
 		// reproducible, never asserted. The 0.4s figure in the bead is a
