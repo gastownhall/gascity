@@ -1178,11 +1178,14 @@ const proxiedNativeGCSideBudget = 100 * time.Millisecond
 // proxiedNativeStatusPerfTarget is the wall-clock figure the native lane is
 // aiming `gc status --json` at on a warm, gc-initialised proxied city.
 //
-// It is NOT a CI gate. Wall clock on a shared box is a statement about the box:
+// It is NOT a PR gate. Wall clock on a shared box is a statement about the box:
 // the same command measured 1.9s and 0.5s in one run of this file, on the two
 // lanes, with a load average near 90. It is asserted only under
 // GC_ACCEPTANCE_PERF, and there at 3x headroom, so a nightly lane can notice a
 // tenfold regression without a shared runner failing the branch for being busy.
+// That lane is nightly.yml's `beads-proxied-perf` job; until it existed nothing
+// set the variable and the gate was enforced nowhere (round3 review), which
+// scripts' TestAcceptancePerfGateHasALane now guards.
 const proxiedNativeStatusPerfTarget = 500 * time.Millisecond
 
 // proxiedNativePerfHeadroom is the multiple of a target a perf lane allows.

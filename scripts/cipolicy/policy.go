@@ -69,9 +69,17 @@ const (
 	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
 	// skip summary; ci-required needs the new job and allows its skip exactly
 	// as it does the topology job's. No new trigger and no new permission.
-	expectedCIExecutionHash      = "1d4d121e46d9b57c8f951f1a461d841e59745447a56da7a63573d47e10125b6c"
-	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
+	expectedCIExecutionHash     = "1d4d121e46d9b57c8f951f1a461d841e59745447a56da7a63573d47e10125b6c"
+	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
+	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
+	// timeout-minutes 60, env GC_REQUIRE_ACCEPTANCE_TOOLING=1 and
+	// GC_ACCEPTANCE_PERF=1, the setup action with dolt and no released bd, the
+	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
+	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
+	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
+	// provider selector.
+	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
