@@ -160,6 +160,15 @@ type ProxiedStore struct {
 	// (after stopping the old one) by a second StartGuard. Nil for a one-shot
 	// store.
 	guard *proxiedGuard
+	// closed latches CloseStore. It is set under mu BEFORE the guard is
+	// stopped, and repin and adoptPin refuse once it is, because stopping the
+	// guard only cancels its context: a recovery already past its library open
+	// and post-open read when the cancel lands goes on to repin. Without the
+	// latch that repin installed a fresh leaf after CloseStore had captured a
+	// nil one — a live library pool on bd's proxy that nothing ever closed, and
+	// a closed store that went on serving reads from it (round3 review,
+	// safety).
+	closed bool
 	// reopenNative is the ONLY recovery path a non-terminally demoted handle
 	// has. See NativeLeafReopener.
 	reopenNative NativeLeafReopener
@@ -417,13 +426,14 @@ func (s *ProxiedStore) standDown(verdict *ProxiedVerdictError) {
 //
 // It is the guard tick's move (P2-11) and it refuses after a terminal one, which
 // is what keeps "demotion is one-way" true for every verdict that is a fact. It
-// reports whether the swap landed.
+// also refuses on a closed store: the caller then owns the leaf it opened and
+// must close it (recoverNative does). It reports whether the swap landed.
 func (s *ProxiedStore) repin(native *NativeDoltStore, pin Pin) bool {
 	if native == nil || !pin.Admitted() {
 		return false
 	}
 	s.mu.Lock()
-	if s.terminal {
+	if s.terminal || s.closed {
 		s.mu.Unlock()
 		return false
 	}
@@ -776,9 +786,12 @@ func (s *ProxiedStore) DepRemove(issueID, dependsOnID string) error {
 //
 // The native handle is closed first and synchronously here (unlike a stand-down,
 // nobody is waiting on this path), then the bd leaf's own CloseStore if it has
-// one. The guard ticker, when P2-11 has installed one, is stopped before either.
+// one. The guard ticker, when P2-11 has installed one, is stopped before either,
+// and the store is latched closed before THAT, so a guard recovery the stop
+// cannot interrupt any more cannot install a leaf behind it (see closed).
 func (s *ProxiedStore) CloseStore() error {
 	s.mu.Lock()
+	s.closed = true
 	native := s.native
 	s.native = nil
 	guard := s.guard

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1040,5 +1041,96 @@ func TestStartGuardIsIdempotentPerStore(t *testing.T) {
 	}
 	if installed() != nil {
 		t.Fatal("CloseStore left a guard installed")
+	}
+}
+
+// closeSignalStorage is a library handle whose Close is observable.
+type closeSignalStorage struct {
+	*nativeDoltMemStorage
+	closed chan struct{}
+}
+
+func (s *closeSignalStorage) Close() error {
+	select {
+	case <-s.closed:
+	default:
+		close(s.closed)
+	}
+	return nil
+}
+
+// TestCloseStoreDuringAGuardRecoveryClosesTheRecoveredLeaf is round3 review
+// (safety).
+//
+// Stopping the guard only cancels its context. A recovery that has already
+// finished its admission, library open and post-open read when the cancel
+// lands goes on to repin — and repin checked only the terminal latch, which
+// CloseStore never sets. So CloseStore captured native=nil, joined the guard,
+// and returned; the guard then installed the fresh leaf behind it: a live
+// library pool on bd's proxy that nothing closed for the rest of the process,
+// and a CLOSED store serving reads natively. E-S1 made the state this starts
+// from — non-terminally stood down, with a recovery each tick — the ordinary
+// outcome of every re-pin that does not admit.
+func TestCloseStoreDuringAGuardRecoveryClosesTheRecoveredLeaf(t *testing.T) {
+	f := newGuardFixture(t)
+	f.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictProxyGone, "stood down by a refused re-pin", nil))
+	if !f.store.Demoted() {
+		t.Fatal("setup: the store did not stand down")
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	storage := &closeSignalStorage{
+		nativeDoltMemStorage: &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}},
+		closed:               make(chan struct{}),
+	}
+	f.recover = func(ctx context.Context) (*NativeDoltStore, Pin, error) {
+		in := f.admissionInput(true)
+		in.ProbeOnce = true
+		pin, err := Admit(ctx, in)
+		if err != nil {
+			return nil, Pin{}, err
+		}
+		fresh := newNativeDoltStoreForTest(storage)
+		fresh.idPrefix = "prx"
+		// The admission, the library open and the post-open read are done:
+		// nothing left in the recovery looks at ctx. CloseStore lands here.
+		close(entered)
+		<-release
+		return fresh, pin, nil
+	}
+	f.start()
+	f.ticks <- time.Now()
+	<-entered
+
+	closed := make(chan error, 1)
+	go func() { closed <- f.store.CloseStore() }()
+	// CloseStore has passed its locked section once it has taken the guard
+	// out of the store; it is then joining the guard, which is parked above.
+	for deadline := time.Now().Add(10 * time.Second); ; runtime.Gosched() {
+		f.store.mu.RLock()
+		taken := f.store.guard == nil
+		f.store.mu.RUnlock()
+		if taken {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CloseStore never took the guard out of the store")
+		}
+	}
+	close(release)
+	if err := <-closed; err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+
+	if step := <-f.steps; step != proxiedGuardStopped {
+		t.Errorf("the recovery that finished after CloseStore reported %s, want stopped", step)
+	}
+	if leaked := f.store.nativeLeaf(); leaked != nil {
+		t.Fatal("CloseStore returned and a recovered native leaf was installed behind it: the closed store serves reads " +
+			"natively from a pool nothing will close")
+	}
+	select {
+	case <-storage.closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the leaf the recovery opened was never closed: a live library pool on bd's proxy for the rest of the process")
 	}
 }

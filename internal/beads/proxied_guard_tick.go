@@ -596,7 +596,9 @@ func (g *proxiedGuard) recoverNative(ctx context.Context) proxiedGuardStep {
 	}
 	if !g.store.repin(native, pin) {
 		// A terminal stand-down landed between the reopen and the swap, or the
-		// store closed underneath us. The fresh leaf belongs to nobody.
+		// store closed underneath us — CloseStore latches that before it stops
+		// this guard, because the stop cannot interrupt a recovery that is past
+		// its last ctx-sensitive step. The fresh leaf belongs to nobody.
 		closeNativeLeafQuietly(native)
 		return proxiedGuardStopped
 	}
@@ -804,7 +806,7 @@ func (s *ProxiedStore) adoptPin(pin Pin) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.terminal || s.native == nil {
+	if s.terminal || s.closed || s.native == nil {
 		return false
 	}
 	s.pin = pin
