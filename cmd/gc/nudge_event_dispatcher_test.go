@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -605,5 +609,107 @@ func TestNudgeDispatcherIsHostingCapableButSubscribeFails(t *testing.T) {
 	}
 	if nudgeDispatcherIsHosting(dir) {
 		t.Fatal("no dispatcher is listening, but nudgeDispatcherIsHosting reports true")
+	}
+}
+
+// TestCityRuntimeReloadConfigTracedClosesNudgeWakeListenerOnLegacyReload
+// drives reloadConfigTraced itself (not ensureNudgeWakeListener directly):
+// a prior version of ensureNudgeWakeListener returned early once a listener
+// existed and never closed it, so a reload out of supervisor mode left the
+// wake socket answering forever. Producers dial that socket
+// (nudgequeue.DispatcherIsHosting) to decide whether to suppress their
+// fallback poller; a stale listener makes that check a false positive while
+// neither delivery path (event-dispatcher or supervisor patrol) is actually
+// draining the queue anymore, stranding deferred nudges to idle sessions.
+func TestCityRuntimeReloadConfigTracedClosesNudgeWakeListenerOnLegacyReload(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigWithDaemonMode(t, tomlPath, "fake", "supervisor")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: testWriter(t),
+	})
+	cr.sessionDrains = newDrainTracker()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cr.nudgeWakeCh = make(chan struct{}, 1)
+	cr.nudgeEvents = newNudgeEventDispatcher(ctx, cityPath, cr.stderr, cr.logPrefix)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-cr.nudgeEvents.workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+	cr.nudgeEvents.update(cr.sp, cr.cfg, true)
+
+	// Startup: supervisor mode satisfies the gate on its own, independent
+	// of provider capability. The listener must start.
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener == nil {
+		t.Fatal("wake listener did not start in supervisor mode at startup")
+	}
+	if !nudgeDispatcherIsHosting(cityPath) {
+		t.Fatal("precondition: nudgeDispatcherIsHosting must report true once the listener is up")
+	}
+
+	// Reload into legacy mode: rewrite the on-disk config without
+	// [daemon] nudge_dispatcher = "supervisor" and drive the real reload
+	// path. Nothing here calls cr.ensureNudgeWakeListener directly — this
+	// is the production wiring exercising the teardown branch.
+	writeCityRuntimeConfigWithDaemonMode(t, tomlPath, "fake", "")
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(ctx, &lastProviderName, cityPath, nil, reloadSourceManual)
+	if reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reloadConfigTraced failed: %s", reply.Error)
+	}
+	if nudgeDispatcherIsSupervisor(cr.cfg) {
+		t.Fatal("precondition: reloaded config must be legacy mode")
+	}
+	if cr.nudgeEvents.active() {
+		t.Fatal("precondition: provider must not be event-capable after reload (fake provider stays non-event-capable)")
+	}
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("reloadConfigTraced left the wake listener running after a reload out of supervisor mode into legacy mode")
+	}
+	if nudgeDispatcherIsHosting(cityPath) {
+		t.Fatal("wake socket still answers after the listener should have been closed on legacy reload")
+	}
+}
+
+// writeCityRuntimeConfigWithDaemonMode is writeCityRuntimeConfig plus an
+// optional [daemon] nudge_dispatcher setting; an empty mode omits the
+// [daemon] section entirely (legacy mode).
+func writeCityRuntimeConfigWithDaemonMode(t *testing.T, tomlPath, provider, nudgeDispatcherMode string) {
+	t.Helper()
+	writeCityRuntimeConfig(t, tomlPath, provider)
+	if nudgeDispatcherMode == "" {
+		return
+	}
+	existing, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	suffix := []byte("\n[daemon]\nnudge_dispatcher = \"" + nudgeDispatcherMode + "\"\n")
+	data := append(append([]byte{}, existing...), suffix...)
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }

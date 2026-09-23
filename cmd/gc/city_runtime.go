@@ -3526,7 +3526,7 @@ func (cr *CityRuntime) ensureNudgeWakeListener(ctx context.Context) {
 	if cr.cityPath == "" {
 		return
 	}
-	gateOpen := cr.nudgeEvents != nil && (nudgeDispatcherIsSupervisor(cr.cfg) || cr.nudgeEvents.active())
+	gateOpen := nudgeDispatcherIsSupervisor(cr.cfg) || (cr.nudgeEvents != nil && cr.nudgeEvents.active())
 	if cr.nudgeWakeListener != nil {
 		if !gateOpen {
 			// A stale listener still answering after a reload into legacy
