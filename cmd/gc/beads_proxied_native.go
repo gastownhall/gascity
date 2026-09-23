@@ -43,7 +43,9 @@ const (
 	// proxiedProviderRecoverOp is the verb behind ProviderOps.Recover: `bd dolt
 	// stop` followed by `bd ping`, except for a scope that shares the CITY's
 	// proxy root, where the script degrades to a ping alone rather than cycling
-	// the one proxy serving hq and every other rig.
+	// the one proxy serving hq and every other rig. Admission never spends it
+	// for such a scope: the recover rung is the city scope's (round4 recheck
+	// M2, beads.AdmissionInput.CityRoot).
 	proxiedProviderRecoverOp = "recover"
 
 	// proxiedOneShotAdmissionBudget bounds admission for a command a human is
@@ -568,7 +570,10 @@ func (o *proxiedNativeOpener) admitWith(ctx context.Context, longLived bool, ops
 // but the field the recovery sets on purpose.
 func (o *proxiedNativeOpener) admissionInput(longLived bool, ops beads.ProviderOps) beads.AdmissionInput {
 	return beads.AdmissionInput{
-		ScopeRoot:    o.scopeRoot,
+		ScopeRoot: o.scopeRoot,
+		// The city decides which scope may spend the recover rung: a rig
+		// sharing the city's proxy root never does (round4 recheck M2).
+		CityRoot:     o.cityPath,
 		Database:     o.scopeDatabase(),
 		ProcessTable: o.processTable,
 		Probe:        o.probe,

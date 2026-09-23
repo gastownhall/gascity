@@ -489,6 +489,94 @@ esac`)
 		}
 	})
 
+	t.Run("a rig sharing the city's proxy root leaves the recover to the city", func(t *testing.T) {
+		// round4 recheck M2, through the production opener: the city path the
+		// opener carries is what tells admission which scope may spend the
+		// recover rung. The rig reaches the zombie first, as the reader that
+		// hits the dead pool first may; the city's ladder must still run its
+		// recover afterwards.
+		f := newProxiedScopeFixture(t)
+		rig := t.TempDir()
+		rigBeads := filepath.Join(rig, ".beads")
+		if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(rigBeads, f.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+			[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"rig"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(proxyendpoint.SidecarPath(rigBeads),
+			[]byte(`{"root_path":"`+rel+`","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		recovered := false
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered {
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+		var mu sync.Mutex
+		spent := map[string][]string{}
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string) error {
+			mu.Lock()
+			spent[scopeRoot] = append(spent[scopeRoot], op)
+			mu.Unlock()
+			if op == proxiedProviderRecoverOp && scopeRoot == f.scopeRoot {
+				// The city's `bd dolt stop` then `bd ping`: a new generation.
+				f.writeRecord(7004, "99887766")
+				recovered = true
+				return nil
+			}
+			return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		// ONE pair of ledgers for both openers, as newProxiedNativeOpener
+		// wires the package-level ones.
+		observed, recoveredSet := beads.NewGenerationSet(), beads.NewGenerationSet()
+		opener := func(scopeRoot, database string) *proxiedNativeOpener {
+			return &proxiedNativeOpener{
+				cityPath:     f.scopeRoot,
+				scopeRoot:    scopeRoot,
+				database:     database,
+				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed},
+				processTable: f.processTable(),
+				probe:        probe,
+				observed:     observed,
+				recovered:    recoveredSet,
+				sleep:        func(context.Context, time.Duration) error { return nil },
+			}
+		}
+
+		_, err = opener(rig, "rig").admit(context.Background(), true)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Terminal() {
+			t.Fatalf("rig admit = %v, want non-terminal: the rig cannot cycle the shared proxy", err)
+		}
+		pin, err := opener(f.scopeRoot, "beads").admit(context.Background(), true)
+		if err != nil {
+			t.Fatalf("city admit = %v after the rig's ladder: the city's zombie was never recovered", err)
+		}
+		if pin.PoolKey().PID != 7004 {
+			t.Fatalf("the city admitted pid %d, want the generation its recover produced (7004)", pin.PoolKey().PID)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got := strings.Join(spent[rig], ","); got != proxiedProviderProbeOp {
+			t.Fatalf("the rig spent [%s], want exactly [probe]: its recover is a ping, and the rung is the city's", got)
+		}
+		if got := strings.Join(spent[f.scopeRoot], ","); got != proxiedProviderRecoverOp {
+			t.Fatalf("the city spent [%s], want exactly [recover]: bd already answered this generation's ping", got)
+		}
+	})
+
 	t.Run("a ping that failed on gc's side never reaches the recover", func(t *testing.T) {
 		// The semaphore wait or the op budget running out is a deadline, not
 		// bd's answer (council A-F5): one probe, no recover, non-terminal.

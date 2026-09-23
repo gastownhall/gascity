@@ -1293,6 +1293,214 @@ func TestZombieLadderEndsTheLaneOnlyOnARecoverBdRefused(t *testing.T) {
 	}
 }
 
+// sharedRootRig writes a rig scope whose sidecar names the CITY's proxy root —
+// the shape `gc beads city migrate-proxied` leaves, one proxy and one Dolt
+// child serving hq and every rig. The root_path is RELATIVE and climbs out of
+// the rig through `..`, the way the migration writes it, so the shared-root
+// test has to resolve it physically.
+func sharedRootRig(t *testing.T, city *admissionFixture) string {
+	t.Helper()
+	rig := t.TempDir()
+	beadsDir := filepath.Join(rig, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(beadsDir, city.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"rig"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.SidecarPath(beadsDir),
+		[]byte(`{"root_path":"`+rel+`","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := proxyendpoint.ProviderRoot(rig)
+	if err != nil || !samePhysicalDir(root, city.root) {
+		t.Fatalf("the rig resolves proxy root %q (%v), want the city's %q: the fixture is not the shared-root shape",
+			root, err, city.root)
+	}
+	return rig
+}
+
+func samePhysicalDir(a, b string) bool {
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
+// TestZombieLadderLeavesTheSharedRootsRecoverToTheCity is round4 recheck M2.
+//
+// A rig sharing the city's proxy root reads the city's proxy.pid, so it has
+// the city's generation, and the recover ledger is process-global and keyed on
+// the generation. The rig's recover op is a ping alone (the script will not
+// `bd dolt stop` the pair serving hq and every rig from a rig), yet it spent
+// the generation's one recover: when the first ladder in the process was the
+// rig's, the rig went terminal on its own useless ping, and the city's ladder
+// found the rung spent and went terminal with no verb — `bd dolt stop` never
+// ran and both handles were demoted for the process.
+//
+// Each row is the interleaving: the RIG reaches the zombie first, then the
+// city.
+func TestZombieLadderLeavesTheSharedRootsRecoverToTheCity(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	silent := proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+
+	type pair struct {
+		city, rig       AdmissionInput
+		cityOps, rigOps *admissionOps
+		recovered       *bool
+		generation      string
+	}
+	build := func(t *testing.T, cityRecover func(f *admissionFixture, recovered *bool) error) pair {
+		t.Helper()
+		f := newAdmissionFixture(t, "-1")
+		rig := sharedRootRig(t, f)
+		recovered := false
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered {
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return silent
+		}
+		cityOps := &admissionOps{
+			onPing:  func() error { t.Error("the city pinged a generation bd has already answered"); return nil },
+			onRecov: func() error { return cityRecover(f, &recovered) },
+		}
+		rigOps := &admissionOps{onPing: bdSaysNo, onRecov: func() error {
+			// What the script does for this scope: `bd ping` alone, which
+			// fails against the zombie. Reaching here at all is the defect.
+			return ProviderReportedFailure(errors.New("provider-owned beads recover: Error: ping: invalid connection"))
+		}}
+		// ONE pair of ledgers, as in production: every scope's opener gets
+		// the package-level sets.
+		observed, recoveredSet := NewGenerationSet(), NewGenerationSet()
+
+		city := baseAdmissionInput(f, cityOps)
+		city.CityRoot = f.scopeRoot
+		city.Probe = probe
+		city.Observed, city.Recovered = observed, recoveredSet
+
+		rigIn := baseAdmissionInput(f, rigOps)
+		rigIn.ScopeRoot = rig
+		rigIn.Database = "rig"
+		rigIn.CityRoot = f.scopeRoot
+		rigIn.Probe = probe
+		rigIn.Observed, rigIn.Recovered = observed, recoveredSet
+
+		return pair{
+			city: city, rig: rigIn, cityOps: cityOps, rigOps: rigOps, recovered: &recovered,
+			generation: proxyendpoint.NewPoolKey(f.record, "").Generation(),
+		}
+	}
+	cityRecovers := func(f *admissionFixture, recovered *bool) error {
+		// `bd dolt stop` then `bd ping`, from the city: a new generation,
+		// which greets.
+		f.writeRecord(6002, "55667788")
+		*recovered = true
+		return nil
+	}
+
+	t.Run("rig first, then the city's zombie still recovers", func(t *testing.T) {
+		p := build(t, cityRecovers)
+
+		for open := 1; open <= 2; open++ {
+			_, err := Admit(context.Background(), p.rig)
+			verdict, ok := ProxiedVerdictOf(err)
+			if !ok || verdict.Terminal() {
+				t.Fatalf("rig open %d = %v, want a non-terminal verdict: the rig cannot cycle the shared proxy, "+
+					"so nothing it learned ends its lane", open, err)
+			}
+		}
+		if pings, recovers := p.rigOps.counts(); pings != 1 || recovers != 0 {
+			t.Fatalf("the rig spent %d ping(s) and %d recover(s), want 1 and 0: its recover is a ping bd has just "+
+				"refused, and the rung is the city's", pings, recovers)
+		}
+		if p.city.Recovered.Has(p.generation) {
+			t.Fatalf("the rig spent generation %s's recover rung; the city's `bd dolt stop` can now never run", p.generation)
+		}
+
+		pin, err := Admit(context.Background(), p.city)
+		if err != nil {
+			t.Fatalf("city Admit = %v after the rig's ladder: the city's own zombie was not recovered", err)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Fatalf("the city admitted pid %d, want the generation its recover produced (6002)", pin.PoolKey().PID)
+		}
+		if pings, recovers := p.cityOps.counts(); pings != 0 || recovers != 1 {
+			t.Fatalf("the city spent %d ping(s) and %d recover(s), want 0 and 1: bd already answered this "+
+				"generation's ping for the rig, and the recover is the city's to spend", pings, recovers)
+		}
+
+		// And the rig follows the city onto the recovered generation, for free.
+		rigPin, err := Admit(context.Background(), p.rig)
+		if err != nil {
+			t.Fatalf("rig Admit after the city's recover = %v, want the recovered generation", err)
+		}
+		if rigPin.PoolKey().PID != 6002 {
+			t.Fatalf("the rig admitted pid %d, want 6002", rigPin.PoolKey().PID)
+		}
+		if pings, recovers := p.rigOps.counts(); pings != 1 || recovers != 0 {
+			t.Fatalf("the rig spent %d ping(s) and %d recover(s) in total, want 1 and 0", pings, recovers)
+		}
+	})
+
+	t.Run("the rig turns terminal only once the city's recover was spent and did not fix it", func(t *testing.T) {
+		p := build(t, func(*admissionFixture, *bool) error {
+			// bd's recover ran and refused: the city's determinate end.
+			return ProviderReportedFailure(errors.New("provider-owned beads recover: Error: ping: invalid connection"))
+		})
+		if _, err := Admit(context.Background(), p.rig); err == nil {
+			t.Fatal("a silent proxy admitted the rig")
+		}
+		_, err := Admit(context.Background(), p.city)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("city Admit = %v, want the terminal proxy_zombie of a recover bd refused", err)
+		}
+		_, err = Admit(context.Background(), p.rig)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("rig Admit after the city's spent recover = %v, want a terminal proxy_zombie on the city's terms", err)
+		}
+		if pings, recovers := p.rigOps.counts(); pings != 1 || recovers != 0 {
+			t.Fatalf("the rig spent %d ping(s) and %d recover(s), want 1 and 0", pings, recovers)
+		}
+	})
+
+	t.Run("a city recover gc's side cut short leaves the rig non-terminal", func(t *testing.T) {
+		p := build(t, func(*admissionFixture, *bool) error {
+			return fmt.Errorf("provider-owned beads recover: %w", context.DeadlineExceeded)
+		})
+		_, _ = Admit(context.Background(), p.rig)
+		if _, err := Admit(context.Background(), p.city); err == nil {
+			t.Fatal("a silent proxy admitted the city")
+		}
+		_, err := Admit(context.Background(), p.rig)
+		if verdict, ok := ProxiedVerdictOf(err); !ok || verdict.Terminal() {
+			t.Fatalf("rig Admit while the city's recover rung is backing off = %v, want non-terminal", err)
+		}
+	})
+
+	t.Run("control: a rig on its OWN root still spends its own recover", func(t *testing.T) {
+		city := newAdmissionFixture(t, "-1")
+		rig := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{onPing: bdSaysNo}
+		in := baseAdmissionInput(rig, ops)
+		in.CityRoot = city.scopeRoot
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
+		if _, err := Admit(context.Background(), in); err == nil {
+			t.Fatal("a silent proxy admitted")
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("a rig that owns its root spent %d ping(s) and %d recover(s), want 1 and 1: only a SHARED "+
+				"root's recover is the city's", pings, recovers)
+		}
+	})
+}
+
 // TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing is
 // council pr2 E-S6.
 //

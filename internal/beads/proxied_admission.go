@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ProviderOps is the ENTIRE bd-verb surface admission may reach for.
@@ -385,6 +386,15 @@ func (p Pin) Report() ProxiedOpenReport {
 type AdmissionInput struct {
 	// ScopeRoot is the workspace whose proxy is being admitted.
 	ScopeRoot string
+	// CityRoot is the city's workspace root. A scope that is NOT the city but
+	// whose proxy root IS the city's — the `gc beads city migrate-proxied`
+	// shape, where one proxy and one Dolt child serve hq and every rig —
+	// cannot run the recover the ladder's last rung exists for: the provider
+	// script degrades such a scope's recover to a ping, because cycling the
+	// shared pair is the city scope's. Such a scope never spends the recover
+	// rung (round4 recheck M2; see leaveRecoverToCity). Empty treats every
+	// scope as owning its root.
+	CityRoot string
 	// Database is the Dolt database to admit. It is required: the cursors are
 	// DATABASE()-scoped, so a probe with none selected reports served with both
 	// cursors at zero, which would pass the gate against nothing at all.
@@ -759,7 +769,9 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // neither: it holds the rung for failedPingBackoff (council A-F5, D-F9).
 //
 // Only a recover bd itself refused is terminal (round4 recheck M1); see
-// recoverFailed for every other way a recover can fail.
+// recoverFailed for every other way a recover can fail. And only a scope that
+// can cycle its proxy root spends the recover at all: a rig on the city's
+// root leaves it to the city scope (round4 recheck M2, leaveRecoverToCity).
 func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	if in.ProbeOnce {
 		// The first rung is "ask again", and a background tick asks again by
@@ -852,6 +864,13 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 		}
 	}
 
+	// The recover rung is spent by the scope that can run it (round4 recheck
+	// M2). The ledger is process-global and keyed on the generation, which a
+	// rig sharing the city's proxy root shares with the city.
+	if in.sharesCityProxyRoot(root) {
+		return in.leaveRecoverToCity(generation, ep)
+	}
+
 	// A recover that failed on gc's side holds its rung for a backoff (round4
 	// recheck M1). While it holds, this generation has had no recover bd
 	// answered, so the terminal line below — "a recover was already spent" —
@@ -873,6 +892,60 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 
 	return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 		"the endpoint still accepts and never greets after a recover was already spent on generation "+generation, ep.Err)
+}
+
+// sharesCityProxyRoot reports whether this scope is not the city but resolves
+// the city's proxy root.
+//
+// It is the provider script's own test (gc-beads-bd.sh,
+// provider_owned_scope_shares_city_proxy_root: a scope other than
+// GC_CITY_PATH whose physical proxy root is the city's), answered with the
+// resolver the generation under escalation was read from — so "shares" here
+// means exactly "shares the generation the city scope would recover". A city
+// root gc cannot resolve answers false, which is the script's answer too.
+func (in AdmissionInput) sharesCityProxyRoot(root string) bool {
+	if in.CityRoot == "" || pathutil.SamePath(in.ScopeRoot, in.CityRoot) {
+		return false
+	}
+	cityRoot, err := proxyendpoint.ProviderRoot(in.CityRoot)
+	if err != nil || cityRoot == "" {
+		return false
+	}
+	return pathutil.SamePath(root, cityRoot)
+}
+
+// leaveRecoverToCity is the no-greeting ladder's last rung for a scope that
+// shares the city's proxy root, and so cannot run the recover (round4 recheck
+// M2).
+//
+// The recover ledger is process-global and keyed on the generation, and a rig
+// on the city's root has the city's generation. The rig's own recover op is
+// `bd ping` alone — the script will not `bd dolt stop` the pair serving hq and
+// every rig from a rig — so a rig whose ladder reached the rung first spent the
+// generation's one recover on a ping bd had just refused, took a terminal
+// proxy_zombie for it, and the city's ladder then found the rung spent and went
+// terminal with no verb at all: `bd dolt stop` never ran, the zombie was never
+// recovered, and both long-lived handles were demoted for the process. Whether
+// that happened depended on which reader hit the dead pool first.
+//
+// So this scope neither spends the rung nor forks its degraded recover (a
+// second `bd ping` straight after the one bd just refused learns nothing), and
+// answers non-terminal: the recover that cycles the shared proxy is the city
+// scope's, spent by the city's own ladder, and once it has run the generation
+// moves and this scope re-admits. Its answer turns terminal on exactly the
+// city's terms and no sooner — the city's recover has been SPENT on this
+// generation (not merely held for a backoff after a gc-side failure) and the
+// generation is still silent.
+func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.Endpoint) (Pin, bool, error) {
+	if _, backing := in.Recovered.BackingOff(generation); !backing && in.Recovered.Has(generation) {
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+			"the endpoint still accepts and never greets after the city scope's recover was already spent on generation "+
+				generation+", whose proxy root this scope shares", ep.Err)
+	}
+	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+		"the endpoint accepts and never greets, and this scope shares the city's proxy root: its own recover would only "+
+			"ping, which bd has already answered for this generation, and the recover that cycles the shared proxy is "+
+			"the city scope's to spend", ep.Err)
 }
 
 // recoverFailed classifies a provider recover that did not succeed (round4
