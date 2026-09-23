@@ -69,7 +69,10 @@ const (
 	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
 	// skip summary; ci-required needs the new job and allows its skip exactly
 	// as it does the topology job's. No new trigger and no new permission.
-	expectedCIExecutionHash     = "1d4d121e46d9b57c8f951f1a461d841e59745447a56da7a63573d47e10125b6c"
+	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
+	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
+	// failing test).
+	expectedCIExecutionHash     = "71bfa3a539e5dd0cb7973c5f265ef6582a1ed943ccbd36fb39f39fda744c1cd2"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
