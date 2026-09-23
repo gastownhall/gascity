@@ -715,6 +715,102 @@ esac
 	}
 }
 
+// TestForceReinitGuardWaitOutlastsSettleTimeoutWhileCursorAdvances asserts
+// the acceptance criterion directly: op_init "must stop random vNN -> v66
+// forced reinitializations when another initializer advances
+// schema_migrations" (release-gates/ga-3jssfa-op-init-force-reinit-race-gate.md
+// criterion 2), with no exception for how long that takes. The full suite
+// reproduced exactly this: TestGraphWorkflowFailureRunsCleanup's gc init
+// forced a reinit that bd then refused for 13 pending migrations (v53 ->
+// v66) — a live migration that was still moving, just not fast enough to
+// finish inside a fixed wall-clock window under load.
+//
+// wait_for_bd_runtime_schema computes its GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS
+// deadline once, up front, and checks "now >= deadline" every iteration
+// regardless of whether the cursor just advanced. A cursor that advances on
+// every single poll (stalls always reset to 0, never approaching
+// stall_budget=8) must still be waited out; the settle-timeout cap is
+// documented (gc-beads-bd.sh's GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS comment) as
+// bounding a stalled wait, not a live one. This test sets that cap to 0 so
+// the deadline is exhausted before the loop's first iteration completes,
+// then drives a cursor that advances on every attempt: the wait must still
+// reach readiness, not give up on the first check.
+func TestForceReinitGuardWaitOutlastsSettleTimeoutWhileCursorAdvances(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+
+	src := readGCBeadsBdScript(t)
+	validSQLName := extractShellFunction(t, src, "valid_sql_name")
+	serverSQL := extractShellFunction(t, src, "server_sql")
+	schemaReady := extractShellFunction(t, src, "bd_runtime_schema_ready")
+	tableCount := extractShellFunction(t, src, "bd_runtime_bd_table_count")
+	schemaCursor := extractShellFunction(t, src, "bd_runtime_schema_cursor")
+	sleepMs := extractShellFunction(t, src, "sleep_ms")
+	waitForSchema := extractShellFunction(t, src, "wait_for_bd_runtime_schema")
+
+	binDir := t.TempDir()
+	counterFile := filepath.Join(binDir, "cursor-counter")
+
+	const readyAtCursor = 3 // any value > 1 exposes the bug: the buggy wait gives up after its first iteration
+	fakeDolt := fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+counter_file=%q
+case "$query" in
+  *"FROM config"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    [ "$n" -ge %d ]
+    exit $?
+    ;;
+  *"information_schema.tables"*"schema_migrations"*)
+    printf 'cnt\n1\n'
+    exit 0
+    ;;
+  *"schema_migrations"*)
+    n=$(cat "$counter_file" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$counter_file"
+    printf 'cur\n%%d\n' "$n"
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, counterFile, readyAtCursor)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(fakeDolt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "connect_host() { printf '127.0.0.1'; }\n" +
+		"GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS=0\n" +
+		validSQLName + "\n" +
+		serverSQL + "\n" +
+		schemaReady + "\n" +
+		tableCount + "\n" +
+		schemaCursor + "\n" +
+		sleepMs + "\n" +
+		waitForSchema + "\n" +
+		"wait_for_bd_runtime_schema hq\n"
+
+	if err := runGCBeadsBdSnippet(t, script, binDir); err != nil {
+		counterContents, _ := os.ReadFile(counterFile)
+		t.Fatalf("wait_for_bd_runtime_schema gave up under an exhausted GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS even though the migration cursor was still advancing on every attempt (last cursor seen: %s); a live, advancing cursor must not be cut off by the wall-clock cap alone: %v", counterContents, err)
+	}
+}
+
 // TestGcBeadsBdInitRefusesForcedReinitWhenMigrationCursorIsAdvancing drives
 // op_init through the exact scenario in the failing job: a target database
 // with zero of the four bd tables (so the pre-fix guard read it as
