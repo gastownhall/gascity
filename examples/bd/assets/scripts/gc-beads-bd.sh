@@ -32,14 +32,16 @@
 #       <data_dir>/<db>/.dolt/noms/LOCK) to be released before start/stop
 #       fail closed, in milliseconds (default: 60000). gc projects
 #       [dolt].dolt_lock_release_timeout from city.toml into this variable.
-#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — hard-cap wall-clock budget for
-#       wait_for_bd_runtime_schema to keep waiting on a mid-migration
-#       database's schema_migrations cursor to settle, in milliseconds
-#       (default: 120000). The wait itself is progress-based, not a fixed
-#       attempt count: it keeps waiting as long as the cursor keeps
-#       advancing, and gives up earlier than this cap if the cursor stalls
-#       first. This cap only bounds the case where a concurrent initializer
-#       is genuinely still making slow progress.
+#   GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS — wall-clock budget, in milliseconds
+#       (default: 120000), for how long wait_for_bd_runtime_schema will go
+#       between observed advances of a mid-migration database's
+#       schema_migrations cursor before giving up. The wait itself is
+#       progress-based, not a fixed attempt count or a total-wait ceiling:
+#       every observed advance pushes this budget forward again, so a live
+#       migration that keeps advancing -- however long it ultimately takes
+#       -- is waited out in full. Only a gap with no observed advance, once
+#       it reaches this cap (or the shorter STALL_BUDGET consecutive-attempt
+#       count), ends the wait early.
 #   GC_DOLT_INIT_LOCK_DIR — directory holding op_init's cross-process,
 #       per-database advisory locks that serialize a forced reinit's
 #       revalidate-then-force sequence (default: $TMPDIR or /tmp). Not
@@ -989,19 +991,20 @@ server_reachable() {
 
 # wait_for_bd_runtime_schema waits for bd's schema to become queryable in
 # database $1, tracking real migration progress instead of a fixed attempt
-# count: each attempt re-reads the schema_migrations cursor via
-# bd_runtime_schema_cursor, and the stall counter resets to zero whenever
-# the cursor has moved since the previous attempt. A slow-but-live
-# concurrent migration keeps resetting the counter and is waited out; only
-# a genuinely stalled cursor (unchanged for STALL_BUDGET consecutive
-# attempts) or the GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS wall-clock hard cap
-# ends the wait early. The prior fixed 8-attempt/~4.5s budget measured
-# short against a real 66-migration run (7.19s unloaded, worse under a
-# saturated CI host) -- exactly the window that let a racing initializer's
-# database read as "missing schema" in ga-e2z1zb. A cursor read that fails
-# outright (bd_runtime_schema_cursor returns non-numeric/empty) is treated
-# as a stalled attempt rather than progress -- there is no evidence of
-# advancement to reset on.
+# count or total-wait ceiling: each attempt re-reads the schema_migrations
+# cursor via bd_runtime_schema_cursor, and both the stall counter and the
+# GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS deadline reset whenever the cursor has
+# moved since the previous attempt. A slow-but-live concurrent migration
+# keeps resetting both and is waited out in full, however long it
+# ultimately takes; only a gap with no observed advance -- once it reaches
+# STALL_BUDGET consecutive attempts or the settle-timeout cap, whichever
+# comes first -- ends the wait early. The prior fixed 8-attempt/~4.5s
+# budget measured short against a real 66-migration run (7.19s unloaded,
+# worse under a saturated CI host) -- exactly the window that let a racing
+# initializer's database read as "missing schema" in ga-e2z1zb. A cursor
+# read that fails outright (bd_runtime_schema_cursor returns
+# non-numeric/empty) is treated as a stalled attempt rather than progress
+# -- there is no evidence of advancement to reset the counters on.
 wait_for_bd_runtime_schema() {
     local db="$1"
     local backoff_ms stalls last_cursor cursor cap_ms now deadline
@@ -1031,16 +1034,18 @@ wait_for_bd_runtime_schema() {
         if [ -n "$cursor" ] && [ "$cursor" != "$last_cursor" ]; then
             stalls=0
             last_cursor="$cursor"
+            now=$(date +%s 2>/dev/null) || now=0
+            deadline=$((now + cap_ms / 1000))
         else
             stalls=$((stalls + 1))
-        fi
-        if [ "$stalls" -ge "$stall_budget" ]; then
-            return 1
-        fi
+            if [ "$stalls" -ge "$stall_budget" ]; then
+                return 1
+            fi
 
-        now=$(date +%s 2>/dev/null) || now=0
-        if [ "$now" -ge "$deadline" ]; then
-            return 1
+            now=$(date +%s 2>/dev/null) || now=0
+            if [ "$now" -ge "$deadline" ]; then
+                return 1
+            fi
         fi
 
         sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
