@@ -589,3 +589,67 @@ func TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGo
 		t.Fatal("tracker.stale() still true after b resumed delivering")
 	}
 }
+
+// TestProvider_MergedStreamStale_RealSubscribeWiring exercises the actual
+// wiring exposed via SubscribeSessionEvents and MergedStreamStale, not just
+// the tracker in isolation. TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent
+// above proves the tracker itself works, but a mutation that makes the real
+// Provider.MergedStreamStale() return false unconditionally, or removes
+// p.mergedStale.Store(tracker) from SubscribeSessionEvents, survives that
+// test untouched: nothing calls SubscribeSessionEvents and then asks the
+// Provider (not the tracker) whether it thinks the merge is stale.
+func TestProvider_MergedStreamStale_RealSubscribeWiring(t *testing.T) {
+	orig := sessionEventStaleAfter
+	sessionEventStaleAfter = 20 * time.Millisecond
+	defer func() { sessionEventStaleAfter = orig }()
+
+	local := newFakeEventProvider()
+	remote := newFakeEventProvider()
+	h := New(local, remote, isRemote)
+
+	if h.MergedStreamStale() {
+		t.Fatal("MergedStreamStale() = true before any subscription, want false")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, err := h.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	// Both sides emit: not stale.
+	local.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "local-sess"}
+	remote.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "remote-agent-1"}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-merged:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for initial merged events")
+		}
+	}
+	if h.MergedStreamStale() {
+		t.Fatal("MergedStreamStale() = true while both backends are emitting, want false")
+	}
+
+	// remote goes silent past the staleness window; local keeps emitting.
+	deadline := time.Now().Add(sessionEventStaleAfter * 10)
+	sawStale := false
+	for time.Now().Before(deadline) && !sawStale {
+		select {
+		case local.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "local-sess"}:
+			select {
+			case <-merged:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for local's event to be forwarded")
+			}
+		default:
+		}
+		if h.MergedStreamStale() {
+			sawStale = true
+		}
+	}
+	if !sawStale {
+		t.Fatal("MergedStreamStale() never reported true via the real Provider after remote went silent")
+	}
+}

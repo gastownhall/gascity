@@ -306,10 +306,16 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	if err != nil {
 		return nil, fmt.Errorf("remote backend: %w", err)
 	}
-	tracker := newSessionEventStaleTracker(runtime.SessionEventStaleAfter)
+	tracker := newSessionEventStaleTracker(sessionEventStaleAfter)
 	p.mergedStale.Store(tracker)
 	return mergeSessionEvents(ctx, lCh, rCh, tracker), nil
 }
+
+// sessionEventStaleAfter is runtime.SessionEventStaleAfter by default;
+// tests override it to a short duration so real-provider staleness wiring
+// (SubscribeSessionEvents -> tracker -> MergedStreamStale) can be exercised
+// without waiting out the production bound.
+var sessionEventStaleAfter = runtime.SessionEventStaleAfter
 
 // MergedStreamStale reports whether either backend fanned into the current
 // SubscribeSessionEvents merge has gone silent past its staleness bound. It
