@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestCLIStorageRoutesDeclineTheRevisionSnapshot pins that the one-shot CLI
@@ -20,11 +22,17 @@ func TestCLIStorageRoutesDeclineTheRevisionSnapshot(t *testing.T) {
 	const capturingCall = "config.LoadWithIncludes("
 	const optionsName = "cliStorageRoutesLoad"
 	const option = "SkipRevisionSnapshot: true"
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	srcDir := ""
+	if root := bazeltest.OverrideRoot(); root != "" {
+		srcDir = filepath.Join(root, "cmd", "gc")
+	} else {
+		_, currentFile, _, ok := runtime.Caller(0)
+		if !ok {
+			t.Fatal("runtime.Caller failed")
+		}
+		srcDir = filepath.Dir(currentFile)
 	}
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), guarded))
+	src, err := os.ReadFile(filepath.Join(srcDir, guarded))
 	if err != nil {
 		t.Fatalf("reading %s: %v", guarded, err)
 	}

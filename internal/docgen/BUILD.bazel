@@ -10,6 +10,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/docgen",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/config",
         "//internal/git",
         "@com_github_invopop_jsonschema//:jsonschema",
         "@com_github_spf13_cobra//:cobra",
@@ -25,10 +26,30 @@ go_test(
         "schema_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":docgen"],
     deps = [
+        "//internal/bazeltest",
         "//internal/testenv",
         "@com_github_invopop_jsonschema//:jsonschema",
         "@com_github_spf13_cobra//:cobra",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

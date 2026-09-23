@@ -6,6 +6,7 @@ go_library(
         "control.go",
         "control_retry.go",
         "drain.go",
+        "drain_residency.go",
         "fanout.go",
         "ralph.go",
         "retry.go",
@@ -16,8 +17,10 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/config",
         "//internal/convergence",
         "//internal/convoy",
+        "//internal/coordclass",
         "//internal/formula",
         "//internal/fsys",
         "//internal/graphv2",
@@ -43,13 +46,16 @@ go_test(
         "drain_conditional_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
+        "finalize_query_timeout_tier_repro_test.go",
         "ralph_check_asset_test.go",
+        "ralph_check_infra_blind_test.go",
         "ralph_check_infra_retry_test.go",
         "ralph_retry_iteration_test.go",
         "ralph_test.go",
         "retry_artifact_iteration_test.go",
         "retry_test.go",
         "runtime_test.go",
+        "scope_skip_compat_test.go",
         "terminal_root_gate_test.go",
         "testenv_import_test.go",
         "zz_boolptr_test.go",
@@ -58,6 +64,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/config",
         "//internal/convergence",
         "//internal/convoy",
         "//internal/formula",
@@ -69,4 +76,16 @@ go_test(
         "//internal/sourceworkflow",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

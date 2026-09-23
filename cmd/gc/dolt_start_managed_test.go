@@ -140,7 +140,7 @@ func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -159,7 +159,7 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -195,7 +195,7 @@ func TestGCBeadsBDScript_DoesNotMutateDoltInternals(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -236,7 +236,7 @@ func TestGCBeadsBDScript_InitForcesReinitOverPreSeededMetadata(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)

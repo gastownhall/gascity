@@ -1132,3 +1132,10 @@ k8s-secret:
 ## help: show this help
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
+
+## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
+## source tree used by whole-repo scan guards. Run after adding packages.
+.PHONY: bazel-sync
+bazel-sync:
+	bazel run //:gazelle
+	python3 tools/bazel/repo_tree.py

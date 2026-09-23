@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "beads",
-    srcs = glob(["*.go"]),
+    srcs = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ),
     importpath = "github.com/gastownhall/gascity/internal/beads",
     visibility = ["//:__subpackages__"],
     deps = [
@@ -41,6 +44,7 @@ go_test(
         "bdstore_internal_test.go",
         "bdstore_ready_projection_capability_internal_test.go",
         "bdstore_ready_projection_internal_test.go",
+        "bdstore_revision_compat_test.go",
         "bdstore_storage_conformance_test.go",
         "bdstore_test.go",
         "bdtrace_smoke_test.go",
@@ -57,6 +61,7 @@ go_test(
         "caching_store_internal_test.go",
         "caching_store_observation_test.go",
         "caching_store_overlay_test.go",
+        "caching_store_partial_list_internal_test.go",
         "caching_store_primitives_test.go",
         "caching_store_ready_projection_internal_test.go",
         "caching_store_ready_staleness_internal_test.go",
@@ -83,8 +88,10 @@ go_test(
         "conditional_writes_inspect_test.go",
         "conditional_writes_resolve_internal_test.go",
         "corpus_decoder_test.go",
+        "dep_metadata_test.go",
         "event_payload_contract_test.go",
         "event_payload_test.go",
+        "exec_timeout_linux_test.go",
         "export_test.go",
         "factory_test.go",
         "filestore_test.go",
@@ -99,6 +106,7 @@ go_test(
         "memstore_test.go",
         "metadata_cas_operation_test.go",
         "metadata_empty_clear_conformance_test.go",
+        "namespace_census_test.go",
         "native_dolt_store_close_retry_test.go",
         "native_dolt_store_conditional_retry_test.go",
         "native_dolt_store_conformance_test.go",
@@ -108,6 +116,8 @@ go_test(
         "native_dolt_store_list_sort_test.go",
         "native_dolt_store_metadata_cas_internal_test.go",
         "native_dolt_store_metadata_cas_test.go",
+        "native_dolt_store_metadata_preserve_test.go",
+        "native_dolt_store_parent_namespace_test.go",
         "native_dolt_store_ready_projection_internal_test.go",
         "native_dolt_store_ready_statuses_test.go",
         "native_dolt_store_reconnect_test.go",
@@ -126,7 +136,6 @@ go_test(
         "sqlite_store_dsn_test.go",
         "sqlite_store_graph_apply_test.go",
         "sqlite_store_hardening_test.go",
-        "sqlite_store_id_fence_test.go",
         "sqlite_store_readonly_uri_test.go",
         "sqlite_store_ready_test.go",
         "sqlite_store_schema_test.go",
@@ -137,9 +146,17 @@ go_test(
         "unread_store_notice_test.go",
         "updated_at_store_test.go",
     ],
-    data = glob(["testdata/**"]),
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "@com_github_steveyegge_beads//internal/storage/schema:migrations",
+    ],
     embed = [":beads"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -243,4 +260,16 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
