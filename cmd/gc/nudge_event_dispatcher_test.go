@@ -702,19 +702,36 @@ func TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering(t *testing.T) {
 }
 
 // TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel is the
-// regression test for the two guards added alongside the wedged-sweep fix:
-// worker()'s `ctx.Err() != nil` check and runPass's `d.parent.Err() != nil`
-// check in the sweep's per-session fan-out loop. Without them, a sweep
-// racing shutdown could keep spawning fresh per-session passes against a
-// city whose stores are mid-teardown, because spawnPass hands each session
-// to its own goroutine and returns immediately rather than blocking the
-// sweep on a wedged delivery.
+// regression test for runPass's `d.parent.Err() != nil` check in the sweep's
+// per-session fan-out loop, one of two guards added alongside the
+// wedged-sweep fix (the other is worker()'s own top-of-loop `ctx.Err() !=
+// nil` check, see the note below). Without this check, a sweep racing
+// shutdown could keep spawning fresh per-session passes against a city whose
+// stores are mid-teardown, because spawnPass hands each session to its own
+// goroutine and returns immediately rather than blocking the sweep on a
+// wedged delivery.
 //
-// This drives both guards through their real callers: kickAll before cancel
-// exercises the normal path, and kickAll after cancel exercises the guarded
-// one. A second, distinct session is queued only after cancellation, so any
-// spawn for it can only have come from a sweep that ran (or kept running)
-// past the cancel.
+// This drives the check through kickAll's normal (pre-cancel) path, then
+// through a direct d.runPass("", 0) call standing in for a sweep that was
+// already running (or a straggler racing) worker()'s own cancellation — NOT
+// through kickAll again, since worker()'s loop may already have exited by
+// the time a post-cancel kickAll's wakeup is observed. A second, distinct
+// session is queued only after cancellation, so any spawn for it can only
+// have come from a sweep that ran (or kept running) past the cancel.
+//
+// worker()'s own `ctx.Err() != nil` check (nudge_event_dispatcher.go, top of
+// the scheduler loop) is NOT exercised by this test, and mutation testing
+// against this suite confirms it: deleting that check alone leaves every
+// test in this file green. Proving it deterministically would require racing
+// a real cancellation against worker()'s internal `select` between its
+// idle/timer wait and the top of its loop — a window with no exposed seam,
+// since both the ctx.Done() and d.kicked cases in that select can be
+// simultaneously ready, making the outcome depend on Go's unspecified
+// multi-case select order rather than on anything the test controls. Forcing
+// determinism there needs a new seam (e.g. an injectable post-wakeup hook)
+// that does not exist yet; until one is added, that specific guard is
+// defense-in-depth on the coarser sweep-scheduling loop, untested, layered
+// behind the runPass-level guard this test does prove.
 func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
 	fake := newNudgeEventedFake()
 	t.Setenv("GC_BEADS", "file")

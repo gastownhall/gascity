@@ -2277,6 +2277,120 @@ func TestDispatchReadyWaitNudges_PropagatesPollerFailure(t *testing.T) {
 	}
 }
 
+// newWaitPollerFixture builds the session/wait beads
+// TestDispatchReadyWaitNudges_SuppressesPollerOnlyWhenDispatcherIsLive and its
+// sibling need: one codex session with a ready wait, the shape
+// TestDispatchReadyWaitNudges_StartsCodexPoller already exercises against a
+// non-event-capable provider.
+func newWaitPollerFixture(t *testing.T) *beads.MemStore {
+	t.Helper()
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "1",
+			"provider":           "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"delivery_attempt": "1",
+		},
+	}); err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+	return store
+}
+
+// TestDispatchReadyWaitNudges_SuppressesPollerOnlyWhenDispatcherIsLive is the
+// regression test for the fail-open fix mirrored from maybeStartNudgePoller
+// (cmd_nudge.go) into dispatchReadyWaitNudgesWithSnapshot: an event-capable
+// provider alone must never suppress the fallback poller, only an
+// event-capable provider PLUS a confirmed-live dispatcher may. Reverting the
+// `|| !nudgePollerDispatcherIsLive(cityPath)` half of that condition back to
+// the branch-introduced `!providerRetiresNudgePollers(...)` alone makes the
+// "not live" case below spawn 0 instead of 1, which is exactly the
+// undelivered-queue bug this fix closes.
+func TestDispatchReadyWaitNudges_SuppressesPollerOnlyWhenDispatcherIsLive(t *testing.T) {
+	setWaitTestFileBeads(t)
+
+	for _, tc := range []struct {
+		name      string
+		live      bool
+		wantSpawn int
+	}{
+		{name: "event-capable provider, live dispatcher: suppressed", live: true, wantSpawn: 0},
+		{name: "event-capable provider, no dispatcher answering: fails open", live: false, wantSpawn: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newWaitPollerFixture(t)
+			stubNudgePollerDispatcherLive(t, tc.live)
+
+			spawns := 0
+			prev := startNudgePoller
+			startNudgePoller = func(_, _, _ string) error {
+				spawns++
+				return nil
+			}
+			t.Cleanup(func() { startNudgePoller = prev })
+
+			if err := dispatchReadyWaitNudges(dir, store, newNudgeEventedFake(), time.Now().UTC()); err != nil {
+				t.Fatalf("dispatchReadyWaitNudges: %v", err)
+			}
+			if spawns != tc.wantSpawn {
+				t.Fatalf("spawns = %d, want %d", spawns, tc.wantSpawn)
+			}
+		})
+	}
+}
+
+// TestDispatchReadyWaitNudges_PlainProviderAlwaysSpawnsRegardlessOfLiveness
+// pins the other half of the contract: a provider with no event capability at
+// all needs the sidecar poller unconditionally, so the dispatcher-liveness
+// probe must never even change that outcome.
+func TestDispatchReadyWaitNudges_PlainProviderAlwaysSpawnsRegardlessOfLiveness(t *testing.T) {
+	setWaitTestFileBeads(t)
+	dir := t.TempDir()
+	store := newWaitPollerFixture(t)
+	stubNudgePollerDispatcherLive(t, true)
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	spawns := 0
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error {
+		spawns++
+		return nil
+	}
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	if err := dispatchReadyWaitNudges(dir, store, sp, time.Now().UTC()); err != nil {
+		t.Fatalf("dispatchReadyWaitNudges: %v", err)
+	}
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1: a non-event-capable provider always needs the sidecar poller", spawns)
+	}
+}
+
 func TestWithdrawQueuedWaitNudges_RemovesQueuedNudge(t *testing.T) {
 	setWaitTestFileBeads(t)
 	dir := t.TempDir()
