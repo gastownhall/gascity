@@ -435,11 +435,11 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	return nil
 }
 
-// handleControlPendingRefusal is the disposition for a control bead that
-// answered ErrControlPending: it stays OPEN and retries unbounded, because the
-// refusal names a drift a human heals (`gc rig add`, restoring a city name, a
-// store coming back) and the open bead IS the handle the heal completes
-// through.
+// handleControlDriftRefusal is the disposition for a control bead that
+// answered ErrControlDriftPending: it stays OPEN and retries unbounded,
+// because the refusal names a drift a human heals (`gc rig add`, restoring a
+// city name, a store coming back) and the open bead IS the handle the heal
+// completes through.
 //
 // Unbounded retry is the right disposition; unbounded SILENCE is not. Pending
 // bypasses the tier system, so before this it produced no budget, no event and
@@ -454,6 +454,21 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 // stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
 // arm in handleControlDispatchError above.
 func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
+		dispatch.PendingControlRefusalRecorded(bead, cause) {
+		// Past the horizon, repeating verbatim: the escalation already fired
+		// (the latch below makes it one-shot) and the count is documented
+		// diagnostics-only, so another record changes nothing observable while
+		// costing a store round-trip plus an event-log row — on every sweep,
+		// forever, because pending retry is deliberately unbounded and the
+		// motivating case is a rig nobody is coming back to re-add. Freeze the
+		// bookkeeping instead. A CHANGED refusal still falls through and
+		// records, so the reason on the bead stays honest, and everything
+		// before the escalation is untouched: the anchor and attempts must
+		// stay truthful right up to the point they decide something.
+		workflowTracef("control-pending-budget bead=%s frozen after escalation (verbatim repeat) err=%v", beadID, cause)
+		return dispatch.MarkQuietControllerRetry(cause)
+	}
 	pending, recordErr := dispatch.RecordPendingControlRetry(
 		graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 	if recordErr != nil {
@@ -490,12 +505,19 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 // semanticControlRetryBudget returns how long the control dispatcher keeps
 // retrying a store refusal before quarantining the control bead.
 //
+// The same window now also bounds drift-pending SILENCE: a pending bead is
+// never quarantined, but once this budget elapses it escalates once on the
+// control.stalled lane and then goes on retrying. One knob, two horizons.
+//
 // GC_CONTROL_SEMANTIC_RETRY_BUDGET overrides the default as a Go duration. It
 // is an incident knob, not a tuning parameter: "0s" restores quarantine-on-
 // first-refusal (the pre-#5020 behavior) to clear a wedged fleet immediately,
 // and a negative value restores unbounded retry if a bad classification ever
-// starts quarantining healthy work. An unparseable value falls back to the
-// default rather than failing the dispatcher.
+// starts quarantining healthy work. A negative value therefore also disables
+// the pending escalation, restoring the unbounded silence the horizon exists
+// to close — acceptable for an incident knob, but it is the cost of reaching
+// for it. An unparseable value falls back to the default rather than failing
+// the dispatcher.
 func semanticControlRetryBudget() time.Duration {
 	raw := strings.TrimSpace(os.Getenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET"))
 	if raw == "" {
@@ -843,7 +865,7 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// reason is recorded on it, and the next sweep completes the work
 			// once the rig is restored via `gc rig add`. Fail loud, not
 			// terminal — the pending budget escalates once if the rig never
-			// comes back (handleControlPendingRefusal). Malformed refs (the
+			// comes back (handleControlDriftRefusal). Malformed refs (the
 			// default arm below) stay hard: no config change can ever make
 			// them resolve, and pending there would be unbounded retry of a
 			// permanent error.
@@ -902,10 +924,15 @@ func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.Ci
 		}
 		loaded = true
 		views, skips, err := openSourceWorkflowStoresWith(cfg, cityPath, "", openStore)
-		if err != nil {
-			loadErr = err
-			return nil, err
-		}
+		// A non-empty skip set is the classification trigger, NOT the
+		// partial-vs-total split. openSourceWorkflowStoresWith reports the same
+		// unopenable configured store two different ways — as a nil error with
+		// skips when a sibling survived, and as the first open error when none
+		// did — and only the skip set is common to both. Keying on it first is
+		// what makes the two arms classify identically; keying on err first
+		// sent the total-failure arm out bare, onto the quarantine path this
+		// wrap exists to close, and neither lister fixture could see it because
+		// both inject a sibling that opens.
 		if len(skips) > 0 {
 			msg := formatSourceWorkflowStoreSkips(skips)
 			workflowTracef("source-workflow stores warning=%q", msg)
@@ -919,9 +946,20 @@ func makeSourceWorkflowStoresListerWithOpenStore(cityPath string, cfg *config.Ci
 			// closes the finalizer AND settles the root, stranding the domain
 			// parent exactly as the removed-rig landmine did. Pending keeps the
 			// finalizer open so the next sweep completes the finalize once the
-			// store returns.
+			// store returns. msg names every skipped store and its error, so the
+			// total-failure arm loses nothing by reporting skips instead of the
+			// first open error it also returns.
 			loadErr = fmt.Errorf("%w: %s", dispatch.ErrControlDriftPending, msg)
 			return nil, loadErr
+		}
+		if err != nil {
+			// Empty skips with an error means no candidate was ever opened:
+			// the "no source workflow stores available" config-shape error.
+			// It stays terminal on purpose — nothing was unopenable, there was
+			// nothing to open, and no store coming back can change that — so
+			// the drift wrap must not reach it.
+			loadErr = err
+			return nil, err
 		}
 		cityName := loadedCityName(cfg, cityPath)
 		stores = make([]dispatch.SourceWorkflowStore, 0, len(views))

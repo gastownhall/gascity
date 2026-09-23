@@ -82,6 +82,22 @@ func RecordPendingControlRetry(store beads.Store, beadID string, cause error, no
 	return recordControlRetry(store, beadID, cause, now, budget, pendingRetryKeys, "pending retry")
 }
 
+// PendingControlRefusalRecorded reports whether bead's pending budget already
+// carries this exact refusal text, so re-recording it would move nothing but
+// the diagnostics-only count.
+//
+// It exists so the caller can skip the write once the escalation latch has
+// fired and the count can no longer change any outcome: pending retry is
+// unbounded by design, so a never-healing drift bead would otherwise write a
+// store round-trip plus an event-log row on every sweep, forever. The
+// comparison mirrors recordControlRetry's own repeat check — same truncation,
+// same trim on both sides — so a refusal longer than
+// maxControllerRetryErrorMetadata is judged the same way a short one is, rather
+// than never matching and re-writing every sweep.
+func PendingControlRefusalRecorded(bead beads.Bead, cause error) bool {
+	return strings.TrimSpace(bead.Metadata[pendingRetryKeys.reason]) == truncateControllerRetryReason(cause)
+}
+
 // controlRetryKeys names one disposition's bead-persisted retry budget.
 type controlRetryKeys struct {
 	reason    string

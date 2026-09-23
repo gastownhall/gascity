@@ -4621,14 +4621,24 @@ func TestProcessWorkflowFinalizeFailOutcomeInheritsPendingResolver(t *testing.T)
 	f := newSourceChainFinalizeFixtureWithOutcome(t, "fail")
 	resolver := func(ref string) (beads.Store, error) {
 		if ref == "rig:test" {
-			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlPending, "test")
+			// The drift SUBCLASS, matching what the cmd-layer resolver actually
+			// returns for a removed rig — annotateSourceBeadFailure forwards
+			// with %w, so this is the live FAIL+missing-rig shape and not a
+			// stand-in.
+			return nil, fmt.Errorf("%w: rig %q not found in city config", ErrControlDriftPending, "test")
 		}
 		return f.resolver(ref)
 	}
 
 	_, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: resolver})
-	if !errors.Is(err, ErrControlPending) {
-		t.Fatalf("ProcessControl error = %v, want ErrControlPending on the FAIL arm too", err)
+	// Assert the subclass, not just the parent. The cmd layer keys the loudness
+	// horizon on ErrControlDriftPending, so a rewrap along the FAIL path that
+	// preserved only ErrControlPending would keep this retryable while silently
+	// dropping its escalation — retrying forever in silence. The PASS/skip path
+	// already pins exactly this; the FAIL path is the arm that reaches the
+	// resolver through annotateSourceBeadFailure instead.
+	if !errors.Is(err, ErrControlDriftPending) {
+		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending on the FAIL arm too", err)
 	}
 	finalizer := mustGetBead(t, f.rigStore, f.finalizer.ID)
 	if finalizer.Status != "open" {

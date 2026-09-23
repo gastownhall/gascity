@@ -242,13 +242,19 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
-	// ControlStalled fires once, when a control bead's bounded semantic-refusal
-	// retry budget expires and the control dispatcher quarantines it. Before
-	// this event the control plane had no control.* vocabulary at all, so a
-	// city whose dispatcher spent 95% of its throughput re-asking a question
-	// the store had already refused was, by construction, invisible on the
-	// event bus: no event, no metric, every health surface green. It is
-	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// ControlStalled fires once per disposition whose bounded retry budget
+	// expires: a semantic refusal the control dispatcher then QUARANTINES
+	// (error_class "semantic"), or a drift-pending wait whose loudness horizon
+	// elapsed (error_class "pending"). The two are not interchangeable — a
+	// quarantined bead is CLOSED and its order is dead, while a pending one
+	// stays OPEN and keeps retrying, and completes the moment a human heals the
+	// drift. Only the quarantine emits the paired order.failed; treating a
+	// pending stall as terminal misreads a healable wait as a dead workflow.
+	// Before this event the control plane had no control.* vocabulary at all,
+	// so a city whose dispatcher spent 95% of its throughput re-asking a
+	// question the store had already refused was, by construction, invisible on
+	// the event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the expiry, not level-triggered on the retry — one
 	// emission per stalled bead under the intended single-control-dispatcher-
 	// per-city topology, never one per attempt. Control beads carry no
 	// claim/lease, so a misconfigured second dispatcher over the same store
