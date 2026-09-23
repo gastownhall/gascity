@@ -4074,7 +4074,7 @@ type rigStoreOpener func(rigPath, cityPath string) (beads.Store, error)
 // config itself, exactly like openStoreAtForCity.
 func oneShotRigStoreOpener(cfg *config.City) rigStoreOpener {
 	return func(rigPath, cityPath string) (beads.Store, error) {
-		return openStoreAtForCityWithConfig(rigPath, cityPath, cfg)
+		return openOneShotStoreAtForCityWithConfig(rigPath, cityPath, cfg)
 	}
 }
 

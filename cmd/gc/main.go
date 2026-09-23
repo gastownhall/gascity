@@ -1481,7 +1481,7 @@ func openCityStoreAt(cityPath string) (beads.Store, error) {
 // instead of reloading city.toml and every pack include. A nil cfg loads, like
 // openCityStoreAt. Long-lived callers must keep openCityStoreAt.
 func openCityStoreAtWithConfig(cityPath string, cfg *config.City) (beads.Store, error) {
-	return openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+	return openOneShotStoreAtForCityWithConfig(cityPath, cityPath, cfg)
 }
 
 func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
@@ -1608,6 +1608,29 @@ func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverr
 // project pool; every other open is a one-shot CLI open and takes the
 // single-connection cap from nativeDoltOneShotOpenEnvForScope.
 func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived bool) (beads.StoreOpenResult, error) {
+	return openStoreResultAtForCityScoped(storePath, cityPath, cfg, modeOverride, haveMode, authoritative, longLived, false)
+}
+
+// openOneShotStoreAtForCityWithConfig is openStoreAtForCityWithConfig for a
+// one-shot CLI invocation whose cfg it loaded itself moments ago. On top of
+// the shared path's reuse it also skips the bd provider's city-scope reload
+// (issue prefix, store options): that reload stays on the shared path because
+// long-lived callers (the order dispatcher from the controller tick and the
+// API webhook handler) pass a cfg that can be stale, or an empty stand-in.
+// Nothing enforces that cfg is fresh; the one-shot entry points
+// (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
+func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
+// openStoreResultAtForCityScoped is the shared open body. oneShotConfig
+// reports that cfg is this one-shot invocation's own fresh load, which lets
+// the bd city-scope open reuse it; see openOneShotStoreAtForCityWithConfig.
+func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, longLived, oneShotConfig bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1654,6 +1677,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 		OpenBdStore: func() (beads.Store, error) {
 			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
 				return nil, err
+			}
+			if oneShotConfig {
+				return openOneShotBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
 			}
 			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
 		},
@@ -1789,11 +1815,29 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 }
 
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
-// A caller that already holds this city's config passes it to avoid reloading
-// it; a nil config is loaded here.
+// A rig scope reuses a supplied cfg (a nil config is loaded here). The city
+// scope always reloads config from disk for the issue prefix and store
+// options: this is the shared open path, and long-lived callers (order
+// dispatch, API) can hand it a stale or empty cfg. One-shot callers go through
+// openOneShotBdStoreAtWithConfig instead.
 func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, false)
+}
+
+// openOneShotBdStoreAtWithConfig is openBdStoreAtWithConfig for a one-shot
+// invocation's fresh cfg: the city scope reuses it instead of reloading.
+func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	return openBdStoreAtScoped(storePath, cityPath, cfg, true)
+}
+
+func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
+		var store *beads.BdStore
+		if oneShotConfig {
+			store = bdStoreForCityWithConfig(storePath, cityPath, cfg)
+		} else {
+			store = bdStoreForCity(storePath, cityPath)
+		}
 		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
 			return optimized, nil
 		}

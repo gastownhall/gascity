@@ -272,9 +272,19 @@ func scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot string) bool {
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		cfg = nil
+	return bdStoreForCityWithConfig(dir, cityPath, nil)
+}
+
+// bdStoreForCityWithConfig is bdStoreForCity for a caller that already holds
+// this city's config: the issue prefix and store options are read from cfg
+// instead of reloading city.toml and every pack include. A nil cfg is loaded
+// here (a failed load leaves it nil, as bdStoreForCity always has).
+func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err == nil {
+			cfg = loaded
+		}
 	}
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
