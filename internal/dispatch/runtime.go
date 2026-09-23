@@ -135,6 +135,24 @@ const workflowFailedReason = "workflow_failed"
 // should be retried later.
 var ErrControlPending = errors.New("workflow control pending")
 
+// ErrControlDriftPending is the subset of ErrControlPending that no progress
+// inside the graph can ever clear: the control bead is waiting on an
+// out-of-band repair — a rig re-added to city.toml, a city name restored, a
+// store that comes back.
+//
+// The split is load-bearing at the cmd layer. Ordinary pending — a retry
+// waiting for its subject, a drain waiting for its members, a scope waiting for
+// its body — is the engine's routine "not yet". It clears on its own, it is the
+// highest-frequency return in the control plane, and it must stay a zero-write,
+// zero-event path: billing it for a persisted budget would add a store
+// round-trip per bead per sweep, and escalating it would raise control.stalled
+// on every workflow that merely takes longer than the budget window to finish.
+//
+// Drift pending clears only when a human acts. That makes it the one pending
+// shape that can wait forever while every health metric stays green, so it is
+// the one that earns a persisted budget and a one-shot stall escalation.
+var ErrControlDriftPending = fmt.Errorf("%w: awaiting config repair", ErrControlPending)
+
 // ErrControlGraphMalformed reports that a control bead refers to graph state
 // that cannot become valid by waiting.
 var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
@@ -980,7 +998,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	switch outcome {
 	case beadmeta.OutcomePass:
 		if err := preflightSourceBeadChain(store, rootID, opts); err != nil {
-			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: preflighting source bead chain: %w", rootID, err))
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: preflighting source bead chain: %w", rootID, err))
 		}
 	case beadmeta.OutcomeFail:
 		// Failures leave the domain parent OPEN (a human investigates via the
@@ -1003,7 +1021,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// (propagateSourceBeadTerminalMetadata) so a succeeded parent never
 		// carries the failure it superseded.
 		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead), opts); err != nil {
-			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
 		}
 	}
 	// Close the root BEFORE the finalize bead. If the root close fails and
@@ -1014,17 +1032,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
-				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
+				return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
 			}
 			return ControlResult{Processed: true, Action: "workflow-missing_root"}, nil
 		}
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: completing workflow head: %w", rootID, err))
 	}
 	// Generated spec sidecars are topology records rather than executable
 	// members; preserve their established successful cleanup outcome before the
 	// remaining subtree is skipped.
 	if _, err := sourceworkflow.CloseSpecSidecarsForRoot(store, rootID, sourceworkflow.WorkflowSpecSidecarClosedReason); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing workflow spec sidecars: %w", rootID, err))
 	}
 	// A terminal root makes every still-open generated member non-executable —
 	// except the teardown tail, which is executable precisely because the root
@@ -1034,21 +1052,21 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// progression.
 	excludeTeardown, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: resolving teardown members: %w", rootID, err))
 	}
 	if _, err := molecule.CloseSubtreeWithMetadataExcept(store, rootID, map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
 	}, excludeTeardown); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
 		if err := closeSourceBeadChain(store, rootID, opts); err != nil {
-			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing source bead chain: %w", rootID, err))
 		}
 	}
-	if err := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass); err != nil {
-		return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err))
+	if err := updateMetadataAndClose(store, bead.ID, finalizerCompletionMetadata(bead)); err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: completing workflow finalizer: %w", bead.ID, err))
 	}
 
 	// Purge the molecule-scoped artifact tree now that the workflow has
@@ -1442,7 +1460,16 @@ func propagateSourceBeadTerminalMetadata(store beads.Store, target beads.Bead, m
 	return store.SetMetadataBatch(target.ID, batch)
 }
 
-func recordWorkflowFinalizeError(store beads.Store, finalizerID string, err error) error {
+// recordWorkflowFinalizeError stamps the finalize failure on the finalizer bead
+// and returns err for the caller to propagate.
+//
+// The stamp is skipped when it would rewrite the value already on the bead. A
+// pending finalize (a removed rig, a store that will not open) re-reports the
+// same reason on every sweep for as long as the drift lasts, and the write is
+// not free: it is a store round-trip plus an event-log row per sweep, on the
+// bead whose retry cadence the pending disposition deliberately keeps at the
+// serve loop's floor until it goes quiet.
+func recordWorkflowFinalizeError(store beads.Store, finalizer beads.Bead, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -1450,10 +1477,44 @@ func recordWorkflowFinalizeError(store beads.Store, finalizerID string, err erro
 	if len(reason) > maxWorkflowFinalizeErrorMetadata {
 		reason = truncateWorkflowFinalizeErrorMetadata(reason)
 	}
-	if setErr := store.SetMetadata(finalizerID, workflowFinalizeErrorMetadataKey, reason); setErr != nil {
-		return errors.Join(err, fmt.Errorf("recording workflow finalize error on %s: %w", finalizerID, setErr))
+	if strings.TrimSpace(finalizer.Metadata[workflowFinalizeErrorMetadataKey]) == reason {
+		return err
+	}
+	if setErr := store.SetMetadata(finalizer.ID, workflowFinalizeErrorMetadataKey, reason); setErr != nil {
+		return errors.Join(err, fmt.Errorf("recording workflow finalize error on %s: %w", finalizer.ID, setErr))
 	}
 	return err
+}
+
+// finalizerCompletionMetadata is the metadata a finalizer carries into its own
+// successful close.
+//
+// Beyond the outcome it drops the failure it recorded on the way here. Nothing
+// cleared that before, so a finalizer that recorded a store error and then
+// succeeded closed gc.outcome=pass while still advertising the error —
+// readable as "this finalize is broken" long after it was not. The pending
+// disposition turns record-then-heal from an edge case into a designed-for
+// lifecycle, and the codebase's own whole-value-stamp principle
+// (propagateSourceBeadTerminalMetadata clears the failure stamps on pass) says
+// a terminal success must not leave the failure it superseded standing beside
+// it. The pending budget rides along for the same reason.
+//
+// Each key is added only when the bead actually carries it, so the ordinary
+// never-failed finalize closes with exactly the one-key update it always did.
+func finalizerCompletionMetadata(finalizer beads.Bead) map[string]string {
+	metadata := map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+	for _, key := range []string{
+		workflowFinalizeErrorMetadataKey,
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
+	} {
+		if strings.TrimSpace(finalizer.Metadata[key]) != "" {
+			metadata[key] = ""
+		}
+	}
+	return metadata
 }
 
 func truncateWorkflowFinalizeErrorMetadata(reason string) string {

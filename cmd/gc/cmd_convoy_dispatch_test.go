@@ -460,6 +460,21 @@ func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *test
 	if !strings.Contains(err.Error(), "source-workflow singleton scan skipped") {
 		t.Fatalf("ProcessControl error = %v, want skipped-store scan error", err)
 	}
+	// Fail-closed is only half the contract. A bare error here classifies
+	// TierNone at the cmd layer — no typed check and no transient needle match
+	// this wrapper — so handleControlDispatchError would quarantine on the first
+	// refusal, closing the finalizer AND settling the root: the same
+	// strand-the-parent shape as a rig removed from city.toml, one door over.
+	// The skip must carry the pending sentinel all the way out through
+	// walkSourceBeadChain's and recordWorkflowFinalizeError's wrappers.
+	// Assert the DRIFT subclass, not just pending. The cmd layer keys the
+	// stall escalation on ErrControlDriftPending, so a rewrap that preserved
+	// only ErrControlPending would keep this store skip retryable while
+	// silently dropping its loudness horizon — retrying forever in silence,
+	// which is the half of the failure the escalation exists to close.
+	if !errors.Is(err, dispatch.ErrControlDriftPending) {
+		t.Fatalf("ProcessControl error = %v, want errors.Is(err, dispatch.ErrControlDriftPending) so the cmd layer retries with a horizon instead of quarantining", err)
+	}
 
 	workflowAfter, err := rigStore.Get(workflow.ID)
 	if err != nil {
@@ -495,6 +510,192 @@ func TestWorkflowFinalizeRetriesWhenSourceWorkflowStoreScanSkipsLiveRoot(t *test
 	}
 	if hiddenRootAfter.Status == "closed" {
 		t.Fatal("hidden root status = closed; want unchanged")
+	}
+}
+
+// TestSourceWorkflowStoresListerSkipIsPendingNotTerminal pins the
+// classification directly at the lister, where the wrap is made. Keeping it
+// fail-closed is deliberate and load-bearing — the lister's doc comment records
+// that tolerating a skip produces a destructive false "no live roots" — so the
+// only thing that changes is terminal→pending.
+func TestSourceWorkflowStoresListerSkipIsPendingNotTerminal(t *testing.T) {
+	cityPath := "/city"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "rigs/alpha"},
+			{Name: "broken", Path: "rigs/broken"},
+		},
+	}
+	openStore := func(dir string) (beads.Store, error) {
+		if filepath.Base(dir) == "broken" {
+			return nil, fmt.Errorf("no such file or directory")
+		}
+		return beads.NewMemStore(), nil
+	}
+
+	_, err := makeSourceWorkflowStoresListerWithOpenStore(cityPath, cfg, openStore)()
+	if err == nil {
+		t.Fatal("lister err = nil; want the skip surfaced, not tolerated")
+	}
+	if !errors.Is(err, dispatch.ErrControlDriftPending) {
+		t.Fatalf("lister error = %v, want errors.Is(err, dispatch.ErrControlDriftPending)", err)
+	}
+	if !strings.Contains(err.Error(), "rigs/broken") {
+		t.Fatalf("lister error = %v, want it to still name the skipped store", err)
+	}
+}
+
+// newPendingControlBead builds a minimal control bead for the pending
+// disposition tests: one that answers ErrControlPending the moment it is
+// dispatched, because its rig left city.toml.
+func newPendingControlBead(t *testing.T) (beads.Store, string, string) {
+	t.Helper()
+	store := beads.NewMemStore()
+	workflowID, finalizerID := finalizeStoreRefFixture(t, store, "rig:ghostrig")
+	return store, workflowID, finalizerID
+}
+
+// TestPendingControlRefusal_EscalatesOnceAndStaysOpen is the loudness horizon.
+//
+// Pending bypasses the tier system entirely, so before this a decommissioned
+// rig produced no budget, no event and nothing for a reconciler to find: the
+// workflow read as "in-flight" forever, distinguishable from healthy only by a
+// `bd show` nobody runs. Unbounded retry is the right disposition — the open
+// bead IS the handle the heal completes through — but unbounded silence is the
+// defect. The bead must escalate exactly once and go on retrying.
+func TestPendingControlRefusal_EscalatesOnceAndStaysOpen(t *testing.T) {
+	clearGCEnv(t)
+	// Escalate on the first refusal so the test does not wait out a budget.
+	t.Setenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET", "0s")
+
+	store, workflowID, finalizerID := newPendingControlBead(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cityPath := t.TempDir()
+
+	var first bytes.Buffer
+	err := runControlDispatcherWithStoreAndConfig(cityPath, t.TempDir(), store, finalizerID, cfg, io.Discard, &first)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("first dispatch error = %v, want ErrControlPending", err)
+	}
+	if got := first.String(); !strings.Contains(got, "control dispatch: pending stalled bead="+finalizerID) {
+		t.Fatalf("stderr = %q, want the one-shot pending stall escalation", got)
+	}
+	if got := first.String(); strings.Contains(got, "control dispatch: quarantined bead="+finalizerID) {
+		t.Fatalf("stderr = %q, want NO quarantine — escalation must not close the bead", got)
+	}
+
+	stalled, err := store.Get(finalizerID)
+	if err != nil {
+		t.Fatalf("get finalizer: %v", err)
+	}
+	if stalled.Status != "open" {
+		t.Fatalf("finalizer status = %q, want open after escalation", stalled.Status)
+	}
+	if got := stalled.Metadata[beadmeta.ControlPendingStalledMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q, want \"true\"", beadmeta.ControlPendingStalledMetadataKey, got)
+	}
+	if got := stalled.Metadata[beadmeta.ControlPendingReasonMetadataKey]; !strings.Contains(got, `rig "ghostrig" not found`) {
+		t.Fatalf("%s = %q, want the pending reason recorded for bd show", beadmeta.ControlPendingReasonMetadataKey, got)
+	}
+	if got := stalled.Metadata[beadmeta.ControlPendingFirstSeenMetadataKey]; got == "" {
+		t.Fatalf("%s is empty, want the deadline anchor persisted", beadmeta.ControlPendingFirstSeenMetadataKey)
+	}
+	if root, err := store.Get(workflowID); err != nil || root.Status != "open" {
+		t.Fatalf("root status = %v (err %v), want open", root.Status, err)
+	}
+
+	// Every later sweep keeps retrying and stays quiet: the escalation is a
+	// horizon, not a per-sweep alarm.
+	var second bytes.Buffer
+	err = runControlDispatcherWithStoreAndConfig(cityPath, t.TempDir(), store, finalizerID, cfg, io.Discard, &second)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("second dispatch error = %v, want ErrControlPending (retry stays unbounded)", err)
+	}
+	if got := second.String(); strings.Contains(got, "pending stalled bead=") {
+		t.Fatalf("stderr = %q, want the escalation latched after the first emission", got)
+	}
+	if !dispatch.IsQuietControllerRetry(err) {
+		t.Fatal("second identical pending refusal was not marked quiet; it would hold the serve loop at its 1s floor forever")
+	}
+}
+
+// TestRoutineControlPending_IsNotBudgetedOrEscalated is the scope guard on the
+// pending budget.
+//
+// ErrControlPending is the engine's routine "not yet": ~30 sites return it for
+// a retry waiting on its subject, a drain waiting on its members, a scope
+// waiting on its body. Those clear on their own, and this is the
+// highest-frequency return in the control plane. Budgeting all of them would
+// add a store read plus a metadata write per bead per sweep, and escalating
+// them would raise control.stalled on every workflow that simply runs longer
+// than the budget window — turning the stall signal into noise precisely where
+// it needs to mean something. Only the drift class, which no graph progress can
+// ever clear, is budgeted.
+func TestRoutineControlPending_IsNotBudgetedOrEscalated(t *testing.T) {
+	clearGCEnv(t)
+	// Escalate on the first refusal if this bead were budgeted at all.
+	t.Setenv("GC_CONTROL_SEMANTIC_RETRY_BUDGET", "0s")
+
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "Finalize workflow",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflowFinalize},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+	routine := fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, dispatch.ErrControlPending)
+
+	var stderr bytes.Buffer
+	got := handleControlDispatchError(t.TempDir(), t.TempDir(), store, bead, bead.ID, routine, &stderr)
+	if !errors.Is(got, dispatch.ErrControlPending) {
+		t.Fatalf("handleControlDispatchError = %v, want the pending cause returned unchanged", got)
+	}
+	if dispatch.IsQuietControllerRetry(got) {
+		t.Fatal("routine pending was marked quiet; only a recorded repeat may be")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want silence for routine pending", stderr.String())
+	}
+
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	for _, key := range []string{
+		beadmeta.ControlPendingReasonMetadataKey,
+		beadmeta.ControlPendingCountMetadataKey,
+		beadmeta.ControlPendingFirstSeenMetadataKey,
+		beadmeta.ControlPendingStalledMetadataKey,
+		beadmeta.ControllerRetryFirstSeenMetadataKey,
+	} {
+		if v := after.Metadata[key]; v != "" {
+			t.Fatalf("%s = %q after a routine pending sweep, want empty (no write on the hot path)", key, v)
+		}
+	}
+}
+
+// TestPendingControlRefusal_FirstRefusalIsNotQuiet keeps the quiet marking from
+// swallowing the first report of a new problem: the sweep that discovers a
+// pending refusal must still count as activity so the serve loop reacts to it.
+func TestPendingControlRefusal_FirstRefusalIsNotQuiet(t *testing.T) {
+	clearGCEnv(t)
+
+	store, _, finalizerID := newPendingControlBead(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+	var stderr bytes.Buffer
+	err := runControlDispatcherWithStoreAndConfig(t.TempDir(), t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("dispatch error = %v, want ErrControlPending", err)
+	}
+	if dispatch.IsQuietControllerRetry(err) {
+		t.Fatal("first pending refusal was marked quiet; a newly-stuck bead must wake the dispatcher")
+	}
+	if got := stderr.String(); strings.Contains(got, "pending stalled bead=") {
+		t.Fatalf("stderr = %q, want no escalation inside the default budget", got)
 	}
 }
 

@@ -83,12 +83,31 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
-	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
-	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
-	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
-	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
-	ControllerErrorMetadataKey           = "gc.controller_error"
-	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControlPendingReasonMetadataKey records the latest ErrControlPending
+	// refusal text for a control bead. Pending keeps its own namespace rather
+	// than reusing the gc.controller_* keys: the two dispositions have
+	// independent budgets, and sharing one deadline anchor would let a long
+	// pending wait expire a later semantic refusal's budget on its FIRST
+	// refusal — quarantining the bead the pending disposition exists to keep
+	// open.
+	ControlPendingReasonMetadataKey = "gc.control_pending_reason"
+	// ControlPendingCountMetadataKey counts pending sweeps recorded for a
+	// control bead. Diagnostics only, like its Tier-B counterpart.
+	ControlPendingCountMetadataKey = "gc.control_pending_count"
+	// ControlPendingFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// pending refusal recorded for a control bead. Pending retry stays
+	// unbounded; this anchor bounds only how long it stays SILENT.
+	ControlPendingFirstSeenMetadataKey = "gc.control_pending_first_seen"
+	// ControlPendingStalledMetadataKey marks that the one-shot control.stalled
+	// escalation has already been emitted for this bead's pending wait, so a
+	// never-healing pending is loud once rather than every sweep.
+	ControlPendingStalledMetadataKey   = "gc.control_pending_stalled"
+	ControlQuarantineReasonMetadataKey = "gc.control_quarantine_reason"
+	ControlQuarantinedAtMetadataKey    = "gc.control_quarantined_at"
+	ControlQuarantinedMetadataKey      = "gc.control_quarantined"
+	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
+	ControllerErrorMetadataKey         = "gc.controller_error"
+	ControllerRetryableMetadataKey     = "gc.controller_retryable"
 	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
 	// semantic-refusal retry recorded for a control bead. It is the persisted
 	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
@@ -454,6 +473,10 @@ var KnownMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlPendingReasonMetadataKey,
+	ControlPendingCountMetadataKey,
+	ControlPendingFirstSeenMetadataKey,
+	ControlPendingStalledMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,

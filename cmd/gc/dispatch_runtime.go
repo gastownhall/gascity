@@ -470,6 +470,19 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
+					// Same rule as the transient arm below: a pending bead
+					// repeating its previous refusal verbatim is still retried
+					// every sweep, but it must not count as activity. Pending
+					// waits on config/state drift a human heals, so it can last
+					// days — and a bead that resets idleSweeps on every one of
+					// them holds the whole serve loop at its 1s floor for the
+					// duration, re-running a full dispatch (config load, store
+					// open, outcome read, source-chain preflight) five times per
+					// idle-cap interval to re-learn the same answer.
+					if dispatch.IsQuietControllerRetry(err) {
+						workflowTracef("serve pending-quiet bead=%s kind=%s", beadID, kind)
+						continue
+					}
 					result.pendingAny = true
 					workflowTracef("serve pending bead=%s kind=%s", beadID, kind)
 					continue
