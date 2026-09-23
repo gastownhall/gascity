@@ -701,6 +701,120 @@ func TestNudgeEventDispatcherSweepHandsOffInsteadOfDelivering(t *testing.T) {
 	}
 }
 
+// TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel is the
+// regression test for the two guards added alongside the wedged-sweep fix:
+// worker()'s `ctx.Err() != nil` check and runPass's `d.parent.Err() != nil`
+// check in the sweep's per-session fan-out loop. Without them, a sweep
+// racing shutdown could keep spawning fresh per-session passes against a
+// city whose stores are mid-teardown, because spawnPass hands each session
+// to its own goroutine and returns immediately rather than blocking the
+// sweep on a wedged delivery.
+//
+// This drives both guards through their real callers: kickAll before cancel
+// exercises the normal path, and kickAll after cancel exercises the guarded
+// one. A second, distinct session is queued only after cancellation, so any
+// spawn for it can only have come from a sweep that ran (or kept running)
+// past the cancel.
+func TestNudgeEventDispatcherSweepStopsSpawningAfterParentCancel(t *testing.T) {
+	fake := newNudgeEventedFake()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+
+	createSession := func(template string) session.Info {
+		info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: template, Title: template, Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("CreateSession(%s): %v", template, err)
+		}
+		if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+			t.Fatalf("Start(%s): %v", template, err)
+		}
+		return info
+	}
+	wedgedInfo := createSession("wedged")
+	laterInfo := createSession("later")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newNudgeEventDispatcher(ctx, dir, testWriter(t), "test", testNudgeDispatchStores(dir))
+	d.quiescence = 150 * time.Millisecond
+	d.retryEpsilon = 30 * time.Millisecond
+	seen := newPasses()
+	d.observePasses(seen.record)
+	d.update(fake, &config.City{}, true)
+	workerDone := d.workerDone
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-workerDone:
+		case <-time.After(3 * time.Second):
+			t.Log("dispatcher worker did not stop within 3s")
+		}
+	})
+	seen.next(t, "the subscription's leading resync pass")
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseWedged := func() { releaseOnce.Do(func() { close(release) }) }
+	entered := fake.holdNudge(wedgedInfo.SessionName, release)
+	t.Cleanup(releaseWedged)
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("wedged", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge(wedged): %v", err)
+	}
+	fake.setBusy(wedgedInfo.SessionName, false)
+	fake.setStamp(wedgedInfo.SessionName, time.Now().Add(-time.Minute))
+
+	d.kickAll()
+	if filter := seen.next(t, "the enumerating sweep"); filter != "" {
+		t.Fatalf("sweep ran with filter %q, want the enumerating sweep", filter)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no delivery reached Nudge within 10s; wedged session was never handed off")
+	}
+
+	// The wedged delivery's goroutine is now stuck inside Nudge, holding
+	// d.inflight[wedged]. Cancel the parent as shutdown would, then queue a
+	// second, distinct session's nudge only now, so it could only be picked
+	// up by a sweep that runs (or keeps running) after cancellation.
+	cancel()
+
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("later", "wait satisfied: proceed", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge(later): %v", err)
+	}
+	fake.setBusy(laterInfo.SessionName, false)
+	fake.setStamp(laterInfo.SessionName, time.Now().Add(-time.Minute))
+
+	// Simulate a sweep that was already in flight when cancellation landed
+	// (or a straggler racing it) by driving runPass directly, the way
+	// worker() would have.
+	d.runPass("", 0)
+
+	select {
+	case got := <-seen.ch:
+		t.Fatalf("a sweep ran after parent cancellation (filter %q); the post-cancel session must never be spawned", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Release the still-wedged pre-cancel delivery and wait for it to
+	// actually complete (its own pass() call reports through seen), so the
+	// final counts reflect only genuine deliveries, not an in-flight one.
+	releaseWedged()
+	if filter := seen.next(t, "the wedged session's own delivery pass"); filter != wedgedInfo.SessionName {
+		t.Fatalf("completed pass had filter %q, want %q", filter, wedgedInfo.SessionName)
+	}
+
+	if n := countFakeCalls(fake, "Nudge"); n != 1 {
+		t.Fatalf("Nudge calls = %d, want 1 (only the pre-cancel wedged session); a post-cancel sweep spawned new delivery work", n)
+	}
+	state := queueStateSnapshot(t, dir)
+	if len(state.Pending) == 0 {
+		t.Fatal("the post-cancel nudge for 'later' was consumed by a sweep that should have refused to run after cancellation")
+	}
+}
+
 // A second kick for a session whose pass is already running is deferred
 // rather than run concurrently, so a burst of idle events for one session
 // cannot pile up goroutines; spawnPass re-arms the deferred kick once the

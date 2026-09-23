@@ -1327,9 +1327,15 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		// BuiltinAncestor at session-bead creation, so wrapped aliases
 		// already surface as their built-in family here. The provider
 		// fallback covers sessions created before provider_kind was stamped.
-		// Event-capable session providers retire the sidecar class: the
-		// supervisor's nudge event dispatcher owns queued delivery there.
-		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && !providerRetiresNudgePollers(nudgeTarget{sessionName: sessionInfo.SessionNameMetadata}, sp) {
+		// Event-capable session providers retire the sidecar class, but only
+		// while something is actually hosting the replacement: the
+		// controller-hosted nudge event dispatcher. Mirrors
+		// maybeStartNudgePoller's fail-open contract (cmd_nudge.go) — with no
+		// controller answering, nothing owns delivery, so suppress the sidecar
+		// only when a dispatcher is confirmed live, never on provider
+		// capability alone.
+		waitTarget := nudgeTarget{cityPath: cityPath, sessionName: sessionInfo.SessionNameMetadata}
+		if waitNudgeProviderNeedsPoller(sessionInfo) && !nudgeDispatcherIsSupervisor(cfg) && (!providerRetiresNudgePollers(waitTarget, sp) || !nudgePollerDispatcherIsLive(cityPath)) {
 			if err := startNudgePoller(cityPath, waitNudgePollerKey(sessionInfo), sessionInfo.SessionNameMetadata); err != nil {
 				return fmt.Errorf("starting wait nudge poller: %w", err)
 			}
