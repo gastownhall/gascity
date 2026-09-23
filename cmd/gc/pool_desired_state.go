@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -522,6 +523,7 @@ func computePoolDesiredStatesAt(
 		protectedNewRequests[req.Template] = candidates[1:]
 	}
 	usage := acceptedNestedCapUsage(limits, resumeRequests)
+	floorReservations := newNestedCapFloorReservations(cfg, aliasHeldTemplates, limits, usage)
 	allRequests := append([]SessionRequest(nil), resumeRequests...)
 
 	// Merge scale_check demand. In bead-backed reconciliation, scale_check is
@@ -567,7 +569,7 @@ func computePoolDesiredStatesAt(
 			}
 		}
 		effectiveDemand := max(scaleCount, len(protected), inFlightFloor)
-		newCount := capNewDemandCount(limits, usage, agent, effectiveDemand)
+		newCount := capNewDemandCount(limits, usage, floorReservations, agent, effectiveDemand)
 		recordNewDemandCapTrace(trace, template, agent, limits, usage, effectiveDemand, newCount)
 		protectedCount := minInt(len(protected), newCount)
 		inFlightCount := minInt(len(inFlight), newCount-protectedCount)
@@ -908,7 +910,9 @@ func poolSessionConsumesNewDemandInfo(info sessionpkg.Info) bool {
 }
 
 // applyNestedCaps enforces workspace, rig, and agent max_active_sessions caps.
-// Accepts requests in priority order, rejecting any that would exceed a cap.
+// Agent floors reserve capacity before remaining demand competes by priority.
+// When floors exceed a cap, qualified template name order decides which floor
+// receives the scarce capacity; rejected floor traces identify the loser.
 func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTemplates map[string]struct{}, trace *sessionReconcilerTraceCycle) []PoolDesiredState {
 	// Sort by priority DESC, resume tier first within same priority.
 	sort.SliceStable(requests, func(i, j int) bool {
@@ -924,11 +928,14 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 
 	limits := newNestedCapLimits(cfg)
 	usage := newNestedCapUsage()
-
-	// Walk sorted requests, accepting each if all caps have room.
 	accepted := make(map[string][]SessionRequest) // template → accepted requests
+	floorConsumed := reserveNestedCapFloors(cfg, requests, aliasHeldTemplates, limits, &usage, accepted, trace)
 
-	for _, req := range requests {
+	// Walk demand not already used by a floor, accepting by priority.
+	for i, req := range requests {
+		if floorConsumed[i] {
+			continue
+		}
 		template := req.Template
 		if usage.isDuplicateSessionRequest(req) {
 			continue
@@ -950,38 +957,6 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		usage.accept(req, limits)
 	}
 
-	// Fill agent mins (if caps allow).
-	for i := range cfg.Agents {
-		agent := &cfg.Agents[i]
-		if agent.Suspended {
-			continue
-		}
-		template := agent.QualifiedName()
-		minSess := agent.EffectiveMinActiveSessions()
-		if _, ok := aliasHeldTemplates[template]; ok {
-			continue
-		}
-		for usage.agentCount[template] < minSess {
-			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				FloorGuarantee: true,
-			}
-			if _, _, _, rejected := usage.rejection(req, limits); rejected {
-				break
-			}
-			accepted[template] = append(accepted[template], req)
-			if trace != nil {
-				trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, template, "", traceRecordPayload{
-					"min":     minSess,
-					"current": usage.agentCount[template],
-					"tier":    "new",
-				})
-			}
-			usage.accept(req, limits)
-		}
-	}
-
 	// Build output.
 	var result []PoolDesiredState
 	for template, reqs := range accepted {
@@ -995,6 +970,90 @@ func applyNestedCaps(cfg *config.City, requests []SessionRequest, aliasHeldTempl
 		return result[i].Template < result[j].Template
 	})
 	return result
+}
+
+type nestedCapFloor struct {
+	template string
+	minimum  int
+}
+
+func reserveNestedCapFloors(
+	cfg *config.City,
+	requests []SessionRequest,
+	aliasHeldTemplates map[string]struct{},
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	trace *sessionReconcilerTraceCycle,
+) []bool {
+	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		template := agent.QualifiedName()
+		if agent.Suspended || agent.EffectiveMinActiveSessions() == 0 {
+			continue
+		}
+		if _, held := aliasHeldTemplates[template]; held {
+			continue
+		}
+		floors = append(floors, nestedCapFloor{template: template, minimum: agent.EffectiveMinActiveSessions()})
+	}
+	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
+
+	consumed := make([]bool, len(requests))
+	for _, floor := range floors {
+		for i, request := range requests {
+			if usage.agentCount[floor.template] >= floor.minimum {
+				break
+			}
+			if request.Template != floor.template || consumed[i] {
+				continue
+			}
+			consumed[i] = true
+			request.FloorGuarantee = request.Tier == "new"
+			if !acceptNestedCapFloor(request, floor, limits, usage, accepted, trace) {
+				break
+			}
+		}
+		for usage.agentCount[floor.template] < floor.minimum {
+			request := SessionRequest{Template: floor.template, Tier: "new", FloorGuarantee: true}
+			if !acceptNestedCapFloor(request, floor, limits, usage, accepted, trace) {
+				break
+			}
+		}
+	}
+	return consumed
+}
+
+func acceptNestedCapFloor(
+	request SessionRequest,
+	floor nestedCapFloor,
+	limits nestedCapLimits,
+	usage *nestedCapUsage,
+	accepted map[string][]SessionRequest,
+	trace *sessionReconcilerTraceCycle,
+) bool {
+	if usage.isDuplicateSessionRequest(request) {
+		return true
+	}
+	if site, reason, payload, rejected := usage.rejection(request, limits); rejected {
+		if trace != nil {
+			payload["floor_template"] = floor.template
+			payload["floor_min"] = floor.minimum
+			trace.RecordDecision(site, reason, TraceOutcomeRejected, floor.template, "", payload)
+		}
+		return false
+	}
+	accepted[floor.template] = append(accepted[floor.template], request)
+	if trace != nil {
+		trace.RecordDecision(TraceSitePoolMinFill, TraceReasonMinFill, TraceOutcomeAccepted, floor.template, "", traceRecordPayload{
+			"min":     floor.minimum,
+			"current": usage.agentCount[floor.template],
+			"tier":    request.Tier,
+		})
+	}
+	usage.accept(request, limits)
+	return true
 }
 
 type nestedCapLimits struct {
@@ -1011,6 +1070,8 @@ type nestedCapUsage struct {
 	seenSessionBead map[string]bool
 	requests        []SessionRequest
 }
+
+type nestedCapFloorReservations map[string]int
 
 func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	limits := nestedCapLimits{
@@ -1032,7 +1093,7 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		template := agent.QualifiedName()
-		limits.agentRig[template] = agent.Dir
+		limits.agentRig[template] = nestedCapAgentRigName(agent, cfg.Rigs)
 		resolved := agent.ResolvedMaxActiveSessions(cfg)
 		if resolved != nil {
 			limits.agentMax[template] = *resolved
@@ -1041,6 +1102,25 @@ func newNestedCapLimits(cfg *config.City) nestedCapLimits {
 		}
 	}
 	return limits
+}
+
+func nestedCapAgentRigName(agent *config.Agent, rigs []config.Rig) string {
+	if rigName := agentRigScopeName(agent, rigs); rigName != "" {
+		return rigName
+	}
+	if agent == nil || strings.TrimSpace(agent.Scope) == "city" {
+		return ""
+	}
+	agentDir := filepath.Clean(strings.TrimSpace(agent.Dir))
+	if agentDir == "." {
+		return ""
+	}
+	for _, rig := range rigs {
+		if rig.Path != "" && filepath.Clean(rig.Path) == agentDir {
+			return rig.Name
+		}
+	}
+	return ""
 }
 
 func newNestedCapUsage() nestedCapUsage {
@@ -1071,7 +1151,57 @@ func acceptedNestedCapUsage(limits nestedCapLimits, requests []SessionRequest) n
 	return usage
 }
 
-func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *config.Agent, demand int) int {
+func newNestedCapFloorReservations(
+	cfg *config.City,
+	aliasHeldTemplates map[string]struct{},
+	limits nestedCapLimits,
+	usage nestedCapUsage,
+) nestedCapFloorReservations {
+	reservations := make(nestedCapFloorReservations)
+	floors := make([]nestedCapFloor, 0, len(cfg.Agents))
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		template := agent.QualifiedName()
+		if agent.Suspended {
+			continue
+		}
+		if _, held := aliasHeldTemplates[template]; held {
+			continue
+		}
+		minimum := agent.EffectiveMinActiveSessions()
+		if agentMax := limits.agentMax[template]; agentMax >= 0 {
+			minimum = minInt(minimum, agentMax)
+		}
+		if minimum > usage.agentCount[template] {
+			floors = append(floors, nestedCapFloor{template: template, minimum: minimum})
+		}
+	}
+	sort.Slice(floors, func(i, j int) bool { return floors[i].template < floors[j].template })
+	rigReserved := make(map[string]int)
+	workspaceReserved := 0
+	for _, floor := range floors {
+		grant := floor.minimum - usage.agentCount[floor.template]
+		if rig := limits.agentRig[floor.template]; rig != "" {
+			if rigMax := limits.rigMax[rig]; rigMax >= 0 {
+				grant = minInt(grant, rigMax-usage.rigCount[rig]-rigReserved[rig])
+			}
+		}
+		if limits.workspaceMax >= 0 {
+			grant = minInt(grant, limits.workspaceMax-usage.workspaceCount-workspaceReserved)
+		}
+		if grant <= 0 {
+			continue
+		}
+		reservations[floor.template] = usage.agentCount[floor.template] + grant
+		workspaceReserved += grant
+		if rig := limits.agentRig[floor.template]; rig != "" {
+			rigReserved[rig] += grant
+		}
+	}
+	return reservations
+}
+
+func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, floors nestedCapFloorReservations, agent *config.Agent, demand int) int {
 	if demand <= 0 {
 		return 0
 	}
@@ -1086,16 +1216,31 @@ func capNewDemandCount(limits nestedCapLimits, usage nestedCapUsage, agent *conf
 			rigMax = -1
 		}
 		if rigMax >= 0 {
-			remaining = minInt(remaining, rigMax-usage.rigCount[rig])
+			headroom := rigMax - usage.rigCount[rig] - floors.reservedForOthers(usage, template, rig, limits)
+			remaining = minInt(remaining, headroom)
 		}
 	}
 	if limits.workspaceMax >= 0 {
-		remaining = minInt(remaining, limits.workspaceMax-usage.workspaceCount)
+		headroom := limits.workspaceMax - usage.workspaceCount - floors.reservedForOthers(usage, template, "", limits)
+		remaining = minInt(remaining, headroom)
 	}
 	if remaining < 0 {
 		return 0
 	}
 	return remaining
+}
+
+func (r nestedCapFloorReservations) reservedForOthers(usage nestedCapUsage, template, rig string, limits nestedCapLimits) int {
+	reserved := 0
+	for floorTemplate, minimum := range r {
+		if floorTemplate == template || (rig != "" && limits.agentRig[floorTemplate] != rig) {
+			continue
+		}
+		if unmet := minimum - usage.agentCount[floorTemplate]; unmet > 0 {
+			reserved += unmet
+		}
+	}
+	return reserved
 }
 
 func (u nestedCapUsage) canAccept(req SessionRequest, limits nestedCapLimits) bool {
