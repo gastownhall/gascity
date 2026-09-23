@@ -30,6 +30,7 @@ go_library(
         "@com_github_shirou_gopsutil_v4//load",
         "@com_github_shirou_gopsutil_v4//mem",
         "@com_github_shirou_gopsutil_v4//process",
+        "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
 
@@ -47,6 +48,7 @@ go_test(
         "rundetail_grace_test.go",
         "rundetail_lazy_test.go",
         "rundetail_memo_test.go",
+        "rundetail_retired_sessions_test.go",
         "rundetail_session_push_test.go",
         "rundetail_stream_test.go",
         "rundetailtailer_test.go",
@@ -66,4 +68,16 @@ go_test(
         "@com_github_shirou_gopsutil_v4//load",
         "@com_github_shirou_gopsutil_v4//mem",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

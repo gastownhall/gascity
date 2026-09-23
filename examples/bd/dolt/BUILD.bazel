@@ -1,5 +1,37 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# Non-Go pack files are embedded by the parent //examples/bd package via
+# go:embed; export them so the parent BUILD can reference them as labels.
+exports_files(glob(
+    [
+        "pack.toml",
+        "doctor/**",
+        "commands/**",
+        "formulas/**",
+        "orders/**",
+        "agents/**",
+        "assets/**",
+    ],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "embed_files",
+    srcs = glob(
+        [
+            "pack.toml",
+            "doctor/**",
+            "commands/**",
+            "formulas/**",
+            "orders/**",
+            "agents/**",
+            "assets/**",
+        ],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//examples/bd:__pkg__"],
+)
+
 go_library(
     name = "dolt",
     srcs = ["embed.go"],
@@ -56,6 +88,7 @@ go_library(
         "orders/mol-dog-phantom-db.toml",
         "orders/mol-dog-stale-db.toml",
         "pack.toml",
+        "assets/scripts/proxied_scope.sh",
     ],
     importpath = "github.com/gastownhall/gascity/examples/bd/dolt",
     visibility = ["//visibility:public"],
@@ -65,6 +98,7 @@ go_test(
     name = "dolt_test",
     srcs = [
         "agent_workdir_test.go",
+        "cleanup_test.go",
         "compact_backup_remotes_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
@@ -76,6 +110,8 @@ go_test(
         "logs_test.go",
         "main_test.go",
         "port_resolve_test.go",
+        "proxied_scope_test.go",
+        "pull_remote_selection_test.go",
         "pull_test.go",
         "recover_host_test.go",
         "restart_test.go",
@@ -87,11 +123,48 @@ go_test(
         "sync_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
     deps = [
+        "//internal/bazeltest",
+        "//internal/config",
         "//internal/formula",
         "//internal/fsys",
         "//internal/orders",
         "//internal/testenv",
         "//internal/workdir",
     ],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

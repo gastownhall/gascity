@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "storeref",
     srcs = [
+        "bindings.go",
         "class_candidates.go",
         "plan.go",
         "relevance.go",
@@ -14,6 +15,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/storeref",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/coordclass",
     ],
@@ -22,10 +24,12 @@ go_library(
 go_test(
     name = "storeref_test",
     srcs = [
+        "bindings_test.go",
         "class_candidates_test.go",
         "mint_test.go",
         "placement_test.go",
         "relevance_test.go",
+        "relic_census_bench_test.go",
         "relic_census_test.go",
         "residency_agreement_test.go",
         "residency_conformance_test.go",
@@ -33,13 +37,27 @@ go_test(
         "resolve_test.go",
         "storeref_test.go",
         "testenv_import_test.go",
+        "topology_prefix_fault_test.go",
         "walk_test.go",
         "work_axis_test.go",
     ],
     embed = [":storeref"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

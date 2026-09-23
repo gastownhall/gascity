@@ -9,7 +9,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/testutil/providerledger",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/testpolicy/waiverclock"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testpolicy/waiverclock",
+    ],
 )
 
 go_test(
@@ -21,9 +24,27 @@ go_test(
         "waiver_owner_test.go",
         "waiver_stagger_test.go",
     ],
+    data = [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "@go_sdk//:srcs",
+    ],
     embed = [":providerledger"],
     deps = [
+        "//internal/bazeltest",
         "//internal/testenv",
         "//internal/testpolicy/waiverclock",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

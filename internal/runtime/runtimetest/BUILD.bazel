@@ -1,5 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+exports_files(glob(
+    ["*.go"],
+    exclude = ["*_test.go"],
+))
+
 go_library(
     name = "runtimetest",
     srcs = ["conformance.go"],
@@ -19,4 +24,16 @@ go_test(
         "//internal/runtime",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

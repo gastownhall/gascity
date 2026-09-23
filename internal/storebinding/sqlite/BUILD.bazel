@@ -29,6 +29,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/pathutil",
         "//internal/storebinding",
@@ -74,7 +75,7 @@ go_library(
 go_test(
     name = "sqlite_test",
     srcs = [
-        "beads_engine_namespace_test.go",
+        "beads_engine_fence_wiring_test.go",
         "beads_provider_test.go",
         "graph_alias_unix_test.go",
         "graph_capability_linux_test.go",
@@ -150,4 +151,16 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
