@@ -986,7 +986,8 @@ func TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber
 	// never report stale, even while the second subscriber's own merge (fed
 	// by no further sends here) would independently go stale.
 	deadline := time.Now().Add(sessionEventStaleAfter * 10)
-	for time.Now().Before(deadline) {
+	sawSecondStale := false
+	for time.Now().Before(deadline) && !sawSecondStale {
 		def.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"})
 		select {
 		case <-firstCh:
@@ -1002,9 +1003,11 @@ func TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber
 		if firstStale() {
 			t.Fatal("first subscriber's checker went stale even though its own merge kept receiving events on both sides; it must be reading its own tracker, not the second subscriber's")
 		}
-		time.Sleep(sessionEventStaleAfter / 2)
+		if secondStale() {
+			sawSecondStale = true
+		}
 	}
-	if !secondStale() {
+	if !sawSecondStale {
 		t.Fatal("second subscriber's checker never went stale despite receiving nothing; the two subscriptions must not share one tracker")
 	}
 }

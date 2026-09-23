@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -652,5 +653,118 @@ func TestProvider_SubscribeSessionEventsStale_RealSubscribeWiring(t *testing.T) 
 	}
 	if !sawStale {
 		t.Fatal("stale() never reported true after remote went silent")
+	}
+}
+
+// multiSubEventProvider hands out a fresh channel on every
+// SubscribeSessionEvents call, so independent subscribers each drive their
+// own underlying stream instead of racing to consume the same channel.
+type multiSubEventProvider struct {
+	*runtime.Fake
+	mu   sync.Mutex
+	subs []chan runtime.SessionEvent
+}
+
+func newMultiSubEventProvider() *multiSubEventProvider {
+	return &multiSubEventProvider{Fake: runtime.NewFake()}
+}
+
+func (f *multiSubEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch := make(chan runtime.SessionEvent, 4)
+	f.subs = append(f.subs, ch)
+	return ch, nil
+}
+
+// sendToFirst delivers ev only to the first channel handed out, so a test
+// can drive that one subscriber's stream while leaving a second
+// subscriber's channel untouched (and undrained) without deadlocking on a
+// full buffer.
+func (f *multiSubEventProvider) sendToFirst(ev runtime.SessionEvent) {
+	f.mu.Lock()
+	ch := f.subs[0]
+	f.mu.Unlock()
+	ch <- ev
+}
+
+var _ runtime.SessionEventProvider = (*multiSubEventProvider)(nil)
+
+// TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber
+// guards against a regression where a second, independent
+// SubscribeSessionEventsStale call on the same Provider (e.g. cmd/gc's nudge
+// dispatcher subscribing alongside the session-event pump) replaced a
+// provider-wide staleness tracker, leaving the FIRST subscriber's checker
+// silently reporting on the SECOND subscriber's merge instead of its own.
+func TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber(t *testing.T) {
+	orig := sessionEventStaleAfter
+	sessionEventStaleAfter = 20 * time.Millisecond
+	defer func() { sessionEventStaleAfter = orig }()
+
+	local := newMultiSubEventProvider()
+	remote := newMultiSubEventProvider()
+	h := New(local, remote, isRemote)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// First subscriber (e.g. the session-event pump).
+	firstCh, firstStale, err := h.SubscribeSessionEventsStale(ctx)
+	if err != nil {
+		t.Fatalf("first SubscribeSessionEventsStale: %v", err)
+	}
+
+	// Both sides emit so the first subscriber's tracker is fresh.
+	local.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "local-sess"})
+	remote.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "remote-agent-1"})
+	for i := 0; i < 2; i++ {
+		select {
+		case <-firstCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for first subscriber's initial merged events")
+		}
+	}
+	if firstStale() {
+		t.Fatal("first subscriber's checker = stale immediately after both backends emitted")
+	}
+
+	// A second, independent subscriber (e.g. the nudge dispatcher) subscribes
+	// on the same Provider and never touches its channel again — it should
+	// get its OWN tracker, not clobber the first subscriber's.
+	secondCh, secondStale, err := h.SubscribeSessionEventsStale(ctx)
+	if err != nil {
+		t.Fatalf("second SubscribeSessionEventsStale: %v", err)
+	}
+	if secondCh == nil || secondStale == nil {
+		t.Fatal("second subscription returned a nil channel or checker")
+	}
+
+	// The first subscriber's own merge keeps flowing on both sides; it must
+	// never report stale, even while the second subscriber's own merge (fed
+	// by no further sends here) would independently go stale.
+	deadline := time.Now().Add(sessionEventStaleAfter * 10)
+	sawSecondStale := false
+	for time.Now().Before(deadline) && !sawSecondStale {
+		local.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "local-sess"})
+		select {
+		case <-firstCh:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for local's event on the first subscriber's channel")
+		}
+		remote.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "remote-agent-1"})
+		select {
+		case <-firstCh:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for remote's event on the first subscriber's channel")
+		}
+		if firstStale() {
+			t.Fatal("first subscriber's checker went stale even though its own merge kept receiving events on both sides; it must be reading its own tracker, not the second subscriber's")
+		}
+		if secondStale() {
+			sawSecondStale = true
+		}
+	}
+	if !sawSecondStale {
+		t.Fatal("second subscriber's checker never went stale despite receiving nothing; the two subscriptions must not share one tracker")
 	}
 }
