@@ -1741,18 +1741,18 @@ func TestZombieLadderNeverEndsTheLaneOnARecoverStillInFlight(t *testing.T) {
 		}
 	}
 
-	t.Run("rig first: the city claims its recover while the rig's ping holds the lifecycle slot", func(t *testing.T) {
-		// The order the per-city lifecycle slot makes deterministic: the rig's
-		// `bd ping` holds the slot, the city's ladder finds the ping spent,
-		// claims the recover and queues on the slot, and the rig's ping comes
-		// back (exit 1) before the city's `bd dolt stop` has run.
+	t.Run("rig first: the city spends nothing while the rig's ping is in flight, then recovers", func(t *testing.T) {
+		// The order the per-city lifecycle slot produces: the rig's `bd ping`
+		// holds the slot when the city's ladder reaches the rung. The city
+		// used to find the ping "spent" and claim the recover — `bd dolt stop`
+		// queued before bd had answered the generation's only ping (round5
+		// recheck M1). It now answers non-terminal and runs nothing; once the
+		// rig's ping has come back (exit 1), the city's next open spends the
+		// recover on fresh evidence.
 		p := build(t)
-		rigPinging := make(chan struct{})
-		cityRecoverQueued := make(chan struct{})
-		rigDone := make(chan struct{})
+		var cityDuringPing error
 		p.rigOps.onPing = func() error {
-			close(rigPinging)
-			<-cityRecoverQueued
+			_, cityDuringPing = Admit(context.Background(), p.city)
 			return bdSaysNo()
 		}
 		p.cityOps.onPing = func() error {
@@ -1760,22 +1760,19 @@ func TestZombieLadderNeverEndsTheLaneOnARecoverStillInFlight(t *testing.T) {
 			return nil
 		}
 		p.cityOps.onRecov = func() error {
-			close(cityRecoverQueued)
-			<-rigDone // the slot, granted once the rig's ping released it
 			cityRecovers(p)
 			return nil
 		}
 
-		var rigErr error
-		go func() {
-			defer close(rigDone)
-			_, rigErr = Admit(context.Background(), p.rig)
-		}()
-		<-rigPinging
-		cityPin, cityErr := Admit(context.Background(), p.city)
-		<-rigDone
+		_, rigErr := Admit(context.Background(), p.rig)
+		wantNonTerminal(t, "city Admit while the rig's ping was in flight", cityDuringPing)
+		wantNonTerminal(t, "rig Admit after its ping, the recover being the city's", rigErr)
+		if pings, recovers := p.cityOps.counts(); pings != 0 || recovers != 0 {
+			t.Fatalf("while the rig's ping was in flight the city spent %d ping(s) and %d recover(s), want 0 and 0",
+				pings, recovers)
+		}
 
-		wantNonTerminal(t, "rig Admit while the city's recover was queued", rigErr)
+		cityPin, cityErr := Admit(context.Background(), p.city)
 		if cityErr != nil {
 			t.Fatalf("city Admit = %v, want the generation its recover produced", cityErr)
 		}
@@ -2525,4 +2522,155 @@ func TestDrainIsNotEndedByAnIndeterminateProbe(t *testing.T) {
 			t.Fatalf("the drain spent %d probe(s), want 3 (refused, served re-probe, served re-admission)", probes)
 		}
 	})
+}
+
+// TestZombieLadderNeverRecoversOnAPingStillInFlight is round5 recheck M1.
+//
+// Two long-lived opens of one scope share one ledger pair. Open A claims the
+// generation's ping and forks it; open B reaches the rung while it runs. The
+// ping ledger used to record the ping as answered the moment it was forked,
+// so B skipped it and spent the recover — `bd dolt stop` — before bd had
+// answered the generation's only ping. Whichever way that ping came back, the
+// stop was wrong: a ping that failed on gc's side must never lead to one
+// (council A-F5, D-F9), and a ping that succeeded found a healthy proxy that
+// was only slow to greet.
+func TestZombieLadderNeverRecoversOnAPingStillInFlight(t *testing.T) {
+	silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+	}
+	build := func(t *testing.T) (a, b AdmissionInput, opsA, opsB *admissionOps) {
+		t.Helper()
+		f := newAdmissionFixture(t, "-1")
+		opsA, opsB = &admissionOps{}, &admissionOps{}
+		observed, recovered := NewGenerationSet(), NewGenerationSet()
+		a = baseAdmissionInput(f, opsA)
+		a.Probe, a.Observed, a.Recovered, a.CityRoot, a.LongLived = silent, observed, recovered, f.scopeRoot, true
+		b = baseAdmissionInput(f, opsB)
+		b.Probe, b.Observed, b.Recovered, b.CityRoot, b.LongLived = silent, observed, recovered, f.scopeRoot, true
+		return a, b, opsA, opsB
+	}
+
+	for _, tc := range []struct {
+		name string
+		ping func() error
+	}{
+		{"the ping then fails on gc's side", func() error {
+			return fmt.Errorf("waiting for provider lifecycle slot: %w", context.DeadlineExceeded)
+		}},
+		{"the ping then succeeds on a proxy that was slow to greet", func() error { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b, opsA, opsB := build(t)
+			// A proxy that greets once bd's ping has answered healthy.
+			var healthy atomic.Bool
+			probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				if healthy.Load() {
+					return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+				}
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+			}
+			a.Probe, b.Probe = probe, probe
+			var errB error
+			opsA.onPing = func() error {
+				_, errB = Admit(context.Background(), b)
+				err := tc.ping()
+				healthy.Store(err == nil)
+				return err
+			}
+			_, _ = Admit(context.Background(), a)
+			if verdict, ok := ProxiedVerdictOf(errB); !ok || verdict.Terminal() {
+				t.Fatalf("B's Admit during A's ping = %v, want non-terminal", errB)
+			}
+			pa, ra := opsA.counts()
+			pb, rb := opsB.counts()
+			if pb != 0 || rb != 0 {
+				t.Fatalf("B spent %d ping(s) and %d recover(s) while the generation's only ping was in flight, want 0 and 0",
+					pb, rb)
+			}
+			if ra != 0 {
+				t.Fatalf("A spent %d recover(s) after a ping that did not come back as bd's refusal, want 0", ra)
+			}
+			if pa != 1 {
+				t.Fatalf("A spent %d ping(s), want 1", pa)
+			}
+		})
+	}
+
+	t.Run("evidence older than the ping's answer is re-taken before any recover", func(t *testing.T) {
+		// B's last probe begins while A's ping is in flight; the ping then
+		// finds the proxy healthy and settles before B reads the rung. B's
+		// silence predates bd's answer, so B re-admits on fresh evidence —
+		// and the proxy greets.
+		a, b, opsA, opsB := build(t)
+		var healthy atomic.Bool
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if healthy.Load() {
+				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+		}
+		a.Probe = probe
+		pinging, answer, doneA := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		opsA.onPing = func() error {
+			close(pinging)
+			<-answer
+			healthy.Store(true)
+			return nil
+		}
+		bProbes := 0
+		b.Probe = func(ctx context.Context, ep proxyendpoint.Endpoint, db string) proxyendpoint.ProbeResult {
+			bProbes++
+			if bProbes == admissionNoGreetingAttempts {
+				// B's last probe of its first ladder: taken while the ping
+				// runs, and answered silent. A's ping lands before B reads
+				// the rung.
+				close(answer)
+				<-doneA
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+			}
+			return probe(ctx, ep, db)
+		}
+		var errA error
+		go func() {
+			defer close(doneA)
+			_, errA = Admit(context.Background(), a)
+		}()
+		<-pinging
+		pinB, errB := Admit(context.Background(), b)
+		<-doneA
+		if errA != nil {
+			t.Fatalf("A's Admit = %v, want the proxy its ping found healthy admitted", errA)
+		}
+		if errB != nil || !pinB.Admitted() {
+			t.Fatalf("B's Admit = %v, want admitted on fresh evidence", errB)
+		}
+		if _, rb := opsB.counts(); rb != 0 {
+			t.Fatalf("B spent %d recover(s) on a proxy bd's ping had just found healthy, want 0", rb)
+		}
+		if _, ra := opsA.counts(); ra != 0 {
+			t.Fatalf("A spent %d recover(s), want 0", ra)
+		}
+	})
+}
+
+// TestGenerationSetIssuesOneStopPerGeneration pins the last gate of round5
+// recheck M1: per generation, IssueStop says yes once, ever — no Release,
+// Backoff or expiry reopens it.
+func TestGenerationSetIssuesOneStopPerGeneration(t *testing.T) {
+	now := time.Now()
+	set := NewGenerationSet()
+	set.now = func() time.Time { return now }
+	const g = "6001:abcd"
+	if !set.IssueStop(g) {
+		t.Fatal("the first stop of a generation was refused")
+	}
+	set.Release(g)
+	set.Backoff(g, failedRecoverBackoff)
+	now = now.Add(10 * generationMemoTTL)
+	if set.IssueStop(g) {
+		t.Fatal("a second stop of the same generation was allowed")
+	}
+	if !set.IssueStop("6002:ef01") {
+		t.Fatal("another generation's stop was refused")
+	}
 }

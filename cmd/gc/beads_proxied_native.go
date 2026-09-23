@@ -95,6 +95,11 @@ var providerOwnedScopeLifecycleOp = runProviderOwnedScopeLifecycleOpGuarded
 type proxiedProviderOps struct {
 	cityPath string
 	observed *beads.GenerationSet
+	// recovered is the recover ledger, whose IssueStop is the last gate
+	// before the provider's recover runs: per proxy generation, at most one
+	// `bd dolt stop` is ever issued by this process (round5 recheck M1). Nil
+	// runs no such gate.
+	recovered *beads.GenerationSet
 }
 
 // Ping asks bd to make the scope's proxy healthy.
@@ -154,9 +159,23 @@ func markProviderReportedFailure(err error) error {
 // `bd dolt stop` then `bd ping` — runs only if, with the slot held, the
 // scope's proxy record still names that generation; otherwise nothing runs
 // and the error wraps beads.ErrRecoverTargetMoved (unmarked: bd was not asked).
+//
+// And it runs at most once per generation in this process (round5 recheck
+// M1): with the slot held and the target confirmed, the recover ledger's
+// IssueStop records the stop before the script runs, and a second Recover of
+// the same generation runs nothing and wraps beads.ErrRecoverAlreadyIssued.
 func (o proxiedProviderOps) Recover(ctx context.Context, scopeRoot, generation string) error {
-	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp,
-		proxiedRecoverStillAimed(scopeRoot, generation)); err != nil {
+	aimed := proxiedRecoverStillAimed(scopeRoot, generation)
+	precondition := func() error {
+		if err := aimed(); err != nil {
+			return err
+		}
+		if !o.recovered.IssueStop(generation) {
+			return fmt.Errorf("proxied recover of %s: generation %s: %w", scopeRoot, generation, beads.ErrRecoverAlreadyIssued)
+		}
+		return nil
+	}
+	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderRecoverOp, precondition); err != nil {
 		return markProviderReportedFailure(err)
 	}
 	o.noteReady(scopeRoot)
@@ -277,8 +296,9 @@ func newProxiedNativeOpener(cityPath, scopeRoot string, cfg *config.City, openBd
 		cityName:  proxiedNativeAuthorCityName(cfg),
 		openBd:    openBd,
 		ops: proxiedProviderOps{
-			cityPath: cityPath,
-			observed: proxiedObservedGenerations,
+			cityPath:  cityPath,
+			observed:  proxiedObservedGenerations,
+			recovered: proxiedRecoveredGenerations,
 		},
 		observed:          proxiedObservedGenerations,
 		recovered:         proxiedRecoveredGenerations,

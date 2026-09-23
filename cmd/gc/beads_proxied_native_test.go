@@ -562,15 +562,16 @@ esac`)
 		}
 	})
 
-	t.Run("a shared-root rig stays non-terminal while the city's recover waits for the rig's ping", func(t *testing.T) {
-		// round4 review F1, through two production openers, long-lived (the
-		// reopen shape), sharing one ledger pair. The rig reaches the zombie
-		// first and its `bd ping` (the production runner, exit 1) holds the
-		// city's lifecycle slot; meanwhile the city's ladder finds the ping
-		// spent, claims the recover and queues behind it. The seam holds the
-		// city's recover until the rig's open has returned, which is the order
-		// the slot imposes: every pass of the rig's admitWith loop runs while
-		// the city's recover is in flight, and none of them may end its lane.
+	t.Run("a city ladder spends nothing while a shared-root rig's ping is in flight, then recovers", func(t *testing.T) {
+		// round4 review F1 and round5 recheck M1, through two production
+		// openers, long-lived (the reopen shape), sharing one ledger pair. The
+		// rig reaches the zombie first and its `bd ping` (the production
+		// runner, exit 1) holds the city's lifecycle slot. The city's ladder
+		// reaches the rung meanwhile: it used to find the ping "spent", claim
+		// the recover and queue `bd dolt stop` behind a ping bd had not
+		// answered. It now runs nothing and answers non-terminal; the rig's
+		// ping comes back refused, the rig leaves the recover to the city, and
+		// the city's next open spends it.
 		f := newProxiedScopeFixture(t)
 		rig := sharedRootRigScope(t, f)
 		var recovered atomic.Bool
@@ -588,7 +589,7 @@ esac`)
 				cityPath:     f.scopeRoot,
 				scopeRoot:    scopeRoot,
 				database:     database,
-				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed},
+				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed, recovered: recoveredSet},
 				processTable: f.processTable(),
 				probe:        probe,
 				observed:     observed,
@@ -599,12 +600,7 @@ esac`)
 
 		var mu sync.Mutex
 		spent := map[string][]string{}
-		cityRecoverQueued := make(chan struct{})
-		rigDone := make(chan struct{})
-		cityDone := make(chan struct{})
-		var cityPin beads.Pin
-		var cityErr error
-		var startCity sync.Once
+		var cityDuringPing error
 		restore := providerOwnedScopeLifecycleOp
 		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string, _ func() error) error {
 			mu.Lock()
@@ -612,17 +608,10 @@ esac`)
 			mu.Unlock()
 			switch {
 			case scopeRoot == rig && op == proxiedProviderProbeOp:
-				startCity.Do(func() {
-					go func() {
-						defer close(cityDone)
-						cityPin, cityErr = opener(f.scopeRoot, "beads").admit(context.Background(), true)
-					}()
-					<-cityRecoverQueued
-				})
+				// The rig's ping holds the slot; the city's ladder runs now.
+				_, cityDuringPing = opener(f.scopeRoot, "beads").admit(context.Background(), true)
 				return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
 			case scopeRoot == f.scopeRoot && op == proxiedProviderRecoverOp:
-				close(cityRecoverQueued)
-				<-rigDone
 				// The city's `bd dolt stop` then `bd ping`: a new generation.
 				f.writeRecord(7004, "99887766")
 				recovered.Store(true)
@@ -634,13 +623,22 @@ esac`)
 		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
 
 		_, rigErr := opener(rig, "rig").admit(context.Background(), true)
-		close(rigDone)
-		<-cityDone
-
-		if verdict, typed := beads.ProxiedVerdictOf(rigErr); !typed || verdict.Terminal() {
-			t.Fatalf("rig admit = %v, want non-terminal: the city's recover of the shared proxy was still in flight, "+
-				"and it then succeeded", rigErr)
+		if verdict, typed := beads.ProxiedVerdictOf(cityDuringPing); !typed || verdict.Terminal() {
+			t.Fatalf("city admit during the rig's ping = %v, want non-terminal", cityDuringPing)
 		}
+		if verdict, typed := beads.ProxiedVerdictOf(rigErr); !typed || verdict.Terminal() {
+			t.Fatalf("rig admit = %v, want non-terminal: the recover of the shared proxy is the city's, and "+
+				"it had not been spent", rigErr)
+		}
+		mu.Lock()
+		cityBefore := strings.Join(spent[f.scopeRoot], ",")
+		mu.Unlock()
+		if cityBefore != "" {
+			t.Fatalf("while the rig's ping was in flight the city spent [%s], want nothing: bd had not answered "+
+				"the generation's only ping", cityBefore)
+		}
+
+		cityPin, cityErr := opener(f.scopeRoot, "beads").admit(context.Background(), true)
 		if cityErr != nil || cityPin.PoolKey().PID != 7004 {
 			t.Fatalf("city admit = (pid %d, %v), want the generation its recover produced (7004)", cityPin.PoolKey().PID, cityErr)
 		}
@@ -1699,4 +1697,67 @@ func TestProxiedRecoverRunsNothingOnceTheZombieIsGone(t *testing.T) {
 			t.Fatalf("the provider ran %q, want exactly %q", got, proxiedProviderRecoverOp)
 		}
 	})
+}
+
+// TestProxiedRecoverIssuesOneStopPerGeneration is round5 recheck M1's last
+// gate, through the production Recover, runner and precondition: per proxy
+// generation, at most one `bd dolt stop` is ever issued by this process.
+//
+// The recover rung is retryable after a recover gc's own budget cut short
+// (round4 recheck M1), and the generation can still be current afterwards —
+// the script was killed before its stop landed, or the stop landed and the
+// record has not moved yet. A second recover of that generation used to run
+// the provider's `bd dolt stop` again.
+func TestProxiedRecoverIssuesOneStopPerGeneration(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	logPath := filepath.Join(t.TempDir(), "provider-invocations")
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	// The provider logs the op and fails without moving the record: the
+	// shape of a recover cut short after its script started.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.scopeRoot, "city.toml"),
+		[]byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	zombie := proxyendpoint.NewPoolKey(f.record, "").Generation()
+	ops := proxiedProviderOps{cityPath: f.scopeRoot, recovered: beads.NewGenerationSet()}
+	runs := func() int {
+		data, err := os.ReadFile(logPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(data), proxiedProviderRecoverOp)
+	}
+
+	first := ops.Recover(context.Background(), f.scopeRoot, zombie)
+	if first == nil || errors.Is(first, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("first Recover = %v, want the provider's own failure", first)
+	}
+	if got := runs(); got != 1 {
+		t.Fatalf("the first Recover ran the provider's recover %d time(s), want 1", got)
+	}
+	second := ops.Recover(context.Background(), f.scopeRoot, zombie)
+	if !errors.Is(second, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("second Recover of the same generation = %v, want ErrRecoverAlreadyIssued", second)
+	}
+	if errors.Is(second, beads.ErrProviderReportedFailure) {
+		t.Fatalf("second Recover = %v is marked as bd's answer, but bd was never asked", second)
+	}
+	if got := runs(); got != 1 {
+		t.Fatalf("the provider's recover ran %d time(s) on one generation, want exactly 1", got)
+	}
+
+	// Another generation is its own stop.
+	f.writeRecord(7002, "55667788")
+	if err := ops.Recover(context.Background(), f.scopeRoot, proxyendpoint.NewPoolKey(f.record, "").Generation()); errors.Is(err, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("a new generation's first Recover = %v, want it run", err)
+	}
+	if got := runs(); got != 2 {
+		t.Fatalf("the provider's recover ran %d time(s) over two generations, want 2", got)
+	}
 }

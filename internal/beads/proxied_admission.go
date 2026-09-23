@@ -47,7 +47,9 @@ type ProviderOps interface {
 	// and run nothing unless it still names generation; otherwise it returns
 	// an error wrapping ErrRecoverTargetMoved (round4 review F3). A record it
 	// cannot read counts as moved: `bd dolt stop` is never aimed at a proxy
-	// gc cannot name.
+	// gc cannot name. And it must run nothing, returning an error wrapping
+	// ErrRecoverAlreadyIssued, if this process has already issued the
+	// recover on generation (round5 recheck M1; see GenerationSet.IssueStop).
 	Recover(ctx context.Context, scopeRoot, generation string) error
 }
 
@@ -55,6 +57,15 @@ type ProviderOps interface {
 // ran nothing because, by the time it could run, the scope's proxy was no
 // longer the generation admission asked it to recover. See ProviderOps.Recover.
 var ErrRecoverTargetMoved = errors.New("the proxy generation the recover was aimed at is no longer current")
+
+// ErrRecoverAlreadyIssued is what errors.Is finds on a ProviderOps.Recover
+// that ran nothing because this process has already issued the provider's
+// recover — its `bd dolt stop` — on that generation (round5 recheck M1). The
+// invariant it enforces is absolute: per proxy generation, at most one `bd
+// dolt stop` is ever issued by this process. A recover that was cut short
+// after its script started may have stopped the proxy or may not have, and a
+// second one is never the way to find out. See GenerationSet.IssueStop.
+var ErrRecoverAlreadyIssued = errors.New("this process has already issued the provider recover on this proxy generation")
 
 // ErrProviderReportedFailure is what errors.Is finds on a ProviderOps failure
 // the PROVIDER reported: bd ran the verb to completion and said it could not
@@ -130,8 +141,12 @@ func (e providerReportedFailure) Is(target error) bool { return target == ErrPro
 type GenerationSet struct {
 	mu   sync.Mutex
 	seen map[string]generationEntry
-	ttl  time.Duration
-	now  func() time.Time
+	// stops records the generations this process has issued a provider
+	// recover (`bd dolt stop`) on. It never expires and nothing releases it:
+	// see IssueStop.
+	stops map[string]struct{}
+	ttl   time.Duration
+	now   func() time.Time
 }
 
 // generationEntry is one spent rung: when it stops counting, whether the verb
@@ -144,6 +159,10 @@ type generationEntry struct {
 	// does not expire: the verb's own budget bounds it, and settle — which the
 	// spender defers — ends it whichever way the verb came back.
 	inFlight bool
+	// settledAt is when settle ended an in-flight claim: when the verb's
+	// answer landed. Zero for an entry Add wrote (no verb ran under it) and
+	// for a failure arm's Backoff. See answeredSince.
+	settledAt time.Time
 }
 
 // live reports whether the entry still holds its rung at now.
@@ -243,8 +262,60 @@ func (s *GenerationSet) settle(generation string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if entry, ok := s.seen[generation]; ok && entry.inFlight {
-		s.seen[generation] = generationEntry{expires: s.clock().Add(s.memoTTL())}
+		now := s.clock()
+		s.seen[generation] = generationEntry{expires: now.Add(s.memoTTL()), settledAt: now}
 	}
+}
+
+// answeredSince reports whether a verb begin claimed on generation was
+// answered (settled) strictly after t (round5 recheck M1).
+//
+// The no-greeting ladder spends the recover on its own evidence — three
+// probes that found the endpoint silent. That evidence is stale if another
+// ladder's ping of the same generation came back after this ladder's last
+// probe began: a slow-to-greet proxy that bd's ping has just found healthy
+// looks exactly like a zombie to a probe that ran before the ping returned.
+func (s *GenerationSet) answeredSince(generation string, t time.Time) bool {
+	if s == nil || generation == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.seen[generation]
+	return ok && !entry.inFlight && !entry.settledAt.IsZero() && entry.settledAt.After(t)
+}
+
+// IssueStop records that this process is about to issue the provider recover
+// — `bd dolt stop` then `bd ping` — on generation, and reports false if it
+// already has (round5 recheck M1).
+//
+// It is the last gate before the script runs, and it is absolute: per proxy
+// generation, at most one `bd dolt stop` is ever issued by this process. The
+// recover rung above it is not enough on its own. That rung is RETRYABLE by
+// design after a recover gc's own budget cut short (round4 recheck M1), and a
+// recover cut short after its script started may already have stopped the
+// proxy — or may have been killed before the stop landed. Either way a second
+// stop of the same generation is not the way to find out: a stop that took
+// moves the generation, and bd's own ping brings the scope back; a stop that
+// did not is left to the ping rung and to the city's health loop.
+//
+// Nothing releases or expires an entry. A generation is a {pid, birth} pair
+// that is never reused, so the set grows by one per recover this process ever
+// issues.
+func (s *GenerationSet) IssueStop(generation string) bool {
+	if s == nil || generation == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stops == nil {
+		s.stops = map[string]struct{}{}
+	}
+	if _, issued := s.stops[generation]; issued {
+		return false
+	}
+	s.stops[generation] = struct{}{}
+	return true
 }
 
 // rung reports a generation's standing in one read. See rungState.
@@ -353,7 +424,7 @@ func (s *GenerationSet) Has(generation string) bool {
 }
 
 func (s *GenerationSet) clock() time.Time {
-	if s.now == nil {
+	if s == nil || s.now == nil {
 		return time.Now()
 	}
 	return s.now()
@@ -888,11 +959,15 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"the endpoint accepts and never greets; a background recovery does not walk the no-greeting ladder, its next tick asks again", ep.Err)
 	}
+	// lastProbe is when this ladder's newest evidence of silence was taken,
+	// on the ledger's clock (see GenerationSet.answeredSince).
+	var lastProbe time.Time
 	for attempt := 1; attempt < admissionNoGreetingAttempts; attempt++ {
 		if err := in.Sleep(ctx, admissionNoGreetingSpacing); err != nil {
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the no-greeting ladder ran out of budget", err)
 		}
+		lastProbe = in.Observed.clock()
 		probe := in.Probe(ctx, ep, in.Database)
 		if probe.Outcome != proxyendpoint.ProbeAcceptedNoGreeting {
 			// Something changed. Re-run from the top: the record may have moved
@@ -920,10 +995,28 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 	// One ping per generation. The observed set is what makes "a later open in
 	// the same process skips its ping" true: a generation gc has already asked
 	// bd about does not get asked again just because a second scope opened.
-	if in.Observed.Add(generation) {
+	//
+	// The claim is in flight until bd answers (round5 recheck M1), and the
+	// answer is written in ONE step once the arm below has decided it: a
+	// success or bd's own refusal settles the rung, a failure of gc's own
+	// replaces the claim with a backoff. Before this the claim was Add's
+	// success-shaped entry from the moment the ping was forked, so a second
+	// ladder on the same generation — a second long-lived open of the city,
+	// a city ladder while a shared-root rig's ping held the lifecycle slot —
+	// read the ping as answered and spent the recover, `bd dolt stop`, while
+	// the only ping was still running. If that ping then failed on gc's side
+	// (which must never lead to a stop: council A-F5, D-F9) or came back
+	// healthy (a slow-to-greet proxy, generation unchanged), the stop had
+	// already been issued on it.
+	if in.Observed.begin(generation) {
+		// A panic in the verb must not strand the claim in flight for ever;
+		// on every ordinary path the rung has already been written by then
+		// and this is a no-op.
+		defer in.Observed.settle(generation)
 		err := in.Ops.Ping(ctx, in.ScopeRoot)
 		switch {
 		case err == nil:
+			in.Observed.settle(generation)
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"pinged the provider; re-admitting", nil)
 		case !in.sameGeneration(root, key):
@@ -931,8 +1024,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// replacing its proxy — or the record could not be read at all,
 			// which sameGeneration also reports as "moved". Re-admit against
 			// whatever is there now, and hold THIS generation's rung for the
-			// backoff first (council pr2 E-S6). Observed.Add has already
-			// written a success-shaped entry for it; left as that, a record
+			// backoff first (council pr2 E-S6). Settled as a success, a record
 			// read that merely failed (EMFILE, EIO, a torn read) while the
 			// generation stayed current let the next open find the ping
 			// "spent", no backoff, and escalate straight to a recover — a
@@ -956,6 +1048,7 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			// ping took the backoff arm below, so a real zombie — whose ping
 			// can only fail — was pinged once per backoff window for ever and
 			// never recovered.
+			in.Observed.settle(generation)
 		default:
 			// The ping failed on gc's side — the lifecycle semaphore, the op
 			// budget, an environment gc could not build — and nothing moved.
@@ -971,13 +1064,39 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 				"the endpoint accepts and never greets, and the provider ping failed before bd could answer; "+
 					"not escalating to a recover on a failure that says nothing about the proxy", err)
 		}
+	} else {
+		// The ping rung was already claimed. Nothing below it may run until
+		// bd has answered that ping, and only on evidence taken after it did.
+		ping := in.Observed.rung(generation)
+		switch {
+		case ping.inFlight:
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the endpoint accepts and never greets, and another open in this process is running the provider "+
+					"ping for this generation now; not escalating to a recover before bd has answered it", ep.Err)
+		case ping.backoff > 0:
+			// The ping failed on gc's side between the two reads.
+			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the endpoint accepts and never greets, and the provider ping for this generation failed before bd "+
+					"could answer; not escalating to a recover on a failure that says nothing about the proxy", ep.Err)
+		case !ping.spent:
+			// Released or expired between the two reads: nothing was asked.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"the ping rung for this generation was released while this pass read it; re-admitting", ep.Err)
+		case in.Observed.answeredSince(generation, lastProbe):
+			// bd answered another open's ping after this ladder's last probe
+			// began, so this ladder's silence predates bd's answer. A proxy
+			// that was merely slow to greet looks exactly like a zombie to
+			// those probes; re-read and re-probe rather than stop it.
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+				"bd answered this generation's ping after this ladder's probes; re-admitting on fresh evidence", ep.Err)
+		}
 	}
 
 	// The recover rung is spent by the scope that can run it (round4 recheck
 	// M2). The ledger is process-global and keyed on the generation, which a
 	// rig sharing the city's proxy root shares with the city.
 	if in.sharesCityProxyRoot(root) {
-		return in.leaveRecoverToCity(generation, ep)
+		return Pin{}, false, in.leaveRecoverToCity(generation, ep)
 	}
 
 	// One recover per generation, ever. The claim is in flight until the verb
@@ -1041,6 +1160,17 @@ func (in AdmissionInput) spendRecover(ctx context.Context, root string, key prox
 		return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"the generation moved while the provider recover waited to run; it ran nothing, re-admitting", err)
 	}
+	if errors.Is(err, ErrRecoverAlreadyIssued) {
+		// Nothing ran: this process already issued the recover on this
+		// generation, and it was cut short on gc's side (round5 recheck M1).
+		// A second `bd dolt stop` of one generation is never issued, so the
+		// rung is held for the backoff — no fork on every open — and the
+		// answer is non-terminal: nothing here is bd's answer either.
+		in.Recovered.Backoff(generation, failedRecoverBackoff)
+		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+			"the endpoint accepts and never greets, and this process has already issued the provider recover on "+
+				"this generation; not issuing a second `bd dolt stop`", err)
+	}
 	if err != nil {
 		retry, verdict := in.recoverFailed(ctx, root, key, err)
 		return Pin{}, retry, verdict
@@ -1093,24 +1223,26 @@ func (in AdmissionInput) sharesCityProxyRoot(root string) bool {
 // failure, and not still queued or running: round4 review F1) and the
 // generation is still silent.
 //
-// The in-flight case is the ordinary one, not a corner. The rig's `bd ping`
-// and the city's recover share the city's lifecycle slot, so when the rig
-// reaches the zombie first the city's ladder claims the recover while the
-// rig's ping still holds the slot, and the rig's ladder arrives here before
-// the city's `bd dolt stop` has run at all.
-func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.Endpoint) (Pin, bool, error) {
+// The in-flight case is the ordinary one, not a corner: a rig on a later pass
+// of its admitWith loop reaches this rung while the city's recover is queued
+// on the lifecycle slot or running. What can no longer happen is the order
+// this comment used to describe as intended — the city claiming the recover
+// while the rig's `bd ping` still held the slot. That spent the stop before
+// bd had answered the generation's only ping; the city's ladder now waits for
+// that answer (round5 recheck M1, escalateZombie's ping rung).
+func (in AdmissionInput) leaveRecoverToCity(generation string, ep proxyendpoint.Endpoint) error {
 	rung := in.Recovered.rung(generation)
 	if rung.spent {
-		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictProxyZombie,
+		return NewProxiedVerdictError(ProxiedVerdictProxyZombie,
 			"the endpoint still accepts and never greets after the city scope's recover was already spent on generation "+
 				generation+", whose proxy root this scope shares", ep.Err)
 	}
 	if rung.inFlight {
-		return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+		return NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 			"the endpoint accepts and never greets, and the city scope's recover of this generation, whose proxy root "+
 				"this scope shares, is running now; not ending the lane before bd has answered it", ep.Err)
 	}
-	return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
+	return NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 		"the endpoint accepts and never greets, and this scope shares the city's proxy root: its own recover would only "+
 			"ping, which bd has already answered for this generation, and the recover that cycles the shared proxy is "+
 			"the city scope's to spend", ep.Err)
