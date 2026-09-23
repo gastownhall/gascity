@@ -1221,3 +1221,126 @@ func assertEveryLegAskedForTheFederatedTier(t *testing.T, surface string, legs i
 		}
 	}
 }
+
+// readyCountedRigNames are the bound rigs of the load-count fixture. Three is
+// enough to tell "once per invocation" from "once per rig" apart.
+var readyCountedRigNames = []string{"alpha", "beta", "gamma"}
+
+// newReadyCityWithRigs writes a real on-disk file-provider city with every rig
+// in readyCountedRigNames bound and openable, left ambient (GC_CITY) the way
+// newReadyCityWithBrokenRig leaves its city. The last rig's path is written
+// relative to the city so config loading's rig-path normalisation is part of
+// what the load-count tests exercise.
+func newReadyCityWithRigs(t *testing.T) string {
+	t.Helper()
+	cityDir := t.TempDir()
+	var cityToml strings.Builder
+	cityToml.WriteString("[workspace]\nname = \"readycounted\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n")
+	rigDirs := make([]string, 0, len(readyCountedRigNames))
+	for i, name := range readyCountedRigNames {
+		dir := filepath.Join(cityDir, "rigs", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("creating rig dir %s: %v", dir, err)
+		}
+		rigDirs = append(rigDirs, dir)
+		tomlPath := dir
+		if i == len(readyCountedRigNames)-1 {
+			tomlPath = filepath.Join("rigs", name)
+		}
+		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(name) + "\npath = " + strconv.Quote(tomlPath) + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml.String()), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensuring scoped file store layout: %v", err)
+	}
+	for _, scope := range append([]string{cityDir}, rigDirs...) {
+		if err := ensurePersistedScopeLocalFileStore(scope); err != nil {
+			t.Fatalf("ensuring file store at %s: %v", scope, err)
+		}
+	}
+
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() { cityFlag, rigFlag = prevCityFlag, prevRigFlag })
+	t.Setenv("GC_CITY", cityDir)
+	return cityDir
+}
+
+// TestReadyLoadsCityConfigOnce pins `gc ready` to one full city-config load per
+// invocation. The command loads the config up front; every store it then opens
+// (city leg, each rig leg) used to throw that config away and reload city.toml
+// plus every pack include inside the open — 8 loads on a 6-rig city, ~10 s of a
+// work query on maintainer-city. It is a one-shot process, so the config it
+// loaded is the config its opens must use.
+//
+// GC_RIG is set the way an agent's work_query runs (GC_CITY + GC_RIG): without
+// it, city resolution maps the cwd to a rig with a load of its own, which is
+// context resolution rather than a store open and is not what this pins.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestReadyLoadsCityConfigOnce(t *testing.T) {
+	newReadyCityWithRigs(t)
+	t.Setenv("GC_RIG", readyCountedRigNames[0])
+
+	var stdout, stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
+	if code := cmdReady(readyOpts{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("gc ready loaded the city config %d times over %d bound rigs, want exactly 1: the store opens must reuse the config the command already loaded", grew, len(readyCountedRigNames))
+	}
+}
+
+// TestReadyRigLegStoresReuseSuppliedConfig pins the rig-leg opener on its own:
+// handed a config, it opens every bound rig without loading one.
+func TestReadyRigLegStoresReuseSuppliedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	stores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("readyRigLegStores: %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("readyRigLegStores loaded the city config %d times despite a supplied config", grew)
+	}
+	if len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("readyRigLegStores opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+}
+
+// TestControllerRigStoresStillReloadConfigPerRig is the other half of the
+// policy split TestRigStoreOpenPolicyDiffersByCaller pins: the controller's
+// opener is long-lived and deliberately keeps re-resolving config inside each
+// rig open, so threading the one-shot config must not have reached it.
+func TestControllerRigStoresStillReloadConfigPerRig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	stores := buildStandaloneRigStores(cfg, cityDir, io.Discard)
+	if grew := loadCityConfigCalls.Load() - before; grew != int64(len(readyCountedRigNames)) {
+		t.Fatalf("buildStandaloneRigStores loaded the city config %d times, want once per bound rig (%d): the controller keeps its reload-per-open semantics", grew, len(readyCountedRigNames))
+	}
+	if len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("buildStandaloneRigStores opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+
+	before = loadCityConfigCalls.Load()
+	if stores := buildStandaloneRigStoresWithConfig(cfg, cityDir, io.Discard); len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("buildStandaloneRigStoresWithConfig opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("buildStandaloneRigStoresWithConfig loaded the city config %d times despite a supplied config", grew)
+	}
+}
