@@ -83,9 +83,13 @@ import (
 //     "A mutation", not "every mutation", and the difference is council B-F3
 //     and, one level finer, council pr2 D-F8.
 //
-//     INSIDE the bracket: every method on the beads.Store surface; every write
-//     capability this wrapper implements as a method (ReleaseIfCurrent,
-//     DeleteBatch, CreateWithForeignID, CreateWithStorage, …); and ONE
+//     INSIDE the bracket: every method on the beads.Store surface that writes
+//     through the bd leaf (Create, Update, Close, Reopen, CloseAll,
+//     SetMetadata, SetMetadataBatch, Tx, Delete, DepAdd, DepRemove —
+//     SetLocalString, which writes only the clone-local sidecar file, is
+//     deliberately outside; see its doc); every write capability this wrapper
+//     implements as a method (ReleaseIfCurrent, DeleteBatch,
+//     CreateWithForeignID, CreateWithStorage); and ONE
 //     capability handle, ConditionalWriterHandle — but only when it is reached
 //     by beads.ConditionalWriterFor on the *ProxiedStore itself, through which
 //     UpdateIfMatch, CloseIfMatch, DeleteIfMatch and CompareAndSetMetadataKey
@@ -113,8 +117,15 @@ import (
 //     leaf's) and the read-only latch still refuses a native write; what is
 //     lost is the staleness half, bounded by the guard tick on a long-lived
 //     store and by the next bracketed mutation otherwise.
-//     TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap pins both
-//     lists.
+//
+//     Each list is pinned by a test that CALLS it: the INSIDE list by
+//     TestProxiedStoreBracketsEveryInsideWriteMethod (every method above,
+//     with SetLocalString's exclusion as a row) and
+//     TestProxiedStoreBracketsTheConditionalWriteHandles (the
+//     ConditionalWriterFor path); the OUTSIDE list by
+//     TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap. This used
+//     to say the last one "pins both lists"; it pinned one inside path and
+//     none of the methods (council pr2 E-I6).
 //
 // # Demotion
 //
@@ -666,9 +677,10 @@ func (s *ProxiedStore) Ping() error {
 
 // ---------------------------------------------------------------------------
 // Mutations. Always the bd leaf. Inside H6's generation bracket for every
-// method below and for the three bracketing capability adapters in
-// proxied_store_capabilities.go; see the H6 note above for the two paths that
-// are outside it and why they have to be.
+// method below except SetLocalString, for the four write-capability methods and
+// the one bracketing capability adapter (ConditionalWriterHandle) in
+// proxied_store_capabilities.go; see the H6 note above for the paths that are
+// outside it and why they have to be.
 // ---------------------------------------------------------------------------
 
 // Create persists a new bead through the bd CLI.

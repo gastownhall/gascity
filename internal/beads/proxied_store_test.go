@@ -959,6 +959,150 @@ func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
 	}
 }
 
+// bracketLeaf is a write leaf whose every mutating method — the Store surface's
+// and the four write capabilities the wrapper implements as methods — runs
+// onWrite and succeeds. The bracket is the subject, not the write.
+type bracketLeaf struct {
+	Store
+	onWrite func()
+}
+
+func (l *bracketLeaf) Create(Bead) (Bead, error)                { l.onWrite(); return Bead{ID: "prx-1"}, nil }
+func (l *bracketLeaf) Update(string, UpdateOpts) error          { l.onWrite(); return nil }
+func (l *bracketLeaf) Close(string) error                       { l.onWrite(); return nil }
+func (l *bracketLeaf) Reopen(string) error                      { l.onWrite(); return nil }
+func (l *bracketLeaf) SetMetadata(string, string, string) error { l.onWrite(); return nil }
+func (l *bracketLeaf) SetMetadataBatch(string, map[string]string) error {
+	l.onWrite()
+	return nil
+}
+func (l *bracketLeaf) SetLocalString(string, string, string) error { l.onWrite(); return nil }
+func (l *bracketLeaf) Tx(string, func(Tx) error) error             { l.onWrite(); return nil }
+func (l *bracketLeaf) Delete(string) error                         { l.onWrite(); return nil }
+func (l *bracketLeaf) DepAdd(string, string, string) error         { l.onWrite(); return nil }
+func (l *bracketLeaf) DepRemove(string, string) error              { l.onWrite(); return nil }
+func (l *bracketLeaf) CloseAll([]string, map[string]string) (int, error) {
+	l.onWrite()
+	return 0, nil
+}
+func (l *bracketLeaf) ReleaseIfCurrent(string, string) (bool, error) { l.onWrite(); return true, nil }
+func (l *bracketLeaf) DeleteBatch([]string) error                    { l.onWrite(); return nil }
+func (l *bracketLeaf) CreateWithForeignID(Bead) (Bead, error)        { l.onWrite(); return Bead{}, nil }
+func (l *bracketLeaf) CreateWithStorage(Bead, StorageClass) (Bead, error) {
+	l.onWrite()
+	return Bead{}, nil
+}
+
+// TestProxiedStoreBracketsEveryInsideWriteMethod is council pr2 E-I6.
+//
+// The H6 register lists what is INSIDE the generation bracket — every
+// Dolt-writing method of the Store surface and every write capability the
+// wrapper implements as a method — and used to say one test "pins both lists".
+// That test pinned the OUTSIDE list and one inside path; nothing called
+// ReleaseIfCurrent, DeleteBatch, CreateWithForeignID or CreateWithStorage, and
+// of the Store surface only Create. A refactor that dropped a bracket — a CAS
+// release that restarts bd's proxy, left on the old generation — stayed green.
+// Every row here restarts the proxy inside the write and asserts the stand-down,
+// with a steady-generation control; SetLocalString is the one deliberate
+// exclusion and is pinned as one.
+func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
+	root := t.TempDir()
+	writeRecord := func(t *testing.T, pid, port int, birth string) {
+		t.Helper()
+		rootID, err := proxyendpoint.RootID(root)
+		if err != nil {
+			t.Fatalf("RootID: %v", err)
+		}
+		body, err := json.Marshal(proxyendpoint.Record{
+			PID: pid, Port: port, UpstreamID: "upstream", Schema: proxyendpoint.SchemaV2,
+			Kind: proxyendpoint.RecordKind, Birth: birth, RootID: rootID, ControlPort: port + 1,
+		})
+		if err != nil {
+			t.Fatalf("marshal record: %v", err)
+		}
+		if err := os.WriteFile(proxyendpoint.PIDPath(root), body, 0o600); err != nil {
+			t.Fatalf("write record: %v", err)
+		}
+	}
+	newSplit := func(t *testing.T, restart bool) *ProxiedStore {
+		t.Helper()
+		writeRecord(t, 4001, 45123, proxyendpoint.BirthToken("boot", "111"))
+		storage := &nativeDoltMemStorage{store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true}}
+		native := newNativeDoltStoreForTest(storage, WithProxiedReadOnly())
+		leaf := &bracketLeaf{Store: newNativeDoltStoreForTest(storage), onWrite: func() {
+			if restart {
+				writeRecord(t, 4002, 45987, proxyendpoint.BirthToken("boot", "222"))
+			}
+		}}
+		store, err := NewProxiedStore(native, leaf, PinForTest("/scope", root, "beads"))
+		if err != nil {
+			t.Fatalf("NewProxiedStore: %v", err)
+		}
+		return store
+	}
+
+	inside := []struct {
+		name string
+		call func(store *ProxiedStore) error
+	}{
+		{"Create", func(s *ProxiedStore) error { _, err := s.Create(Bead{Title: "t", Type: "task"}); return err }},
+		{"Update", func(s *ProxiedStore) error { return s.Update("prx-1", UpdateOpts{}) }},
+		{"Close", func(s *ProxiedStore) error { return s.Close("prx-1") }},
+		{"Reopen", func(s *ProxiedStore) error { return s.Reopen("prx-1") }},
+		{"CloseAll", func(s *ProxiedStore) error { _, err := s.CloseAll([]string{"prx-1"}, nil); return err }},
+		{"SetMetadata", func(s *ProxiedStore) error { return s.SetMetadata("prx-1", "k", "v") }},
+		{"SetMetadataBatch", func(s *ProxiedStore) error { return s.SetMetadataBatch("prx-1", map[string]string{"k": "v"}) }},
+		{"Tx", func(s *ProxiedStore) error { return s.Tx("m", func(Tx) error { return nil }) }},
+		{"Delete", func(s *ProxiedStore) error { return s.Delete("prx-1") }},
+		{"DepAdd", func(s *ProxiedStore) error { return s.DepAdd("prx-1", "prx-2", "blocks") }},
+		{"DepRemove", func(s *ProxiedStore) error { return s.DepRemove("prx-1", "prx-2") }},
+		{"ReleaseIfCurrent", func(s *ProxiedStore) error { _, err := s.ReleaseIfCurrent("prx-1", "worker"); return err }},
+		{"DeleteBatch", func(s *ProxiedStore) error { return s.DeleteBatch([]string{"prx-1"}) }},
+		{"CreateWithForeignID", func(s *ProxiedStore) error { _, err := s.CreateWithForeignID(Bead{ID: "gcg-1"}); return err }},
+		{"CreateWithStorage", func(s *ProxiedStore) error {
+			_, err := s.CreateWithStorage(Bead{Title: "t", Type: "task"}, StorageDefault)
+			return err
+		}},
+	}
+	for _, tc := range inside {
+		t.Run(tc.name+" across a proxy restart stands the native leaf down", func(t *testing.T) {
+			store := newSplit(t, true)
+			if err := tc.call(store); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if !store.Demoted() {
+				t.Fatalf("%s restarted bd's proxy and the native leaf kept serving the previous generation: "+
+					"the H6 register lists it INSIDE the bracket", tc.name)
+			}
+			if verdict := store.Verdict(); verdict == nil || verdict.Verdict != ProxiedVerdictProxyGone || verdict.Terminal() {
+				t.Fatalf("verdict = %v, want a non-terminal proxy_gone", verdict)
+			}
+		})
+		t.Run(tc.name+" on a steady generation leaves the native leaf alone", func(t *testing.T) {
+			store := newSplit(t, false)
+			if err := tc.call(store); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if store.Demoted() {
+				t.Fatalf("%s demoted the store without a generation change", tc.name)
+			}
+		})
+	}
+
+	t.Run("SetLocalString is outside the bracket on purpose", func(t *testing.T) {
+		// It writes only the clone-local sidecar file, never Dolt, the proxy
+		// or a subprocess; bracketing it would put two file reads on the
+		// hottest write in the tree. See its doc.
+		store := newSplit(t, true)
+		if err := store.SetLocalString("prx-1", "synced_at", "now"); err != nil {
+			t.Fatalf("SetLocalString: %v", err)
+		}
+		if store.Demoted() {
+			t.Fatal("SetLocalString ran the generation bracket; the register says it deliberately does not")
+		}
+	})
+}
+
 // TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap makes the OTHER
 // half of council B-F3 executable rather than prose, and pins the H6 register's
 // two lists exactly (council pr2 D-F8).
