@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,6 +32,11 @@ import (
 // process resolves BY NAME — the way the linked library's exec.LookPath does —
 // and it records the exec with this process as parent and then refuses,
 // without running the real dolt.
+//
+// And the parent capture is proved on both of its paths: procfs, which is what
+// Linux uses, and POSIX ps, which is the only one macOS has. The ps row hides
+// procfs from the shim (SentinelDoltProcEnv) so Linux CI exercises the branch
+// the macOS jobs depend on, rather than leaving it to be discovered there.
 func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "ran")
@@ -40,19 +46,49 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A pass-through ps first on PATH that leaves a mark, so each row can prove
+	// which branch the shim took rather than passing on whichever one worked.
+	realPS, psErr := exec.LookPath("ps")
+	psDir := filepath.Join(dir, "ps-shim")
+	psMarker := filepath.Join(dir, "ps-ran")
+	if psErr == nil {
+		if err := os.MkdirAll(psDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		psScript := "#!/bin/sh\n: >>" + shellQuote(psMarker) + "\nexec " + shellQuote(realPS) + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(psDir, "ps"), []byte(psScript), 0o755); err != nil { //nolint:gosec // test double must be executable
+			t.Fatal(err)
+		}
+	}
+
 	sentinel := NewSentinelDolt(t, fake)
 	if got := sentinel.Invocations(); len(got) != 0 {
 		t.Fatalf("a fresh sentinel already recorded %d invocation(s)", len(got))
 	}
 
 	for _, tc := range []struct {
-		name string
-		trap bool
+		name   string
+		trap   bool
+		noProc bool
 	}{
 		{name: "pass-through"},
 		{name: "trapped in this process", trap: true},
+		{name: "pass-through without procfs (the macOS path)", noProc: true},
+		{name: "trapped without procfs (the macOS path)", trap: true, noProc: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if psErr == nil {
+				t.Setenv("PATH", psDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			if tc.noProc {
+				if psErr != nil {
+					t.Skipf("no ps on PATH, so the non-procfs branch cannot run here: %v", psErr)
+				}
+				t.Setenv(SentinelDoltProcEnv, filepath.Join(t.TempDir(), "no-proc"))
+			}
+			if err := os.Remove(psMarker); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
 			sentinel.Reset()
 			if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
@@ -106,6 +142,15 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 				t.Errorf("ParentCommand() = %q (from parent %q), want this test binary %q",
 					got.ParentCommand(), got.Parent, filepath.Base(os.Args[0]))
 			}
+			if psErr == nil {
+				_, statErr := os.Stat(psMarker)
+				switch {
+				case tc.noProc && statErr != nil:
+					t.Errorf("procfs was hidden but the shim never ran ps, so the macOS branch was not exercised")
+				case !tc.noProc && statErr == nil && runtime.GOOS == "linux":
+					t.Errorf("the shim ran ps on Linux with procfs available; the procfs branch was not exercised")
+				}
+			}
 			if mine := sentinel.FromThisProcess(); len(mine) != 1 {
 				t.Errorf("FromThisProcess = %v, want the one exec this process made", mine)
 			}
@@ -118,7 +163,7 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 	// command line answers yes for any process whose ARGUMENTS happen to mention
 	// the binary, which in an acceptance run is every process under a
 	// /tmp/gc-acceptance-* city.
-	decoy := SentinelDoltInvocation{Parent: "/usr/bin/bd db-proxy-child --root /tmp/gc-acceptance-1/x/.beads/dolt", Argv: []string{"sql-server"}}
+	decoy := SentinelDoltInvocation{ParentExe: "/usr/bin/bd", Parent: "/usr/bin/bd db-proxy-child --root /tmp/gc-acceptance-1/x/.beads/dolt", Argv: []string{"sql-server"}}
 	if decoy.ParentCommandIs("gc") {
 		t.Error("ParentCommandIs(\"gc\") matched a bd process whose argv merely names a gc-acceptance path")
 	}
@@ -135,13 +180,37 @@ func TestSentinelDoltRecordsArgvAndParentThenExecs(t *testing.T) {
 // TestParseSentinelDoltRefusesAnInterleavedRecord pins the refusal without
 // having to provoke a real interleave.
 func TestParseSentinelDoltRefusesAnInterleavedRecord(t *testing.T) {
-	good := "123" + fieldSeparator + "/bin/bd db-proxy-child" + fieldSeparator + "sql-server" + fieldSeparator + recordSeparator + "\n"
-	if got, err := parseSentinelDolt([]byte(good)); err != nil || len(got) != 1 {
+	good := "123" + fieldSeparator + "/bin/bd" + fieldSeparator + "/bin/bd" + argvSeparator + "db-proxy-child" + fieldSeparator + "sql-server" + fieldSeparator + recordSeparator + "\n"
+	got, err := parseSentinelDolt([]byte(good))
+	if err != nil || len(got) != 1 {
 		t.Fatalf("parse a good record: %v (%d records)", err, len(got))
 	}
-	bad := "sql-server" + fieldSeparator + "123" + fieldSeparator + recordSeparator + "\n"
+	if got[0].Parent != "/bin/bd db-proxy-child" || !got[0].ParentCommandIs("bd") || !got[0].IsServer() {
+		t.Fatalf("parsed %+v, want parent %q by bd running sql-server", got[0], "/bin/bd db-proxy-child")
+	}
+	bad := "sql-server" + fieldSeparator + "123" + fieldSeparator + "/bin/bd" + fieldSeparator + recordSeparator + "\n"
 	if _, err := parseSentinelDolt([]byte(bad)); err == nil {
 		t.Fatal("parseSentinelDolt accepted a record whose first field is not a pid; a dropped record would read as proof that gc spawned nothing")
+	}
+}
+
+// TestSentinelDoltParentCommandSurvivesASpaceInThePath pins why the parent's
+// program is its own field. ps's args (the macOS path) and a space-joined
+// /proc cmdline both lose argv boundaries, so cutting the program from the
+// command line misreads any path with a space — ordinary under a macOS home
+// directory — and the no-spawn row would then attribute a server to "My".
+func TestSentinelDoltParentCommandSurvivesASpaceInThePath(t *testing.T) {
+	exe := "/Users/ci/My Tools/gc"
+	record := "123" + fieldSeparator + exe + fieldSeparator + exe + " status --json" + fieldSeparator + "version" + fieldSeparator + recordSeparator + "\n"
+	got, err := parseSentinelDolt([]byte(record))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("parse: %v (%d records)", err, len(got))
+	}
+	if !got[0].ParentCommandIs("gc") {
+		t.Fatalf("ParentCommand() = %q for program %q, want gc", got[0].ParentCommand(), exe)
+	}
+	if unknown := (SentinelDoltInvocation{Parent: "/usr/bin/gc status"}); unknown.ParentCommand() != "" {
+		t.Fatalf("ParentCommand() = %q with no recorded program; an uncaptured parent must match nothing", unknown.ParentCommand())
 	}
 }
 
@@ -153,7 +222,7 @@ func TestSentinelDoltFromThisProcessKeepsOnlyThisProcesssExecs(t *testing.T) {
 	dir := t.TempDir()
 	s := &SentinelDolt{t: t, logPath: filepath.Join(dir, "invocations.log")}
 	record := func(ppid, parent string, argv ...string) string {
-		return ppid + fieldSeparator + parent + fieldSeparator + strings.Join(argv, fieldSeparator) + fieldSeparator + recordSeparator + "\n"
+		return ppid + fieldSeparator + strings.Fields(parent)[0] + fieldSeparator + parent + fieldSeparator + strings.Join(argv, fieldSeparator) + fieldSeparator + recordSeparator + "\n"
 	}
 	self := strconv.Itoa(os.Getpid())
 	log := record(self, os.Args[0], "version") +

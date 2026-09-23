@@ -57,11 +57,31 @@ const SentinelDoltTrapEnv = "GC_ACCEPTANCE_SENTINEL_DOLT_TRAP"
 // one dolt uses, so a refusal is recognizable in a library error.
 const sentinelDoltTrapStatus = 97
 
+// SentinelDoltProcEnv overrides where the shim looks for procfs (default
+// /proc). The shim reads the parent from procfs when "$proc/self" exists and
+// otherwise falls back to POSIX ps, which is the only path on macOS. Pointing
+// this at a directory that does not exist forces the ps path on Linux, so the
+// branch macOS depends on is exercised by Linux CI as well.
+const SentinelDoltProcEnv = "GC_ACCEPTANCE_SENTINEL_DOLT_PROC"
+
+// argvSeparator is what the shim turns the NULs of /proc/<pid>/cmdline into.
+// It is neither fieldSeparator nor recordSeparator, so a parent's argv stays
+// inside its one field, and it is split on exactly, not guessed at.
+const argvSeparator = "\x1d"
+
 // SentinelDoltInvocation is one recorded dolt exec.
 type SentinelDoltInvocation struct {
 	// PPID is the process that spawned it.
 	PPID string
-	// Parent is that process's own command line, read from /proc at exec time.
+	// ParentExe is the parent's own program, unambiguously: its argv[0] read
+	// verbatim from /proc/<ppid>/cmdline on Linux, or `ps -o comm=` where there
+	// is no procfs (macOS). It is a field of its own because Parent is a
+	// space-joined command line, and a program path with a space in it — which
+	// macOS home directories make ordinary — cannot be recovered from that.
+	ParentExe string
+	// Parent is that process's own command line, captured at exec time from
+	// /proc on Linux and from `ps -o args=` elsewhere, space-joined. It is for
+	// humans reading a failure; ancestry is decided on ParentExe.
 	//
 	// It is captured by the shim rather than looked up afterwards because the
 	// parent is usually gone by the time a test reads the log: bd's proxy child
@@ -87,8 +107,9 @@ func (i SentinelDoltInvocation) IsServer() bool {
 	return i.Subcommand() == "sql-server"
 }
 
-// ParentCommand is the base name of the parent's argv[0] — "gc", "bd",
-// "timeout", and so on.
+// ParentCommand is the base name of the parent's program (ParentExe) — "gc",
+// "bd", "timeout", and so on. It is "" when the parent was not captured, which
+// no ancestry predicate matches.
 //
 // Deliberately NOT a substring match on the whole parent command line, and this
 // is a trap worth naming: the first draft of the no-spawn row classified a parent
@@ -96,13 +117,14 @@ func (i SentinelDoltInvocation) IsServer() bool {
 // acceptance run matched, because its argv names a city under
 // /tmp/gc-acceptance-*. The row failed reporting that gc had spawned a Dolt
 // server when what it had found was bd's proxy child doing its job. Only argv[0]
-// says who a process IS.
+// says who a process IS — and it is recorded as its own field rather than cut
+// from the command line, so a path with a space cannot be misread either.
 func (i SentinelDoltInvocation) ParentCommand() string {
-	fields := strings.Fields(i.Parent)
-	if len(fields) == 0 {
+	exe := strings.TrimSpace(i.ParentExe)
+	if exe == "" {
 		return ""
 	}
-	return filepath.Base(fields[0])
+	return filepath.Base(exe)
 }
 
 // ParentCommandIs reports whether the parent's own binary is name.
@@ -144,11 +166,20 @@ func NewSentinelDolt(t *testing.T, realDolt string) *SentinelDolt {
 	// uses and for the same reason: a dolt argv carries paths and a `--config`
 	// value, and a line-oriented log would split one exec into two records.
 	//
-	// The parent's command line is read from /proc with a redirect rather than a
-	// `cat`, so the only extra process is the `tr` that turns dolt's NUL
-	// separators into spaces. Failures are swallowed on purpose: an instrument
-	// must not be able to fail the city it is observing, and a parent that has
-	// already exited is a legitimate answer of "unknown".
+	// Each record is: ppid, the parent's program, the parent's command line, then
+	// dolt's own argv.
+	//
+	// On Linux the parent is read from /proc with a redirect rather than a `cat`,
+	// so the only extra process is the `tr` that turns the NUL separators into
+	// argvSeparator; argv[0] is then cut at the first argvSeparator by the shell
+	// itself, exactly. Where there is no procfs (macOS) the shim asks POSIX ps:
+	// `-o comm=` for the program and `-o args=` for the command line, each
+	// standing in for the other if it comes back empty. ps's args is already
+	// space-joined, which is why the program is recorded separately rather than
+	// cut from it. Failures are swallowed on purpose: an instrument must not be
+	// able to fail the city it is observing, and a parent that has already
+	// exited is a legitimate answer of "unknown" — which ParentCommand reports as
+	// "", so no ancestry predicate can match it.
 	//
 	// In trap mode (SentinelDoltTrapEnv set) the record is written FIRST and the
 	// shim then refuses without exec'ing anything, so a trapped exec is always
@@ -156,8 +187,19 @@ func NewSentinelDolt(t *testing.T, realDolt string) *SentinelDolt {
 	script := fmt.Sprintf(`#!/bin/sh
 us='%s'
 rs='%s'
-parent=$(tr '\0' ' ' </proc/${PPID:-0}/cmdline 2>/dev/null)
-record="${PPID:-0}$us$parent$us"
+gs='%s'
+ppid=${PPID:-0}
+proc=${%s:-/proc}
+if [ -d "$proc/self" ]; then
+	parent=$(tr '\0' "$gs" <"$proc/$ppid/cmdline" 2>/dev/null)
+	exe=${parent%%%%"$gs"*}
+else
+	exe=$(ps -o comm= -p "$ppid" 2>/dev/null)
+	parent=$(ps -o args= -p "$ppid" 2>/dev/null)
+	[ -n "$parent" ] || parent=$exe
+	[ -n "$exe" ] || exe=${parent%%%% *}
+fi
+record="$ppid$us$exe$us$parent$us"
 for arg in "$@"; do
 	record="$record$arg$us"
 done
@@ -167,7 +209,7 @@ if [ -n "${%s:-}" ]; then
 	exit %d
 fi
 exec %s "$@"
-`, fieldSeparator, recordSeparator, shellQuote(s.logPath), SentinelDoltTrapEnv, sentinelDoltTrapStatus, shellQuote(resolved))
+`, fieldSeparator, recordSeparator, argvSeparator, SentinelDoltProcEnv, shellQuote(s.logPath), SentinelDoltTrapEnv, sentinelDoltTrapStatus, shellQuote(resolved))
 	if err := os.WriteFile(s.Path, []byte(script), 0o755); err != nil { //nolint:gosec // the shim must be executable
 		t.Fatalf("write sentinel dolt shim: %v", err)
 	}
@@ -208,16 +250,17 @@ func parseSentinelDolt(data []byte) ([]SentinelDoltInvocation, error) {
 			continue
 		}
 		fields := strings.Split(strings.TrimSuffix(record, fieldSeparator), fieldSeparator)
-		if len(fields) < 2 || fields[0] == "" {
+		if len(fields) < 3 || fields[0] == "" {
 			continue
 		}
 		if _, convErr := strconv.Atoi(fields[0]); convErr != nil {
 			return nil, fmt.Errorf("a record's first field %q is not a pid: two dolt execs interleaved their writes, so this log's ancestry cannot be trusted", fields[0])
 		}
 		out = append(out, SentinelDoltInvocation{
-			PPID:   fields[0],
-			Parent: strings.TrimSpace(fields[1]),
-			Argv:   fields[2:],
+			PPID:      fields[0],
+			ParentExe: strings.TrimSpace(fields[1]),
+			Parent:    strings.TrimSpace(strings.ReplaceAll(fields[2], argvSeparator, " ")),
+			Argv:      fields[3:],
 		})
 	}
 	return out, nil
@@ -274,7 +317,7 @@ func (s *SentinelDolt) Describe() string {
 	}
 	lines := make([]string, 0, len(invocations))
 	for _, i := range invocations {
-		lines = append(lines, fmt.Sprintf("  ppid=%s parent=%q dolt %s", i.PPID, i.Parent, strings.Join(i.Argv, " ")))
+		lines = append(lines, fmt.Sprintf("  ppid=%s exe=%q parent=%q dolt %s", i.PPID, i.ParentExe, i.Parent, strings.Join(i.Argv, " ")))
 	}
 	return strings.Join(lines, "\n")
 }
