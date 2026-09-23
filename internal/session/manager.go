@@ -362,6 +362,14 @@ type Info struct {
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
+	// DrainAt is the RAW drain_at metadata (RFC3339 or empty): the durable
+	// instant BeginDrainPatch stamped when the session entered drain. It
+	// survives the draining → drained transition (AcknowledgeDrainPatch does
+	// not clear it), so it is the only persistent clock for how long a seat has
+	// been in drain — the in-memory drainTracker resets on every controller
+	// restart. The pool-slot retire deadline parses it; an empty or
+	// unparseable value fails closed (no forced retirement).
+	DrainAt string // drain_at (raw RFC3339)
 	// SleepIntent is the RAW sleep_intent metadata. The sleep-intent branch reads
 	// it as != "" and == "idle-stop-pending".
 	SleepIntent string // sleep_intent (raw)
@@ -1517,6 +1525,15 @@ func (m *Manager) Kill(id string) error {
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.
+//
+// Population warning for a new caller: this stamps drain_at (BeginDrainPatch),
+// and drain_at is the durable clock cmd/gc's poolSlotDrainRetireDeadline bound
+// reads to decide that a pool seat's drain has outlived its deadline and its
+// runtime may be killed and its bead force-retired. That bound's safety
+// argument currently rests on drain_at being stamped only by the controller's
+// drain-ack path — this exported entry point has no production caller today —
+// so wiring an operator-facing drain here widens the bound's population.
+// Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
 func (m *Manager) BeginDrain(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)
