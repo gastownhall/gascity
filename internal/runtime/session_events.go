@@ -90,3 +90,28 @@ type SessionEvent struct {
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
 }
+
+// SessionEventStaleAfter bounds how long a session-event source may go
+// silent before it is no longer trusted as live. A provider's stream
+// self-heals without ever closing on a transient transport failure (see
+// SessionEventProvider's contract), so silence — not a channel close — is
+// the only signal an outage leaves behind. Composite providers (auto,
+// hybrid) use this to detect partial backend failure when fanning in
+// multiple backends' streams: without a per-backend bound, a healthy
+// backend's traffic keeps the merged stream looking alive indefinitely even
+// while the other backend's stream has gone silent, masking that backend's
+// outage from every consumer of the merged stream. 30s is 6x herdr's max
+// reconnect backoff (5s, internal/runtime/herdr/events.go), giving margin
+// for reconnect latency and scheduling jitter before declaring a source
+// stale.
+const SessionEventStaleAfter = 30 * time.Second
+
+// EventCapableRouter is implemented by composite providers (e.g. auto,
+// hybrid) that route different sessions to different backends. Asserting a
+// provider against SessionEventProvider alone answers "is ANY routed backend
+// event-capable", which for a composite is true whenever its local side is,
+// even for sessions it routes elsewhere. A provider that can report
+// per-session capability must be asked per-session.
+type EventCapableRouter interface {
+	EventCapableRoute(name string) bool
+}

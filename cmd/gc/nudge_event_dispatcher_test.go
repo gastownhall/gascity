@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -1086,14 +1087,54 @@ func TestAwaitNudgeEventsDownWaitsThenGivesUp(t *testing.T) {
 }
 
 func TestProviderRetiresNudgePollers(t *testing.T) {
-	if providerRetiresNudgePollers(nil) {
+	target := nudgeTarget{sessionName: "gc-worker"}
+	if providerRetiresNudgePollers(target, nil) {
 		t.Fatal("nil provider must not retire pollers")
 	}
-	if providerRetiresNudgePollers(runtime.NewFake()) {
+	if providerRetiresNudgePollers(target, runtime.NewFake()) {
 		t.Fatal("plain provider must not retire pollers")
 	}
-	if !providerRetiresNudgePollers(newNudgeEventedFake()) {
+	if !providerRetiresNudgePollers(target, newNudgeEventedFake()) {
 		t.Fatal("event-capable provider must retire pollers")
+	}
+}
+
+// routedFake implements runtime.EventCapableRouter to simulate a composite provider
+// (e.g. hybrid) whose top-level SessionEventProvider assertion is true
+// (because SOME routed backend is event-capable) but whose per-session
+// routing decision differs — regression coverage for gc-ey9vgx finding 3:
+// a hybrid provider must not suppress the sidecar poller for sessions it
+// routes to a non-event-capable backend.
+type routedFake struct {
+	runtime.Provider
+	eventCapableFor map[string]bool
+}
+
+var (
+	_ runtime.SessionEventProvider = (*routedFake)(nil)
+	_ runtime.EventCapableRouter   = (*routedFake)(nil)
+)
+
+func (r *routedFake) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	ch := make(chan runtime.SessionEvent)
+	close(ch)
+	return ch, nil
+}
+
+func (r *routedFake) EventCapableRoute(name string) bool {
+	return r.eventCapableFor[name]
+}
+
+func TestProviderRetiresNudgePollersChecksPerTargetRoute(t *testing.T) {
+	sp := &routedFake{
+		Provider:        runtime.NewFake(),
+		eventCapableFor: map[string]bool{"gc-local": true},
+	}
+	if !providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-local"}, sp) {
+		t.Fatal("session routed to the event-capable backend must retire its poller")
+	}
+	if providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-remote"}, sp) {
+		t.Fatal("session routed to a non-event-capable backend must NOT have its poller suppressed")
 	}
 }
 
@@ -1253,5 +1294,28 @@ func TestNudgeEventDispatcherWedgedPassSurrendersItsSlot(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the healthy session never got a pass: a wedged pass is holding its slot for the life of the process, which is the head-of-line blocking the fan-out exists to end")
+	}
+}
+
+// TestProviderRetiresNudgePollersChecksPerTargetRoute_Auto is the production
+// counterpart to the routedFake case above: it proves the REAL
+// internal/runtime/auto.Provider (not a hand-rolled test double) is asked
+// per-session too. Before EventCapableRoute existed on auto.Provider, its
+// SubscribeSessionEvents method made the bare runtime.SessionEventProvider
+// type assertion in providerRetiresNudgePollers true unconditionally
+// (auto.Provider always implements the method, even when neither backend
+// does), so an ACP-routed session behind an event-capable default backend
+// had its sidecar poller suppressed even though the ACP backend cannot
+// deliver its events.
+func TestProviderRetiresNudgePollersChecksPerTargetRoute_Auto(t *testing.T) {
+	acp := runtime.NewFake()
+	sp := sessionauto.New(newNudgeEventedFake(), acp)
+	sp.RouteACP("gc-acp")
+
+	if !providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-default"}, sp) {
+		t.Fatal("session routed to the event-capable default backend must retire its poller")
+	}
+	if providerRetiresNudgePollers(nudgeTarget{sessionName: "gc-acp"}, sp) {
+		t.Fatal("session routed to the non-event-capable ACP backend must NOT have its poller suppressed")
 	}
 }

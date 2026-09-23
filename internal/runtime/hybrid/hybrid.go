@@ -264,10 +264,15 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable local backend (e.g. herdr)
-// behind hybrid for remote routing would fail the
+// SubscribeSessionEvents merges the session-event streams of every backend
+// that implements runtime.SessionEventProvider. EventCapableRoute reports
+// event-capability per session, backend by backend, so a caller may rely on
+// events arriving for a session routed to EITHER backend. Forwarding only
+// one backend's stream (the pre-fix behavior) would silently drop events for
+// sessions served by the other backend whenever both are event-capable,
+// while still telling that caller (via EventCapableRoute) that those
+// sessions were covered. Wrapping an event-capable local backend (e.g.
+// herdr) behind hybrid without this method would fail the
 // runtime.SessionEventProvider type assertion in cmd/gc's
 // sessionEventPump.restart and silently drop the whole event-driven
 // reconcile poke, falling back to patrol polling with no underlying
@@ -275,12 +280,96 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
 	lSEP, lok := p.local.(runtime.SessionEventProvider)
 	rSEP, rok := p.remote.(runtime.SessionEventProvider)
-	switch {
-	case lok:
-		return lSEP.SubscribeSessionEvents(ctx)
-	case rok:
-		return rSEP.SubscribeSessionEvents(ctx)
-	default:
+	if !lok && !rok {
 		return nil, fmt.Errorf("neither local nor remote backend implements SubscribeSessionEvents")
 	}
+	if lok && !rok {
+		return lSEP.SubscribeSessionEvents(ctx)
+	}
+	if rok && !lok {
+		return rSEP.SubscribeSessionEvents(ctx)
+	}
+
+	lCh, err := lSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("local backend: %w", err)
+	}
+	rCh, err := rSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("remote backend: %w", err)
+	}
+	return mergeSessionEvents(ctx, lCh, rCh, runtime.SessionEventStaleAfter), nil
+}
+
+// mergeSessionEvents fans two session-event streams into one, closing the
+// output when ctx is done, both inputs close, or either input goes silent
+// past staleAfter while the other is still open.
+//
+// The staleness check matters because a consumer's liveness signal (e.g.
+// cmd/gc's sessionEventPump.flowing()) is computed off the single merged
+// stream: as long as SOME event keeps arriving, that signal reports "live"
+// even if it is only ever the healthy backend's traffic. Without this check
+// a dead backend inside a composite provider would be invisible to every
+// consumer of the merged stream for as long as the other backend kept
+// producing — silently under-covering the dead backend's sessions instead
+// of falling back to patrol polling for them. Ending the merge here instead
+// reuses the pump's existing channel-closed fallback (session liveness
+// reverts fully to patrol) the same way a single-backend stream ending
+// already does. staleAfter is a parameter (not a direct
+// runtime.SessionEventStaleAfter reference) so tests can exercise the path
+// without waiting out the production bound; production always passes
+// runtime.SessionEventStaleAfter (see SubscribeSessionEvents above).
+func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, staleAfter time.Duration) <-chan runtime.SessionEvent {
+	out := make(chan runtime.SessionEvent)
+	go func() {
+		defer close(out)
+		ticker := time.NewTicker(staleAfter / 3)
+		defer ticker.Stop()
+		now := time.Now()
+		lastA, lastB := now, now
+		for a != nil || b != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-a:
+				if !ok {
+					a = nil
+					continue
+				}
+				lastA = time.Now()
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case ev, ok := <-b:
+				if !ok {
+					b = nil
+					continue
+				}
+				lastB = time.Now()
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case <-ticker.C:
+				if a != nil && b != nil {
+					if time.Since(lastA) >= staleAfter || time.Since(lastB) >= staleAfter {
+						return
+					}
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// EventCapableRoute reports whether the backend routed for name implements
+// runtime.SessionEventProvider. SubscribeSessionEvents above merges both
+// backends' streams whenever both are event-capable, so a session routed to
+// either backend gets real events whenever this reports true.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
 }

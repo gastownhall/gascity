@@ -1954,7 +1954,7 @@ func maybeStartNudgePoller(target nudgeTarget, sp runtime.Provider) {
 	// suppressing here would leave the queue undelivered until one comes back.
 	// So this fails OPEN: no controller, spawn the poller. Callers without a
 	// resolved provider pass nil and keep today's spawn behavior too.
-	if providerRetiresNudgePollers(sp) && nudgePollerDispatcherIsLive(target.cityPath) {
+	if providerRetiresNudgePollers(target, sp) && nudgePollerDispatcherIsLive(target.cityPath) {
 		return
 	}
 	// ACP session/prompt delivery requires the process that owns the

@@ -713,13 +713,24 @@ func nudgeQuiescenceRemaining(obs worker.LiveObservation, quiescence time.Durati
 }
 
 // providerRetiresNudgePollers reports whether sp's event stream retires the
-// sidecar poller class: the supervisor-hosted event dispatcher owns queued
-// delivery for such providers (in both nudge_dispatcher modes), so a spawned
-// poller would only race it. A nil provider fails open — callers without a
-// resolved provider keep today's spawn behavior.
-func providerRetiresNudgePollers(sp runtime.Provider) bool {
+// sidecar poller class for target: the supervisor-hosted event dispatcher
+// owns queued delivery for such providers (in both nudge_dispatcher modes),
+// so a spawned poller would only race it. A nil provider fails open —
+// callers without a resolved provider keep today's spawn behavior.
+//
+// A composite provider (auto, hybrid) routes different sessions to different
+// backends, so the bare SessionEventProvider type assertion below answers
+// "is ANY routed backend event-capable" — true whenever the DEFAULT/LOCAL
+// side is, even for target's session if it is routed to the other backend.
+// When sp can report per-session capability (runtime.EventCapableRouter),
+// ask it for target's session specifically instead of trusting the
+// composite-wide assertion.
+func providerRetiresNudgePollers(target nudgeTarget, sp runtime.Provider) bool {
 	if sp == nil {
 		return false
+	}
+	if router, ok := sp.(runtime.EventCapableRouter); ok {
+		return router.EventCapableRoute(target.sessionName)
 	}
 	_, ok := sp.(runtime.SessionEventProvider)
 	return ok

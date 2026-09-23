@@ -684,3 +684,134 @@ func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
 		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
 	}
 }
+
+// fakeEventProvider adds a controllable SessionEventProvider to runtime.Fake
+// so tests can drive both backends' streams independently.
+type fakeEventProvider struct {
+	*runtime.Fake
+	ch chan runtime.SessionEvent
+}
+
+func newFakeEventProvider() *fakeEventProvider {
+	return &fakeEventProvider{Fake: runtime.NewFake(), ch: make(chan runtime.SessionEvent, 4)}
+}
+
+func (f *fakeEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	return f.ch, nil
+}
+
+var _ runtime.SessionEventProvider = (*fakeEventProvider)(nil)
+
+// Both backends being event-capable must not mean only one is heard from:
+// EventCapableRoute is checked per session, so a session routed to either
+// backend needs its events to actually arrive.
+func TestSubscribeSessionEvents_MergesBothEventCapableBackends(t *testing.T) {
+	def := newFakeEventProvider()
+	acp := newFakeEventProvider()
+	p := New(def, acp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	acp.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"}
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case ev := <-merged:
+			seen[ev.Session] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for merged events, got %v", seen)
+		}
+	}
+	if !seen["default-sess"] || !seen["acp-sess"] {
+		t.Errorf("merged events = %v, want both default-sess and acp-sess", seen)
+	}
+}
+
+func TestSubscribeSessionEvents_SingleBackendForwardsDirectly(t *testing.T) {
+	def := newFakeEventProvider()
+	p := New(def, runtime.NewFake())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	select {
+	case ev := <-ch:
+		if ev.Session != "default-sess" {
+			t.Errorf("event.Session = %q, want default-sess", ev.Session)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forwarded event")
+	}
+}
+
+func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
+	p := New(runtime.NewFake(), runtime.NewFake())
+	if _, err := p.SubscribeSessionEvents(context.Background()); err == nil {
+		t.Fatal("SubscribeSessionEvents = nil error, want error when neither backend is event-capable")
+	}
+}
+
+// A healthy backend's continuing traffic must not mask the other backend
+// going silent: without per-source staleness tracking, the merged stream
+// looks alive forever off "a" alone, hiding "b"'s outage from every
+// consumer computing liveness off the single merged channel.
+func TestMergeSessionEvents_ClosesWhenOneSourceGoesStaleWhileOtherKeepsFlowing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := make(chan runtime.SessionEvent)
+	b := make(chan runtime.SessionEvent)
+	const staleAfter = 30 * time.Millisecond
+	merged := mergeSessionEvents(ctx, a, b, staleAfter)
+
+	// b delivers once, then goes silent (transport wedged, channel never
+	// closed — herdr's actual behavior on a broken transport).
+	b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess"}
+	if ev := <-merged; ev.Session != "b-sess" {
+		t.Fatalf("first event = %q, want b-sess", ev.Session)
+	}
+
+	// a keeps producing well past staleAfter; merged must still close
+	// because b, not a, is the one that went stale.
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
+				case <-stop:
+					return
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-merged:
+			if !ok {
+				return // merged closed despite a's continuing traffic: correct.
+			}
+		case <-deadline:
+			t.Fatal("merged stream did not close after one source went stale")
+		}
+	}
+}
