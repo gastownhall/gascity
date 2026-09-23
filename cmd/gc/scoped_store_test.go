@@ -559,7 +559,7 @@ func TestBdStoreBackingGuardsATypedNilProxiedView(t *testing.T) {
 	// the very thing this test is about, and staticcheck rejects it (SA4023)
 	// precisely because it can see that an interface with a type is never nil.
 	// That is the bug, stated by the linter.
-	if value := reflect.ValueOf(store); value.Kind() != reflect.Ptr || !value.IsNil() {
+	if value := reflect.ValueOf(store); value.Kind() != reflect.Pointer || !value.IsNil() {
 		t.Fatal("the fixture did not build a typed nil; this test would prove nothing")
 	}
 	if _, ok := store.(beads.ProxiedStoreView); !ok {

@@ -197,7 +197,7 @@ func scopedStoreLike(ctx context.Context, cityPath string, cfg *config.City, exi
 func isNilProxiedStoreView(view beads.ProxiedStoreView) bool {
 	value := reflect.ValueOf(view)
 	switch value.Kind() {
-	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
 		return value.IsNil()
 	default:
 		return false
