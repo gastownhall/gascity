@@ -927,6 +927,10 @@ func TestGenerationSetRungsExpire(t *testing.T) {
 // semaphore, the op budget — and none of them is evidence that bd cannot make
 // its proxy healthy. Cascading into `bd dolt stop` in the same pass spends the
 // most destructive rung in the ladder on gc's own contention.
+//
+// The failure here is UNMARKED, which is what such a failure is: bd never ran
+// to an answer. A failure bd itself reported is the other arm, and it is
+// TestZombieLadderRecoversWhenBdReportsThePingFailed.
 func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 	f := newAdmissionFixture(t, "-1")
 	ops := &admissionOps{onPing: func() error {
@@ -985,6 +989,112 @@ func TestZombieLadderDoesNotRecoverOnAFailedPing(t *testing.T) {
 		t.Fatalf("the open after the backoff spent %d ping(s) in total, want 2: a ping that failed for gc's own "+
 			"reason must not hold the rung for the whole TTL", pings)
 	}
+}
+
+// TestZombieLadderRecoversWhenBdReportsThePingFailed is round3 review
+// (completeness): the zombie a real bd produces.
+//
+// SIGTERM a proxied scope's Dolt child and it exits 0, so bd's supervisor never
+// notices and the proxy lives on: its data port accepts and never greets. `bd
+// ping` against it adopts the proxy, fails its SELECT 1 and exits 1 — against
+// a real zombie the ping can only FAIL. The rows that pinned the ladder
+// scripted a ping that SUCCEEDED on a zombie, a shape real bd never produces,
+// and after A-F5 every failed ping took the backoff arm; together, a real
+// zombie was pinged once per backoff window for ever and never recovered, and
+// the child-term-zombie acceptance row (2 pings, 1 `bd dolt stop`) could not
+// pass. A failure bd reported is the design's trigger for the recover rung
+// (v2 3.4, F13a/F22), and it is spent in the same pass.
+func TestZombieLadderRecoversWhenBdReportsThePingFailed(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	silent := proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+
+	t.Run("bd's recover restores the proxy: one ping, one recover, admitted in the same Admit", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		zombie := f.record
+		recovered := false
+		ops := &admissionOps{onPing: bdSaysNo, onRecov: func() error {
+			// `bd dolt stop` then `bd ping`: a new generation, which greets.
+			f.writeRecord(6002, "55667788")
+			recovered = true
+			return nil
+		}}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if !recovered {
+				return silent
+			}
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+		}
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			pings, recovers := ops.counts()
+			t.Fatalf("Admit = %v after %d ping(s) and %d recover(s): a zombie whose ping bd reported as failed "+
+				"was never recovered, so every open of this scope forks bd against a proxy nobody will fix", err, pings, recovers)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("the ladder spent %d ping(s) and %d recover(s), want exactly 1 and 1", pings, recovers)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Fatalf("admitted pid %d, want the generation the recover produced (6002, not the zombie's %d)",
+				pin.PoolKey().PID, zombie.PID)
+		}
+	})
+
+	t.Run("a recover that does not fix it is terminal, and neither rung is spent twice", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{onPing: bdSaysNo}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
+
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+			t.Fatalf("Admit = %v, want a terminal proxy_zombie: bd has been asked to ping and to recover and has not fixed it", err)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("the ladder spent %d ping(s) and %d recover(s), want exactly 1 and 1", pings, recovers)
+		}
+		if _, err := Admit(context.Background(), in); err == nil {
+			t.Fatal("a second admission of the same zombie succeeded")
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("a second admission of the same generation spent more: %d ping(s), %d recover(s), want 1 and 1", pings, recovers)
+		}
+	})
+
+	t.Run("the mark survives wrapping, and marks nothing else", func(t *testing.T) {
+		cause := errors.New("provider-owned beads probe: exit status 1")
+		marked := ProviderReportedFailure(cause)
+		if marked.Error() != cause.Error() {
+			t.Errorf("the mark changed the error's text: %q, want %q", marked.Error(), cause.Error())
+		}
+		if !errors.Is(fmt.Errorf("ping scope: %w", marked), ErrProviderReportedFailure) {
+			t.Error("a %w wrap between the provider op and the ladder lost the mark")
+		}
+		if !errors.Is(marked, cause) {
+			t.Error("the mark hid its cause from errors.Is")
+		}
+		if errors.Is(cause, ErrProviderReportedFailure) {
+			t.Error("an unmarked failure reads as one bd reported")
+		}
+		if ProviderReportedFailure(nil) != nil {
+			t.Error("marking nil produced an error")
+		}
+
+		// And through the ladder: the same failure wrapped once more still
+		// recovers in the same pass.
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{onPing: func() error { return fmt.Errorf("ping %s: %w", f.scopeRoot, bdSaysNo()) }}
+		in := baseAdmissionInput(f, ops)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
+		_, _ = Admit(context.Background(), in)
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+			t.Fatalf("a wrapped bd-reported failure spent %d ping(s) and %d recover(s), want 1 and 1", pings, recovers)
+		}
+	})
 }
 
 // TestZombieLadderHoldsTheBackoffWhenTheRecordIsUnreadableAfterAFailedPing is

@@ -26,12 +26,52 @@ import (
 // execs dolt, and never starts a proxy itself.
 type ProviderOps interface {
 	// Ping asks bd to make the scope's proxy healthy, and reports whether it
-	// could.
+	// could. A failure bd ITSELF reported — the verb ran to completion and
+	// exited non-zero — must be marked with ProviderReportedFailure; every
+	// other failure (gc's lifecycle semaphore, the op budget, an environment
+	// gc could not build) must not be. The no-greeting ladder escalates on the
+	// first and never on the second.
 	Ping(ctx context.Context, scopeRoot string) error
 	// Recover asks bd to retire and re-establish a proxy that is listening but
 	// not answering.
 	Recover(ctx context.Context, scopeRoot string) error
 }
+
+// ErrProviderReportedFailure is what errors.Is finds on a ProviderOps failure
+// the PROVIDER reported: bd ran the verb to completion and said it could not
+// do what it was asked. See ProviderReportedFailure.
+var ErrProviderReportedFailure = errors.New("the provider ran the verb and reported failure")
+
+// ProviderReportedFailure marks err as a failure the provider itself reported,
+// leaving its text unchanged. A nil err stays nil.
+//
+// The distinction is the one piece of evidence the no-greeting ladder turns on
+// (design v2 3.4, F13a/F22). SIGTERM a proxied scope's Dolt child and the
+// child exits 0, so bd's supervisor never notices and the proxy lives on as a
+// zombie: its data port accepts and never greets. `bd ping` adopts that proxy
+// (the control port still answers), its SELECT 1 through the proxy fails, and
+// it exits 1. That exit is bd saying its ping cannot make this proxy healthy,
+// and the recover rung — `bd dolt stop` plus a ping — is what the design spends
+// on it. A ping that failed on gc's side never got that far and says nothing
+// about the proxy (council A-F5), so it stays unmarked and holds the rung for
+// failedPingBackoff instead.
+func ProviderReportedFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return providerReportedFailure{err: err}
+}
+
+// providerReportedFailure is the mark ProviderReportedFailure puts on an error.
+type providerReportedFailure struct{ err error }
+
+func (e providerReportedFailure) Error() string { return e.err.Error() }
+
+func (e providerReportedFailure) Unwrap() error { return e.err }
+
+// Is matches ErrProviderReportedFailure, so the mark survives any %w wrapping
+// between the provider op and the ladder.
+func (e providerReportedFailure) Is(target error) bool { return target == ErrProviderReportedFailure }
 
 // GenerationSet is a process-local set of proxy generations, with a TTL.
 //
@@ -147,8 +187,10 @@ func (s *GenerationSet) Release(generation string) {
 //
 // While it holds, the rung is neither spendable (Add reports false) nor spent
 // successfully: BackingOff tells the ladder to decline without escalating,
-// because a failed ping is no evidence that bd has been asked and could not
-// help.
+// because a ping that failed on gc's side is no evidence that bd has been
+// asked and could not help. A ping bd itself reported as failed never gets
+// here from the no-greeting ladder: that is the evidence, and the ladder
+// spends the recover on it (see escalateZombie).
 func (s *GenerationSet) Backoff(generation string, d time.Duration) {
 	if s == nil || generation == "" {
 		return
@@ -693,6 +735,13 @@ func (in AdmissionInput) drain(ctx context.Context, ep proxyendpoint.Endpoint, r
 // after a recover has already been spent on this generation is terminal:
 // bd has been asked to fix it and has not, and gc's remaining options are all
 // somebody else's to exercise.
+//
+// The recover is reached two ways, and both are "bd has been asked and could
+// not": the ping bd ran reported failure (ProviderReportedFailure — the real
+// zombie's shape, whose `bd ping` exits 1, so it falls through in the SAME
+// pass), or the ping succeeded and the generation it left is still silent (a
+// later pass finds the rung spent). A ping that failed on gc's side reaches
+// neither: it holds the rung for failedPingBackoff (council A-F5, D-F9).
 func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep proxyendpoint.Endpoint, key proxyendpoint.PoolKey) (Pin, bool, error) {
 	if in.ProbeOnce {
 		// The first rung is "ask again", and a background tick asks again by
@@ -754,18 +803,33 @@ func (in AdmissionInput) escalateZombie(ctx context.Context, root string, ep pro
 			in.Observed.Backoff(generation, failedPingBackoff)
 			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
 				"the generation moved during the ping; re-admitting", err)
+		case errors.Is(err, ErrProviderReportedFailure):
+			// bd RAN its ping and said it could not make this proxy healthy,
+			// and nothing moved. That is the zombie's own signature, not gc's
+			// contention: a Dolt child that exited 0 leaves bd's proxy up and
+			// silent, `bd ping` adopts it, its SELECT 1 fails and it exits 1
+			// (design v2 3.4, F13a/F22). It is exactly the evidence the
+			// recover rung exists for, so it falls through to it in this pass,
+			// once per generation. The ping rung stays spent: bd has answered
+			// it.
+			//
+			// This arm is round3 review completeness: before it, EVERY failed
+			// ping took the backoff arm below, so a real zombie — whose ping
+			// can only fail — was pinged once per backoff window for ever and
+			// never recovered.
 		default:
-			// The ping failed and nothing moved. That is not evidence that bd
-			// cannot fix this proxy — the failure is as likely to be gc's own
-			// lifecycle semaphore or op budget — so it does NOT cascade into a
-			// `bd dolt stop` in the same pass (council A-F5), nor in a later
-			// one while the backoff holds. The rung is held for
-			// failedPingBackoff rather than released, so a later open asks
-			// again once it runs out and not on every open before then
-			// (council pr2 D-F9). The answer is non-terminal.
+			// The ping failed on gc's side — the lifecycle semaphore, the op
+			// budget, an environment gc could not build — and nothing moved.
+			// bd never ran to an answer, so this is not evidence that bd
+			// cannot fix this proxy, and it does NOT cascade into a `bd dolt
+			// stop` in the same pass (council A-F5), nor in a later one while
+			// the backoff holds. The rung is held for failedPingBackoff rather
+			// than released, so a later open asks again once it runs out and
+			// not on every open before then (council pr2 D-F9). The answer is
+			// non-terminal.
 			in.Observed.Backoff(generation, failedPingBackoff)
 			return Pin{}, false, NewNonTerminalProxiedVerdictError(ProxiedVerdictBackendUnreachable,
-				"the endpoint accepts and never greets, and the provider ping failed; "+
+				"the endpoint accepts and never greets, and the provider ping failed before bd could answer; "+
 					"not escalating to a recover on a failure that says nothing about the proxy", err)
 		}
 	}

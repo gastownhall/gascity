@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -92,12 +94,41 @@ type proxiedProviderOps struct {
 }
 
 // Ping asks bd to make the scope's proxy healthy.
+//
+// A failure bd itself reported is marked as such (beads.ProviderReportedFailure),
+// because it is the evidence admission's no-greeting ladder escalates to a
+// recover on, and a failure of gc's own is not. See markProviderReportedFailure.
 func (o proxiedProviderOps) Ping(ctx context.Context, scopeRoot string) error {
 	if err := providerOwnedScopeLifecycleOp(ctx, o.cityPath, scopeRoot, proxiedProviderProbeOp); err != nil {
-		return err
+		return markProviderReportedFailure(err)
 	}
 	o.noteReady(scopeRoot)
 	return nil
+}
+
+// providerOpExitNotNeeded is the provider script's "not needed / not mine"
+// status (runProviderOp's convention). The strict runner reports it as a
+// failure, but it is the script declining the op — GC_DOLT=skip, an op its
+// arm does not handle — not bd answering about the proxy.
+const providerOpExitNotNeeded = 2
+
+// markProviderReportedFailure marks a provider-op failure as bd's own answer
+// when, and only when, the script RAN and exited with a status of its own.
+//
+// On a proxied scope the probe op's arm is exactly `bd ping`, so that status is
+// bd's: the real zombie (a Dolt child that exited 0 behind a proxy that lives
+// on) makes it exit 1, and that is the design's trigger for the recover rung.
+// Everything else stays unmarked, because none of it is an answer about the
+// proxy: the lifecycle semaphore or the op budget running out (a deadline, not
+// an exit), an ownership or environment refusal before the script started, a
+// child killed by a signal, and the script's own "not needed" status. Unmarked
+// failures hold the ping rung for a backoff and never escalate (council A-F5).
+func markProviderReportedFailure(err error) error {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !exitErr.Exited() || exitErr.ExitCode() == providerOpExitNotNeeded {
+		return err
+	}
+	return beads.ProviderReportedFailure(err)
 }
 
 // Recover asks bd to retire and re-establish a proxy that listens but never

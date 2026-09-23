@@ -363,6 +363,71 @@ func TestProxiedReopenEscalationLadder(t *testing.T) {
 		}
 	})
 
+	t.Run("the real zombie: bd's own ping exits 1, and the same one-shot open recovers it", func(t *testing.T) {
+		// The shape a real bd produces (round3 review, completeness). The
+		// zombie row above scripts a ping that SUCCEEDS on a silent proxy; a
+		// real `bd ping` against a zombie adopts it, fails its SELECT 1 and
+		// exits 1. That failure is produced here by the PRODUCTION runner
+		// executing a script that exits 1, so the whole chain is real: the
+		// runner keeps the exit status, Ping marks it as bd's answer, and the
+		// ladder spends the recover on it in the same open — the one-shot shape
+		// `gc doctor` takes, whose acceptance row wants [probe recover] and a
+		// native store.
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		recovered := false
+		opener := newOpener(t, f, ops, func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if !recovered {
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+			}
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+		})
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string) error {
+			_ = ops.run(op)
+			if op == proxiedProviderRecoverOp {
+				// `bd dolt stop` then `bd ping`: a new generation, which greets.
+				f.writeRecord(7004, "99887766")
+				recovered = true
+				return nil
+			}
+			return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit = %v after verbs [%s]: a zombie whose ping bd reported as failed was not recovered",
+				err, strings.Join(ops.spent(), " "))
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp+","+proxiedProviderRecoverOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe recover]", spent)
+		}
+		if pin.PoolKey().PID != 7004 {
+			t.Fatalf("admitted pid %d, want the generation the recover produced (7004)", pin.PoolKey().PID)
+		}
+	})
+
+	t.Run("a ping that failed on gc's side never reaches the recover", func(t *testing.T) {
+		// The semaphore wait or the op budget running out is a deadline, not
+		// bd's answer (council A-F5): one probe, no recover, non-terminal.
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{fail: map[string]error{
+			proxiedProviderProbeOp: fmt.Errorf("waiting for provider lifecycle slot for %q: %w", f.scopeRoot, context.DeadlineExceeded),
+		}}
+		silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		_, err := newOpener(t, f, ops, silent).admit(context.Background(), false)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Terminal() {
+			t.Fatalf("admit = %v, want a non-terminal verdict", err)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: gc's own contention must never cost a `bd dolt stop`", spent)
+		}
+	})
+
 	t.Run("a one-shot never waits out a drain", func(t *testing.T) {
 		f := newProxiedScopeFixture(t)
 		ops := &scriptedProviderOps{}
@@ -1192,4 +1257,71 @@ type closeCountingStorage struct {
 func (s *closeCountingStorage) Close() error {
 	s.closed++
 	return nil
+}
+
+// writeExitingProviderScript writes a provider-script double whose every op
+// runs body, so a test can hand the PRODUCTION runner a child that exits the
+// way it needs.
+func writeExitingProviderScript(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "gc-beads-exit-double")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil { //nolint:gosec // the double must be executable
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestProxiedPingMarksOnlyBdsOwnAnswer pins which provider-op failures the
+// no-greeting ladder may escalate on (round3 review, completeness).
+//
+// Only a script that RAN and exited with a status of its own is bd's answer
+// about the proxy. Each unmarked row is a failure that would otherwise cost a
+// `bd dolt stop` on gc's own contention (council A-F5).
+func TestProxiedPingMarksOnlyBdsOwnAnswer(t *testing.T) {
+	dir := t.TempDir()
+	run := func(ctx context.Context, body string) error {
+		t.Helper()
+		return runProviderOwnedOpStrict(ctx, 30*time.Second, writeExitingProviderScript(t, t.TempDir(), body), nil, proxiedProviderProbeOp)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name   string
+		err    func() error
+		marked bool
+	}{
+		{"bd ping exited 1", func() error { return run(context.Background(), "echo 'Error: ping: invalid connection' >&2; exit 1") }, true},
+		{"the script exited 7", func() error { return run(context.Background(), "exit 7") }, true},
+		{"the script's not-needed status (exit 2)", func() error { return run(context.Background(), "exit 2") }, false},
+		{"the child was killed by a signal", func() error { return run(context.Background(), "kill -9 $$") }, false},
+		{"the op budget was already spent", func() error { return run(canceled, "exit 1") }, false},
+		{"the lifecycle semaphore wait ran out", func() error {
+			return fmt.Errorf("waiting for provider lifecycle slot for %q: %w", dir, context.DeadlineExceeded)
+		}, false},
+		{"an ownership refusal before the script started", func() error {
+			return errors.New("provider-owned scope requires an exec beads provider")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err()
+			if err == nil {
+				t.Fatal("the op succeeded; the row needs a failure")
+			}
+			got := markProviderReportedFailure(err)
+			if got.Error() != err.Error() {
+				t.Errorf("marking changed the error's text: %q, want %q", got.Error(), err.Error())
+			}
+			if marked := errors.Is(got, beads.ErrProviderReportedFailure); marked != tc.marked {
+				t.Fatalf("marked = %v, want %v for %v", marked, tc.marked, err)
+			}
+		})
+	}
+
+	// The runner's text is what every other caller reads, and it is unchanged:
+	// the op, then bd's own stderr.
+	err := run(context.Background(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+	if want := "provider-owned beads probe: Error: ping: invalid connection"; err == nil || err.Error() != want {
+		t.Fatalf("runner error = %v, want %q", err, want)
+	}
 }

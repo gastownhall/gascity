@@ -1578,10 +1578,31 @@ func runProviderOwnedOpStrict(parent context.Context, timeout time.Duration, scr
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("provider-owned beads %s: %s", op, msg)
+		text := fmt.Sprintf("provider-owned beads %s: %s", op, msg)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return &providerOpExitError{text: text, exit: exitErr}
+		}
+		return errors.New(text)
 	}
 	return nil
 }
+
+// providerOpExitError is a provider-owned op whose script RAN and exited
+// non-zero before gc's deadline: the text runProviderOwnedOpStrict has always
+// returned, now with the child's exit status as its cause instead of dropped.
+//
+// The proxied lane needs that cause to tell bd's own answer from gc's
+// contention (see markProviderReportedFailure). Everything else reads the text
+// alone, which is unchanged.
+type providerOpExitError struct {
+	text string
+	exit *exec.ExitError
+}
+
+func (e *providerOpExitError) Error() string { return e.text }
+
+func (e *providerOpExitError) Unwrap() error { return e.exit }
 
 func ensureBeadsProvider(cityPath string) error {
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
