@@ -413,6 +413,14 @@ func clearControllerSpawnErrorMetadata(metadata map[string]string) {
 	// later life (re-mint, reopen) and quarantine itself on its first refusal.
 	metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = ""
 	metadata[beadmeta.ControllerRetryCountMetadataKey] = ""
+	// The pending budget rides along for the same reason, plus one of its own:
+	// gc.control_pending_stalled is a one-shot latch, so a bead that carried it
+	// into a later life would never escalate a second, genuinely never-healing
+	// pending wait.
+	metadata[beadmeta.ControlPendingReasonMetadataKey] = ""
+	metadata[beadmeta.ControlPendingCountMetadataKey] = ""
+	metadata[beadmeta.ControlPendingFirstSeenMetadataKey] = ""
+	metadata[beadmeta.ControlPendingStalledMetadataKey] = ""
 }
 
 func isPartialAttemptAttachError(err error) bool {

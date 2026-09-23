@@ -60,6 +60,56 @@ type SemanticRetryState struct {
 // A negative budget disables the bound (unbounded retry, pre-tier behavior); a
 // zero budget escalates on the first refusal.
 func RecordSemanticControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
+	return recordControlRetry(store, beadID, cause, now, budget, semanticRetryKeys, "semantic retry")
+}
+
+// RecordPendingControlRetry records one ErrControlPending sweep against a
+// SEPARATE bead-persisted budget and reports whether it is exhausted.
+//
+// Pending retry stays unbounded by design: the refusal names a config/state
+// drift a human can heal (`gc rig add`, restoring a city name, returning a
+// store), and closing the bead would destroy the very handle the heal completes
+// through. What the budget bounds is the SILENCE. An unbounded answering-no with
+// no escalation reads as healthy on every metric — the exact shape whose
+// three-day, six-city stall is recorded on ControllerErrorTier — so the caller
+// escalates once at expiry and keeps retrying.
+//
+// The pending keys deliberately do not alias the gc.controller_* ones. Sharing
+// the anchor would let a long pending wait hand a later Tier-B refusal an
+// already-expired deadline, quarantining on its first refusal the bead that
+// pending kept open.
+func RecordPendingControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration) (SemanticRetryState, error) {
+	return recordControlRetry(store, beadID, cause, now, budget, pendingRetryKeys, "pending retry")
+}
+
+// controlRetryKeys names one disposition's bead-persisted retry budget.
+type controlRetryKeys struct {
+	reason    string
+	count     string
+	firstSeen string
+	// extra is stamped verbatim alongside the budget on every record. The
+	// semantic disposition uses it to keep the controller-error class/retryable
+	// pair in step with the reason it records; pending has no such pair.
+	extra map[string]string
+}
+
+var semanticRetryKeys = controlRetryKeys{
+	reason:    beadmeta.ControllerErrorMetadataKey,
+	count:     beadmeta.ControllerRetryCountMetadataKey,
+	firstSeen: beadmeta.ControllerRetryFirstSeenMetadataKey,
+	extra: map[string]string{
+		beadmeta.ControllerErrorClassMetadataKey: beadmeta.FailureClassTransient,
+		beadmeta.ControllerRetryableMetadataKey:  "true",
+	},
+}
+
+var pendingRetryKeys = controlRetryKeys{
+	reason:    beadmeta.ControlPendingReasonMetadataKey,
+	count:     beadmeta.ControlPendingCountMetadataKey,
+	firstSeen: beadmeta.ControlPendingFirstSeenMetadataKey,
+}
+
+func recordControlRetry(store beads.Store, beadID string, cause error, now time.Time, budget time.Duration, keys controlRetryKeys, label string) (SemanticRetryState, error) {
 	bead, err := store.Get(beadID)
 	if err != nil {
 		return SemanticRetryState{}, fmt.Errorf("reading control bead %s for its retry budget: %w", beadID, err)
@@ -67,27 +117,28 @@ func RecordSemanticControlRetry(store beads.Store, beadID string, cause error, n
 
 	reason := truncateControllerRetryReason(cause)
 	state := SemanticRetryState{
-		Attempts: parseRetryCount(bead.Metadata[beadmeta.ControllerRetryCountMetadataKey]) + 1,
+		Attempts: parseRetryCount(bead.Metadata[keys.count]) + 1,
 	}
 
 	metadata := map[string]string{
-		beadmeta.ControllerErrorMetadataKey:      reason,
-		beadmeta.ControllerErrorClassMetadataKey: beadmeta.FailureClassTransient,
-		beadmeta.ControllerRetryableMetadataKey:  "true",
-		beadmeta.ControllerRetryCountMetadataKey: strconv.Itoa(state.Attempts),
+		keys.reason: reason,
+		keys.count:  strconv.Itoa(state.Attempts),
+	}
+	for key, value := range keys.extra {
+		metadata[key] = value
 	}
 
-	firstSeen, anchored := parseRetryFirstSeen(bead.Metadata[beadmeta.ControllerRetryFirstSeenMetadataKey])
+	firstSeen, anchored := parseRetryFirstSeen(bead.Metadata[keys.firstSeen])
 	if anchored {
-		state.Repeat = strings.TrimSpace(bead.Metadata[beadmeta.ControllerErrorMetadataKey]) == reason
+		state.Repeat = strings.TrimSpace(bead.Metadata[keys.reason]) == reason
 	} else {
 		firstSeen = now
-		metadata[beadmeta.ControllerRetryFirstSeenMetadataKey] = firstSeen.UTC().Format(time.RFC3339)
+		metadata[keys.firstSeen] = firstSeen.UTC().Format(time.RFC3339)
 	}
 	state.FirstSeen = firstSeen
 
 	if err := store.SetMetadataBatch(beadID, metadata); err != nil {
-		return SemanticRetryState{}, fmt.Errorf("recording the semantic retry budget on %s: %w", beadID, err)
+		return SemanticRetryState{}, fmt.Errorf("recording the %s budget on %s: %w", label, beadID, err)
 	}
 
 	state.Expired = budget >= 0 && !now.Before(firstSeen.Add(budget))
