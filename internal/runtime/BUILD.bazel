@@ -51,6 +51,7 @@ go_test(
         "import_boundary_test.go",
         "import_trust_test.go",
         "liveness_test.go",
+        "nudge_unless_pending_test.go",
         "privatedir_test.go",
         "probe_test.go",
         "provider_core_test.go",

@@ -28,6 +28,7 @@ var (
 	_ runtime.Provider                      = (*Provider)(nil)
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.InteractionProvider           = (*Provider)(nil)
+	_ runtime.PendingAwareNudgeProvider     = (*Provider)(nil)
 	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
@@ -303,6 +304,14 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 		return np.NudgeNow(name, content)
 	}
 	return p.route(name).Nudge(name, content)
+}
+
+// NudgeUnlessPending delegates the guarded delivery to the routed backend.
+// Like WaitForIdle this must be forwarded explicitly: without it, every
+// session in a city that routes any agent through ACP would fall back to
+// unguarded delivery and quietly lose the pending-interaction refusal.
+func (p *Provider) NudgeUnlessPending(name string, content []runtime.ContentBlock) error {
+	return runtime.NudgeUnlessPendingFor(p.route(name), name, content)
 }
 
 // ResetInterruptedTurn delegates to the routed backend when it supports

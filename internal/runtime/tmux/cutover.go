@@ -22,7 +22,9 @@ import (
 // interface would silently degrade a capability. Embedding raw guarantees every
 // non-seam-routed method (known or not) stays on the real provider; only the 18
 // Provider methods below are explicitly routed through the seams. RunLive is
-// intentionally NOT overridden, so the embedded provider's real RunLive runs.
+// intentionally NOT overridden, so the embedded provider's real RunLive runs;
+// neither is NudgeUnlessPending, for the reason recorded on its assertion
+// below.
 type seamBackedProvider struct {
 	*Provider                  // raw: carries RunLive + every optional interface
 	seams     runtime.Provider // the seam adapter, for the 18 routed methods
@@ -33,6 +35,24 @@ var (
 	// Relaunch (B2) rides the embedded raw *Provider — it is NOT one of the 18
 	// seam-routed methods, so the warm-box relaunch stays on the real provider.
 	_ runtime.RelaunchProvider = (*seamBackedProvider)(nil)
+	// NudgeUnlessPending likewise rides the embedded raw *Provider, deliberately
+	// and unlike its unguarded twin Nudge, which IS seam-routed below. Routing
+	// it would break the guard rather than move it: the seam adapter
+	// ([runtime.NewProviderFromSeams]) implements runtime.Provider and nothing
+	// else, so runtime.PendingInteractionFor(s.seams, …) finds no
+	// InteractionProvider and answers "nothing pending" for every seat — the
+	// refusal would silently disappear on the production local provider. The
+	// placement would be wrong too, and that outlives the missing probe: the
+	// seam-routed Nudge already IS the courtesy wait plus the send
+	// (runtime.Attachment.Nudge delegates to the raw Provider.Nudge), so
+	// runtime.NudgeUnlessPendingFor(s.seams, …) would put the probe in FRONT of
+	// that wait — reinstating the pre-wait-probe gap this guard exists to close.
+	// A seam-routed guard has to probe between its own wait and its own
+	// keystrokes to be a guard at all. When the seams grow a pending probe of
+	// their own, this becomes a routed method; the assertion below is here so
+	// the decision is pinned rather than inferred from the absence of an
+	// override.
+	_ runtime.PendingAwareNudgeProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBackedWithConfig constructs a tmux provider served through the seams.

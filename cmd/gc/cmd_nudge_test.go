@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2754,6 +2755,282 @@ func TestTryDeliverQueuedNudgesByPollerAcksDeliveredUnobservedInsteadOfRetrying(
 	}
 	if len(dead) != 0 {
 		t.Fatalf("dead = %d, want 0: a single delivered-unobserved attempt must not dead-letter", len(dead))
+	}
+}
+
+// A seat parked at an approval prompt reads as idle to pollerSessionIdleEnough
+// — the busy indicator is gone and the ready-prompt prefix is still on the pane
+// — and a wait-idle refusal upstream is exactly what queued these items, so
+// this lane is where a refused nudge lands. Two placement properties matter and
+// neither is visible to a test of the predicate alone: the gate sits BEFORE
+// claimDueQueuedNudgesForTarget, so the items stay pending rather than
+// consuming a delivery attempt, and the refusal is not a delivery failure, so
+// nothing counts toward failedQueuedNudge's dead-letter cap. Moving the gate
+// below the claim keeps the rest of the suite green.
+func TestTryDeliverQueuedNudgesByPollerLeavesItemsPendingForAPromptedSeat(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	fake.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+		RequestID: "req-1", Kind: "approval", Prompt: "approve?",
+	})
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false for a seat awaiting human input")
+	}
+	for _, call := range fake.SnapshotCalls() {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			t.Fatalf("typed into a seat awaiting human input: %#v", fake.SnapshotCalls())
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1: a refusal must leave the item for the next pass", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0: the refusal must precede the claim", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: waiting on a human must cost no delivery attempt", pending[0].Attempts)
+	}
+}
+
+// promptsAfterFirstProbeProvider is a seat that raises its approval dialog
+// between the poller's pre-claim gate and the keystrokes. That is the race the
+// gate cannot see, and the only reason the ErrPendingInteraction release arm
+// exists: a refusal arriving after the claim must return the items rather than
+// spend one of failedQueuedNudge's bounded attempts on them.
+type promptsAfterFirstProbeProvider struct {
+	*runtime.Fake
+	mu     sync.Mutex
+	probes int
+}
+
+func (p *promptsAfterFirstProbeProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	p.mu.Lock()
+	p.probes++
+	first := p.probes == 1
+	p.mu.Unlock()
+	if first {
+		return p.Fake.Pending(name)
+	}
+	if _, err := p.Fake.Pending(name); err != nil {
+		return nil, err
+	}
+	return &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "approve?"}, nil
+}
+
+func (p *promptsAfterFirstProbeProvider) probeCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probes
+}
+
+func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenPromptOpensMidFlight(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	sp := &promptsAfterFirstProbeProvider{Fake: fake}
+	mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false: the prompt opened before the keystrokes")
+	}
+	// Two probes is the evidence that the gate PASSED and the delivery-time
+	// probe is what refused. One probe would mean the gate caught it and this
+	// test never reached the release arm at all.
+	if got := sp.probeCount(); got < 2 {
+		t.Fatalf("probe count = %d, want >= 2: the pre-claim gate must have passed before delivery refused", got)
+	}
+	for _, call := range fake.SnapshotCalls() {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			t.Fatalf("typed into a seat that raised a prompt mid-flight: %#v", fake.SnapshotCalls())
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1: the claim must be released, not consumed", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0: the claim must not be left held", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: a refusal must not count toward the dead-letter cap", pending[0].Attempts)
+	}
+}
+
+// probeFailsAfterFirstProbeProvider answers the poller's pre-claim gate and
+// then breaks, so the failure lands at the delivery boundary — after the items
+// are claimed — rather than before it. That is the only arrangement under which
+// the probe error can reach failedQueuedNudge at all.
+type probeFailsAfterFirstProbeProvider struct {
+	*runtime.Fake
+	mu     sync.Mutex
+	probes int
+}
+
+func (p *probeFailsAfterFirstProbeProvider) Pending(name string) (*runtime.PendingInteraction, error) {
+	p.mu.Lock()
+	p.probes++
+	first := p.probes == 1
+	p.mu.Unlock()
+	if first {
+		return p.Fake.Pending(name)
+	}
+	return nil, errors.New("capture-pane: connection reset")
+}
+
+func (p *probeFailsAfterFirstProbeProvider) probeCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probes
+}
+
+// A probe that cannot answer is not a delivery failure: nothing was typed and
+// nothing was learned, so the nudge is as deliverable as it was a moment ago.
+// The pre-claim gate already treats it that way and spends no attempt
+// (pollerSeatAwaitsHumanInput refuses on err != nil before anything is
+// claimed). The delivery boundary must match, or a flapping capture-pane spends
+// the whole bounded budget — five of these and a perfectly good nudge is
+// dead-lettered for a seat that was never prompted. Charging it keeps every
+// other assertion in this suite green, which is why the attempt count below is
+// the load-bearing one.
+func TestTryDeliverQueuedNudgesByPollerReleasesClaimsWhenTheDeliveryProbeBreaks(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	sp := &probeFailsAfterFirstProbeProvider{Fake: fake}
+	mgr := newSessionManagerWithConfig(dir, store, sp, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, sp, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true, want false: the guard could not clear the seat")
+	}
+	// Two probes is the evidence that the gate PASSED and the delivery-time
+	// probe is what broke. One probe would mean the gate refused and this test
+	// never reached the charging path it exists to pin.
+	if got := sp.probeCount(); got < 2 {
+		t.Fatalf("probe count = %d, want >= 2: the pre-claim gate must have passed before the delivery probe broke", got)
+	}
+	for _, call := range fake.SnapshotCalls() {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
+			t.Fatalf("typed into a seat the guard could not read: %#v", fake.SnapshotCalls())
+		}
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1: the claim must be released, not consumed", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("inFlight = %d, want 0: the claim must not be left held", len(inFlight))
+	}
+	if len(dead) != 0 {
+		t.Fatalf("dead = %d, want 0", len(dead))
+	}
+	if pending[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: a broken probe must not count toward the dead-letter cap", pending[0].Attempts)
 	}
 }
 
