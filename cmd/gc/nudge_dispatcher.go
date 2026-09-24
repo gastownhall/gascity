@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -65,7 +64,7 @@ func nudgeDispatcherIsHosting(cityPath string) bool {
 // back to patrol-interval dispatching.
 func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- struct{}, stderr io.Writer, logPrefix string) (net.Listener, error) {
 	path := nudgequeue.WakeSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := nudgequeue.EnsureWakeSocketDir(cityPath); err != nil {
 		return nil, fmt.Errorf("creating nudge wake dir: %w", err)
 	}
 	// A stale socket from a prior supervisor crash blocks Listen with

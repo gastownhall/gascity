@@ -542,12 +542,11 @@ func TestSubmitFollowUpStartsPollerForEventCapableProviderWithoutHosting(t *test
 	}
 }
 
-// TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting is the sibling
-// of the regression test above: with a live listener on the wake socket
-// (nudgequeue.DispatcherIsHosting true), the sidecar poller must be
-// suppressed, since a live supervisor-hosted dispatcher already owns
-// delivery and a spawned poller would only race it.
-func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
+// TestSubmitFollowUpStartsFallbackPollerWhenDispatcherActuallyHosting guards
+// the enqueue/listener-close race: a successful socket probe is only a
+// momentary snapshot, so it cannot safely suppress the durable fallback after
+// the queued item is written. Queue flocking makes the duplicate poller safe.
+func TestSubmitFollowUpStartsFallbackPollerWhenDispatcherActuallyHosting(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := sessionEventedFake{Fake: runtime.NewFake()}
 	cityPath := t.TempDir()
@@ -607,8 +606,8 @@ func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
 	if len(state.Pending) != 1 {
 		t.Fatalf("pending queued submits = %d, want 1 (the item must still queue; only the sidecar is suppressed)", len(state.Pending))
 	}
-	if pollerCalls != 0 {
-		t.Fatalf("pollerCalls = %d, want 0 when a dispatcher is actually hosting on the wake socket", pollerCalls)
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1 so a dispatcher shutdown cannot strand the queued submit", pollerCalls)
 	}
 	select {
 	case <-wakeCh:
@@ -617,56 +616,38 @@ func TestSubmitFollowUpSkipsPollerWhenDispatcherActuallyHosting(t *testing.T) {
 	}
 }
 
-// TestEnqueueDeferredSubmitLockedTrustsPassedDispatcherHosting is the
-// regression test for finding 2 of PR #4967 gate report gc-75w2t8:
-// enqueueDeferredSubmitLocked used to call nudgequeue.DispatcherIsHosting
-// itself (a net.DialTimeout("unix", ..., 200ms)) from inside
-// withSessionMutationLock, stalling every other mutation on the same
-// session for up to 200ms against a half-dead wake socket. The fix hoists
-// that dial into submit() before the lock is acquired and threads the
-// result in as the dispatcherHosting parameter. No wake socket is stood up
-// in this test at all — if enqueueDeferredSubmitLocked ever re-introduced
-// its own dial, DispatcherIsHosting would report false regardless of the
-// argument, and the dispatcherHosting=true case below would fail because
-// the poller would start despite the caller asserting a dispatcher is
-// hosting.
-func TestEnqueueDeferredSubmitLockedTrustsPassedDispatcherHosting(t *testing.T) {
-	for _, hosting := range []bool{true, false} {
-		t.Run(fmt.Sprintf("hosting=%v", hosting), func(t *testing.T) {
-			store := beads.NewMemStore()
-			sp := runtime.NewFake()
-			cityPath := t.TempDir()
-			mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
+// TestEnqueueDeferredSubmitLockedAlwaysStartsFallbackPoller ensures deferred
+// submits retain a durable deliverer without performing a socket liveness
+// probe while holding the session mutation lock.
+func TestEnqueueDeferredSubmitLockedAlwaysStartsFallbackPoller(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 
-			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-			if err != nil {
-				t.Fatalf("CreateSession: %v", err)
-			}
-			b, err := store.Get(info.ID)
-			if err != nil {
-				t.Fatalf("store.Get: %v", err)
-			}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
 
-			var pollerCalls int
-			origPoller := startSessionSubmitPoller
-			startSessionSubmitPoller = func(_, _, _ string) error {
-				pollerCalls++
-				return nil
-			}
-			defer func() { startSessionSubmitPoller = origPoller }()
+	var pollerCalls int
+	origPoller := startSessionSubmitPoller
+	startSessionSubmitPoller = func(_, _, _ string) error {
+		pollerCalls++
+		return nil
+	}
+	defer func() { startSessionSubmitPoller = origPoller }()
 
-			if err := mgr.enqueueDeferredSubmitLocked(b, info.SessionName, "follow up later", hosting); err != nil {
-				t.Fatalf("enqueueDeferredSubmitLocked: %v", err)
-			}
+	if err := mgr.enqueueDeferredSubmitLocked(b, info.SessionName, "follow up later"); err != nil {
+		t.Fatalf("enqueueDeferredSubmitLocked: %v", err)
+	}
 
-			wantPollerCalls := 0
-			if !hosting {
-				wantPollerCalls = 1
-			}
-			if pollerCalls != wantPollerCalls {
-				t.Fatalf("pollerCalls = %d, want %d for dispatcherHosting=%v; the passed-in value must gate the poller directly, with no independent dial inside enqueueDeferredSubmitLocked", pollerCalls, wantPollerCalls, hosting)
-			}
-		})
+	if pollerCalls != 1 {
+		t.Fatalf("pollerCalls = %d, want 1", pollerCalls)
 	}
 }
 

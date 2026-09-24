@@ -1,7 +1,9 @@
 package nudgequeue
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -10,6 +12,31 @@ import (
 
 	"github.com/gastownhall/gascity/internal/clock"
 )
+
+func TestWakeSocketPathLongCityUsesPrivatePerUserDirectory(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	socketPath := WakeSocketPath(cityPath)
+
+	wantDir := fmt.Sprintf("gascity-nudge-%d", os.Getuid())
+	if got := filepath.Base(filepath.Dir(socketPath)); got != wantDir {
+		t.Fatalf("fallback wake socket directory = %q, want %q", got, wantDir)
+	}
+}
+
+func TestEnsurePrivateWakeSocketDirRejectsSymlink(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatalf("Mkdir(real): %v", err)
+	}
+	linkPath := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	if err := ensurePrivateWakeSocketDir(linkPath); err == nil {
+		t.Fatal("ensurePrivateWakeSocketDir accepted a symlink")
+	}
+}
 
 // TestWithState_TimesOutInsteadOfBlockingForever guards ga-2kzci3 FR1/FR2:
 // WithState itself -- not just the withStateBounded helper it wraps -- must
