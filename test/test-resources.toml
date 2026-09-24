@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 666
-baseline_files = 193
+baseline_calls = 698
+baseline_files = 200
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 484
-baseline_files = 173
+baseline_calls = 483
+baseline_files = 175
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 450
-baseline_files = 130
+baseline_calls = 472
+baseline_files = 133
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
+baseline_calls = 317
+baseline_files = 120
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -103,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 58
+baseline_calls = 59
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 37
+baseline_calls = 98
+baseline_files = 38
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"
@@ -253,6 +253,39 @@ migration_target = "P0.4b"
 expires = "2026-10-01"
 
 [[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned script boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service"
+migration_target = "GC6011"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology"
+resources = ["subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the ready-scope topology boundary proof is a checked Medium subprocess owner"
+resource_owner = "the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved"
+migration_target = "GC6011"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses"
+resources = ["slow_process_gate", "subprocess"]
+owner_bead = "ga-p9iuv.30"
+invariant = "the provider-owned BD lifecycle proof is a checked Medium process owner"
+resource_owner = "the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent"
+migration_target = "GC6011"
+expires = "2026-10-01"
+
+[[medium]]
 package_dir = "internal/runtime/herdr"
 package_name = "herdr"
 owner = "TestServerAliveRejectsStaleSocket"
@@ -330,6 +363,17 @@ migration_target = "P0.4b"
 expires = "2026-10-01"
 
 [[medium]]
+package_dir = "internal/doctor"
+package_name = "doctor"
+owner = "TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint"
+resources = ["subprocess"]
+owner_bead = "ga-cp3hwi"
+invariant = "doctor custom-types configured-store targeting regression proof is a checked Medium owner"
+resource_owner = "the bd subprocess is confined to TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint, which runs two disposable loopback Dolt servers and proves ambient endpoint variables cannot redirect detection or repair"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
 package_dir = "scripts"
 package_name = "scripts_test"
 owner = "TestAddTestenvImportSkipsNestedGitWorktrees"
@@ -377,8 +421,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 441
-baseline_files = 124
+baseline_calls = 453
+baseline_files = 126
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -390,8 +434,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 321
-baseline_files = 121
+baseline_calls = 317
+baseline_files = 120
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
@@ -468,8 +512,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 94
-baseline_files = 36
+baseline_calls = 96
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-cp3hwi"

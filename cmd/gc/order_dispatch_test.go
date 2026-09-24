@@ -1590,6 +1590,77 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+// cooldownEventFallbackOrders returns the single city-level cooldown order the
+// event-fallback dispatcher tests share. Pool and FormulaLayer are set so a due
+// order genuinely materializes beads — otherwise the "cooldown held" assertion
+// below would pass for the wrong reason.
+func cooldownEventFallbackOrders() []orders.Order {
+	return []orders.Order{{
+		Name:         "test-order",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+}
+
+// TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune pins the wiring
+// in memoryOrderDispatcher.dispatch that hands m.ep to
+// orders.LastRunFuncWithEventFallback: with every order-run tracking bead
+// compacted away, a recent order.fired event must still hold the cooldown
+// closed.
+func TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order", // city-level order: ScopedName() == Name
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) != 0 {
+		t.Fatalf("expected no dispatch (event fallback should hold the cooldown), got %d bead(s)", len(all))
+	}
+}
+
+// TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale is the negative
+// half of the test above: same pruned store and same order, but the only
+// order.fired event is older than the interval, so the order must dispatch.
+// Without this, a dispatch broken for any unrelated reason would let the
+// cooldown-held assertion pass vacuously.
+func TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order",
+		Ts:      time.Now().Add(-48 * time.Hour),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) == 0 {
+		t.Fatal("expected dispatch (last order.fired is older than the interval), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
@@ -1709,15 +1780,24 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders pins the rotation: a
+// budget smaller than the due set must hand every order a turn across
+// consecutive ticks rather than replaying the head of the list.
+//
+// The orders are cooldown, not condition. Condition orders no longer consult
+// the budget at all (see TestDispatchFiresDueConditionOrderOutsideTheRotation-
+// Budget), so building the corpus out of them would make this pass on the
+// first tick and stop measuring the cursor. A 1ms interval against ticks a
+// second apart is the always-due shape on the budgeted path.
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order
 	for i := 0; i < 5; i++ {
 		aa = append(aa, orders.Order{
-			Name:    fmt.Sprintf("condition-%d", i),
-			Trigger: "condition",
-			Check:   "true",
-			Exec:    "true",
+			Name:     fmt.Sprintf("cooldown-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1ms",
+			Exec:     "true",
 		})
 	}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
@@ -1729,14 +1809,17 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	m := ad.(*memoryOrderDispatcher)
 	m.maxDispatchesPerTick = 2
 
-	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// fixed fake 'now' in the past would leave every fired order's cooldown
+	// clock reading negative and never due again.
+	now := time.Now()
 	for i := 0; i < 3; i++ {
 		ad.dispatch(context.Background(), t.TempDir(), now.Add(time.Duration(i)*time.Second))
 		ad.drain(context.Background())
 	}
 
 	for i := 0; i < 5; i++ {
-		label := fmt.Sprintf("order-run:condition-%d", i)
+		label := fmt.Sprintf("order-run:cooldown-%d", i)
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}

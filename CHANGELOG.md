@@ -101,6 +101,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A condition-triggered order whose check passes now dispatches on the tick
+  that observes it, instead of queueing behind the per-tick dispatch budget.**
+  `orders.max_dispatches_per_tick` (default 4) capped every trigger type and
+  advanced a rotation cursor only when it spent a slot, so on a city with ~40
+  orders and a tick period longer than every sweep's interval the cooldown
+  sweeps were due at every tick and spent the whole budget before the rotation
+  reached anything else — each order got a turn roughly every ten ticks. A
+  condition order is a wake demand rather than a request for a turn: its check
+  reports that work is pending right now, and it is true only for as long as
+  that work waits. On maintainer-city the merge-queue order went 11 h without a
+  dispatch while merge beads sat ready, with no gate error, no suppression
+  event and nothing in the journal to show for it. Due condition orders now
+  fire outside the budget (still single-flighted by the open-tracking and
+  open-work gates, and still bounded by their own check), the budget and its
+  rotation are unchanged for cooldown, cron and event orders, and a tick that
+  spends its budget logs one line naming the orders it did not reach.
+
 - **A closed binding row now supersedes its retained frozen twin in the
   one-live-workflow-per-source-bead guard, so a converged city stops refusing a
   sling whose only live root is gone.** A storage migration copies rows into the
@@ -246,6 +263,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being reused, so the unfinished step is claimed properly instead of being
   pinned `in_progress` on a dead name. Persistent (non-`one_shot`) pools
   are unaffected — a genuine crash still gets a fresh identity.
+
+- **`model` and `effort` pins are no longer silently discarded on launch.**
+  Provider model ids were modelled as a closed enum, so any id the builtin
+  catalog had not caught up to produced no flag args and the launch path
+  emitted no `--model` at all — leaving the agent on whatever the CLI
+  defaulted to, with no error. Named-session resolution meanwhile hard-errored
+  on the same value, so the two paths disagreed and the launch path failed
+  open. `gasburger.refinery` and `gasburger.gorkcats` ran unpinned this way for
+  months (ga-fyh); Claude hit the same hole in ra-jbbv0.
+
+  `model` and `effort` are now **open** options across the catalog: the
+  declared choices remain the curated suggestion list, and any other value is
+  honored by rendering the option's flag template. An unreleased id or a newer
+  effort tier reaches the provider CLI to accept or reject, instead of being
+  dropped. Specifically:
+
+  - grok gained `grok-4.6` and `grok-4.7` as curated ids.
+  - `effort = "max"` on codex and `effort = "xhigh"` / `"max"` on antigravity
+    are honored; those enums previously stopped short, so a tier blessed by
+    claude's own defaults was not portable.
+  - cursor gained a model option; it had none, so every cursor model pin was
+    dropped as an unknown key.
+  - Effort tiers now come from one canonical vocabulary shared by every
+    provider rather than a hand-copied per-provider list.
+
+  A pin that still cannot be honored — an unrecognized value for a genuinely
+  closed option such as `permission_mode`, or an option the provider has no
+  concept of (13 of 20 providers have no effort flag) — prints a loud startup
+  warning naming the agent, the rejected value, and the valid set.
 
 - **`gc import add` of a local in-git pack now locks to HEAD, not the repo's
   latest tag.** Per `gc import add --help`, a local path inside a git
@@ -460,6 +506,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observed protocol update; it does not by itself diagnose why updates stopped
   or prove that a session is dead. `progress_stall_timeout` remains disabled by
   default.
+
+## [1.4.2] - 2026-09-18
+
+### Fixed
+
+- Restore the 1.4 release line's compatibility with Beads 1.3.0: initialize
+  fresh managed workspace version witnesses, align native library and CLI
+  pins, and decode decimal-string revision tokens without losing precision.
+- Allow graph containers to close without depending on their own finalizer,
+  and explicitly close skipped scope members while preserving cleanup.
+
+### Upgrading Notes
+
+- Coordinate clients sharing a Beads 1.2.2 database before running
+  `bd migrate schema`. The verified migration moves schema 53 to 66;
+  older clients cannot read the migrated schema.
+- Workflow dependency fixes apply to newly instantiated graphs and do not
+  rewrite already-persisted workflow dependencies.
+
+## [1.4.1] - 2026-08-15
+
+### Changed
+
+- **beads pinned to v1.2.2 everywhere** (go.mod library, `deps.env`
+  `BD_VERSION`, CI matrix, SHA-verified archive installer). beads v1.2.2 is
+  the recovery re-release of the tested 1.1 line that superseded the
+  accidental, untested v1.2.0/v1.2.1. With the library and the Homebrew
+  `beads` formula both at 1.2.2, the native store preflight's version-match
+  check passes again for `brew install gascity` users, re-activating the
+  in-process NativeDoltStore (it had silently fallen back to the per-call
+  `bd` CLI store since bd 1.1.2 replaced 1.1.0 as the released version).
+  The module bump is code-identical to the previously pinned 1.1 line
+  (v1.2.2 is the v1.1.2 tree; no transitive dependency changes).
 
 ## [1.4.0] - 2026-07-24
 

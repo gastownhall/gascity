@@ -546,7 +546,6 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	addTestControlDispatcherAgents(cfg, "", "frontend", "myrig")
 
 	mayorSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
-	reviewerSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "reviewer", cfg.Workspace.SessionTemplate)
 
 	source := beads.Bead{
 		ID:       "gc-source",
@@ -595,8 +594,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	review := steps["expansion-review.review"]
-	if review.Assignee != reviewerSession {
-		t.Fatalf("review assignee = %q, want %q", review.Assignee, reviewerSession)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want unclaimed routed work", review.Assignee)
 	}
 	if review.Metadata["gc.routed_to"] != "reviewer" {
 		t.Fatalf("review gc.routed_to = %q, want reviewer", review.Metadata["gc.routed_to"])
@@ -613,8 +612,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphroute.GraphExecutionRouteMetaKey])
 	}
 	submit := steps["expansion-review.submit"]
-	if submit.Assignee != mayorSession {
-		t.Fatalf("submit assignee = %q, want %q", submit.Assignee, mayorSession)
+	if submit.Assignee != "" {
+		t.Fatalf("submit assignee = %q, want unclaimed routed work", submit.Assignee)
 	}
 	if submit.Metadata["gc.routed_to"] != "mayor" {
 		t.Fatalf("submit gc.routed_to = %q, want mayor", submit.Metadata["gc.routed_to"])
@@ -817,6 +816,117 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 	}
 	if explicit.Assignee != "" {
 		t.Fatalf("item.explicit assignee = %q, want pool route without controller fallback", explicit.Assignee)
+	}
+}
+
+// TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle pins
+// the interaction between a shared drain and pool routing as it behaves after
+// #6360: decorateDrainItemRecipe copies the step's own continuation pair into
+// the binding, so ApplyGraphRouteBinding takes its stamp arm and BOTH pool
+// lifecycles keep the pair -- the one-shot mark changes nothing here, because
+// its only consumer is the refuse arm, which the copied group discharges
+// before it is reached.
+//
+// The one-shot expectation used to read "drops both". Measured after the
+// rebase it does not: gc.continuation_group stays drain:gc-ctl with
+// gc.session_affinity=require. That is the surviving #5584 exposure (a step
+// pinned require to a session that exits after one bounded invocation), and
+// whether the router's own drain bookkeeping should be clearable for an
+// IndependentSteps route is an open maintainer call -- it cannot be answered
+// without editing the branch #6360 asked us to keep verbatim. This test
+// records the behavior; it does not bless it.
+func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *testing.T) {
+	zero := 0
+	three := 3
+	tests := []struct {
+		name         string
+		lifecycle    string
+		wantGroup    string
+		wantAffinity string
+	}{
+		{
+			name:         "one-shot pool also keeps the shared drain group",
+			lifecycle:    config.AgentLifecycleOneShot,
+			wantGroup:    "drain:gc-ctl",
+			wantAffinity: "require",
+		},
+		{
+			name:         "persistent pool keeps the shared drain group",
+			lifecycle:    "",
+			wantGroup:    "drain:gc-ctl",
+			wantAffinity: "require",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test"},
+				Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					Lifecycle:         tt.lifecycle,
+					MinActiveSessions: &zero,
+					MaxActiveSessions: &three,
+				}},
+			}
+			config.InjectImplicitAgents(cfg)
+			addTestControlDispatcherAgents(cfg, "")
+
+			// The shape stampDrainItemRecipe produces for a shared drain: the
+			// executable step already carries the shared continuation pair.
+			recipe := &formula.Recipe{
+				Name: "item",
+				Steps: []formula.RecipeStep{
+					{
+						ID:     "item",
+						IsRoot: true,
+						Type:   "task",
+						Metadata: map[string]string{
+							beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+							beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+						},
+					},
+					{
+						ID:    "item.work",
+						Title: "Work",
+						Type:  "task",
+						Metadata: map[string]string{
+							beadmeta.ContinuationGroupMetadataKey: "drain:gc-ctl",
+							beadmeta.SessionAffinityMetadataKey:   "require",
+						},
+					},
+				},
+			}
+			source := beads.Bead{
+				ID: "gc-ctl-item",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:              beadmeta.KindDrain,
+					graphroute.GraphExecutionRouteMetaKey: "worker",
+				},
+			}
+
+			if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+				t.Fatalf("decorateDrainItemRecipe: %v", err)
+			}
+
+			work := recipe.StepByID("item.work")
+			if work == nil {
+				t.Fatal("missing item.work")
+			}
+			if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+				t.Fatalf("gc.routed_to = %q, want worker", got)
+			}
+			if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != tt.wantGroup {
+				t.Errorf("gc.continuation_group = %q, want %q", got, tt.wantGroup)
+			}
+			if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != tt.wantAffinity {
+				t.Errorf("gc.session_affinity = %q, want %q", got, tt.wantAffinity)
+			}
+			if work.Assignee != "" {
+				t.Errorf("Assignee = %q, want empty for a metadata-only pool route", work.Assignee)
+			}
+		})
 	}
 }
 
@@ -2052,6 +2162,118 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	}
 }
 
+func TestDecorateDynamicFragmentRecipeOneShotPoolFallbackLeavesStepsIndependent(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Agents: []config.Agent{
+			{
+				Name:              "worker",
+				Lifecycle:         config.AgentLifecycleOneShot,
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "")
+
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "worker",
+		},
+	}
+	fragment := &formula.FragmentRecipe{
+		Name: "expansion",
+		Steps: []formula.RecipeStep{{
+			ID:    "expansion.work",
+			Title: "Work independently",
+			// No continuation group is seeded on purpose: under #6360 a
+			// declared group is propagated rather than dropped, so this case
+			// pins that a one-shot fragment step which declared nothing stays
+			// claimable by any fresh pool slot.
+			Metadata: map[string]string{},
+		}},
+	}
+
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
+	}
+
+	work := fragment.Steps[0]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want unset for one-shot fragment step", got)
+	}
+	if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want unset for one-shot fragment step", got)
+	}
+	if work.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty so any fresh pool slot can claim the step", work.Assignee)
+	}
+}
+
+func TestDecorateDynamicFragmentRecipePerStepOneShotPoolTargetLeavesStepIndependent(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
+		Agents: []config.Agent{
+			{
+				Name:              "coordinator",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+			{
+				Name:              "worker",
+				Lifecycle:         config.AgentLifecycleOneShot,
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(3),
+			},
+		},
+	}
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "")
+
+	source := beads.Bead{
+		ID: "gc-source",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: "coordinator",
+		},
+	}
+	fragment := &formula.FragmentRecipe{
+		Name: "expansion",
+		Steps: []formula.RecipeStep{{
+			ID:    "expansion.work",
+			Title: "Work independently",
+			// See the fallback case above: the group is left unseeded because
+			// a declared group is propagated, not dropped, under #6360.
+			Metadata: map[string]string{
+				beadmeta.RunTargetMetadataKey: "worker",
+			},
+		}},
+	}
+
+	if err := decorateDynamicFragmentRecipe(fragment, source, store, cfg.Workspace.Name, "", cfg); err != nil {
+		t.Fatalf("decorateDynamicFragmentRecipe: %v", err)
+	}
+
+	work := fragment.Steps[0]
+	if got := work.Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Fatalf("gc.routed_to = %q, want worker", got)
+	}
+	if got := work.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "" {
+		t.Errorf("gc.continuation_group = %q, want unset for per-step one-shot fragment route", got)
+	}
+	if got := work.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "" {
+		t.Errorf("gc.session_affinity = %q, want unset for per-step one-shot fragment route", got)
+	}
+}
+
 func TestDecorateDynamicFragmentRecipeControlRouteUsesOwningStoreScope(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -2302,9 +2524,8 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 	}
 
 	review := fragment.Steps[0]
-	wantSession := lookupSessionNameOrLegacy(store, cfg.Workspace.Name, "frontend/reviewer", cfg.Workspace.SessionTemplate)
-	if review.Assignee != wantSession {
-		t.Fatalf("review assignee = %q, want %q", review.Assignee, wantSession)
+	if review.Assignee != "" {
+		t.Fatalf("review assignee = %q, want unclaimed routed work", review.Assignee)
 	}
 	if review.Metadata["gc.routed_to"] != "frontend/reviewer" {
 		t.Fatalf("review gc.routed_to = %q, want frontend/reviewer", review.Metadata["gc.routed_to"])

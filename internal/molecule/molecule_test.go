@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -206,7 +207,10 @@ func TestBuildRecipeApplyPlanReviewQuorumSubstitutesSynthesisTarget(t *testing.T
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Clean(filepath.Join(cwd, "..", ".."))
+	}
 	searchDir := filepath.Join(repoRoot, "internal", "bootstrap", "packs", "core", "formulas")
 	recipe, err := formula.Compile(context.Background(), "mol-review-quorum", []string{searchDir}, map[string]string{
 		"subject":           "PR-123",
@@ -1159,6 +1163,93 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 	}
 	if got := stepBead.Metadata["gc.root_store_ref"]; got != "store-ref" {
 		t.Fatalf("gc.root_store_ref = %q, want store-ref; full metadata = %v", got, stepBead.Metadata)
+	}
+}
+
+// TestInstantiateStampsWorkflowExpandedForRealChildren pins #5900: a graph.v2
+// root compiled with real child steps (RootOnly=false) must carry
+// gc.workflow_expanded=true so hookClaimMatchesRoute's gc.run_target
+// fallback - built for a genuinely root-only molecule - never resurrects a
+// fully-expanded root once its real children have all closed but
+// workflow-finalize has not yet run. Runs both instantiation paths: graph-apply
+// (graphApplySpyStore) and the sequential fallback (plain MemStore).
+func TestInstantiateStampsWorkflowExpandedForRealChildren(t *testing.T) {
+	recipe := func() *formula.Recipe {
+		return &formula.Recipe{
+			Name: "wf",
+			Steps: []formula.RecipeStep{
+				{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+				{ID: "wf.step", Title: "Work", Type: "task"},
+			},
+			Deps: []formula.RecipeDep{
+				{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+			},
+		}
+	}
+
+	t.Run("graph-apply path", func(t *testing.T) {
+		store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(true)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		if _, err := Instantiate(context.Background(), store, recipe(), Options{}); err != nil {
+			t.Fatalf("Instantiate: %v", err)
+		}
+		root := store.plan.Nodes[0]
+		if root.Key != "wf" {
+			t.Fatalf("Nodes[0] = %+v, want the root node (key wf)", root)
+		}
+		if got := root.Metadata[beadmeta.WorkflowExpandedMetadataKey]; got != "true" {
+			t.Fatalf("root gc.workflow_expanded = %q, want true; full metadata = %v", got, root.Metadata)
+		}
+	})
+
+	t.Run("sequential path", func(t *testing.T) {
+		store := beads.NewMemStore()
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(false)
+		t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+		result, err := Instantiate(context.Background(), store, recipe(), Options{})
+		if err != nil {
+			t.Fatalf("Instantiate: %v", err)
+		}
+		root, err := store.Get(result.RootID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", result.RootID, err)
+		}
+		if got := root.Metadata[beadmeta.WorkflowExpandedMetadataKey]; got != "true" {
+			t.Fatalf("root gc.workflow_expanded = %q, want true; full metadata = %v", got, root.Metadata)
+		}
+	})
+}
+
+// TestInstantiateRootOnlyGraphWorkflowOmitsWorkflowExpanded pins the other
+// half of #5900's fix: a genuinely root-only graph.v2 wisp (no compiled
+// children - the #2763 shape) must NOT carry gc.workflow_expanded, so the
+// root stays claimable via the gc.run_target fallback as its own unit of
+// work.
+func TestInstantiateRootOnlyGraphWorkflowOmitsWorkflowExpanded(t *testing.T) {
+	store := beads.NewMemStore()
+	recipe := &formula.Recipe{
+		Name:     "wf",
+		RootOnly: true,
+		Steps: []formula.RecipeStep{
+			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+		},
+	}
+
+	result, err := Instantiate(context.Background(), store, recipe, Options{})
+	if err != nil {
+		t.Fatalf("Instantiate: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.RootID, err)
+	}
+	if got, ok := root.Metadata[beadmeta.WorkflowExpandedMetadataKey]; ok {
+		t.Fatalf("root-only workflow root carries gc.workflow_expanded = %q, want unset", got)
 	}
 }
 

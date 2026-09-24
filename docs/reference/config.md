@@ -541,7 +541,7 @@ MailConfig holds mail provider settings.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `provider` | string |  |  | Provider selects the mail backend: "fake", "fail", "exec:&lt;script&gt;", or "" (default: beadmail). |
-| `retention_ttl` | string |  |  | RetentionTTL is how long read messages are retained before purge. Empty or "0" disables read-message retention. |
+| `retention_ttl` | string |  |  | RetentionTTL has two consumers: it is how long read messages are retained before purge, and how long a read mail bead stays open before the nudge-mail sweep closes it. Empty or "0" disables read-message purge. The sweep distinguishes the two: empty leaves it at its own 60-minute default, while "0" disables its mail-close phase. |
 
 ## MaintenanceConfig
 
@@ -625,7 +625,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
-| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many orders the supervisor dispatches per tick. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. |
+| `max_dispatches_per_tick` | integer |  |  | MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron and event triggers) the supervisor dispatches per tick, in a rotation that resumes where the previous tick stopped. Unset keeps the built-in default of 4; set to 1 to drain overdue cooldown orders one-per-tick at cold start instead of firing several concurrent goroutines at once. Condition-triggered orders are outside this budget: a passing check means work is pending right now, so they dispatch on the tick that observes it. The open-tracking and open-work gates still run for them (unless the order sets no_work_gate), but those gates are keyed per order and only hold back a redispatch of an order whose previous run is still moving, so they do not bound the tick as a whole: a tick launches at most this budget plus one dispatch per condition order whose check passed on that tick. That second term grows with how many condition orders a city defines, not with this setting, and at cold start, before any tracking bead exists, neither gate holds a simultaneously-due set back. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -680,6 +680,7 @@ ProviderOption declares a single configurable option for a provider.
 | `type` | string | **yes** |  | "select" only (v1) |
 | `default` | string | **yes** |  | Default is the Value of the choice selected when the user makes none. |
 | `choices` | []OptionChoice | **yes** |  | Choices are the allowed values; selecting one injects its FlagArgs into the agent command line (how the Model axis renders to a harness CLI flag). |
+| `flag_template` | []string |  |  | FlagTemplate makes this option OPEN: a value that is not one of Choices is still honored by substituting it for OptionValuePlaceholder in this template. Options with no template are CLOSED — an undeclared value cannot be turned into flags at all.  Model ids are an open, fast-moving set: every provider ships new ones between gc releases. Modeling them as a closed enum meant a pin the catalog had not caught up to produced no FlagArgs and the launch path silently omitted the flag, unpinning the agent onto whatever the CLI defaulted to (ra-jbbv0 for claude-opus-5, ga-fyh for grok-4.6). Choices stay as the curated suggestion list for pickers; the template is what guarantees an explicit pin is never discarded.  json:"-" for the same reason as OptionChoice.FlagArgs: CLI flag shapes are server-side only and must not reach the public API DTO. |
 | `omit` | boolean |  |  | Omit is the removal sentinel for options_schema_merge = "by_key". When set on a child layer's entry, the matching Key inherited from a parent layer is pruned from the resolved schema. |
 
 ## ProviderPatch

@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,9 +66,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "c185735c38e25569277eae798ce363ecba9859e8"
-		bdSourceSHA256 = "3e256519a683b413f7baa9f4d1071084bb2646478faabad9bf3ac7bd05952f43"
-		bdBuild        = "c185735c38"
+		bdSourceRef    = "f45b249ce6b40ba62aecc03949e6371e8f7c79d8"
+		bdSourceSHA256 = "51689f2a4d9f3437334d6e9f91e3b18c0793fb9cc8cf988ce511ef1f39b13214"
+		bdBuild        = "f45b249ce6b"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		thriftVersion  = "0.24.0"
@@ -152,8 +153,9 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.57",
+		"gitpython>=3.1.59",
 		"aiohttp>=3.14.3",
+		"anyio>=4.14.2",
 		"pillow>=12.3.0",
 	} {
 		if !strings.Contains(input, want) {
@@ -167,8 +169,9 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.58 \\",
+		"gitpython==3.1.59 \\",
 		"aiohttp==3.14.3 \\",
+		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
 	} {
@@ -200,6 +203,9 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		// util-linux set, CVE-2026-53615, fixed in 2.41.5-0+deb13u1.
 		"bsdutils", "libblkid1", "liblastlog2-2", "libmount1", "libsmartcols1",
 		"libuuid1", "login", "mount", "util-linux",
+		// gzip CVE-2026-41992; libpcre2-8-0 CVE-2026-86145 and CVE-2026-89161;
+		// libsqlite3-0 CVE-2026-11822 and CVE-2026-11824.
+		"gzip", "libpcre2-8-0", "libsqlite3-0",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
@@ -246,7 +252,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"ARG XNET_VERSION=0.58.0",
 		"ARG XTEXT_VERSION=0.41.0",
 		"ARG XMOD_VERSION=0.40.0",
-		"ARG THRIFT_VERSION=0.23.0",
+		"ARG THRIFT_VERSION=0.24.0",
 	} {
 		if !strings.Contains(base, arg) {
 			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
@@ -309,30 +315,90 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 	}
 }
 
+// trivyIgnoreDoc is the shape of .trivyignore.yaml the guards below read. purls
+// is decoded because Trivy honors a purl-scoped waiver in every image, path or
+// no path: an entry naming only `purls: ["pkg:golang/github.com/apache/thrift"]`
+// is a waiver for bd, dolt and gh at once, and a guard that iterates `paths`
+// never sees it.
+type trivyIgnoreDoc struct {
+	Vulnerabilities []struct {
+		ID    string   `yaml:"id"`
+		Paths []string `yaml:"paths"`
+		Purls []string `yaml:"purls"`
+	} `yaml:"vulnerabilities"`
+}
+
+// reviewedTrivyIgnorePurlWaivers names the purl-scoped waivers this repo has
+// reviewed, as "<id> <purl>". It is empty and is meant to stay that way: a
+// module-scoped waiver is exactly the "waive instead of fix" shape the rebuilt-
+// tool guard forbids, and the images force the patched modules in instead
+// (Dockerfile.base's GRPC_VERSION/THRIFT_VERSION and the x/* pins). Adding an
+// entry here is the deliberate edit that admits one.
+var reviewedTrivyIgnorePurlWaivers = map[string]bool{}
+
+// unreviewedTrivyIgnorePurlWaivers reports every purl-scoped waiver the file
+// carries that no reviewer has admitted, as a ready-to-print message.
+func unreviewedTrivyIgnorePurlWaivers(doc trivyIgnoreDoc) []string {
+	var found []string
+	for _, v := range doc.Vulnerabilities {
+		for _, purl := range v.Purls {
+			if reviewedTrivyIgnorePurlWaivers[v.ID+" "+purl] {
+				continue
+			}
+			found = append(found, fmt.Sprintf("%s waives module %q by purl, which applies to every image including the rebuilt bd, dolt and gh; move the module forward in the build instead of waiving it", v.ID, purl))
+		}
+	}
+	return found
+}
+
+// TestTrivyIgnoreRejectsPurlScopedWaivers drives the guard itself, because the
+// file it guards is (correctly) all kubectl paths today, so the assertion in
+// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools cannot demonstrate what it
+// catches. The entry below is the one the council named: a thrift regression
+// waived by module instead of moving Dockerfile.base's THRIFT_VERSION, on the
+// file's own horizon, which both existing guards accepted.
+func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
+	const waived = `vulnerabilities:
+  - id: CVE-2026-43871
+    purls:
+      - pkg:golang/github.com/apache/thrift
+    expired_at: 2026-11-07
+  - id: CVE-2026-56852
+    paths:
+      - usr/local/bin/kubectl
+    expired_at: 2026-11-07
+`
+	var doc trivyIgnoreDoc
+	if err := yaml.Unmarshal([]byte(waived), &doc); err != nil {
+		t.Fatalf("parsing the fixture: %v", err)
+	}
+	found := unreviewedTrivyIgnorePurlWaivers(doc)
+	if len(found) != 1 {
+		t.Fatalf("unreviewedTrivyIgnorePurlWaivers() = %v, want exactly the thrift purl entry", found)
+	}
+	if !strings.Contains(found[0], "CVE-2026-43871") || !strings.Contains(found[0], "apache/thrift") {
+		t.Fatalf("finding = %q, want it to name the CVE and the module", found[0])
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no waiver beyond the reviewed set below. They are
-// rebuilt with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, and
-// Dockerfile.base now forces x/crypto, x/net, x/text and thrift forward in the gh and
-// Dolt builds the same way it forces grpc, so a waiver on those paths would let the
-// scan gate mask a regressed rebuild instead of proving the fix holds. The reviewed
-// set is the two surviving CVEs -- CVE-2026-56852 for kubectl and CVE-2026-43871,
-// published against the thrift 0.23.0 the Dolt build still pins -- carried over from
-// main's time-boxed bridge and held to exactly the paths the scan reported;
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins their horizon and statements.
-// kubectl keeps the x/text waiver because it is an upstream-signed prebuilt this
-// repo installs rather than builds. gc's module waivers are enforced
-// separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
+// 1.26.5 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
+// it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
+// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
+// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
+// rather than builds, so nothing here can move its dependencies. gc's module waivers
+// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
-	var doc struct {
-		Vulnerabilities []struct {
-			ID    string   `yaml:"id"`
-			Paths []string `yaml:"paths"`
-		} `yaml:"vulnerabilities"`
-	}
+	var doc trivyIgnoreDoc
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	for _, unreviewed := range unreviewedTrivyIgnorePurlWaivers(doc) {
+		t.Error(unreviewed)
 	}
 
 	rebuiltPaths := map[string]bool{
@@ -354,15 +420,15 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// cannot grow without one either. The bd and gc paths of the grpc pair were removed
 	// after both moved to 1.83.2; the gh and Dolt grpc paths (CVE-2026-84304,
 	// CVE-2026-84445) were removed once Dockerfile.base's own GRPC_VERSION also reached
-	// 1.83.2, clearing both CVEs for both binaries. The bd path of the thrift entry was
-	// removed once Dockerfile.agent forced thrift forward to 0.24.0.
+	// 1.83.2, clearing both CVEs for both binaries. The thrift entry (CVE-2026-43871)
+	// is gone entirely: Dockerfile.agent forced bd's thrift to 0.24.0 first, and
+	// Dockerfile.base's own THRIFT_VERSION has now followed for the Dolt rebuild, so
+	// no rebuilt path is waived for it and a regression below 0.24.0 fails the scan.
+	// Nothing rebuilt from source is waived here any more; only kubectl is, and
+	// kubectl is a prebuilt.
 	reviewedWaivers := map[string]map[string]bool{
 		"CVE-2026-56852": {
 			"usr/local/bin/kubectl": true,
-		},
-		// thrift, fixed in 0.24.0; the Dolt rebuild still pins 0.23.0.
-		"CVE-2026-43871": {
-			"usr/local/bin/dolt": true,
 		},
 	}
 	foundReviewed := map[string]map[string]bool{}
@@ -536,120 +602,46 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 	}
 }
 
-// TestTrivyIgnoreKeepsReviewedBridgeEntries pins the four entries carried over from
-// main's time-boxed waiver bridge: the findings the rebuilds do not fully clear, because
-// each was published against a version some pin still sits on (thrift 0.23.0 on the Dolt
-// rebuild) or sits in the mail image's requirements. Each is held to the exact paths or
-// purls the scan reported, to the bridge's own 2026-09-21 horizon rather than this
-// file's 2026-11-07, and to a statement naming the fixed version and the pin that has to
-// move. The bridge's other entries — including both grpc CVEs, cleared once
-// Dockerfile.base's own GRPC_VERSION reached 1.83.2 — are what the rebuilds cleared, and
-// the rebuilt-path guard above is what keeps them from coming back.
+// TestTrivyIgnoreKeepsReviewedBridgeEntries holds main's time-boxed waiver bridge
+// (#5885) retired. The bridge carried four reviewed entries on its own 2026-09-21
+// horizon rather than this file's, for findings no rebuild cleared at the time; every
+// one of them was closed by moving the pin its statement named, not by re-dating it.
+// CVE-2026-43871 went when contrib/k8s/Dockerfile.base's THRIFT_VERSION reached
+// 0.24.0 (TestRebuiltToolsForcePatchedXModules pins that), and the three GitPython
+// CVEs went when .github/requirements/mcp-agent-mail.txt reached 3.1.59
+// (TestMCPMailImagePinsPatchedPythonDependencies pins that).
+//
+// So the guard is now the absence of the bridge: no entry may carry a horizon at or
+// behind the bridge's, because such an entry is either the bridge coming back under a
+// new statement or a waiver Trivy already treats as expired, and an expired waiver
+// fails the scan gate at the next run rather than at review time. Re-dating one of
+// these forward is a deliberate decision that belongs in this file's own horizon with
+// a statement to match, which is exactly the edit this test forces.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
 	var doc struct {
 		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			Purls     []string `yaml:"purls"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
+			ID        string `yaml:"id"`
+			ExpiredAt string `yaml:"expired_at"`
 		} `yaml:"vulnerabilities"`
 	}
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
 	}
+	if len(doc.Vulnerabilities) == 0 {
+		t.Fatal(".trivyignore.yaml parsed to no entries; the guard below would pass vacuously")
+	}
 
+	// ISO-8601 dates compare correctly as strings, so <= is "at or behind".
 	const bridgeHorizon = "2026-09-21"
-
-	toSet := func(vals ...string) map[string]bool {
-		m := make(map[string]bool, len(vals))
-		for _, v := range vals {
-			m[v] = true
-		}
-		return m
-	}
-
-	type wantEntry struct {
-		id         string
-		paths      map[string]bool
-		purls      map[string]bool
-		substrings []string
-	}
-	wantEntries := []wantEntry{
-		{
-			id:         "CVE-2026-43871",
-			paths:      toSet("usr/local/bin/dolt"),
-			substrings: []string{"thrift", "0.24.0", "THRIFT_VERSION"},
-		},
-		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
-		{id: "CVE-2026-78675", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-		{id: "CVE-2026-78677", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-	}
-
-	byID := map[string][]int{}
-	for i, v := range doc.Vulnerabilities {
-		byID[v.ID] = append(byID[v.ID], i)
-	}
-
-	reviewed := map[string]bool{}
-	for _, want := range wantEntries {
-		reviewed[want.id] = true
-		idxs := byID[want.id]
-		if len(idxs) != 1 {
-			t.Errorf("%s appears in %d entries, want exactly 1", want.id, len(idxs))
+	for _, v := range doc.Vulnerabilities {
+		if v.ExpiredAt == "" {
+			t.Errorf("%s has no expired_at; every waiver in this file is time-boxed", v.ID)
 			continue
 		}
-		v := doc.Vulnerabilities[idxs[0]]
-		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the bridge horizon %q it was carried over on", v.ID, v.ExpiredAt, bridgeHorizon)
-		}
-		if want.paths != nil {
-			gotPaths := toSet(v.Paths...)
-			for p := range want.paths {
-				if !gotPaths[p] {
-					t.Errorf("%s missing required path %q", v.ID, p)
-				}
-			}
-			for p := range gotPaths {
-				if !want.paths[p] {
-					t.Errorf("%s waives unexpected path %q", v.ID, p)
-				}
-			}
-			if len(v.Purls) != 0 {
-				t.Errorf("%s sets purls %v on a path-scoped binary finding; want no purls", v.ID, v.Purls)
-			}
-		}
-		if want.purls != nil {
-			gotPurls := toSet(v.Purls...)
-			for p := range want.purls {
-				if !gotPurls[p] {
-					t.Errorf("%s missing required purl %q", v.ID, p)
-				}
-			}
-			for p := range gotPurls {
-				if !want.purls[p] {
-					t.Errorf("%s waives unexpected purl %q", v.ID, p)
-				}
-			}
-			if len(v.Paths) != 0 {
-				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths, so the purl match alone confines it to gc-mcp-mail", v.ID, v.Paths)
-			}
-		}
-		statement := strings.ToLower(v.Statement)
-		for _, sub := range want.substrings {
-			if !strings.Contains(statement, strings.ToLower(sub)) {
-				t.Errorf("%s statement %q does not name %q", v.ID, v.Statement, sub)
-			}
-		}
-	}
-
-	// Every other entry is the kubectl set on this file's own horizon, so an entry
-	// that borrows the bridge's date without being listed above skipped this review.
-	for _, v := range doc.Vulnerabilities {
-		if !reviewed[v.ID] && v.ExpiredAt == bridgeHorizon {
-			t.Errorf("%s expires on the bridge horizon %s but is not a reviewed bridge entry; list it above or give it this file's own horizon", v.ID, bridgeHorizon)
+		if v.ExpiredAt <= bridgeHorizon {
+			t.Errorf("%s expires %s, at or behind the retired bridge horizon %s; fix the finding as the bridge's own entries were, or move it to this file's horizon with a statement saying why", v.ID, v.ExpiredAt, bridgeHorizon)
 		}
 	}
 }

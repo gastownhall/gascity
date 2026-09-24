@@ -1,0 +1,91 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "workertest",
+    srcs = [
+        "catalog.go",
+        "catalog_phase2_data.go",
+        "corpus.go",
+        "phase1.go",
+        "profiles.go",
+        "report.go",
+        "reporter.go",
+        "results.go",
+        "structured_conformance.go",
+    ],
+    embedsrcs = [
+        "testdata/phase2/catalog.json",
+        "testdata/phase2/scenarios.yaml",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/worker/workertest",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/pricing",
+        "//internal/worker",
+        "@in_gopkg_yaml_v3//:yaml_v3",
+    ],
+)
+
+go_test(
+    name = "workertest_test",
+    srcs = [
+        "catalog_phase2_data_test.go",
+        "phase1_conformance_test.go",
+        "phase2_conformance_test.go",
+        "phase2_fake_worker_test.go",
+        "phase2_result_helpers_test.go",
+        "phase2_transcript_helpers_test.go",
+        "phase3_conformance_test.go",
+        "report_test.go",
+        "structured_conformance_test.go",
+        "structured_corpus_test.go",
+        "telemetry_handle_conformance_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:repo_source_tree",
+        "//internal/worker/fakecmd",
+    ],
+    embed = [":workertest"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/beads",
+        "//internal/events",
+        "//internal/runtime",
+        "//internal/session",
+        "//internal/sessionlog",
+        "//internal/telemetry",
+        "//internal/testenv",
+        "//internal/worker",
+        "//internal/worker/fake",
+        "@io_opentelemetry_go_otel//:otel",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+    ],
+)
+
+exports_files(
+    glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "testdata",
+    srcs = glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

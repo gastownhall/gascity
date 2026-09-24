@@ -1,0 +1,59 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "proxyendpoint",
+    srcs = [
+        "birth.go",
+        "birth_linux.go",
+        "birth_other.go",
+        "idle.go",
+        "liveness.go",
+        "poolkey.go",
+        "probe.go",
+        "record.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/beads/proxyendpoint",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads/contract",
+        "//internal/fsys",
+        "//internal/pathutil",
+        "//internal/pidutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+go_test(
+    name = "proxyendpoint_test",
+    srcs = [
+        "birth_linux_test.go",
+        "birth_test.go",
+        "idle_test.go",
+        "liveness_test.go",
+        "poolkey_test.go",
+        "probe_session_test.go",
+        "probe_test.go",
+        "record_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":proxyendpoint"],
+    deps = [
+        "//internal/beads/contract",
+        "//internal/doltpool",
+        "//internal/fsys",
+        "//internal/testenv",
+        "@com_github_go_sql_driver_mysql//:mysql",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

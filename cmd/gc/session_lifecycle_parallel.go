@@ -1454,7 +1454,7 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
 	if resolveErr != nil {
-		log.Printf("session %s: template option resolution error: %v", sessionID, resolveErr)
+		log.Printf("WARNING: session %s: unhonored template option pin (%v); schema flags not applied", sessionID, resolveErr)
 		return
 	}
 	if len(args) > 0 {
@@ -3644,7 +3644,7 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 		markCityStopSessionAsAsleep(sessionFrontDoor(store), target.sessionID, nil)
 		return nil
 	}
-	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+	return workerStopSessionTargetForShutdownWithConfig("", store, sp, cfg, targetID)
 }
 
 func cityStopSessionMarked(store beads.Store, sessionID string) bool {
