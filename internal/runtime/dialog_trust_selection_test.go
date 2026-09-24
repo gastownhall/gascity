@@ -46,8 +46,8 @@ func TestWorkspaceTrustDialogDoesNotConfirmNoExit(t *testing.T) {
 	)
 	// The pane never re-renders with the cursor on the trust row, so the
 	// handler must give up visibly instead of confirming "No, exit".
-	if !errors.Is(err, errWorkspaceTrustUnconfirmed) {
-		t.Fatalf("acceptWorkspaceTrustDialog() error = %v, want errWorkspaceTrustUnconfirmed", err)
+	if !errors.Is(err, ErrWorkspaceTrustUnconfirmed) {
+		t.Fatalf("acceptWorkspaceTrustDialog() error = %v, want ErrWorkspaceTrustUnconfirmed", err)
 	}
 
 	for _, k := range sent {

@@ -1477,6 +1477,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 // run session_setup, send the startup nudge, and apply session_live. The caller
 // is responsible for the lifecycle gating (one-shot / no-managed-hints) before
 // invoking this — these steps assume a managed, non-one-shot session.
+// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
+// capture it).
+var startupDialogWarningOut io.Writer = os.Stderr
+
 func launchOrchestration(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	// Step 2: Wait for agent command to appear (not still in shell).
 	if len(cfg.ProcessNames) > 0 {
@@ -1490,7 +1494,9 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// Always attempted when process names are set, since any Claude-like
 	// agent may show a trust dialog regardless of EmitsPermissionWarning.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort: a trust dialog left unconfirmed here is retried by
+		// the post-readiness pass below, which reports it if it persists.
+		_ = ops.acceptStartupDialogs(ctx, name)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1517,7 +1523,12 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	// ready screen. Re-run dialog acceptance after readiness so late dialogs do
 	// not strand the session in an unusable startup state.
 	if runtime.ShouldAcceptStartupDialogs(cfg) {
-		_ = ops.acceptStartupDialogs(ctx, name) // best-effort
+		// Best-effort, but a trust dialog this last pass still could not
+		// confirm is left on screen with the cursor off the trust row, where
+		// any later Enter would answer it. Say so instead of dropping it.
+		if err := ops.acceptStartupDialogs(ctx, name); errors.Is(err, runtime.ErrWorkspaceTrustUnconfirmed) {
+			_, _ = fmt.Fprintf(startupDialogWarningOut, "warning: session %q: %v\n", name, err)
+		}
 		if err := ctx.Err(); err != nil {
 			return ignoreDeadlineIfSessionAlive(ops, name, err)
 		}

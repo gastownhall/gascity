@@ -134,7 +134,9 @@ func AcceptStartupDialogs(
 }
 
 // AcceptStartupDialogsFromStream dismisses known startup dialogs using an
-// event stream of full-screen snapshots instead of repeated peeks.
+// event stream of full-screen snapshots instead of repeated peeks. It drops
+// the "stream inconclusive" status; callers that can fall back to peeks
+// should use AcceptStartupDialogsFromStreamWithStatus.
 func AcceptStartupDialogsFromStream(
 	ctx context.Context,
 	timeout time.Duration,
@@ -149,6 +151,10 @@ func AcceptStartupDialogsFromStream(
 // AcceptStartupDialogsFromStreamWithStatus dismisses known startup dialogs
 // using an event stream of full-screen snapshots instead of repeated peeks
 // and reports whether the stream observed readiness or a known dialog state.
+// It also reports false when a workspace-trust dialog needs its selection
+// moved: the stream cannot re-read the screen to confirm the move, so it
+// sends nothing and the caller should fall back to AcceptStartupDialogs with
+// synchronous peeks.
 func AcceptStartupDialogsFromStreamWithStatus(
 	ctx context.Context,
 	timeout time.Duration,
@@ -199,6 +205,11 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return observed, err
 	}
 	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	if errors.Is(err, errStartupDialogStreamInconclusive) {
+		// The trust dialog is up and needs a selection move. Report the
+		// stream as inconclusive so the caller answers it with peeks.
+		return false, nil
+	}
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
 	}
@@ -589,11 +600,20 @@ func containsPostUpdateStartupDialog(content string) bool {
 // never reached the trust row and the dialog is left unconfirmed.
 const maxTrustDialogMoveAttempts = 3
 
-// errWorkspaceTrustUnconfirmed reports that a workspace-trust dialog was left
+// ErrWorkspaceTrustUnconfirmed reports that a workspace-trust dialog was left
 // on screen because no frame ever showed the cursor on the trust row. The
 // handlers return it rather than pressing Enter on whatever is selected,
 // which could be "No, exit".
-var errWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
+var ErrWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
+
+// errStartupDialogStreamInconclusive reports that a stream handler found a
+// dialog whose selection must move before it can be confirmed. A snapshot
+// stream cannot be re-read on demand, so it cannot close the move/re-read/
+// confirm loop safely: frames may lag the screen, Claude's trust cursor wraps,
+// and Claude re-renders the dialog shortly after first paint, resetting the
+// cursor. The stream handler sends nothing and the caller falls back to
+// synchronous peeks (AcceptStartupDialogs).
+var errStartupDialogStreamInconclusive = errors.New("startup dialog needs a selection move; stream cannot re-read the screen")
 
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
@@ -602,11 +622,19 @@ var errWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust op
 // stale Claude Code build can default the cursor to "No, exit" — so the
 // handler locates the cursor and the trust option in the rendered content
 // and moves the selection before confirming; it never blind-sends a fixed
-// key sequence. Selection and confirmation are a closed loop: movement keys
-// are sent alone, the pane is re-read, and Enter is sent only from a frame
-// whose cursor is on the trust row (bounded by maxTrustDialogMoveAttempts). When it can't locate both rows it sends no keys, and the
+// key sequence. When it can't locate both rows it sends no keys, and the
 // snapshot falls through to the existing readiness check, which hands the
 // phase off. Holding the phase open instead is tracked separately.
+//
+// Selection and confirmation are a closed loop: movement keys are sent
+// alone, the pane is re-read, and Enter is sent only from a frame whose
+// cursor is on the trust row. Claude drops keys for a moment after the
+// dialog first renders and its cursor wraps, so a blind Enter, or a blind
+// extra move, can land on "No, exit". Moves are bounded by
+// maxTrustDialogMoveAttempts. After any move, the trust row must show on
+// two consecutive frames before Enter, so a late move, or the re-render
+// that resets Claude's cursor shortly after first paint, cannot slip in
+// between the frame and the Enter.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
@@ -614,6 +642,7 @@ func acceptWorkspaceTrustDialog(
 	sendKeys func(keys ...string) error,
 ) error {
 	moves := 0
+	trustFrames := 0 // consecutive frames showing the cursor on the trust row
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -633,13 +662,23 @@ func acceptWorkspaceTrustDialog(
 					// frame that shows the cursor on the trust row, so a
 					// movement key Claude drops right after first render
 					// leads to another move, never to confirming "No, exit".
+					trustFrames = 0
 					moves++
 					if moves > maxTrustDialogMoveAttempts {
-						return fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+						return fmt.Errorf("%w after %d selection moves", ErrWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
 					}
 					if err := sendKeys(keys[:len(keys)-1]...); err != nil {
 						return err
 					}
+					sleep(ctx, startupDialogAcceptDelay)
+					continue
+				}
+				trustFrames++
+				if moves > 0 && trustFrames < 2 {
+					// After a move, confirm only once the trust row holds on
+					// two consecutive frames: a move Claude applies late, or
+					// the re-render that resets its cursor shortly after
+					// first paint, must not land between frame and Enter.
 					sleep(ctx, startupDialogAcceptDelay)
 					continue
 				}
@@ -650,6 +689,8 @@ func acceptWorkspaceTrustDialog(
 				return nil
 			}
 		}
+
+		trustFrames = 0
 
 		if containsPromptIndicator(content) {
 			budget.observe()
@@ -683,8 +724,9 @@ func acceptWorkspaceTrustDialogFromStream(
 		matchDelay:   startupDialogAcceptDelay,
 		ready:        containsPromptIndicator,
 		readyOrNext:  containsPostTrustStartupDialog,
-		// See acceptWorkspaceTrustDialog: move, re-read, and confirm only
-		// from a frame with the cursor on the trust row.
+		// See acceptWorkspaceTrustDialog. When the selection has to move,
+		// the stream hands off to synchronous peeks, which run the closed
+		// loop (errStartupDialogStreamInconclusive).
 		confirmOnlyFromSelectedFrame: true,
 	})
 }
@@ -1386,12 +1428,13 @@ type streamDialogSpec struct {
 	// readiness checks like any unmatched snapshot.
 	matchKeysFor func(string) ([]string, bool)
 	matchDelay   time.Duration
-	// confirmOnlyFromSelectedFrame makes a multi-key match a closed loop:
-	// only the movement keys (all but the final confirm key) are sent, the
-	// snapshots captured before the move are discarded, and the newest
-	// frame is re-evaluated. The confirm key goes out only when a frame
-	// derives to exactly that one key, i.e. the cursor is already on the
-	// target row. Moves are bounded by maxTrustDialogMoveAttempts.
+	// confirmOnlyFromSelectedFrame limits the stream to single-key matches:
+	// a match that needs the selection moved first sends nothing and
+	// returns errStartupDialogStreamInconclusive so the caller answers it
+	// with synchronous peeks. A stream frame may lag the screen, and Claude
+	// re-renders the trust dialog shortly after first paint, resetting its
+	// cursor and dropping keys, so a streamed frame showing the cursor on
+	// the target row does not prove the cursor is still there.
 	confirmOnlyFromSelectedFrame bool
 }
 
@@ -1472,29 +1515,6 @@ func (c *replayableSnapshotCursor) nextBatch() ([]string, bool, <-chan struct{})
 	return batch, closed, updated
 }
 
-// rereadAfterSend returns the current frame after keys were sent. Snapshots
-// already queued may predate the keys, so only the newest one counts. If none
-// has arrived, it waits up to settle for one; a stream that stays quiet means
-// the screen did not change (e.g. the key was dropped), so the last frame seen,
-// prev, is still current.
-func (c *replayableSnapshotCursor) rereadAfterSend(ctx context.Context, prev string, settle time.Duration) string {
-	batch, closed, updated := c.nextBatch()
-	if len(batch) == 0 && !closed && settle > 0 {
-		timer := time.NewTimer(settle)
-		select {
-		case <-ctx.Done():
-		case <-timer.C:
-		case <-updated:
-		}
-		timer.Stop()
-		batch, _, _ = c.nextBatch()
-	}
-	if len(batch) == 0 {
-		return prev
-	}
-	return batch[len(batch)-1]
-}
-
 func (c *replayableSnapshotCursor) replay(history []string) {
 	if len(history) == 0 {
 		return
@@ -1547,8 +1567,6 @@ func acceptDialogFromStream(
 	defer stopTimer(readyTimer)
 	defer stopTimer(idleTimer)
 
-	moves := 0
-scan:
 	for {
 		history, closed, updated := snapshots.nextBatch()
 		if len(history) > 0 {
@@ -1559,19 +1577,7 @@ scan:
 						keys, ok = spec.matchKeysFor(content)
 					}
 					if ok && spec.confirmOnlyFromSelectedFrame && len(keys) > 1 {
-						moves++
-						if moves > maxTrustDialogMoveAttempts {
-							return true, fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
-						}
-						if err := ctx.Err(); err != nil {
-							return true, err
-						}
-						if err := sendKeys(keys[:len(keys)-1]...); err != nil {
-							return true, err
-						}
-						sleep(ctx, spec.matchDelay)
-						snapshots.replay([]string{snapshots.rereadAfterSend(ctx, content, spec.matchDelay)})
-						continue scan
+						return true, errStartupDialogStreamInconclusive
 					}
 					if ok {
 						snapshots.replay(history[idx+1:])
