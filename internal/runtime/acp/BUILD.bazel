@@ -24,6 +24,7 @@ go_test(
         "acp_test.go",
         "activity_test.go",
         "meta_privacy_test.go",
+        "pipe_error_test.go",
         "protocol_test.go",
         "seams_test.go",
         "testenv_import_test.go",
