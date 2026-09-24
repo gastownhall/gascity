@@ -715,3 +715,90 @@ func createPrevBead(t *testing.T, env *restartRequestTestEnv, closedAt *time.Tim
 		}
 	}
 }
+
+// TestReconcileSessionBeads_FreshCycleWakesOnMintedKeyNextTick pins the
+// second half of ga-2fpf9z's fresh-mode fix: it isn't enough for the handoff
+// tick to record state=asleep (TestPhantomReplacementSessionKeyRepro covers
+// that in isolation) — the very next reconciler tick must actually observe
+// that recorded state and wake the session back up on the SAME minted key,
+// with no separate trigger, stall-detector pass, or heal round-trip
+// required. Before the fix, state never left "active", so ComputeAwakeSet's
+// reset-pending desire (gated on continuation_reset_pending +
+// reset_committed_at, both already set unconditionally by
+// RestartRequestPatch) never got a chance to matter one way or the other —
+// but the session also never looked asleep, so nothing woke it either.
+func TestReconcileSessionBeads_FreshCycleWakesOnMintedKeyNextTick(t *testing.T) {
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "witness", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "witness")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "witness",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "witness",
+		namedSessionModeMetadata:     "on_demand",
+		"template":                   "witness",
+		"state":                      "active",
+		"wake_mode":                  "fresh",
+		"session_key":                "conversation-A",
+		sessionpkg.CurrentBeadIDKey:  "wb-A",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	workBead := beads.Bead{ID: "wb-B", Title: "next witness wisp", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+	// Tick 1: the assignee/current-bead divergence fires the fresh-cycle
+	// kill + mint.
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{session}, []beads.Bead{workBead})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatal("session should have been killed by the fresh-cycle handoff")
+	}
+	cycled, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", session.ID, err)
+	}
+	minted := cycled.Metadata["session_key"]
+	if minted == "" || minted == "conversation-A" {
+		t.Fatalf("session_key after cycle = %q, want a freshly minted key", minted)
+	}
+	if cycled.Metadata["state"] != "asleep" {
+		t.Fatalf("state after cycle = %q, want asleep", cycled.Metadata["state"])
+	}
+
+	env.stdout.Reset()
+	env.stderr.Reset()
+
+	// Tick 2: same work demand still assigned (wb-B, already the recorded
+	// current bead — no further cycling), runtime still dead. This is a
+	// plain "wake an asleep named session" tick.
+	reconcileSessionBeadsWithAssignedWork(env, []beads.Bead{cycled}, []beads.Bead{workBead})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake on the next tick after the fresh-cycle handoff; ComputeAwakeSet should have desired it reset-pending", sessionName)
+	}
+	woke, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s) after wake: %v", session.ID, err)
+	}
+	if woke.Metadata["session_key"] != minted {
+		t.Fatalf("session_key after wake = %q, want the minted key %q preserved (not regenerated)", woke.Metadata["session_key"], minted)
+	}
+}
