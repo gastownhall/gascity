@@ -89,6 +89,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -212,8 +213,11 @@ func readyLegLabel(ref storeref.StoreRef) string {
 	}
 }
 
-// readyRigLegStores opens the rig legs, failing the whole query when any BOUND
-// rig's store cannot be opened.
+// readyRigLegStores opens the active rig legs, failing the whole query when any
+// active BOUND rig's store cannot be opened. Suspended rigs are deliberately not
+// opened: suspension removes their demand from the running city, and a work
+// reader paying to scan them both defeats that lifecycle boundary and multiplies
+// the hottest query by dormant stores.
 //
 // This is the OPEN end of the fail-loud rule federateBeadLegs applies at the read
 // end, and the two are the same rule for the same reason: a leg missing from the
@@ -227,7 +231,24 @@ func readyLegLabel(ref storeref.StoreRef) string {
 // already happened by here, so reporting one and discarding the rest would throw
 // away diagnosis already paid for.
 func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Store, error) {
-	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	if cfg == nil {
+		return nil, nil
+	}
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading rig suspension state: %w", err)
+	}
+	active := *cfg
+	active.Rigs = make([]config.Rig, 0, len(cfg.Rigs))
+	suspended := buildEffectiveSuspendedRigNames(cfg, st)
+	for _, rig := range cfg.Rigs {
+		if suspended[rig.Name] {
+			continue
+		}
+		active.Rigs = append(active.Rigs, rig)
+	}
+
+	stores, failures := openStandaloneRigStores(&active, cityPath)
 	if len(failures) == 0 {
 		return stores, nil
 	}

@@ -4204,7 +4204,7 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 		t.Fatalf("workflowServeControlReadyQuery should disable bd auto-export: %q", query)
 	}
 	for _, want := range []string{
-		`bd --readonly --sandbox ready --assignee="$cand" --exclude-type=epic --json --limit=20`,
+		`bd --readonly --sandbox ready --exclude-type=epic --json --limit=0`,
 		`bd --readonly --sandbox ready --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 		`routed_ready "$GC_CONTROL_TARGET"`,
@@ -4399,7 +4399,7 @@ func TestWorkflowServeControlReadyQueryBD105IncludesEphemeral(t *testing.T) {
 		config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
 	)
 	for _, want := range []string{
-		`bd --readonly --sandbox ready --include-ephemeral --assignee="$cand" --exclude-type=epic --json --limit=20`,
+		`bd --readonly --sandbox ready --include-ephemeral --exclude-type=epic --json --limit=0`,
 		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.run_target=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 		`bd --readonly --sandbox ready --include-ephemeral --metadata-field "gc.routed_to=$route" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`,
 	} {
@@ -4459,8 +4459,8 @@ case "$*" in
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-epic-leak"}]'
     ;;
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-ready"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-ready","assignee":"gascity--control-dispatcher"}]'
     ;;
   "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-routed"}]'
@@ -4470,7 +4470,7 @@ case "$*" in
     ;;
 esac
 `)
-	assertJSONEqual(t, out, `[{"id":"ga-ready"},{"id":"ga-routed"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-ready","assignee":"gascity--control-dispatcher"},{"id":"ga-routed"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryIncludesMetadataRoutedWorkAfterAssignedPending(t *testing.T) {
@@ -4481,8 +4481,8 @@ func TestWorkflowServeControlReadyQueryIncludesMetadataRoutedWorkAfterAssignedPe
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-pending","metadata":{"gc.kind":"retry"}}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-pending","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}}]'
     ;;
   "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]'
@@ -4492,7 +4492,7 @@ case "$*" in
     ;;
 esac
 `)
-	assertJSONEqual(t, out, `[{"id":"ga-pending","metadata":{"gc.kind":"retry"}},{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-pending","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}},{"id":"ga-ready","metadata":{"gc.kind":"scope-check"}}]`)
 }
 
 func TestWorkflowServeControlReadyQueryIncludesCanonicalRoutedControlWork(t *testing.T) {
@@ -4522,8 +4522,8 @@ func TestWorkflowServeControlReadyQuerySkipsInstantiatingBeads(t *testing.T) {
 	}, fmt.Sprintf(`#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-instantiating-assigned","metadata":{"%s":"true"}},{"id":"ga-assigned","metadata":{"gc.kind":"retry"}}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-instantiating-assigned","assignee":"gascity--control-dispatcher","metadata":{"%s":"true"}},{"id":"ga-assigned","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}}]'
     ;;
   "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-instantiating-routed","metadata":{"%s":"true"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]'
@@ -4533,7 +4533,7 @@ case "$*" in
     ;;
 esac
 `, beadmeta.InstantiatingMetadataKey, beadmeta.InstantiatingMetadataKey))
-	assertJSONEqual(t, out, `[{"id":"ga-assigned","metadata":{"gc.kind":"retry"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-assigned","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}},{"id":"ga-routed","metadata":{"gc.kind":"scope-check"}}]`)
 }
 
 func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *testing.T) {
@@ -4544,8 +4544,8 @@ func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *test
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-z-assigned","assignee":"gascity--control-dispatcher"},{"id":"ga-dup","assignee":"gascity--control-dispatcher","source":"assigned"}]'
     ;;
   "--readonly --sandbox ready --metadata-field gc.run_target=gascity/control-dispatcher --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort oldest --limit=20")
     printf '[{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]'
@@ -4558,7 +4558,7 @@ case "$*" in
     ;;
 esac
 `)
-	assertJSONEqual(t, out, `[{"id":"ga-z-assigned"},{"id":"ga-dup","source":"assigned"},{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-z-assigned","assignee":"gascity--control-dispatcher"},{"id":"ga-dup","assignee":"gascity--control-dispatcher","source":"assigned"},{"id":"ga-a-routed"},{"id":"ga-route-dup","source":"run-target"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualSession(t *testing.T) {
@@ -4574,15 +4574,15 @@ func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualS
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-control-ready"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
 `)
-	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryFailsFastOnBDReadyError(t *testing.T) {
@@ -4638,8 +4638,8 @@ func TestWorkflowServeControlReadyQueryKeepsSuccessfulBDStderrOutOfJSON(t *testi
 set -eu
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-control-ready"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
     printf 'notice: refreshed export metadata\n' >&2
     ;;
   *)
@@ -4658,7 +4658,7 @@ esac
 	if err != nil {
 		t.Fatalf("run workflow serve query: %v", err)
 	}
-	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]`)
 }
 
 func TestWorkflowServeControlReadyQueryFailsOnMalformedBDJSON(t *testing.T) {
@@ -4671,7 +4671,7 @@ func TestWorkflowServeControlReadyQueryFailsOnMalformedBDJSON(t *testing.T) {
 	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
     printf 'not-json'
     ;;
   *)
@@ -4707,8 +4707,8 @@ set -eu
 }
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-control-ready"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
     ;;
   *)
     printf '[]'
@@ -4728,13 +4728,13 @@ esac
 	if err != nil {
 		t.Fatalf("run workflow serve query: %v", err)
 	}
-	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]`)
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
 	firstCall, _, _ := strings.Cut(strings.TrimSpace(string(logData)), "\n")
-	if want := "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20"; firstCall != want {
+	if want := "--readonly --sandbox ready --exclude-type=epic --json --limit=0"; firstCall != want {
 		t.Fatalf("first bd call = %q, want %q; all calls:\n%s", firstCall, want, string(logData))
 	}
 }
@@ -4751,8 +4751,8 @@ func TestWorkflowServeControlReadyQueryDeduplicatesAssigneeProbes(t *testing.T) 
 set -eu
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --exclude-type=epic --json --limit=20")
-    printf '[{"id":"ga-control-ready"}]'
+  "--readonly --sandbox ready --exclude-type=epic --json --limit=0")
+    printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
     ;;
   *)
     printf '[]'
@@ -4771,16 +4771,16 @@ esac
 	if err != nil {
 		t.Fatalf("run workflow serve query: %v", err)
 	}
-	assertJSONEqual(t, out, `[{"id":"ga-control-ready"}]`)
+	assertJSONEqual(t, out, `[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]`)
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
-	if got := strings.Count(string(logData), "--assignee=gascity--control-dispatcher "); got != 1 {
-		t.Fatalf("gascity--control-dispatcher query count = %d, want 1; calls:\n%s", got, string(logData))
+	if got := strings.Count(string(logData), "--readonly --sandbox ready --exclude-type=epic --json --limit=0"); got != 1 {
+		t.Fatalf("shared assignee snapshot count = %d, want 1; calls:\n%s", got, string(logData))
 	}
-	if got := strings.Count(string(logData), "--assignee=gascity--workflow-control "); got != 1 {
-		t.Fatalf("gascity--workflow-control query count = %d, want 1; calls:\n%s", got, string(logData))
+	if strings.Contains(string(logData), "--assignee=") {
+		t.Fatalf("batched assignee path still issued per-identity probes; calls:\n%s", string(logData))
 	}
 }
 

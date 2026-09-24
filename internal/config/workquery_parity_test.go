@@ -412,10 +412,13 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
 			single := v.forTopo(shape.agent, QueryTopology{Beads: bd105})
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
-			if n := singleStoreReadCount(single); n == 0 {
+			n := singleStoreReadCount(single)
+			if n == 0 {
 				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
-			} else if got := strings.Count(federated, gcReadyCommand); got != n {
-				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, got, gcReadyCommand)
+			}
+			gotReads := strings.Count(federated, gcReadyCommand)
+			if gotReads == 0 || gotReads > n {
+				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q; batching may reduce but never add reader calls", shape.name, v.name, n, gotReads, gcReadyCommand)
 			}
 			if strings.Contains(federated, bdReadyCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so that tier stays blind on a split city: %q", shape.name, v.name, bdReadyCommand, federated)
@@ -423,9 +426,15 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			if strings.Contains(federated, bdListInProgressCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so a session stays blind to its OWN claim in a relocated binding: %q", shape.name, v.name, bdListInProgressCommand, federated)
 			}
-			// Everything outside the reader words, their failure handling, and the
-			// crash-recovery presence key must be untouched. Normalizing the
-			// federated form back onto the single-store one is what proves it.
+			// The three assigned variants intentionally replace their per-identity
+			// reader loop with one ordered snapshot plus per-identity projections.
+			// Their invocation count and row parity are guarded by
+			// TestFederatedAssignedTiersReadOnceForTheWholeIdentitySet and the
+			// ready identity-set tests. The remaining variants are still a literal
+			// reader swap and retain this stronger text-normalization guard.
+			if v.name == "Work" || v.name == "AssignedInProgress" || v.name == "AssignedReady" {
+				continue
+			}
 			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
 				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}

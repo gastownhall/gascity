@@ -293,7 +293,7 @@ func TestGcReadyNonInProgressArmsSkipEnrichment(t *testing.T) {
 // readyRowsForAssignee runs the crash-recovery read the swapped tier 0 issues.
 func readyRowsForAssignee(t *testing.T, legs []readyLeg, assignee string) []readyBead {
 	t.Helper()
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress, assignee: assignee, limit: 1})
+	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress, assignees: []string{assignee}, limit: 1})
 	if err != nil {
 		t.Fatalf("readyBeadsForOpts(--status in_progress --assignee %s): %v", assignee, err)
 	}

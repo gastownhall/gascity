@@ -98,6 +98,54 @@ func TestControlReadyCandidatesSkipsEmptySlots(t *testing.T) {
 	}
 }
 
+// TestWorkflowServeControlReadyBatchesAssigneeReads counts the actual reader
+// calls made by the generated shell. The five control/session identity slots
+// (plus their legacy expansions) must share one unbounded ready snapshot; wall
+// time is deliberately not the assertion because it is dominated by the store
+// and the host running the test.
+func TestWorkflowServeControlReadyBatchesAssigneeReads(t *testing.T) {
+	query := workflowServeControlReadyQuery(
+		config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"},
+		"gascity--control-dispatcher",
+	)
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_ID=s-gcg-1",
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run control-ready query: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	var assigned []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if !strings.Contains(line, "--metadata-field") {
+			assigned = append(assigned, line)
+		}
+	}
+	if len(assigned) != 1 {
+		t.Fatalf("assignee-ready reader ran %d times, want exactly 1 shared snapshot; calls=%q", len(assigned), string(data))
+	}
+	if !strings.Contains(assigned[0], "--limit=0") || strings.Contains(assigned[0], "--assignee=") {
+		t.Fatalf("shared assignee snapshot call = %q, want unbounded unfiltered reader with shell-side identity projection", assigned[0])
+	}
+}
+
 func TestControlReadyRoutesFiltersEmptyAliases(t *testing.T) {
 	parsed := parsedControlReadyQuery{target: "core.control-dispatcher", bareTarget: "control-dispatcher"}
 	got := controlReadyRoutes(parsed)

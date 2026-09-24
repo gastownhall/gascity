@@ -19,7 +19,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/pflag"
 )
 
@@ -691,6 +693,44 @@ func TestRigStoreOpenPolicyDiffersByCaller(t *testing.T) {
 	}
 }
 
+// TestReadyDoesNotOpenSuspendedRigStores pins the lifecycle boundary on the
+// expensive reader path. The fixture's broken rig would make gc ready fail if
+// it were opened; marking it suspended must remove that leg before the opener
+// runs while leaving the active rig present.
+func TestReadyDoesNotOpenSuspendedRigStores(t *testing.T) {
+	cityDir := newReadyCityWithBrokenRig(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	for i := range cfg.Rigs {
+		if cfg.Rigs[i].Name == readyBrokenRigName {
+			cfg.Rigs[i].SuspendedOnStart = true
+		}
+	}
+
+	stores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("gc ready opened the suspended broken rig: %v", err)
+	}
+	if _, ok := stores[readyBrokenRigName]; ok {
+		t.Fatalf("gc ready returned the suspended rig store: %v", stores)
+	}
+	if _, ok := stores["good"]; !ok {
+		t.Fatalf("gc ready dropped the active rig while skipping the suspended one: %v", stores)
+	}
+
+	// Runtime state wins over the authored default. Once explicitly resumed,
+	// the same broken rig must be opened and therefore make the query fail loud.
+	resumed := false
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, readyBrokenRigName, &resumed); err != nil {
+		t.Fatalf("record runtime resume: %v", err)
+	}
+	if stores, err := readyRigLegStores(cfg, cityDir); err == nil {
+		t.Fatalf("gc ready skipped the explicitly resumed broken rig and returned %v; runtime resume must restore the leg", stores)
+	}
+}
+
 // TestReadyUnboundRigIsSkippedOnBothSurfaces states the decision for the rig
 // declared in city.toml with NO .gc/site.toml binding, which is a different
 // shape from a rig that failed to open and is deliberately NOT promoted to an
@@ -800,7 +840,7 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 		want []string
 	}{
 		{"unassigned drops claimed work", readyOpts{unassigned: true}, []string{plain.ID, held.ID, epic.ID}},
-		{"assignee keeps only that identity", readyOpts{assignee: owner}, []string{assigned.ID}},
+		{"assignee keeps only that identity", readyOpts{assignees: []string{owner}}, []string{assigned.ID}},
 		{"exclude-type drops epics", readyOpts{excludeTypes: []string{"epic"}}, []string{plain.ID, held.ID, assigned.ID}},
 		{"exclude-label drops held work", readyOpts{excludeLabels: []string{"hold:mayor"}}, []string{plain.ID, epic.ID, assigned.ID}},
 	}

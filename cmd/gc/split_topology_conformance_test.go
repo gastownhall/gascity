@@ -2673,7 +2673,7 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	// non-direct binding, and molecule materialization writes it through).
 	assigned := e.mintWispWith(t, wispOpts{title: "assigned graph step", assignee: e.qualified})
 	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readyOpts{
-		assignee:  e.qualified,
+		assignees: []string{e.qualified},
 		sortOrder: readySortOldest,
 		limit:     20,
 	})

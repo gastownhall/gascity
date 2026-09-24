@@ -3483,7 +3483,8 @@ store answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
---include-ephemeral is passed.
+--include-ephemeral is passed. Effectively suspended rigs are not opened or
+read; resuming a rig makes its store part of the next query again.
 
 ```
 gc ready [flags]
@@ -3491,7 +3492,7 @@ gc ready [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--assignee` | string |  | only work assigned to this identity |
+| `--assignee` | stringArray |  | only work assigned to this identity (repeatable; earlier values win) |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |

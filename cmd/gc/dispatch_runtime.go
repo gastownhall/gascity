@@ -793,6 +793,10 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	jqFilter = strings.ReplaceAll(jqFilter, `\`, `\\`)
 	jqFilter = strings.ReplaceAll(jqFilter, `"`, `\"`)
 	jqFilter = strings.ReplaceAll(jqFilter, `$`, `\$`)
+	assigneeFilter := `[.[] | select((.assignee // "") == $cand)] | .[:` + limit + `]`
+	assigneeFilter = strings.ReplaceAll(assigneeFilter, `\`, `\\`)
+	assigneeFilter = strings.ReplaceAll(assigneeFilter, `"`, `\"`)
+	assigneeFilter = strings.ReplaceAll(assigneeFilter, `$`, `\$`)
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target) + ambientDoltConnectionQueryPrefix()
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -811,9 +815,12 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 	query := queryPrefix + ` sh -c '` +
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`read_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; printf "%s" "$r"; }; ` +
+		`emit_ready() { r=$(read_ready "$@") || return $?; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`assignee_ready_json=$(read_ready bd --readonly --sandbox ready` + includeEphemeral + ` --exclude-type=epic --json --limit=0); ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
+		`r=$(printf "%s" "$assignee_ready_json" | jq -c --arg cand "$cand" "` + assigneeFilter + `"); ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
