@@ -5000,6 +5000,31 @@ func waitForProviderTestPIDExit(t *testing.T, pid int, label string) {
 	t.Fatalf("provider child pid %d survived %s cancellation", pid, label)
 }
 
+// waitForProviderOwnedPIDStopped waits until pid is gone or a zombie, the same
+// definition of "stopped" bd applies before `bd dolt stop` returns. A process
+// bd did not parent (the proxied Dolt backend is reparented to init) exposes no
+// exit notification to the test, so this polls pidAlive on a ticker and fails
+// with the last observed /proc state when the deadline passes.
+func waitForProviderOwnedPIDStopped(t *testing.T, pid int, within time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), within)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for pidAlive(pid) {
+		select {
+		case <-ctx.Done():
+			stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+			state := strings.TrimSpace(string(stat))
+			if err != nil {
+				state = err.Error()
+			}
+			t.Fatalf("provider-owned process %d remained alive %s after stop; last state: %s", pid, within, state)
+		case <-ticker.C:
+		}
+	}
+}
+
 func TestStartBeadsLifecycleDoesNotMutateProcessDoltEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
@@ -13094,10 +13119,14 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				t.Fatal("provider-owned lifecycle did not publish a process identity")
 			}
 			run(ctx, "stop")
+			// bd confirms a stop once each recorded process is gone OR a zombie
+			// (procid treats state Z as exited). The Dolt backend is the killed
+			// proxy's child, so it is reparented to init and reaped moments
+			// later; kill(pid, 0) still succeeds on it until then (#6506). Assert
+			// with the zombie-aware probe and a bounded wait: a process that
+			// really outlives stop is still alive when the deadline passes.
 			for _, pid := range pids {
-				if processStillAlive(pid) {
-					t.Fatalf("provider-owned process %d remained alive after stop", pid)
-				}
+				waitForProviderOwnedPIDStopped(t, pid, 5*time.Second)
 			}
 			// The PID records above prove bd's own children are gone. Sweep the
 			// process table too: a proxy or Dolt child that lost its record

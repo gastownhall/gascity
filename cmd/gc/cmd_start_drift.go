@@ -570,9 +570,9 @@ func humanizeReadyDuration(d time.Duration) string {
 }
 
 // spawnDetachedSupervisor starts a backgrounded supervisor process,
-// inheriting the operator's environment and writing logs to the same
-// path doSupervisorStart uses. The child is fully detached so the
-// `gc start` invocation can return without orphaning it.
+// inheriting the operator's environment minus any agent-session identity, and
+// writing logs to the same path doSupervisorStart uses. The child is fully
+// detached so the `gc start` invocation can return without orphaning it.
 func spawnDetachedSupervisor(exe string, argv ...string) error {
 	logPath := supervisorLogPath()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -588,7 +588,10 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	child.Env = os.Environ()
+	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
+	// to init; inheriting an agent shell's session identity would make it that
+	// session's orphan-sweep target once the session closes (#6316).
+	child.Env = withoutSessionIdentityEnv(os.Environ())
 	disableProductMetricsForChild(child)
 	return child.Start()
 }
