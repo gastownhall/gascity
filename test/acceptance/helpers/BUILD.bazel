@@ -4,6 +4,7 @@ go_library(
     name = "helpers",
     srcs = [
         "bd_schema_parity.go",
+        "bd_time.go",
         "beads_topology.go",
         "binary.go",
         "city.go",
@@ -13,6 +14,7 @@ go_library(
         "lifecycle.go",
         "provider_shim.go",
         "recording_bd.go",
+        "sentinel_dolt.go",
         "tooling.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/acceptance/helpers",
@@ -24,6 +26,7 @@ go_test(
     name = "helpers_test",
     srcs = [
         "bd_schema_parity_test.go",
+        "bd_time_test.go",
         "beads_topology_test.go",
         "binary_test.go",
         "city_test.go",
@@ -31,6 +34,7 @@ go_test(
         "env_test.go",
         "provider_shim_test.go",
         "recording_bd_test.go",
+        "sentinel_dolt_test.go",
         "testenv_import_test.go",
         "tooling_test.go",
     ],
