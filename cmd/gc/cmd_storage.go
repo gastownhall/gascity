@@ -403,23 +403,28 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "  %-9s -> %s\n", class, storage.Classes.BindingFor(class)) //nolint:errcheck // best-effort stdout
 	}
 
-	// Resolve the boot plan once, on every path, the way doStorageMigrate
-	// does. This command's exit code is a deploy gate — "a city boot refuses
-	// must not report may-serve here" — and that contract used to hold only on
-	// the born-split path below, the one path that resolved the plan. The
-	// served path and the no-binding path returned 0 without ever asking.
+	// Resolve the boot plan once on every configured path. This command's exit
+	// code is a deploy gate — "a city boot refuses must not report may-serve
+	// here" — and that contract used to hold only on the born-split path below,
+	// the one path that resolved the plan. The configured served and all-work
+	// paths returned 0 without ever asking.
 	//
-	// Resolution is safe to do unconditionally: it builds a registry,
-	// absolutizes the city root and computes a plan. It opens no store.
+	// The no-[storage] compatibility path deliberately reaches no registry or
+	// plan, matching storageBootGate. A legacy city must not acquire a new boot
+	// refusal merely because the compiled provider registry cannot be built.
 	//
 	// A refusal is reported and carried into the exit code rather than
 	// returned on, because it is the moment an operator most needs the rest of
 	// the readout.
-	plan, planErr := resolveCityStoragePlan(request.CityPath, request.Cfg)
+	var plan *storebinding.StoragePlan
+	var planErr error
 	exitCode := 0
-	if planErr != nil {
-		fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", planErr) //nolint:errcheck // best-effort stdout
-		exitCode = 1
+	if request.Cfg.Storage != nil {
+		plan, planErr = resolveCityStoragePlan(request.CityPath, request.Cfg)
+		if planErr != nil {
+			fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", planErr) //nolint:errcheck // best-effort stdout
+			exitCode = 1
+		}
 	}
 
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
