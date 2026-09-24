@@ -119,37 +119,102 @@ func TestNudgeOwningFramesLeaveTheStorageRoutesServingALiveStore(t *testing.T) {
 	}
 }
 
-// TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity is the leak
-// half of the ownership rule: on a relocated city the class store is the
-// routes' engine, but the open still opened a work store, and that work store is
-// the handle the frame must close. Closing "nothing" would stop the engine
-// damage and leak one work store per frame instead.
+// closeCountingWorkStore is a work store handle that counts its own closes.
+type closeCountingWorkStore struct {
+	beads.Store
+	closes int
+}
+
+// CloseStore counts the close and forwards it to the real work store, so the
+// handle is released exactly as it would be in production.
+func (s *closeCountingWorkStore) CloseStore() error {
+	s.closes++
+	return closeBeadStoreHandle(s.Store)
+}
+
+// countNudgeWorkStoreOpens wraps every work store the nudge openers open in a
+// closeCountingWorkStore and returns the handles in open order. The real store
+// is still opened, so the frame runs against the real fixture.
+func countNudgeWorkStoreOpens(t *testing.T) *[]*closeCountingWorkStore {
+	t.Helper()
+	var opened []*closeCountingWorkStore
+	prev := openNudgeWorkStore
+	openNudgeWorkStore = func(storePath, cityPath string) (beads.Store, error) {
+		store, err := prev(storePath, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		handle := &closeCountingWorkStore{Store: store}
+		opened = append(opened, handle)
+		return handle, nil
+	}
+	t.Cleanup(func() { openNudgeWorkStore = prev })
+	return &opened
+}
+
+// TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity is the
+// ownership rule itself, per frame: on a relocated city the class store is the
+// routes' engine, but the open still opened a work store, and each owning frame
+// must close exactly that handle, exactly once.
+//
+// With emittingClassStore.CloseStore a no-op, closing the class store no longer
+// breaks the routes, so the frame tests above pass even if a frame closes the
+// wrong store. This test is what fails in that case: a frame that closes
+// store.Store instead of the handle it opened leaves the handle at zero closes,
+// which leaks one work store per call (per fence census in the controller).
 func TestNudgeOwningFramesCloseTheWorkStoreTheyOpenedOnARelocatedCity(t *testing.T) {
-	cityPath, _ := migratedOneShotCLICity(t)
-	captureCLIStorageStderr(t)
+	cases := []struct {
+		name string
+		run  func(t *testing.T, cityPath string, item queuedNudge)
+	}{
+		{"fence census", func(_ *testing.T, cityPath string, _ queuedNudge) {
+			_ = loadLiveNudgeFenceSessionIDsFromCity(cityPath)
+		}},
+		{"nudge drop", func(t *testing.T, cityPath string, item queuedNudge) {
+			var stdout, stderr bytes.Buffer
+			if code := doNudgeDrop(cityPath, []string{item.ID}, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc nudge drop exited %d: %s", code, stderr.String())
+			}
+		}},
+		{"maintenance sweep", func(t *testing.T, cityPath string, _ queuedNudge) {
+			if err := runNudgeQueueMaintenanceSweep(cityPath, time.Now()); err != nil {
+				t.Fatalf("maintenance sweep: %v", err)
+			}
+		}},
+		{"enqueue with no store", func(t *testing.T, cityPath string, _ queuedNudge) {
+			if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{}, newQueuedNudge("mayor", "hi", time.Now())); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+		}},
+		{"record failure with no store", func(t *testing.T, cityPath string, item queuedNudge) {
+			if _, err := recordQueuedNudgeFailureDetailed(cityPath, beads.NudgesStore{}, []string{item.ID}, errNudgeManualDrop, time.Now()); err != nil {
+				t.Fatalf("record failure: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, _ := migratedOneShotCLICity(t)
+			captureCLIStorageStderr(t)
+			item := enqueueRoutedNudge(t, cityPath)
+			opened := countNudgeWorkStoreOpens(t)
 
-	store, opened, err := openNudgeBeadStoreOwned(cityPath)
-	if err != nil {
-		t.Fatalf("opening the nudges store: %v", err)
-	}
-	if opened == nil {
-		t.Fatal("the owned opener reported no opened handle; the work store it opened would leak")
-	}
-	if opened == store.Store {
-		t.Fatal("fixture is not relocated: the opened handle is the class store")
-	}
-	routed := cliNudgesStore(beads.NewMemStore(), nil, cityPath)
-	if store.Store != routed.Store {
-		t.Fatalf("the class store %p is not the routes' nudges store %p", store.Store, routed.Store)
-	}
+			tc.run(t, cityPath, item)
 
-	maint := nudgeMaintenanceStore{cityPath: cityPath}
-	maint.ensureOpen()
-	if maint.handle == nil || maint.handle == maint.store.Store {
-		t.Fatalf("the maintenance frame holds handle %p for class store %p; it must hold the work store it opened", maint.handle, maint.store.Store)
-	}
-	if err := maint.close(); err != nil {
-		t.Fatalf("closing the maintenance frame: %v", err)
+			if len(*opened) == 0 {
+				t.Fatalf("%s opened no work store; the frame under test did not run its owning path", tc.name)
+			}
+			routed := cliNudgesStore(beads.NewMemStore(), nil, cityPath).Store
+			for i, handle := range *opened {
+				if beads.Store(handle) == routed {
+					t.Fatalf("fixture is not relocated: open %d returned the routes' nudges store", i)
+				}
+				if handle.closes != 1 {
+					t.Errorf("%s: work store open %d of %d was closed %d time(s), want exactly 1", tc.name, i+1, len(*opened), handle.closes)
+				}
+			}
+			requireRoutesServeALiveStore(t, cityPath, tc.name)
+		})
 	}
 }
 

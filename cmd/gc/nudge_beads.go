@@ -27,10 +27,13 @@ type nudgeReference = nudgequeue.Reference
 // every leaf nudge-bead helper; the wrapper carries the same underlying store
 // value (identity to the work store until the nudges class relocates).
 //
-// It discards the opened handle, so it is the form for callers that only read.
-// A frame that will CLOSE what it opened must use openOwnedNudgeBeadStore: once
-// the nudges class relocates, the store this returns is not the handle the call
-// opened, and closing it is the bug openOwnedNudgeBeadStore exists to prevent.
+// It discards the opened handle, so a caller of this form can never close the
+// work store the call opened. Once the nudges class relocates, that work store
+// is not the store returned, so it stays open (leaks) for the life of the
+// process; only on an unrelocated city is the returned store the opened handle.
+// A frame that closes what it opened must use openOwnedNudgeBeadStore and close
+// the returned handle, never the class store: closing the class store on a
+// relocated city is the bug openOwnedNudgeBeadStore exists to prevent.
 var openNudgeBeadStore = func(cityPath string) beads.NudgesStore {
 	store, _ := openOwnedNudgeBeadStore(cityPath)
 	return store
@@ -77,11 +80,17 @@ func openNudgeBeadStoreErr(cityPath string) (beads.NudgesStore, error) {
 	return store, err
 }
 
+// openNudgeWorkStore opens the work store every nudge opener starts from. It is
+// a seam so tests can count, per handle, that each owning frame closes the work
+// store it opened exactly once, including on a relocated city where that handle
+// is not the class store the frame uses. Tests that replace it must stay serial.
+var openNudgeWorkStore = openStoreAtForCity
+
 // openNudgeBeadStoreOwned is the one place the nudges-class store is opened, so
 // the class store and the handle the call opened are decided together. Every
 // form above is a projection of it.
 func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, error) {
-	store, err := openStoreAtForCity(cityPath, cityPath)
+	store, err := openNudgeWorkStore(cityPath, cityPath)
 	if err != nil {
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
