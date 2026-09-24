@@ -564,17 +564,20 @@ func TestSpawnDetachedSupervisorScrubsSessionIdentity(t *testing.T) {
 		t.Fatalf("spawnDetachedSupervisor: %v", err)
 	}
 	var data []byte
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
 	for {
 		var err error
 		data, err = os.ReadFile(snapshot)
 		if err == nil {
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline:
 			t.Fatalf("supervisor child did not write its environment: %v", err)
+		case <-tick.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	env := map[string]string{}
 	for _, line := range strings.Split(string(data), "\n") {
