@@ -745,12 +745,16 @@ func (s *emittingClassStore) AdvanceSequenceFloor(seq int64) {
 	}
 }
 
+// CloseStore is deliberately a no-op. An emittingClassStore only ever wraps a
+// storage route's engine (withCLIEmission), and that engine is owned by the
+// routes: storageRoutes.close releases it through r.closers, never through
+// this method. Every caller that reaches this wrapper borrowed it from a class
+// resolver (cli*Store / resolve*Store over cliStorageRoutes), and the routes
+// memo is process-lived and never reopened, so forwarding a borrower's close
+// here would leave every later class read in the process failing with
+// ErrStoreClosed (#5979). Borrowers close what they opened, not what they hold.
 func (s *emittingClassStore) CloseStore() error {
-	closer, ok := s.Store.(interface{ CloseStore() error })
-	if !ok {
-		return nil
-	}
-	return closer.CloseStore()
+	return nil
 }
 
 func (s *emittingClassStore) IDPrefix() string {

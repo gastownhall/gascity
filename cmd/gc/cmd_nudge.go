@@ -561,12 +561,12 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	// reported as dropped.
 	dropped := make(map[string]bool, len(droppable))
 	if len(droppable) > 0 {
-		store, err := openNudgeBeadStoreErr(cityPath)
+		store, opened, err := openNudgeBeadStoreOwned(cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 		deadLettered, err := recordQueuedNudgeFailureDetailed(cityPath, store, droppable, errNudgeManualDrop, now)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
@@ -2301,8 +2301,8 @@ func liveNudgeFenceSessionIDsForCity(cityPath string) map[string]struct{} {
 // census was unavailable; callers must fail closed and leave mismatched
 // SessionID items pending.
 func loadLiveNudgeFenceSessionIDsFromCity(cityPath string) map[string]struct{} {
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	if store.Store == nil {
 		return nil
 	}
