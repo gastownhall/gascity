@@ -240,25 +240,144 @@ func TestParseEnvFileCRLFQuotedValues(t *testing.T) {
 }
 
 // TestParseEnvFileErrorsContainNoSecretMaterial asserts that parse errors name
-// only line numbers and keys: no value or raw line content from a malformed
-// line, a skipped block, or an unterminated quote reaches the error text.
+// only line numbers and identifier keys: no value, raw line content, or text
+// before the '=' of a non-identifier "key" (which on a JSON paste line is the
+// secret itself) reaches the error text.
 func TestParseEnvFileErrorsContainNoSecretMaterial(t *testing.T) {
-	secrets := []string{"s3cr3t-no-equals", "s3cr3t-empty-key", "s3cr3t-block-open", "s3cr3t-block-mid", "s3cr3t-block-close", "s3cr3t-eof"}
-	content := "  \"token\": \"s3cr3t-no-equals\"\n" +
-		"=s3cr3t-empty-key\n" +
-		"BLOCK_KEY=\"s3cr3t-block-open\n" +
-		"s3cr3t-block-mid\n" +
-		"s3cr3t-block-close\"\n" +
-		"EOF_KEY='s3cr3t-eof\n"
-	_, errs := ParseEnvFile(content)
-	if len(errs) != 4 {
-		t.Fatalf("ParseEnvFile returned %d errors, want 4: %v", len(errs), errs)
-	}
-	for _, err := range errs {
-		for _, secret := range secrets {
-			if strings.Contains(err.Error(), secret) {
-				t.Errorf("error %q leaks secret material %q", err, secret)
+	for name, tc := range map[string]struct {
+		content  string
+		secrets  []string
+		wantErrs int
+	}{
+		"mixed malformed lines": {
+			content: "  \"token\": \"s3cr3t-no-equals\"\n" +
+				"=s3cr3t-empty-key\n" +
+				"BLOCK_KEY=\"s3cr3t-block-open\n" +
+				"s3cr3t-block-mid\n" +
+				"s3cr3t-block-close\"\n" +
+				"EOF_KEY='s3cr3t-eof\n",
+			secrets:  []string{"s3cr3t-no-equals", "s3cr3t-empty-key", "s3cr3t-block-open", "s3cr3t-block-mid", "s3cr3t-block-close", "s3cr3t-eof"},
+			wantErrs: 4,
+		},
+		"unquoted JSON paste with base64 padding": {
+			content: "CODEX_AUTH_JSON={\n" +
+				"  \"refresh_token\": \"rt-SECRET=\"\n" +
+				"}\n",
+			secrets:  []string{"rt-SECRET", "refresh_token"},
+			wantErrs: 2,
+		},
+		"double-quoted JSON paste": {
+			content: "CODEX_AUTH_JSON=\"{\n" +
+				"  \"access\": \"at-SECRET\"\n",
+			secrets:  []string{"at-SECRET", "access"},
+			wantErrs: 2,
+		},
+		"non-identifier key": {
+			content:  "sk-live-SECRET=value\n",
+			secrets:  []string{"sk-live-SECRET"},
+			wantErrs: 1,
+		},
+	} {
+		got, errs := ParseEnvFile(tc.content)
+		if len(errs) != tc.wantErrs {
+			t.Errorf("%s: ParseEnvFile returned %d errors, want %d: %v", name, len(errs), tc.wantErrs, errs)
+		}
+		for _, err := range errs {
+			for _, secret := range tc.secrets {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("%s: error %q leaks secret material %q", name, err, secret)
+				}
 			}
 		}
+		for key := range got {
+			if !isEnvIdentifier(key) {
+				t.Errorf("%s: map holds non-identifier key %q", name, key)
+			}
+		}
+	}
+}
+
+// TestParseEnvFileRejectsNonIdentifierKeys asserts that a key outside
+// [A-Za-z_][A-Za-z0-9_]* is a malformed line reported without its text and
+// never added to the map, while valid entries around it survive.
+func TestParseEnvFileRejectsNonIdentifierKeys(t *testing.T) {
+	content := "GOOD=1\n" +
+		"\"quoted\": \"x=\"\n" +
+		"1LEADING_DIGIT=x\n" +
+		"HAS-DASH=x\n" +
+		"export HAS SPACE=x\n" +
+		"_ok_2=y\n"
+	got, errs := ParseEnvFile(content)
+	want := map[string]string{"GOOD": "1", "_ok_2": "y"}
+	if len(got) != len(want) || got["GOOD"] != "1" || got["_ok_2"] != "y" {
+		t.Fatalf("ParseEnvFile returned %v, want exactly %v", got, want)
+	}
+	wantErrs := []string{"line 2: invalid key", "line 3: invalid key", "line 4: invalid key", "line 5: invalid key"}
+	if len(errs) != len(wantErrs) {
+		t.Fatalf("ParseEnvFile returned %d errors, want %d: %v", len(errs), len(wantErrs), errs)
+	}
+	for i, want := range wantErrs {
+		if errs[i].Error() != want {
+			t.Errorf("errs[%d] = %q, want %q", i, errs[i], want)
+		}
+	}
+}
+
+// TestParseEnvFileUnclosedQuoteDoesNotSwallowValidAssignments asserts the
+// closing-line rule: a candidate closing line that is itself a complete
+// one-line assignment does not close the block, so a typo'd unclosed quote
+// costs only its own line and every valid entry after it survives.
+func TestParseEnvFileUnclosedQuoteDoesNotSwallowValidAssignments(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		want    map[string]string
+	}{
+		"typo before plain and quoted keys": {
+			content: "ANTHROPIC_API_KEY=\"sk-ant-1\nGITHUB_TOKEN=ghp_plain\nOPENAI_API_KEY=\"sk-o\"\nLAST=z\n",
+			want:    map[string]string{"GITHUB_TOKEN": "ghp_plain", "OPENAI_API_KEY": "sk-o", "LAST": "z"},
+		},
+		"lone opening quote": {
+			content: "A=\"\nB=\"sk-b\"\n",
+			want:    map[string]string{"B": "sk-b"},
+		},
+		"apostrophe-opened value": {
+			content: "NOTE='it\nSAY=it's\nGREETING='hello'\nLAST=z\n",
+			want:    map[string]string{"SAY": "it's", "GREETING": "hello", "LAST": "z"},
+		},
+	} {
+		got, errs := ParseEnvFile(tc.content)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: ParseEnvFile returned %v, want exactly %v", name, got, tc.want)
+		}
+		for key, wantVal := range tc.want {
+			if got[key] != wantVal {
+				t.Errorf("%s: ParseEnvFile()[%q] = %q, want %q", name, key, got[key], wantVal)
+			}
+		}
+		if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "line 1: unterminated quote") {
+			t.Errorf("%s: errors = %v, want one unterminated-quote error for line 1", name, errs)
+		}
+	}
+}
+
+// TestParseEnvFileDoubleQuotedJSONPasteIsOneBlock asserts that a double-quoted
+// multi-line JSON paste is skipped as a single block: JSON field lines that
+// end with a quote but hold an even number of quotes do not close it, so no
+// field line is reported (or parsed) on its own.
+func TestParseEnvFileDoubleQuotedJSONPasteIsOneBlock(t *testing.T) {
+	content := "CODEX_AUTH_JSON=\"{\n" +
+		"  \"tokens\": {\n" +
+		"    \"access\": \"at-SECRET\",\n" +
+		"    \"refresh_token\": \"rt-SECRET=\"\n" +
+		"  },\n" +
+		"  \"last\": \"x\"\n" +
+		"}\"\n" +
+		"AFTER=kept\n"
+	got, errs := ParseEnvFile(content)
+	if len(got) != 1 || got["AFTER"] != "kept" {
+		t.Fatalf("ParseEnvFile returned %v, want only AFTER=kept", got)
+	}
+	if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "lines 1-7:") {
+		t.Fatalf("ParseEnvFile errors = %v, want one error for lines 1-7", errs)
 	}
 }

@@ -19,22 +19,27 @@ import (
 // and no inline-comment stripping on unquoted values (a '#' mid-value is kept).
 // A value that opens with a quote which is not closed anywhere on the same line
 // is not a single-line value; multi-line values are not supported. Such a
-// value is skipped together with its continuation lines, up to and including
-// the next line containing the matching quote, and reported as one error, so
-// a continuation line (for example "export CODEX_HOME=..." inside a quoted
-// script) never becomes a top-level key of its own. If no later line closes
-// the quote, only the opening line is skipped. A value whose opening quote is
-// closed on the same line but followed by more text (KEY="v" # c) is kept
-// literally, as before.
+// value is skipped together with its continuation lines, through the closing
+// line, and reported as one error, so a continuation line (for example
+// "export CODEX_HOME=..." inside a quoted script) never becomes a top-level
+// key of its own. The closing line is the first later line whose trimmed text
+// ends with the matching quote, holds an odd number of that quote (so a JSON
+// field line such as `"k": "v"` does not close the block), and is not itself
+// a complete one-line assignment (so a typo'd unclosed quote does not swallow
+// the valid KEY="v" lines after it). If no later line qualifies, only the
+// opening line is skipped. A value whose opening quote is closed on the same
+// line but followed by more text (KEY="v" # c) is kept literally, as before.
 //
-// A line missing '=' or with an empty key is malformed. Malformed lines are
-// skipped and reported individually rather than aborting the whole parse: the
-// returned map holds every successfully-parsed entry, and the returned error
-// slice holds one error per malformed line or skipped block (nil/empty when
-// the parse is clean), so a single bad line in a secrets file no longer
-// silently drops every other credential in it. Errors name only line numbers
-// and keys, never raw line content or values, because the input holds
-// secrets. The last assignment wins when a key repeats.
+// A line missing '=', or whose key is empty or not a shell identifier
+// ([A-Za-z_][A-Za-z0-9_]*), is malformed. Malformed lines are skipped and
+// reported individually rather than aborting the whole parse: the returned
+// map holds every successfully-parsed entry, and the returned error slice
+// holds one error per malformed line or skipped block (nil/empty when the
+// parse is clean), so a single bad line in a secrets file no longer silently
+// drops every other credential in it. Errors name only line numbers and
+// valid identifier keys, never raw line content, values, or the text of an
+// invalid key, because the input holds secrets. The last assignment wins when
+// a key repeats.
 func ParseEnvFile(content string) (map[string]string, []error) {
 	out := make(map[string]string)
 	var errs []error
@@ -44,26 +49,13 @@ func ParseEnvFile(content string) (map[string]string, []error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		line = strings.TrimPrefix(line, "export ")
-		key, val, ok := strings.Cut(line, "=")
-		if !ok {
-			errs = append(errs, fmt.Errorf("line %d: missing '='", i+1))
+		key, val, err := parseEnvAssignment(line)
+		if err != "" {
+			errs = append(errs, fmt.Errorf("line %d: %s", i+1, err))
 			continue
 		}
-		key = strings.TrimSpace(key)
-		if key == "" {
-			errs = append(errs, fmt.Errorf("line %d: empty key", i+1))
-			continue
-		}
-		val = strings.TrimSpace(val)
 		if q, open := unclosedQuote(val); open {
-			end := -1
-			for j := i + 1; j < len(lines); j++ {
-				if strings.IndexByte(lines[j], q) >= 0 {
-					end = j
-					break
-				}
-			}
+			end := multiLineQuoteEnd(lines, i+1, q)
 			if end < 0 {
 				errs = append(errs, fmt.Errorf("line %d: unterminated quote in value for %q; skipped", i+1, key))
 				continue
@@ -75,6 +67,73 @@ func ParseEnvFile(content string) (map[string]string, []error) {
 		out[key] = unquoteEnvValue(val)
 	}
 	return out, errs
+}
+
+// parseEnvAssignment splits a trimmed, non-comment line into an identifier key
+// and a trimmed raw value. On failure it returns a short reason that contains
+// no text from the line.
+func parseEnvAssignment(line string) (key, val, reason string) {
+	line = strings.TrimPrefix(line, "export ")
+	key, val, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", "", "missing '='"
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", "", "empty key"
+	}
+	if !isEnvIdentifier(key) {
+		return "", "", "invalid key"
+	}
+	return key, strings.TrimSpace(val), ""
+}
+
+// isEnvIdentifier reports whether key matches [A-Za-z_][A-Za-z0-9_]*.
+func isEnvIdentifier(key string) bool {
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c == '_', c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return key != ""
+}
+
+// multiLineQuoteEnd returns the index of the line that closes a multi-line
+// value opened with quote q, searching from index from, or -1 if none does.
+// See ParseEnvFile for the closing-line rule.
+func multiLineQuoteEnd(lines []string, from int, q byte) int {
+	for j := from; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		if t == "" || t[len(t)-1] != q || strings.Count(t, string(q))%2 == 0 {
+			continue
+		}
+		if isCompleteEnvAssignment(t, q) {
+			continue
+		}
+		return j
+	}
+	return -1
+}
+
+// isCompleteEnvAssignment reports whether a trimmed line is a valid one-line
+// IDENT=value assignment whose quotes balance: a value opening with a quote
+// closes it on the line, and any other value holds an even number of q.
+func isCompleteEnvAssignment(line string, q byte) bool {
+	_, val, reason := parseEnvAssignment(line)
+	if reason != "" {
+		return false
+	}
+	if _, open := unclosedQuote(val); open {
+		return false
+	}
+	if val != "" && (val[0] == '"' || val[0] == '\'') {
+		return true
+	}
+	return strings.Count(val, string(q))%2 == 0
 }
 
 // unquoteEnvValue strips one layer of matching surrounding single or double
