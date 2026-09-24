@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
@@ -56,12 +57,11 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
+		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
+			// Capture transcripts are city-rooted so they survive a
+			// supervisor restart; a city-less provider captures nothing.
+			cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewSeamBacked(cfg), nil
@@ -176,4 +176,14 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 		return true
 	}
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
+}
+
+// acpProviderConfig maps the [session.acp] city settings onto the ACP
+// provider's resolved configuration.
+func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
+	return sessionacp.Config{
+		HandshakeTimeout:  a.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  a.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: a.OutputBufferLinesOrDefault(),
+	}
 }
