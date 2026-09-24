@@ -162,7 +162,6 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 		if strategy.onPass != nil {
 			strategy.onPass(closeMetadata, attempt)
 		}
-		restoreBodyMemberAttempt(closeMetadata, bead)
 		if err := updateMetadataAndClose(store, bead.ID, closeMetadata); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: closing passed: %w", bead.ID, err)
 		}
@@ -227,21 +226,6 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	default:
 		return ControlResult{}, fmt.Errorf("%s: unsupported attempt disposition", bead.ID)
 	}
-}
-
-// restoreBodyMemberAttempt repairs gc.attempt on a ralph body control minted by
-// a v1.5.0 pre-release, which stamped the control's own retry counter ("1")
-// there instead of the iteration. Pack gates read the passed control's verdict
-// joined on gc.attempt == iteration, so leaving it would stall that one
-// in-flight iteration. A control that carries no gc.iteration is not in a loop
-// (or predates gc.iteration, where gc.attempt already is the iteration) and is
-// left alone.
-func restoreBodyMemberAttempt(closeMetadata map[string]string, control beads.Bead) {
-	iteration := strings.TrimSpace(control.Metadata[beadmeta.IterationMetadataKey])
-	if iteration == "" || strings.TrimSpace(control.Metadata[beadmeta.AttemptMetadataKey]) == iteration {
-		return
-	}
-	closeMetadata[beadmeta.AttemptMetadataKey] = iteration
 }
 
 // ensurePendingAttemptConverges drives a not-yet-closed attempt toward

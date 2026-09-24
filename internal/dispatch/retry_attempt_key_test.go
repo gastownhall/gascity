@@ -169,15 +169,16 @@ func TestRetryAttemptKeyUpgradeFromV142InFlightMolecule(t *testing.T) {
 }
 
 // TestRetryAttemptKeyUpgradeFromPreKeyV150Molecule pins the fallback for a
-// molecule minted by a v1.5.0 build between #5635 and this change: the body
-// retry control carries gc.attempt=1 (its own counter) and gc.iteration=N, and
-// attempts carry the retry counter in gc.attempt. Retries continue from the
-// right number, new attempts use the new shape, and the passing control is
-// restored to gc.attempt=N so the pack gate's join finds its verdict.
+// molecule minted by a v1.5.0 build between #5635 and this change. Real
+// dispatch froze the body spec retry-expanded, so the body retry control has
+// no retry spec of its own and already carried gc.attempt = the iteration;
+// only its attempts carried their own retry counter in gc.attempt (and no
+// gc.retry_attempt). Retries continue from that counter, and new attempts use
+// the new shape.
 func TestRetryAttemptKeyUpgradeFromPreKeyV150Molecule(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
-	root, control, stepRef := makeBodyRetryControl(t, store, "3", "1", 3)
+	root, control, stepRef := makeBodyRetryControl(t, store, "3", "3", 3)
 
 	first := makeAttemptBead(t, store, root.ID, stepRef+".attempt.1", 1, map[string]string{
 		"gc.iteration":     "3",
@@ -220,10 +221,12 @@ func TestRetryAttemptKeyUpgradeFromPreKeyV150Molecule(t *testing.T) {
 
 // TestBuildAttemptRecipeAdoptPRReviewLoopJoinsOnIteration is the P0-8
 // regression: the mol-adopt-pr-v2 review loop's gate joins apply-fixes beads
-// on gc.attempt == iteration. apply-fixes declares its own retry, and #5635
-// stamped its own counter there, so from iteration 2 no apply-fixes bead joined
-// and the loop never approved. Iteration-2 apply-fixes must carry gc.attempt=2
-// and, separately, gc.retry_attempt=1.
+// on gc.attempt == iteration, and reviewer prompts and attempt-{attempt}
+// artifact paths name the iteration's directory from each bead's own
+// gc.attempt. apply-fixes declares its own retry, and #5635 stamped the retry
+// counter there on its attempts, so in iteration 2 attempt.1 pointed at
+// attempt-1/. Every iteration-2 apply-fixes bead must carry gc.attempt=2 and,
+// separately on attempts, gc.retry_attempt=1.
 func TestBuildAttemptRecipeAdoptPRReviewLoopJoinsOnIteration(t *testing.T) {
 	t.Parallel()
 
@@ -349,5 +352,27 @@ max_active_sessions = 1
 	}
 	if !isRetryAttemptSubject(first) {
 		t.Errorf("attempt.1 is not recognized as a retry attempt subject")
+	}
+}
+
+// TestRalphRetryMemberRetryAttemptIgnoresNestedAttemptSegments pins the
+// dormant clone path: only a bead whose ref ends in ".attempt.<n>" is a retry
+// attempt root. A bead nested under one keeps no retry counter, and a v1.4.2
+// bead's inflated gc.attempt is never read back as one.
+func TestRalphRetryMemberRetryAttemptIgnoresNestedAttemptSegments(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{"key wins", beads.Bead{Metadata: map[string]string{"gc.step_ref": "m.loop.iteration.3.fix.attempt.2", "gc.retry_attempt": "2", "gc.attempt": "3"}}, "2"},
+		{"pre-key tail ref", beads.Bead{Metadata: map[string]string{"gc.step_ref": "m.loop.iteration.3.fix.attempt.2", "gc.attempt": "4"}}, "2"},
+		{"nested under attempt", beads.Bead{Metadata: map[string]string{"gc.step_ref": "m.loop.iteration.3.fix.attempt.2.check", "gc.attempt": "4"}}, ""},
+		{"plain member", beads.Bead{Metadata: map[string]string{"gc.step_ref": "m.loop.iteration.3.review", "gc.attempt": "3"}}, ""},
+	} {
+		if got := ralphRetryMemberRetryAttempt(tc.bead); got != tc.want {
+			t.Errorf("%s: ralphRetryMemberRetryAttempt = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

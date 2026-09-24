@@ -950,7 +950,11 @@ func ralphRetryMemberRetryAttempt(old beads.Bead) string {
 			return n
 		}
 	}
-	return strings.TrimSpace(old.Metadata[beadmeta.AttemptMetadataKey])
+	// The ref names an attempt segment that is not its tail (a bead nested
+	// under an attempt, such as a scope-check), so it is not a retry attempt
+	// root. Its gc.attempt is not a retry counter either: a v1.4.2 bead there
+	// carries the inflated iteration+retry-1 value.
+	return ""
 }
 
 // trailingAttemptSegment returns n when ref ends in ".attempt.<n>", else "".
