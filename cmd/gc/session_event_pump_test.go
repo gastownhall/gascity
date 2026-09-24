@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -392,4 +395,239 @@ func TestSessionEventPumpParentCancelDeactivates(t *testing.T) {
 		cancel()
 		waitStreaming(t, pump, false)
 	})
+}
+
+func stretchTestRuntime(t *testing.T, stretch string, pump *sessionEventPump) *CityRuntime {
+	t.Helper()
+	return &CityRuntime{
+		cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: stretch,
+			},
+		},
+		sessionEvents: pump,
+	}
+}
+
+func streamingPump(t *testing.T) (*sessionEventPump, context.CancelFunc) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp)
+	if !pump.streaming() {
+		t.Fatal("test pump failed to stream")
+	}
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
+	return pump, cancel
+}
+
+func TestSessionEventPumpFlowingGoesFalseAfterStaleness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &eventedFake{Fake: runtime.NewFake()}
+	pump.restart(fp)
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
+
+	// Simulate elapsed time by backdating the recorded last-event timestamp
+	// directly, rather than racing the still-running forward() goroutine
+	// with an injected clock.
+	realLast := pump.lastEventUnixNano.Load()
+	pump.lastEventUnixNano.Store(time.Now().Add(-(sessionEventFlowingStaleAfter - time.Second)).UnixNano())
+	if !pump.flowing() {
+		t.Error("flowing() went false just under the staleness bound, want true")
+	}
+	pump.lastEventUnixNano.Store(time.Now().Add(-(sessionEventFlowingStaleAfter + time.Second)).UnixNano())
+	if pump.flowing() {
+		t.Error("flowing() = true past the staleness bound with no new events, want false: a stuck herdr reconnect loop retries forever without closing the channel, so streamGen/observedGen alone never detect this outage")
+	}
+	pump.lastEventUnixNano.Store(realLast)
+
+	// A fresh event resets the staleness clock.
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline = time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Error("flowing() did not recover after a fresh event arrived")
+	}
+}
+
+// compositeEventedFake pairs eventedFake's SessionEventProvider with a
+// controllable runtime.StaleAwareSessionEventProvider, so pump.flowing() can
+// be tested against a merged provider reporting one backend stale while the
+// stream itself keeps delivering events.
+type compositeEventedFake struct {
+	*eventedFake
+	stale atomic.Bool
+}
+
+func (p *compositeEventedFake) SubscribeSessionEventsStale(ctx context.Context) (<-chan runtime.SessionEvent, func() bool, error) {
+	events, err := p.SubscribeSessionEvents(ctx)
+	return events, p.stale.Load, err
+}
+
+var _ runtime.StaleAwareSessionEventProvider = (*compositeEventedFake)(nil)
+
+// A merged composite stream can keep lastEventUnixNano fresh off one healthy
+// backend while the other has gone silent; flowing() must consult the
+// composite reporter and not be masked by the healthy backend's traffic.
+func TestSessionEventPumpFlowingConsultsCompositeStaleness(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	fp := &compositeEventedFake{eventedFake: &eventedFake{Fake: runtime.NewFake()}}
+	pump.restart(fp)
+	fp.emit(t, runtime.SessionEvent{Kind: runtime.SessionEventResync})
+	deadline := time.Now().Add(2 * time.Second)
+	for !pump.flowing() && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if !pump.flowing() {
+		t.Fatal("test pump never observed event flow")
+	}
+
+	fp.stale.Store(true)
+	if pump.flowing() {
+		t.Error("flowing() = true while composite reports a fanned-in backend stale, want false")
+	}
+
+	fp.stale.Store(false)
+	if !pump.flowing() {
+		t.Error("flowing() did not recover once composite staleness cleared")
+	}
+}
+
+func TestSessionPhasesDueDoesNotStretchBeforeEventFlow(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pump := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	pump.restart(&eventedFake{Fake: runtime.NewFake()})
+	if !pump.streaming() {
+		t.Fatal("precondition: subscription should be established")
+	}
+	if pump.flowing() {
+		t.Fatal("non-emitting subscription must not count as event flow")
+	}
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now
+	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
+		t.Fatal("patrol was stretched before the event backend proved it could deliver")
+	}
+}
+
+func TestSessionPhasesDueNonPatrolTriggersAlwaysRun(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now // just ran
+	for _, trigger := range []string{"poke", "startup-poke"} {
+		if !cr.sessionPhasesDue(trigger, false, now, false) {
+			t.Errorf("sessionPhasesDue(%q) = false, want true", trigger)
+		}
+	}
+}
+
+func TestSessionPhasesDuePatrolWithoutStretchRuns(t *testing.T) {
+	cr := stretchTestRuntime(t, "", nil)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
+		t.Error("sessionPhasesDue(patrol) = false with stretching unset, want true")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchSkipsWithinWindow(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	if !cr.sessionPhasesDue("patrol", false, now, false) {
+		t.Fatal("first patrol tick must run the session phases")
+	}
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
+		t.Error("patrol tick inside the stretch window ran the session phases")
+	}
+	if !cr.sessionPhasesDue("patrol", false, now.Add(11*time.Minute), false) {
+		t.Error("patrol tick past the stretch window skipped the session phases")
+	}
+}
+
+func TestSessionPhasesDuePatrolStretchIgnoredWithoutStream(t *testing.T) {
+	cr := stretchTestRuntime(t, "10m", nil) // no pump wired
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
+		t.Error("stretch honored without a session-event stream")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idle := newSessionEventPump(ctx, make(chan struct{}, 1), &bytes.Buffer{}, "test")
+	idle.restart(runtime.NewFake()) // provider without a stream
+	cr = stretchTestRuntime(t, "10m", idle)
+	cr.sessionPhasesLast = time.Now()
+	if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
+		t.Error("stretch honored while the pump is not streaming")
+	}
+}
+
+func TestSessionPhasesDueStretchNotLongerThanPatrolIgnored(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	for _, stretch := range []string{"30s", "10s"} {
+		cr := stretchTestRuntime(t, stretch, pump)
+		cr.sessionPhasesLast = time.Now()
+		if !cr.sessionPhasesDue("patrol", false, time.Now(), false) {
+			t.Errorf("stretch %q (not longer than patrol) skipped the session phases", stretch)
+		}
+	}
+}
+
+func TestSessionPhasesDueConfigPendingRuns(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	cr.sessionPhasesLast = now
+	if !cr.sessionPhasesDue("patrol", true, now, false) {
+		t.Error("pending config change did not force the session phases")
+	}
+}
+
+func TestSessionPhasesDueForceDueOverridesStretch(t *testing.T) {
+	pump, cancel := streamingPump(t)
+	defer cancel()
+	cr := stretchTestRuntime(t, "10m", pump)
+	now := time.Now()
+	if !cr.sessionPhasesDue("patrol", false, now, false) {
+		t.Fatal("first patrol tick must run the session phases")
+	}
+	if cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), false) {
+		t.Fatal("patrol tick inside the stretch window ran the session phases without forceDue")
+	}
+	// A dropped poke inside the stretch window must still force the phases
+	// due, even though the window itself has not elapsed: the poke that was
+	// discarded when patrol preempted it may have been exactly what would
+	// have made this cycle due.
+	if !cr.sessionPhasesDue("patrol", false, now.Add(time.Minute), true) {
+		t.Error("forceDue=true inside the stretch window did not run the session phases")
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -25,17 +26,18 @@ type Provider struct {
 }
 
 var (
-	_ runtime.Provider                      = (*Provider)(nil)
-	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
-	_ runtime.InteractionProvider           = (*Provider)(nil)
-	_ runtime.IdleSnapshotProvider          = (*Provider)(nil)
-	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
-	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
-	_ runtime.TransportCapabilityProvider   = (*Provider)(nil)
-	_ runtime.RelaunchProvider              = (*Provider)(nil)
-	_ runtime.LivenessObserver              = (*Provider)(nil)
-	_ runtime.LivenessObserverWithError     = (*Provider)(nil)
-	_ runtime.SessionEventProvider          = (*Provider)(nil)
+	_ runtime.Provider                       = (*Provider)(nil)
+	_ runtime.DeadRuntimeSessionChecker      = (*Provider)(nil)
+	_ runtime.InteractionProvider            = (*Provider)(nil)
+	_ runtime.IdleSnapshotProvider           = (*Provider)(nil)
+	_ runtime.InterruptBoundaryWaitProvider  = (*Provider)(nil)
+	_ runtime.InterruptedTurnResetProvider   = (*Provider)(nil)
+	_ runtime.TransportCapabilityProvider    = (*Provider)(nil)
+	_ runtime.RelaunchProvider               = (*Provider)(nil)
+	_ runtime.LivenessObserver               = (*Provider)(nil)
+	_ runtime.LivenessObserverWithError      = (*Provider)(nil)
+	_ runtime.SessionEventProvider           = (*Provider)(nil)
+	_ runtime.StaleAwareSessionEventProvider = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -62,6 +64,15 @@ func (p *Provider) Unroute(name string) {
 	p.mu.Lock()
 	delete(p.routes, name)
 	p.mu.Unlock()
+}
+
+// EventCapableRoute reports whether the backend routed for name implements
+// runtime.SessionEventProvider. SubscribeSessionEvents above merges both
+// backends' streams whenever both are event-capable, so a session routed to
+// either backend gets real events whenever this reports true.
+func (p *Provider) EventCapableRoute(name string) bool {
+	_, ok := p.route(name).(runtime.SessionEventProvider)
+	return ok
 }
 
 func (p *Provider) route(name string) runtime.Provider {
@@ -431,23 +442,132 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
-// SubscribeSessionEvents forwards the session-event stream of whichever
-// backend implements runtime.SessionEventProvider. Today only herdr does, so
-// without this method, wrapping an event-capable default backend (e.g.
-// herdr) behind auto for ACP routing would fail the
+// SubscribeSessionEvents merges the session-event streams of every backend
+// that implements runtime.SessionEventProvider. EventCapableRoute reports
+// event-capability per session, backend by backend, so a caller may rely on
+// events arriving for a session routed to EITHER backend. Forwarding only
+// one backend's stream (the pre-fix behavior) would silently drop events for
+// sessions served by the other backend whenever both are event-capable,
+// while still telling that caller (via EventCapableRoute) that those
+// sessions were covered. Wrapping an event-capable backend (e.g. herdr)
+// behind auto without this method would fail the
 // runtime.SessionEventProvider type assertion in cmd/gc's
 // sessionEventPump.restart and silently drop the whole event-driven
 // reconcile poke, falling back to patrol polling with no underlying
 // capability loss to explain it.
 func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.SessionEvent, error) {
+	events, _, err := p.SubscribeSessionEventsStale(ctx)
+	return events, err
+}
+
+// SubscribeSessionEventsStale is like SubscribeSessionEvents but also
+// returns a staleness checker scoped to this specific subscription. See
+// runtime.StaleAwareSessionEventProvider.
+func (p *Provider) SubscribeSessionEventsStale(ctx context.Context) (<-chan runtime.SessionEvent, func() bool, error) {
 	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
 	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
-	switch {
-	case dok:
-		return dSEP.SubscribeSessionEvents(ctx)
-	case aok:
-		return aSEP.SubscribeSessionEvents(ctx)
-	default:
-		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
+	if !dok && !aok {
+		return nil, nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
 	}
+	if dok && !aok {
+		ch, err := dSEP.SubscribeSessionEvents(ctx)
+		return ch, nil, err
+	}
+	if aok && !dok {
+		ch, err := aSEP.SubscribeSessionEvents(ctx)
+		return ch, nil, err
+	}
+
+	dCh, err := dSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("default backend: %w", err)
+	}
+	aCh, err := aSEP.SubscribeSessionEvents(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ACP backend: %w", err)
+	}
+	tracker := newSessionEventStaleTracker(sessionEventStaleAfter)
+	return mergeSessionEvents(ctx, dCh, aCh, tracker), tracker.stale, nil
+}
+
+// sessionEventStaleAfter is runtime.SessionEventStaleAfter by default;
+// tests override it to a short duration so real-provider staleness wiring
+// (SubscribeSessionEventsStale -> tracker -> the returned checker) can be
+// exercised without waiting out the production bound.
+var sessionEventStaleAfter = runtime.SessionEventStaleAfter
+
+// sessionEventStaleTracker records the last-observed time of each side of a
+// merged session-event stream so staleness can be reported at query time
+// (MergedStreamStale) instead of by closing the merge. See mergeSessionEvents.
+type sessionEventStaleTracker struct {
+	staleAfter time.Duration
+	lastA      atomic.Int64 // UnixNano
+	lastB      atomic.Int64 // UnixNano
+}
+
+func newSessionEventStaleTracker(staleAfter time.Duration) *sessionEventStaleTracker {
+	t := &sessionEventStaleTracker{staleAfter: staleAfter}
+	now := time.Now().UnixNano()
+	t.lastA.Store(now)
+	t.lastB.Store(now)
+	return t
+}
+
+func (t *sessionEventStaleTracker) touchA() { t.lastA.Store(time.Now().UnixNano()) }
+func (t *sessionEventStaleTracker) touchB() { t.lastB.Store(time.Now().UnixNano()) }
+
+func (t *sessionEventStaleTracker) stale() bool {
+	now := time.Now()
+	if now.Sub(time.Unix(0, t.lastA.Load())) >= t.staleAfter {
+		return true
+	}
+	return now.Sub(time.Unix(0, t.lastB.Load())) >= t.staleAfter
+}
+
+// mergeSessionEvents fans two session-event streams into one, closing the
+// output only when ctx is done or both inputs close. It never closes the
+// output merely because one side has gone quiet: a consumer computing
+// liveness off the single merged stream (e.g. cmd/gc's
+// sessionEventPump.flowing()) would otherwise see the WHOLE composite die
+// whenever either backend went idle for staleAfter, even though the other
+// backend kept delivering — a non-self-healing outage worse than the
+// masking bug this staleness tracking replaced (see
+// runtime.CompositeSessionEventStaleness). Instead, tracker records each
+// side's last-delivery time so a caller can ask MergedStreamStale() whether
+// EITHER side has gone silent, without losing the healthy side's events or
+// needing pump.restart to recover once the stale side resumes.
+func mergeSessionEvents(ctx context.Context, a, b <-chan runtime.SessionEvent, tracker *sessionEventStaleTracker) <-chan runtime.SessionEvent {
+	out := make(chan runtime.SessionEvent)
+	go func() {
+		defer close(out)
+		for a != nil || b != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-a:
+				if !ok {
+					a = nil
+					continue
+				}
+				tracker.touchA()
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			case ev, ok := <-b:
+				if !ok {
+					b = nil
+					continue
+				}
+				tracker.touchB()
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out
 }

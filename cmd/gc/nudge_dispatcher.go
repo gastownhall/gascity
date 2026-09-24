@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
@@ -117,11 +118,27 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
 // into the persisted queue state's DispatchSkips regardless of debugOut, so
 // `gc nudge status` stays informative even with GC_DEBUG unset).
+//
+// (Event-capable providers never reach this: nudgeDispatchTick routes their
+// passes through the nudge event dispatcher's worker instead.)
 func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, debugOut io.Writer) (int, error) {
-	if cfg == nil || sessionBeads == nil || cityPath == "" {
+	if cfg == nil || sessionBeads == nil || cityPath == "" || !nudgeDispatcherIsSupervisor(cfg) {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	return deliverPendingQueuedNudges(cityPath, cfg, sessStore, sp, sessionBeads, "", debugOut, func(target nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+	})
+}
+
+// deliverPendingQueuedNudges is one dispatcher pass over the queue: collect
+// the agents with due pending (or lease-expired in-flight) items, resolve
+// each matching open session bead to a nudgeTarget — restricted to
+// sessionFilter when set — observe it, and hand running matches to deliver.
+// Returns how many targets delivered at least one item. debugOut is threaded
+// through to logNudgeDispatchSkip; nil suppresses the debug lines (skip
+// counts still accumulate regardless).
+func deliverPendingQueuedNudges(cityPath string, cfg *config.City, sessStore beads.Store, sp runtime.Provider, sessionBeads *sessionBeadSnapshot, sessionFilter string, debugOut io.Writer, deliver func(nudgeTarget, worker.LiveObservation) (bool, error)) (int, error) {
+	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
 	now := time.Now()
@@ -192,6 +209,9 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
 			continue
 		}
+		if sessionFilter != "" && target.sessionName != sessionFilter {
+			continue
+		}
 		// ACP sessions also flow through this dispatcher. The inject-on-hook
 		// drain path still catches deliveries when the agent receives external
 		// prompts, but a warm-idle ACP session never fires its hook on its
@@ -228,7 +248,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		ok, err := deliver(target, obs)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

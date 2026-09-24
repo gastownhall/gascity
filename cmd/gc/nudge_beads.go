@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -95,6 +96,23 @@ func openNudgeBeadStoreOwned(cityPath string) (beads.NudgesStore, beads.Store, e
 		return beads.NudgesStore{}, nil, fmt.Errorf("opening the city store at %q: %w", cityPath, err)
 	}
 	return beads.NudgesStore{Store: resolveNudgesStore(cliStorageRoutes(cityPath), store, nil, cityPath, nil)}, store, nil
+}
+
+// nudgeBeadStoreOwned reports whether the store openNudgeBeadStore(cityPath)
+// returns is a handle this call opened, safe for the caller to close, versus
+// the shared nudges-class binding owned by cliStorageRoutes(cityPath).
+//
+// When the nudges class is relocated to a split binding, resolveNudgesStore
+// above discards the freshly opened work-store handle and returns the
+// process-scoped store cliStorageRoutes memoizes instead — the same instance
+// every call, closed exactly once at process exit via closeCLIStorageRoutes.
+// A per-pass caller that closed it anyway would tear down that shared binding
+// out from under every other consumer of the same relocated class group.
+func nudgeBeadStoreOwned(cityPath string) bool {
+	// Ownership probe, not a fresh store enumeration - mirrors the identical,
+	// already-accepted relocation check in cliSessionsRelocated (cli_class_stores.go).
+	_, relocated := cliStorageRoutes(cityPath).storeFor(coordclassFor(config.BeadClassNudges)) // residency:allow mirrors cliSessionsRelocated's identical check
+	return !relocated
 }
 
 // nudgeFrontDoor wraps a strongly-typed nudges store as the nudge object's

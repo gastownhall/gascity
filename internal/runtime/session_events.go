@@ -90,3 +90,58 @@ type SessionEvent struct {
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
 }
+
+// SessionEventStaleAfter bounds how long a session-event source may go
+// silent before it is no longer trusted as live. A provider's stream
+// self-heals without ever closing on a transient transport failure (see
+// SessionEventProvider's contract), so silence — not a channel close — is
+// the only signal an outage leaves behind. Composite providers (auto,
+// hybrid) use this to detect partial backend failure when fanning in
+// multiple backends' streams: without a per-backend bound, a healthy
+// backend's traffic keeps the merged stream looking alive indefinitely even
+// while the other backend's stream has gone silent, masking that backend's
+// outage from every consumer of the merged stream. 30s is 6x herdr's max
+// reconnect backoff (5s, internal/runtime/herdr/events.go), giving margin
+// for reconnect latency and scheduling jitter before declaring a source
+// stale.
+const SessionEventStaleAfter = 30 * time.Second
+
+// EventCapableRouter is implemented by composite providers (e.g. auto,
+// hybrid) that route different sessions to different backends. Asserting a
+// provider against SessionEventProvider alone answers "is ANY routed backend
+// event-capable", which for a composite is true whenever its local side is,
+// even for sessions it routes elsewhere. A provider that can report
+// per-session capability must be asked per-session.
+type EventCapableRouter interface {
+	EventCapableRoute(name string) bool
+}
+
+// StaleAwareSessionEventProvider is implemented by composite providers (e.g.
+// auto, hybrid) whose SubscribeSessionEvents fans in more than one backend's
+// stream into one merged channel. SubscribeSessionEventsStale behaves like
+// SubscribeSessionEvents but also returns a staleness checker scoped to that
+// one subscription, reporting whether any fanned-in backend has gone silent
+// past SessionEventStaleAfter, WITHOUT terminating the merged channel: a
+// consumer computing liveness off the single merged stream (e.g. cmd/gc's
+// sessionEventPump.flowing()) would otherwise never see one backend's outage
+// as long as the other kept producing (see SessionEventStaleAfter). Closing
+// the merged channel to surface that was tried and rejected: a channel close
+// is permanent and the only two production callers of pump.restart are
+// startup and a provider-changing config reload, so a merely-idle-for-30s
+// backend that was never actually broken would have killed event-driven
+// liveness for the WHOLE composite, including the still-healthy backend,
+// until one of those rare events happened to fire. Reporting staleness at
+// query time instead lets the healthy backend's events keep flowing and lets
+// a recovered backend clear its own staleness on its next event, with no
+// restart needed.
+//
+// The checker is scoped to its own subscription rather than shared
+// provider-wide state: a composite provider may be subscribed to more than
+// once concurrently (e.g. cmd/gc's session-event pump and its nudge-event
+// dispatcher each hold an independent subscription), and a shared
+// provider-wide tracker would have the second subscriber's call silently
+// replace the first's, leaving the first subscriber's staleness check
+// reporting on a merge it doesn't consume.
+type StaleAwareSessionEventProvider interface {
+	SubscribeSessionEventsStale(ctx context.Context) (<-chan SessionEvent, func() bool, error)
+}

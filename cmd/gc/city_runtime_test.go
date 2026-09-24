@@ -1109,7 +1109,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	preflightIndex := orderEvents.index("preflight")
 	sessionListIndex := orderEvents.index("session-list")
@@ -1164,7 +1164,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
@@ -1181,6 +1181,97 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	}
 	if len(tracking) == 0 {
 		t.Fatalf("events = %#v, want due order to dispatch after preflight", orderEvents.snapshot())
+	}
+}
+
+// TestCityRuntimeTickStretchSkipStillRunsNudgeDispatchFallback proves the
+// patrol-tick fallback for the supervisor nudge dispatcher fires even when a
+// patrol tick's session phases are stretch-skipped. Before this fix, the
+// fallback lived only inside beadReconcileTick, which the stretch-skip branch
+// never reaches, so a queued nudge whose wake-socket enqueue was missed
+// waited out the full session_patrol_interval instead of the documented
+// belt-and-suspenders delivery on the next patrol tick.
+func TestCityRuntimeTickStretchSkipStillRunsNudgeDispatchFallback(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store.Store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
+		Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir,
+		Provider: "codex", Hints: runtime.Config{WorkDir: dir},
+		ExtraMeta: map[string]string{"session_origin": "manual"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.Activity = map[string]time.Time{info.SessionName: time.Now().Add(-10 * time.Second)}
+
+	if err := enqueueQueuedNudgeWithStore(dir, store, newQueuedNudge("worker", "review the deploy logs", time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudgeWithStore: %v", err)
+	}
+
+	pump, cancelPump := streamingPump(t)
+	defer cancelPump()
+
+	cr := &CityRuntime{
+		cityPath: dir,
+		cityName: "test-city",
+		cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				PatrolInterval:        "30s",
+				SessionPatrolInterval: "10m",
+				NudgeDispatcher:       "supervisor",
+			},
+		},
+		sp: fake,
+		buildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		dops:          newDrainOps(fake),
+		sessionDrains: newDrainTracker(),
+		sessionEvents: pump,
+		rec:           events.Discard,
+		logPrefix:     "gc test",
+		stdout:        io.Discard,
+		stderr:        io.Discard,
+	}
+	cs := newControllerState(context.Background(), cr.cfg, fake, events.NewFake(), "test-city", cr.cityPath)
+	cs.cityBeadStore = store.Store
+	cr.setControllerState(cs)
+
+	// Pin sessionPhasesLast to now so this patrol tick lands inside the
+	// stretch window and takes the stretch-skip branch, not the full
+	// session-reconcile branch that would reach the fallback the old way.
+	cr.sessionPhasesLast = time.Now()
+
+	dirty := &atomic.Bool{}
+	lastProviderName := ""
+	prevPoolRunning := map[string]bool{}
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
+
+	if !cr.sessionPhaseStretchActive() {
+		t.Fatal("precondition: stretch must be active for this tick to have taken the stretch-skip branch")
+	}
+
+	var nudgeMessages []string
+	for _, call := range fake.Calls {
+		if call.Method == "Nudge" {
+			nudgeMessages = append(nudgeMessages, call.Message)
+		}
+	}
+	if len(nudgeMessages) != 1 {
+		t.Fatalf("nudge calls during a stretch-skipped patrol tick = %d, want 1 (fallback must still deliver)", len(nudgeMessages))
+	}
+	if !strings.Contains(nudgeMessages[0], "review the deploy logs") {
+		t.Fatalf("nudge message = %q, want original reminder", nudgeMessages[0])
 	}
 }
 
@@ -1632,7 +1723,7 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -1717,7 +1808,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 	// This is the delta lane being honestly delta, and it is what makes the
 	// sweep non-optional rather than redundant.
 	for _, trigger := range []string{"poke", "patrol"} {
-		cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, trigger)
+		cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, trigger, false)
 		if got := completedFacts(); len(got) != 0 {
 			t.Fatalf("completed events after a %s tick = %#v, want none: no event named this root", trigger, got)
 		}
@@ -1748,7 +1839,7 @@ func TestCityRuntimeSweepReconcilesGraphStepClosedWithNoEvent(t *testing.T) {
 	// further. Without this row, "the tick emits nothing" above would be
 	// satisfied by a delta lane that is wired to nothing at all.
 	lane.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: root.ID})
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	if got := completedFacts(); len(got) != 1 {
 		t.Fatalf("completed events after a tick that named the root = %#v, want the one fact", got)
 	}
@@ -1778,7 +1869,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if od.called.Load() {
 		t.Fatal("order dispatcher should not run after city context is canceled")
@@ -1811,7 +1902,7 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -3879,7 +3970,7 @@ func TestCityRuntimeTick_LogsWispGCPurgeCountWithNonFatalError(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test", false)
 
 	if !strings.Contains(stderr.String(), "test-city: wisp gc: delete failed") {
 		t.Fatalf("stderr = %q, want wisp gc error", stderr.String())
@@ -3915,7 +4006,7 @@ func TestCityRuntimeTick_PrefixesEachJoinedWispGCErrorLine(t *testing.T) {
 	var dirty atomic.Bool
 	var lastProviderName string
 	var prevPoolRunning map[string]bool
-	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "test", false)
 
 	got := stderr.String()
 	for _, want := range []string{
@@ -4162,7 +4253,7 @@ func TestCityRuntimeTick_RefreshesManualSessionOverlayAfterSync(t *testing.T) {
 	var prevPoolRunning map[string]bool
 	var lastProviderName string
 	dirty := &atomic.Bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test")
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "test", false)
 	// tick() enqueues the async start wave and returns without waiting for it:
 	// enqueuePreparedStartWaveForCity spawns a goroutine per candidate and
 	// reports TraceOutcomeStartEnqueued immediately. That goroutine goes on to
@@ -4297,6 +4388,154 @@ func TestCityRuntimeTickSkipsOnDeathWhenSessionListingIsPartial(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeTickFiresOnDeathBeforeConfigReloadReplacesHandlers proves the
+// tick() ordering fix under the exact conditions the regression lives in: a
+// "patrol" trigger with the stretched session-phase patrol active, where
+// runSessionPhases is initially computed FALSE (dirty.Load() == false, not
+// yet due) and only promoted to TRUE afterward because dirty.Swap(false) —
+// called a few instructions later with no I/O in between — observes a
+// config-watcher goroutine's concurrent Store(true) that landed in that gap.
+//
+// This is a genuine TOCTOU race, not a single-threaded ordering fact: with no
+// concurrent writer, dirty.Load() and dirty.Swap(false) always observe the
+// same value, and sessionPhasesDue's own "configPending" clause means
+// runSessionPhases is already true whenever that shared value is true — so
+// the promotion branch is only reachable when a second goroutine mutates
+// dirty between the two reads. In production that second goroutine is the
+// config-file watcher (watchConfigTargets) racing the reconciler tick. The
+// fix moved reconcilePoolDeaths to run against the FINAL (post-promotion)
+// runSessionPhases instead of the stale pre-swap peek; before the fix, a
+// race landing in that gap made reconcilePoolDeaths use the stale FALSE
+// value (skipping it) even though the same tick's reload went on to replace
+// cr.poolDeathHandlers — silently dropping the on_death hook for a death
+// that happened before the reload.
+//
+// Because the race window is only a few non-blocking instructions wide, no
+// single tick() call reliably exercises it. This test drives many
+// independent tick() calls, each racing a swarm of writer goroutines against
+// dirty, and checks the one invariant that must hold on every iteration
+// where a reload actually landed (poolDeathHandlers went empty): the
+// on_death hook must already have fired. Under the fix this invariant is
+// structural (configChanged true always implies runSessionPhases true, so
+// reconcilePoolDeaths always precedes the reload) and holds unconditionally;
+// under the pre-fix ordering it depends on winning the race, so enough
+// iterations make a failure overwhelmingly likely.
+func TestCityRuntimeTickFiresOnDeathBeforeConfigReloadReplacesHandlers(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	const iterations = 300
+	const racers = 16
+
+	for i := 0; i < iterations; i++ {
+		cityPath := t.TempDir()
+		tomlPath := filepath.Join(cityPath, "city.toml")
+		outFile := filepath.Join(cityPath, "on-death.txt")
+
+		writeConfig := func(includeAgent bool) {
+			var buf strings.Builder
+			buf.WriteString("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[daemon]\npatrol_interval = \"30s\"\nsession_patrol_interval = \"10m\"\n")
+			if includeAgent {
+				fmt.Fprintf(&buf, "\n[[agent]]\nname = \"worker\"\ndir = \"demo\"\nmin_active_sessions = 0\nmax_active_sessions = 1\non_death = \"printf fired > %s\"\n", shellQuotePath(outFile))
+			}
+			if err := os.WriteFile(tomlPath, []byte(buf.String()), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+		}
+		writeConfig(true)
+
+		cfg, err := config.Load(osFS{}, tomlPath)
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		fake := runtime.NewFake()
+		handlers := computePoolDeathHandlers(cfg, "test-city", cityPath, fake, io.Discard)
+		if len(handlers) == 0 {
+			t.Fatal("computePoolDeathHandlers returned no handlers")
+		}
+		prevPoolRunning := map[string]bool{}
+		for sn := range handlers {
+			prevPoolRunning[sn] = true
+		}
+
+		// The next reload must see a config with the pool removed, so the
+		// replacement handler map no longer contains this session and
+		// could never fire the hook itself.
+		writeConfig(false)
+
+		pump, cancelPump := streamingPump(t)
+
+		var stderr bytes.Buffer
+		cr := &CityRuntime{
+			cityPath:            cityPath,
+			cityName:            "test-city",
+			tomlPath:            tomlPath,
+			configName:          "test-city",
+			cfg:                 cfg,
+			sp:                  fake,
+			dops:                newDrainOps(fake),
+			standaloneCityStore: beads.NewMemStore(),
+			sessionDrains:       newDrainTracker(),
+			poolDeathHandlers:   handlers,
+			sessionEvents:       pump,
+			rec:                 events.Discard,
+			logPrefix:           "gc test",
+			stdout:              io.Discard,
+			stderr:              &stderr,
+			buildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+				return DesiredStateResult{State: map[string]TemplateParams{}}
+			},
+		}
+		cs := newControllerState(context.Background(), cfg, fake, events.NewFake(), "test-city", cityPath)
+		cs.cityBeadStore = cr.standaloneCityStore
+		cr.setControllerState(cs)
+
+		// Pin sessionPhasesLast to now so, absent the race, this patrol
+		// tick would take the stretch-skip branch (runSessionPhases starts
+		// false) — the precondition for the promotion branch to matter.
+		cr.sessionPhasesLast = time.Now()
+		if !cr.sessionPhaseStretchActive() {
+			cancelPump()
+			t.Fatal("precondition: stretch must be active for this tick to start with runSessionPhases false")
+		}
+
+		dirty := &atomic.Bool{}
+		lastProviderName := "fake"
+
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		for r := 0; r < racers; r++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						dirty.Store(true)
+					}
+				}
+			}()
+		}
+
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol", false)
+
+		close(stop)
+		wg.Wait()
+		cancelPump()
+
+		reloaded := len(cr.poolDeathHandlers) == 0
+		_, statErr := os.Stat(outFile)
+		fired := statErr == nil
+		if reloaded && !fired {
+			t.Fatalf("iteration %d: reload replaced poolDeathHandlers (now empty) but the on_death hook never fired — reconcilePoolDeaths ran against a stale runSessionPhases peek instead of the final post-promotion value\nstderr=%s", i, stderr.String())
+		}
+	}
+}
+
 func TestControlDispatcherOnlyConfig_IncludesRigScopedDispatchers(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -4389,7 +4628,7 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 	lastProviderName := ""
 	prevPoolRunning := make(map[string]bool)
 	runMainTick := func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 	}
 
 	// The targeted dispatcher signal path must both materialize and start the
@@ -5554,7 +5793,7 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 
 	if !od.called.Load() {
 		t.Fatal("order dispatcher was not called")
@@ -5667,7 +5906,7 @@ func TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange(t *testing.T) {
 			lastProviderName := "fake"
 			var prevPoolRunning map[string]bool
 
-			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload")
+			cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "reload", false)
 
 			select {
 			case reply := <-doneCh:
@@ -5995,7 +6234,7 @@ func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *tes
 	var prevPoolRunning map[string]bool
 
 	cr.safeTick(func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 	}, "poke")
 
 	if cr.activeReload != nil {
@@ -6049,7 +6288,7 @@ func TestCityRuntimeWatchReloadPanicRestoresDirty(t *testing.T) {
 	var prevPoolRunning map[string]bool
 
 	cr.safeTick(func() {
-		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol")
+		cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "patrol", false)
 	}, "patrol")
 
 	if !dirty.Load() {

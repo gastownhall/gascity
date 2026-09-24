@@ -244,7 +244,7 @@ func TestCityRuntimeTickSkipsBeforeManagedDoltAndDemandUnderFSPressure(t *testin
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if got := managedDoltCalls.Load(); got != 0 {
 		t.Fatalf("managed dolt calls = %d, want 0 before pressure-skip gate", got)
@@ -342,7 +342,7 @@ func TestCityRuntimeTickSkipsDueOrderDispatchUnderFSPressure(t *testing.T) {
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if got := buildCalls.Load(); got != 0 {
 		t.Fatalf("build desired calls = %d, want 0 before pressure-skip gate", got)
@@ -415,17 +415,17 @@ func TestCityRuntimeTickForcesRunAfterMaxConsecutiveFSPressureSkips(t *testing.T
 	dirty := &atomic.Bool{}
 	lastProviderName := ""
 	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	pressure = []byte(samplePressureLow)
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	pressure = []byte(samplePressureHigh)
 	for i := 0; i < maxConsecutiveFSPressureSkips+1; i++ {
-		cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+		cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	}
 	pressure = []byte(samplePressureLow)
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 	pressure = []byte(samplePressureHigh)
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol", false)
 
 	if got := buildCalls.Load(); got != 3 {
 		t.Fatalf("build desired calls = %d, want low-pressure ticks plus one forced tick", got)
@@ -577,7 +577,7 @@ func TestCityRuntimeManualReloadBypassesFSPressureSkipUntilDemandRefresh(t *test
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
-	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
+	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke", false)
 
 	if got := buildCalls.Load(); got != 1 {
 		select {

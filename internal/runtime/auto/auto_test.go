@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -682,5 +683,331 @@ func TestSnapshotIdle_FailsClosedWhenRouteCannotSnapshot(t *testing.T) {
 	}
 	if idle {
 		t.Error("SnapshotIdle = true on an unsupported route; must never report idle it could not observe")
+	}
+}
+
+// fakeEventProvider adds a controllable SessionEventProvider to runtime.Fake
+// so tests can drive both backends' streams independently.
+type fakeEventProvider struct {
+	*runtime.Fake
+	ch chan runtime.SessionEvent
+}
+
+func newFakeEventProvider() *fakeEventProvider {
+	return &fakeEventProvider{Fake: runtime.NewFake(), ch: make(chan runtime.SessionEvent, 4)}
+}
+
+func (f *fakeEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	return f.ch, nil
+}
+
+var _ runtime.SessionEventProvider = (*fakeEventProvider)(nil)
+
+// Both backends being event-capable must not mean only one is heard from:
+// EventCapableRoute is checked per session, so a session routed to either
+// backend needs its events to actually arrive.
+func TestSubscribeSessionEvents_MergesBothEventCapableBackends(t *testing.T) {
+	def := newFakeEventProvider()
+	acp := newFakeEventProvider()
+	p := New(def, acp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	acp.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"}
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case ev := <-merged:
+			seen[ev.Session] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for merged events, got %v", seen)
+		}
+	}
+	if !seen["default-sess"] || !seen["acp-sess"] {
+		t.Errorf("merged events = %v, want both default-sess and acp-sess", seen)
+	}
+}
+
+func TestSubscribeSessionEvents_SingleBackendForwardsDirectly(t *testing.T) {
+	def := newFakeEventProvider()
+	p := New(def, runtime.NewFake())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := p.SubscribeSessionEvents(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEvents: %v", err)
+	}
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	select {
+	case ev := <-ch:
+		if ev.Session != "default-sess" {
+			t.Errorf("event.Session = %q, want default-sess", ev.Session)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for forwarded event")
+	}
+}
+
+func TestSubscribeSessionEvents_NeitherBackendCapableErrors(t *testing.T) {
+	p := New(runtime.NewFake(), runtime.NewFake())
+	if _, err := p.SubscribeSessionEvents(context.Background()); err == nil {
+		t.Fatal("SubscribeSessionEvents = nil error, want error when neither backend is event-capable")
+	}
+}
+
+// A healthy backend's continuing traffic must not mask the other backend
+// going silent, but the merge must not destroy itself to report that: it
+// stays open and keeps forwarding the healthy side's events while
+// MergedStreamStale (query-time, via the tracker) reports the silent side.
+// Once the silent side resumes, staleness clears on its own — no restart
+// needed, unlike the old close-on-stale behavior this replaces.
+func TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a := make(chan runtime.SessionEvent)
+	b := make(chan runtime.SessionEvent)
+	const staleAfter = 30 * time.Millisecond
+	tracker := newSessionEventStaleTracker(staleAfter)
+	merged := mergeSessionEvents(ctx, a, b, tracker)
+
+	// b delivers once, then goes silent (transport wedged, channel never
+	// closed — herdr's actual behavior on a broken transport).
+	b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess"}
+	if ev := <-merged; ev.Session != "b-sess" {
+		t.Fatalf("first event = %q, want b-sess", ev.Session)
+	}
+
+	// a keeps producing well past staleAfter; merged must NOT close, and
+	// every one of a's events must still arrive.
+	deadline := time.Now().Add(staleAfter * 5)
+	sawStale := false
+	for time.Now().Before(deadline) {
+		select {
+		case a <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "a-sess"}:
+			select {
+			case ev, ok := <-merged:
+				if !ok {
+					t.Fatal("merged stream closed despite b's silence and a's continuing traffic")
+				}
+				if ev.Session != "a-sess" {
+					t.Fatalf("event = %q, want a-sess", ev.Session)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for a's event to be forwarded")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out sending a's event")
+		}
+		if tracker.stale() {
+			sawStale = true
+		}
+	}
+	if !sawStale {
+		t.Fatal("tracker.stale() never reported true while b was silent past staleAfter")
+	}
+
+	// b resumes: staleness must self-heal without any restart.
+	select {
+	case b <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "b-sess-2"}:
+	case <-time.After(time.Second):
+		t.Fatal("timed out resuming b")
+	}
+	select {
+	case ev := <-merged:
+		if ev.Session != "b-sess-2" {
+			t.Fatalf("resumed event = %q, want b-sess-2", ev.Session)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for b's resumed event")
+	}
+	if tracker.stale() {
+		t.Fatal("tracker.stale() still true after b resumed delivering")
+	}
+}
+
+// TestProvider_SubscribeSessionEventsStale_RealSubscribeWiring exercises the
+// actual wiring exposed via SubscribeSessionEventsStale's returned checker,
+// not just the tracker in isolation.
+// TestMergeSessionEvents_StaysOpenAndReportsQueryTimeStalenessWhenOneSourceGoesSilent
+// above proves the tracker itself works, but a mutation that makes
+// SubscribeSessionEventsStale return a checker that always reports false, or
+// stops wiring the tracker returned by mergeSessionEvents into it, survives
+// that test untouched: nothing calls SubscribeSessionEventsStale and then
+// asks its returned checker (not the tracker directly) whether the merge is
+// stale.
+func TestProvider_SubscribeSessionEventsStale_RealSubscribeWiring(t *testing.T) {
+	orig := sessionEventStaleAfter
+	sessionEventStaleAfter = 20 * time.Millisecond
+	defer func() { sessionEventStaleAfter = orig }()
+
+	def := newFakeEventProvider()
+	acp := newFakeEventProvider()
+	p := New(def, acp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	merged, stale, err := p.SubscribeSessionEventsStale(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeSessionEventsStale: %v", err)
+	}
+	if stale == nil {
+		t.Fatal("SubscribeSessionEventsStale returned a nil checker for a dual-backend merge")
+	}
+
+	// Both sides emit: not stale.
+	def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}
+	acp.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-merged:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for initial merged events")
+		}
+	}
+	if stale() {
+		t.Fatal("stale() = true while both backends are emitting, want false")
+	}
+
+	// acp goes silent past the staleness window; def keeps emitting.
+	deadline := time.Now().Add(sessionEventStaleAfter * 10)
+	sawStale := false
+	for time.Now().Before(deadline) && !sawStale {
+		select {
+		case def.ch <- runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"}:
+			select {
+			case <-merged:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for def's event to be forwarded")
+			}
+		default:
+		}
+		if stale() {
+			sawStale = true
+		}
+	}
+	if !sawStale {
+		t.Fatal("stale() never reported true after acp went silent")
+	}
+}
+
+// multiSubEventProvider hands out a fresh channel on every
+// SubscribeSessionEvents call, so independent subscribers each drive their
+// own underlying stream instead of racing to consume the same channel.
+type multiSubEventProvider struct {
+	*runtime.Fake
+	mu   sync.Mutex
+	subs []chan runtime.SessionEvent
+}
+
+func newMultiSubEventProvider() *multiSubEventProvider {
+	return &multiSubEventProvider{Fake: runtime.NewFake()}
+}
+
+func (f *multiSubEventProvider) SubscribeSessionEvents(_ context.Context) (<-chan runtime.SessionEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch := make(chan runtime.SessionEvent, 4)
+	f.subs = append(f.subs, ch)
+	return ch, nil
+}
+
+// sendToFirst delivers ev only to the first channel handed out, so a test
+// can drive that one subscriber's stream while leaving a second
+// subscriber's channel untouched (and undrained) without deadlocking on a
+// full buffer.
+func (f *multiSubEventProvider) sendToFirst(ev runtime.SessionEvent) {
+	f.mu.Lock()
+	ch := f.subs[0]
+	f.mu.Unlock()
+	ch <- ev
+}
+
+var _ runtime.SessionEventProvider = (*multiSubEventProvider)(nil)
+
+// TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber
+// guards against a regression where a second, independent
+// SubscribeSessionEventsStale call on the same Provider (e.g. cmd/gc's nudge
+// dispatcher subscribing alongside the session-event pump) replaced a
+// provider-wide staleness tracker, leaving the FIRST subscriber's checker
+// silently reporting on the SECOND subscriber's merge instead of its own.
+func TestProvider_SubscribeSessionEventsStale_IndependentSubscribersDoNotClobber(t *testing.T) {
+	orig := sessionEventStaleAfter
+	sessionEventStaleAfter = 20 * time.Millisecond
+	defer func() { sessionEventStaleAfter = orig }()
+
+	def := newMultiSubEventProvider()
+	acp := newMultiSubEventProvider()
+	p := New(def, acp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// First subscriber (e.g. the session-event pump).
+	firstCh, firstStale, err := p.SubscribeSessionEventsStale(ctx)
+	if err != nil {
+		t.Fatalf("first SubscribeSessionEventsStale: %v", err)
+	}
+
+	// Both sides emit so the first subscriber's tracker is fresh.
+	def.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"})
+	acp.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"})
+	for i := 0; i < 2; i++ {
+		select {
+		case <-firstCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for first subscriber's initial merged events")
+		}
+	}
+	if firstStale() {
+		t.Fatal("first subscriber's checker = stale immediately after both backends emitted")
+	}
+
+	// A second, independent subscriber (e.g. the nudge dispatcher) subscribes
+	// on the same Provider and never touches its channel again — it should
+	// get its OWN tracker, not clobber the first subscriber's.
+	secondCh, secondStale, err := p.SubscribeSessionEventsStale(ctx)
+	if err != nil {
+		t.Fatalf("second SubscribeSessionEventsStale: %v", err)
+	}
+	if secondCh == nil || secondStale == nil {
+		t.Fatal("second subscription returned a nil channel or checker")
+	}
+
+	// The first subscriber's own merge keeps flowing on both sides; it must
+	// never report stale, even while the second subscriber's own merge (fed
+	// by no further sends here) would independently go stale.
+	deadline := time.Now().Add(sessionEventStaleAfter * 10)
+	sawSecondStale := false
+	for time.Now().Before(deadline) && !sawSecondStale {
+		def.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "default-sess"})
+		select {
+		case <-firstCh:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for def's event on the first subscriber's channel")
+		}
+		acp.sendToFirst(runtime.SessionEvent{Kind: runtime.SessionEventExited, Session: "acp-sess"})
+		select {
+		case <-firstCh:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for acp's event on the first subscriber's channel")
+		}
+		if firstStale() {
+			t.Fatal("first subscriber's checker went stale even though its own merge kept receiving events on both sides; it must be reading its own tracker, not the second subscriber's")
+		}
+		if secondStale() {
+			sawSecondStale = true
+		}
+	}
+	if !sawSecondStale {
+		t.Fatal("second subscriber's checker never went stale despite receiving nothing; the two subscriptions must not share one tracker")
 	}
 }

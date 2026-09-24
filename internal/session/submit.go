@@ -562,6 +562,20 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata[startupDialogVerifiedKey]) != "true"
 }
 
+// providerRetiresDeferredSubmitPoller reports whether sp's event stream
+// retires the deferred-submit sidecar poller for sessName. A nil provider
+// fails open — callers without a resolved provider keep the spawn behavior.
+func providerRetiresDeferredSubmitPoller(sp runtime.Provider, sessName string) bool {
+	if sp == nil {
+		return false
+	}
+	if router, ok := sp.(runtime.EventCapableRouter); ok {
+		return router.EventCapableRoute(sessName)
+	}
+	_, ok := sp.(runtime.SessionEventProvider)
+	return ok
+}
+
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
 	if strings.TrimSpace(m.cityPath) == "" {
 		return errors.New("deferred submit is unavailable without a city path")
@@ -585,7 +599,16 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 	}); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
-	if m.supportsFollowUpLocked(b) {
+	// Providers with a push session-event stream retire the sidecar poller
+	// class: the supervisor's nudge event dispatcher delivers queued items
+	// (deferred submits included) on idle events and dispatch passes, and a
+	// spawned poller would only race it. Composite providers (auto, hybrid)
+	// route different sessions to different backends, so the top-level
+	// SessionEventProvider assertion alone answers "is ANY routed backend
+	// event-capable" — true even when THIS session is routed to a
+	// non-event-capable backend. Ask per-session via EventCapableRoute when
+	// the provider supports it, mirroring cmd/gc's providerRetiresNudgePollers.
+	if !providerRetiresDeferredSubmitPoller(m.sp, sessName) && m.supportsFollowUpLocked(b) {
 		_ = startSessionSubmitPoller(m.cityPath, deferredSubmitPollerKey(b), sessName)
 	}
 	return nil
