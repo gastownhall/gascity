@@ -164,6 +164,8 @@ go_test(
         "//:go.mod",
         "//:repo_source_tree",
         "@com_github_steveyegge_beads//internal/storage/schema:migrations",
+        "@com_github_steveyegge_beads//internal/storage/schema:schema.go",
+        "@com_github_steveyegge_beads//internal/types:types.go",
     ],
     embed = [":beads"],
     deps = [
