@@ -42,6 +42,11 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 	runDoltForCompactTest(t, doltPath, dbDir, "commit", "-Am", "seed second bead")
 	runDoltForCompactTest(t, doltPath, dbDir, "remote", "add", "origin", "file://"+remoteDir)
 	runDoltForCompactTest(t, doltPath, dbDir, "push", "--force", "--set-upstream", "origin", "main")
+	// This history is the city's own (not adopted), so opt it into full
+	// flattening; the remote push itself needs the federated opt-in (#5958).
+	if err := os.WriteFile(filepath.Join(dbDir, ".compact-full-history"), nil, 0o644); err != nil {
+		t.Fatalf("write .compact-full-history: %v", err)
+	}
 
 	port, pid := startRealDoltServerForCompactTest(t, doltPath, dataDir)
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, pid)
@@ -61,6 +66,7 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 		"GC_DOLT_PASSWORD",
 		"GC_DOLT_MANAGED_LOCAL",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS",
+		"GC_DOLT_COMPACT_ALLOW_FEDERATED",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
 	),
@@ -74,6 +80,7 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 		"GC_DOLT_PASSWORD=",
 		"GC_DOLT_MANAGED_LOCAL=1",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=1",
+		"GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=20",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=20",
 	)

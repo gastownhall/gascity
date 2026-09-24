@@ -19,7 +19,8 @@
 #      table there and leaves the row uncommitted).
 #   1. Pre-flight: record row counts and value hashes for all user tables and
 #      require HEAD to remain stable across a bounded retry loop.
-#   2. Soft-reset to the root commit; all data stays staged.
+#   2. Soft-reset to the history-provenance watermark (the gc-compact-base
+#      tag; see "History protection" below); all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts, table value hashes, and database
 #      value hash. Row-count increases are treated as concurrent-writer
@@ -59,6 +60,26 @@
 # A database marked .no-sync (same marker the sync and pull commands honor) has
 # no remote phase at all: it is never fetched or pushed, never gets a
 # pending-push marker, and an existing one is cleared so it cannot block flatten.
+#
+# History protection (#5958). The compactor only rewrites history it can show
+# this city grew:
+#   * Shared-history guard: a database with ANY configured Dolt remote may share
+#     its history with other clones (a team remote, bd's refs/dolt/data, a
+#     federated city), so it is never flattened or force-pushed. It gets a bare
+#     working-set CALL DOLT_GC() instead. .no-sync and --skip-fetch do not
+#     bypass this; GC_DOLT_COMPACT_ALLOW_FEDERATED=1 does (announced windows
+#     only). A pending-GC retry still runs its local DOLT_GC --full but drops the
+#     deferred push; a pending-push marker is held for operator review.
+#   * Provenance watermark: the Dolt tag gc-compact-base, stamped the first time
+#     the compactor sees a database (never under --dry-run). It goes on the root
+#     commit when root's child is a "compaction: flatten history" commit (a
+#     database this compactor already manages) or when the operator created
+#     <data_dir>/<db>/.compact-full-history; otherwise on HEAD, so adopted or
+#     pre-existing history is frozen. The flatten soft-resets to the tag, and
+#     the threshold counts commits since the tag. A tag that is not an ancestor
+#     of HEAD (rollback/restore to before the watermark) refuses the flatten
+#     until an operator re-stamps or deletes it.
+#
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -72,7 +93,16 @@
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
 #   GC_DOLT_COMPACT_THRESHOLD_COMMITS
-#     (default: 2000) — skip databases with fewer commits than this.
+#     (default: 2000) — skip databases with fewer commits than this since
+#                     the gc-compact-base watermark.
+#   GC_DOLT_COMPACT_ALLOW_FEDERATED       (optional) — truthy (1, true, yes)
+#                                         lifts the shared-history guard:
+#                                         databases with configured remotes
+#                                         are flattened and the rewritten
+#                                         branch is FORCE-PUSHED to the
+#                                         remote. Use only during a
+#                                         compaction window announced to
+#                                         every clone of that history.
 #   GC_DOLT_COMPACT_CALL_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for each SQL CALL.
 #   GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS
@@ -319,6 +349,7 @@ dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
+allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
 skip_fetch_dbs="${GC_DOLT_COMPACT_SKIP_FETCH_DBS:-}"
 compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
@@ -345,6 +376,20 @@ case "$skip_fetch_input" in
   *)
     printf 'compact: invalid GC_DOLT_COMPACT_SKIP_FETCH=%s (must be 1/true/yes or 0/false/no)\n' \
       "$skip_fetch_input" >&2
+    exit 2
+    ;;
+esac
+
+case "$allow_federated_input" in
+  ''|0|false|FALSE|no|NO)
+    allow_federated=0
+    ;;
+  1|true|TRUE|yes|YES)
+    allow_federated=1
+    ;;
+  *)
+    printf 'compact: invalid GC_DOLT_COMPACT_ALLOW_FEDERATED=%s (must be 1/true/yes or 0/false/no)\n' \
+      "$allow_federated_input" >&2
     exit 2
     ;;
 esac
@@ -2419,6 +2464,184 @@ defer_writer_race_after_flatten() {
   return 0
 }
 
+# --- History protection (#5958) ---------------------------------------------
+#
+# The compactor may only squash history this city grew. The boundary is the
+# Dolt tag gc-compact-base, stored IN the database: it survives runtime-state
+# wipes, travels with dolt backups, and keeps the protected history reachable
+# through DOLT_GC --full. Branch pushes never carry it.
+compact_base_tag="gc-compact-base"
+compact_flatten_message="compaction: flatten history"
+
+# compact_base_tag_hash prints the commit gc-compact-base points at, or an
+# empty line when the tag does not exist yet.
+compact_base_tag_hash() {
+  db="$1"
+  query_single_cell "$db" "$compact_base_tag tag probe failed" \
+    "SELECT tag_hash FROM dolt_tags WHERE tag_name = '$compact_base_tag'"
+}
+
+# history_is_compactor_owned prints a non-zero count when root's child on the
+# current branch is a compactor flatten commit — the fingerprint of a database
+# this compactor has already flattened from root.
+history_is_compactor_owned() {
+  db="$1"
+  owned_root="$2"
+  query_single_cell "$db" "flatten provenance probe failed" \
+    "SELECT COUNT(*) FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash = '$owned_root' AND l.message = '$compact_flatten_message'"
+}
+
+# commits_since_base counts commits reachable from HEAD but not from base
+# (bounded like commit_count).
+commits_since_base() {
+  db="$1"
+  since_base="$2"
+  query_single_cell "$db" "commits-since-$compact_base_tag probe failed" \
+    "SELECT COUNT(*) FROM (SELECT 1 FROM DOLT_LOG('$since_base..HEAD') LIMIT 200000) AS t"
+}
+
+compact_full_history_marker() {
+  printf '%s/%s/.compact-full-history\n' "$DOLT_DATA_DIR" "$1"
+}
+
+# resolve_compact_base DB ROOT
+#   Sets compact_base to the commit the flatten may soft-reset to. Stamps the
+#   watermark on first sight (a dry run only reports what it would stamp).
+#   Refuses (returns 1) when the existing watermark is not an ancestor of HEAD.
+resolve_compact_base() {
+  db="$1"
+  base_root="$2"
+  compact_base=""
+  base_tag=$(compact_base_tag_hash "$db") || return 1
+  if [ -n "$base_tag" ]; then
+    case "$base_tag" in
+      *[!A-Za-z0-9]*)
+        printf 'compact: db=%s %s probe returned invalid hash=%s — refusing flatten\n' \
+          "$db" "$compact_base_tag" "$base_tag" >&2
+        return 1
+        ;;
+    esac
+    base_in_log=$(commit_exists_in_local_log "$db" "$base_tag") || return 1
+    if [ "$base_in_log" != "1" ]; then
+      base_head=$(head_commit "$db" || true)
+      base_delete_sql="CALL DOLT_TAG('-d', '$compact_base_tag')"
+      printf 'compact: db=%s REFUSING flatten: %s=%s is not an ancestor of HEAD=%s — the history was rolled back or restored to before the watermark, or the tag was moved; nothing was changed. Operator action: to protect the current history as-is, run %s in database %s and the next run re-stamps the tag at HEAD; if this history was grown entirely by this city, also touch %s first so it is re-stamped at root (see docs/troubleshooting/dolt-bloat-recovery.md "History protection")\n' \
+        "$db" "$compact_base_tag" "$base_tag" "${base_head:-<unknown>}" "$base_delete_sql" "$db" "$(compact_full_history_marker "$db")" >&2
+      return 1
+    fi
+    compact_base="$base_tag"
+    return 0
+  fi
+
+  base_owned=$(history_is_compactor_owned "$db" "$base_root") || return 1
+  case "$base_owned" in
+    ''|*[!0-9]*)
+      printf 'compact: db=%s flatten provenance probe returned invalid value=%s — fail\n' \
+        "$db" "$base_owned" >&2
+      return 1
+      ;;
+  esac
+  if [ "$base_owned" -gt 0 ]; then
+    compact_base="$base_root"
+    base_why="history already flattened by this compactor"
+  elif [ -f "$(compact_full_history_marker "$db")" ]; then
+    compact_base="$base_root"
+    base_why="operator opt-in $(compact_full_history_marker "$db")"
+  else
+    if ! compact_base=$(head_commit "$db"); then
+      return 1
+    fi
+    if [ -z "$compact_base" ]; then
+      printf 'compact: db=%s HEAD commit probe returned empty value — fail\n' "$db" >&2
+      return 1
+    fi
+    base_why="history not grown by this compactor (adopted, imported, or pre-existing) is protected; only later commits will be flattened"
+  fi
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s would set %s=%s: %s — dry-run\n' \
+      "$db" "$compact_base_tag" "$compact_base" "$base_why"
+    return 0
+  fi
+  tag_err_tmp=$(mktemp)
+  if ! dolt_query "$db" "CALL DOLT_TAG('-m', 'gc dolt compact provenance watermark: flatten never rewrites history at or before this commit', '$compact_base_tag', '$compact_base')" >/dev/null 2>"$tag_err_tmp"; then
+    printf 'compact: db=%s failed to set %s=%s — refusing flatten\n' \
+      "$db" "$compact_base_tag" "$compact_base" >&2
+    emit_error_file "$db" "$tag_err_tmp"
+    rm -f "$tag_err_tmp"
+    return 1
+  fi
+  rm -f "$tag_err_tmp"
+  printf 'compact: db=%s set %s=%s: %s\n' \
+    "$db" "$compact_base_tag" "$compact_base" "$base_why"
+  return 0
+}
+
+# run_bare_gc runs a working-set CALL DOLT_GC(): it reclaims journal and
+# working-set garbage without touching history.
+run_bare_gc() {
+  db="$1"
+  start=$(date +%s)
+  gc_rc=0
+  gc_err_tmp=$(mktemp)
+  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
+  elapsed=$(( $(date +%s) - start ))
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
+      "$db" "$gc_rc" "$elapsed" >&2
+    emit_error_file "$db" "$gc_err_tmp"
+    rm -f "$gc_err_tmp"
+    return 1
+  fi
+  rm -f "$gc_err_tmp"
+
+  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
+  return 0
+}
+
+# compact_shared_history_database handles a database the shared-history guard
+# protects: never flatten, never push. A pending-GC marker (an earlier run
+# already flattened locally) still gets its local DOLT_GC --full, with the
+# deferred push dropped rather than re-recorded; a pending-push marker is held
+# for operator review; everything else gets a bare working-set GC.
+compact_shared_history_database() {
+  db="$1"
+  guard_remote_count="$2"
+  guard_remote="$3"
+  printf 'compact: db=%s remote=%s remotes=%s — history may be shared with other clones; skipping flatten and remote push (set GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during a compaction window announced to every clone)\n' \
+    "$db" "$guard_remote" "$guard_remote_count"
+
+  if has_compact_marker "$pending_gc_dir" "$db"; then
+    guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    if [ -n "$dry_run" ]; then
+      printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full locally; deferred push dropped by shared-history guard)\n' "$db"
+      return 0
+    fi
+    printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full locally; deferred push dropped by shared-history guard\n' "$db"
+    start=$(date +%s)
+    if ! run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+      return 1
+    fi
+    clear_compact_marker "$pending_gc_dir" "$db"
+    if [ -n "$guard_pending_remote" ]; then
+      printf 'compact: db=%s an earlier run flattened this database locally but never pushed it; remote=%s still holds the full shared history, so gc dolt sync will report diverged until an operator reconciles (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
+        "$db" "$guard_pending_remote" >&2
+    fi
+    return 0
+  fi
+
+  if has_compact_marker "$pending_push_dir" "$db"; then
+    guard_pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
+    printf 'compact: db=%s pending_push=present remote=%s — NOT force-pushing: the shared-history guard holds %s for operator review. Reconcile the flattened local history manually, or re-run with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window to force-push it (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
+      "$db" "${guard_pending_remote:-<unknown>}" "$(compact_marker_path "$pending_push_dir" "$db")" >&2
+  fi
+
+  if [ -n "$dry_run" ]; then
+    printf 'compact: db=%s — dry-run (would bare GC)\n' "$db"
+    return 0
+  fi
+  run_bare_gc "$db"
+}
+
 flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
@@ -2482,6 +2705,31 @@ flatten_database() {
         return 1
         ;;
     esac
+  fi
+
+  # Shared-history guard (#5958; remote guard adapted from #6052). Any
+  # configured remote means other clones may share this history, and a flatten
+  # would have to be force-pushed over it. Checked independently of remote
+  # selection, .no-sync, --skip-fetch, and --dry-run, and before the deferred
+  # GC/push markers so an earlier run's push is never replayed without opt-in.
+  if [ "$allow_federated" != "1" ]; then
+    guard_remote_count=$(remote_count "$db") || return 1
+    case "$guard_remote_count" in
+      ''|*[!0-9]*)
+        printf 'compact: db=%s remote count probe returned invalid value=%s — refusing flatten\n' \
+          "$db" "$guard_remote_count" >&2
+        return 1
+        ;;
+    esac
+    if [ "$guard_remote_count" -gt 0 ]; then
+      guard_remote=$(single_remote_name "$db") || return 1
+      if [ -z "$guard_remote" ]; then
+        printf 'compact: db=%s remote probe returned empty name — refusing flatten\n' "$db" >&2
+        return 1
+      fi
+      compact_shared_history_database "$db" "$guard_remote_count" "$guard_remote"
+      return $?
+    fi
   fi
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
@@ -2658,30 +2906,54 @@ flatten_database() {
       ;;
   esac
 
-  if [ "$count" -lt "$threshold_commits" ]; then
-    if oldgen_has_files "$db"; then
-      printf 'compact: db=%s commits=%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip (run "gc dolt compact --gc-only" to reclaim if these archives are orphaned)\n' \
-        "$db" "$count" "$threshold_commits"
-      return 0
-    fi
-    printf 'compact: db=%s commits=%s below_threshold=%s — skip\n' \
-      "$db" "$count" "$threshold_commits"
-    return 0
-  fi
-
-  # Runs before the root/HEAD probes below because it may commit, and every
-  # commit hash this run relies on must be captured after it. Skipped under
-  # dry-run, which mutates nothing.
-  if [ -z "$dry_run" ]; then
-    version_dirty_dolt_ignore "$db"
-  fi
-
   if ! root=$(root_commit "$db"); then
     return 1
   fi
   if [ -z "$root" ]; then
     printf 'compact: db=%s root commit probe returned empty value — fail\n' "$db" >&2
     return 1
+  fi
+
+  # Provenance watermark: stamped on first sight at any commit count, so the
+  # threshold below only ever counts history this city grew after the stamp.
+  resolve_compact_base "$db" "$root" || return 1
+  flatten_base="$compact_base"
+  if [ "$flatten_base" = "$root" ]; then
+    compactable_count="$count"
+    base_detail=""
+    flatten_target_detail=" root=$root"
+  else
+    if ! compactable_count=$(commits_since_base "$db" "$flatten_base"); then
+      return 1
+    fi
+    case "$compactable_count" in
+      ''|*[!0-9]*)
+        printf 'compact: db=%s commits-since-%s probe returned invalid value=%s\n' \
+          "$db" "$compact_base_tag" "$compactable_count" >&2
+        return 1
+        ;;
+    esac
+    base_detail=" commits_since_base=$compactable_count base=$flatten_base"
+    flatten_target_detail="$base_detail"
+  fi
+
+  if [ "$compactable_count" -lt "$threshold_commits" ]; then
+    if oldgen_has_files "$db"; then
+      printf 'compact: db=%s commits=%s%s below_threshold=%s oldgen_archives=present pending_gc=absent — skip (run "gc dolt compact --gc-only" to reclaim if these archives are orphaned)\n' \
+        "$db" "$count" "$base_detail" "$threshold_commits"
+      return 0
+    fi
+    printf 'compact: db=%s commits=%s%s below_threshold=%s — skip\n' \
+      "$db" "$count" "$base_detail" "$threshold_commits"
+    return 0
+  fi
+
+  # Runs before the HEAD probe below because it may commit, and every commit
+  # hash this run relies on must be captured after it. Skipped under dry-run,
+  # which mutates nothing. The watermark above is an ancestor of anything this
+  # commits, so it stays valid.
+  if [ -z "$dry_run" ]; then
+    version_dirty_dolt_ignore "$db"
   fi
 
   if ! head=$(head_commit "$db"); then
@@ -2694,8 +2966,8 @@ flatten_database() {
   compacted_from_head="$head"
 
   if [ -n "$dry_run" ]; then
-    printf 'compact: db=%s commits=%s root=%s — dry-run (would flatten)\n' \
-      "$db" "$count" "$root"
+    printf 'compact: db=%s commits=%s%s — dry-run (would flatten)\n' \
+      "$db" "$count" "$flatten_target_detail"
     return 0
   fi
 
@@ -2851,8 +3123,8 @@ flatten_database() {
   fi
 
   table_count=$(wc -l < "$preflight_tmp")
-  printf 'compact: db=%s commits=%s root=%s tables=%s — flattening...\n' \
-    "$db" "$count" "$root" "$table_count"
+  printf 'compact: db=%s commits=%s%s tables=%s — flattening...\n' \
+    "$db" "$count" "$flatten_target_detail" "$table_count"
 
   start=$(date +%s)
 
@@ -2866,14 +3138,15 @@ flatten_database() {
   # "unproven" and therefore falls back to the safe quarantine behavior.
   head_before_reset=$(head_commit "$db" || true)
 
-  # Soft-reset to root + commit-everything is the flatten transaction.
-  # Both run in a single dolt sql invocation so the session keeps the
-  # USE selection across the two CALLs.
+  # Soft-reset to the watermark + commit-everything is the flatten
+  # transaction. Both run in a single dolt sql invocation so the session keeps
+  # the USE selection across the two CALLs. History at or before the watermark
+  # is never rewritten.
   reset_rc=0
   reset_err_tmp=$(mktemp)
   dolt_query "$db" "
-    CALL DOLT_RESET('--soft', '$root');
-    CALL DOLT_COMMIT('-Am', 'compaction: flatten history');
+    CALL DOLT_RESET('--soft', '$flatten_base');
+    CALL DOLT_COMMIT('-Am', '$compact_flatten_message');
   " >/dev/null 2>"$reset_err_tmp" || reset_rc=$?
 
   if [ "$reset_rc" -ne 0 ]; then
@@ -2882,7 +3155,7 @@ flatten_database() {
     emit_error_file "$db" "$reset_err_tmp"
     rm -f "$preflight_tmp"
     rm -f "$reset_err_tmp"
-    restore_head_after_flatten_failure "$db" "$head" "$root" || true
+    restore_head_after_flatten_failure "$db" "$head" "$flatten_base" || true
     return 1
   fi
   rm -f "$reset_err_tmp"
@@ -3268,22 +3541,7 @@ bare_gc_database() {
     return 0
   fi
 
-  start=$(date +%s)
-  gc_rc=0
-  gc_err_tmp=$(mktemp)
-  dolt_query "$db" "CALL DOLT_GC()" >/dev/null 2>"$gc_err_tmp" || gc_rc=$?
-  elapsed=$(( $(date +%s) - start ))
-  if [ "$gc_rc" -ne 0 ]; then
-    printf 'compact: db=%s bare-gc failed rc=%s duration=%ss\n' \
-      "$db" "$gc_rc" "$elapsed" >&2
-    emit_error_file "$db" "$gc_err_tmp"
-    rm -f "$gc_err_tmp"
-    return 1
-  fi
-  rm -f "$gc_err_tmp"
-
-  printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
-  return 0
+  run_bare_gc "$db"
 }
 
 # gc_only_database — reclaim orphaned chunks on one database via a full
