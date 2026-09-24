@@ -47,6 +47,7 @@ go_test(
         "bdstore_revision_compat_test.go",
         "bdstore_storage_conformance_test.go",
         "bdstore_test.go",
+        "bdstore_transfer_if_current_test.go",
         "bdtrace_smoke_test.go",
         "bead_database_dirs_internal_test.go",
         "beads_test.go",
