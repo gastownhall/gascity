@@ -1320,10 +1320,11 @@ type BeadWorktreeReapedPayload struct {
 
 // BeadsDiagnostic defines model for BeadsDiagnostic.
 type BeadsDiagnostic struct {
-	BeadsStore          string  `json:"beads_store"`
-	NativeStoreEligible bool    `json:"native_store_eligible"`
-	PreflightGate       *string `json:"preflight_gate,omitempty"`
-	PreflightReason     *string `json:"preflight_reason,omitempty"`
+	BeadsStore          string             `json:"beads_store"`
+	NativeStoreEligible bool               `json:"native_store_eligible"`
+	PreflightGate       *string            `json:"preflight_gate,omitempty"`
+	PreflightReason     *string            `json:"preflight_reason,omitempty"`
+	Proxied             *ProxiedDiagnostic `json:"proxied,omitempty"`
 }
 
 // BindingStatus Lifecycle state of a session binding.
@@ -1658,6 +1659,12 @@ type ConvoyProgress struct {
 type ConvoyRemoveInputBody struct {
 	// Items Bead IDs to remove.
 	Items *[]string `json:"items,omitempty"`
+}
+
+// Cursors defines model for Cursors.
+type Cursors struct {
+	Ignored int64 `json:"ignored"`
+	Main    int64 `json:"main"`
 }
 
 // DeliveryContextRecord defines model for DeliveryContextRecord.
@@ -3177,6 +3184,24 @@ type ProviderUpdateInputBody struct {
 
 	// ReadyDelayMs Milliseconds to wait before probing readiness.
 	ReadyDelayMs *int64 `json:"ready_delay_ms,omitempty"`
+}
+
+// ProxiedDiagnostic defines model for ProxiedDiagnostic.
+type ProxiedDiagnostic struct {
+	Cursors    Cursors              `json:"cursors"`
+	Demoted    *bool                `json:"demoted,omitempty"`
+	Detail     *string              `json:"detail,omitempty"`
+	Endpoint   ProxiedEndpointStamp `json:"endpoint"`
+	Evidence   *string              `json:"evidence,omitempty"`
+	IdlePolicy *string              `json:"idle_policy,omitempty"`
+	Verdict    *string              `json:"verdict,omitempty"`
+}
+
+// ProxiedEndpointStamp defines model for ProxiedEndpointStamp.
+type ProxiedEndpointStamp struct {
+	Generation *string `json:"generation,omitempty"`
+	Pid        *int64  `json:"pid,omitempty"`
+	Port       *int64  `json:"port,omitempty"`
 }
 
 // PublishReceipt defines model for PublishReceipt.
