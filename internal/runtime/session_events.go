@@ -90,3 +90,24 @@ type SessionEvent struct {
 type SessionEventProvider interface {
 	SubscribeSessionEvents(ctx context.Context) (<-chan SessionEvent, error)
 }
+
+// SessionEventCapabilityProvider is implemented by composite providers whose
+// method set alone cannot say whether any wrapped backend supplies session
+// events. A true result requires the provider to be able to satisfy
+// SessionEventProvider with its current backends.
+type SessionEventCapabilityProvider interface {
+	SessionEventProvider
+	SupportsSessionEvents() bool
+}
+
+// SupportsSessionEvents reports whether provider can supply a session-event
+// stream. Direct providers advertise support by implementing
+// SessionEventProvider; composite providers report the capability of their
+// current wrapped backends explicitly.
+func SupportsSessionEvents(provider Provider) bool {
+	if composite, ok := provider.(SessionEventCapabilityProvider); ok {
+		return composite.SupportsSessionEvents()
+	}
+	_, ok := provider.(SessionEventProvider)
+	return ok
+}

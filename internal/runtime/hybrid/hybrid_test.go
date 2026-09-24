@@ -11,6 +11,29 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+var _ runtime.SessionEventCapabilityProvider = (*Provider)(nil)
+
+type sessionEventFake struct{ *runtime.Fake }
+
+func (p *sessionEventFake) SubscribeSessionEvents(context.Context) (<-chan runtime.SessionEvent, error) {
+	return make(chan runtime.SessionEvent), nil
+}
+
+func TestSupportsSessionEventsReportsWrappedCapability(t *testing.T) {
+	plain := runtime.NewFake()
+	evented := &sessionEventFake{Fake: runtime.NewFake()}
+
+	if New(plain, runtime.NewFake(), isRemote).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = true with two plain backends")
+	}
+	if !New(evented, plain, isRemote).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = false with an event-capable local backend")
+	}
+	if !New(plain, evented, isRemote).SupportsSessionEvents() {
+		t.Fatal("SupportsSessionEvents() = false with an event-capable remote backend")
+	}
+}
+
 func isRemote(name string) bool { return strings.Contains(name, "remote-agent") }
 
 type livenessObservationErrorProvider struct {

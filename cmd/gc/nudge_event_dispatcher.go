@@ -137,7 +137,7 @@ func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City, res
 	defer d.mu.Unlock()
 	d.cfg = cfg
 	d.sp = sp
-	_, capable := sp.(runtime.SessionEventProvider)
+	capable := runtime.SupportsSessionEvents(sp)
 	d.eventCapable = capable
 	if !resubscribe {
 		return
@@ -148,10 +148,10 @@ func (d *nudgeEventDispatcher) update(sp runtime.Provider, cfg *config.City, res
 	}
 	d.gen++
 	d.streamGen.Store(0)
-	sep, ok := sp.(runtime.SessionEventProvider)
-	if !ok {
+	if !capable {
 		return
 	}
+	sep := sp.(runtime.SessionEventProvider)
 	ctx, cancel := context.WithCancel(d.parent)
 	events, err := sep.SubscribeSessionEvents(ctx)
 	if err != nil {

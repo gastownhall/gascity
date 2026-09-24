@@ -114,11 +114,11 @@ func (p *sessionEventPump) restart(sp runtime.Provider) {
 	p.streamGen.Store(0)
 	p.observedGen.Store(0)
 	p.lastEventAt.Store(0)
-	sep, ok := sp.(runtime.SessionEventProvider)
-	if !ok {
+	if !runtime.SupportsSessionEvents(sp) {
 		fmt.Fprintf(p.stderr, "%s: provider does not support session events (session liveness stays on patrol polling)\n", p.logPrefix) //nolint:errcheck // best-effort stderr
 		return
 	}
+	sep := sp.(runtime.SessionEventProvider)
 	ctx, cancel := context.WithCancel(p.parent)
 	events, err := sep.SubscribeSessionEvents(ctx)
 	if err != nil {

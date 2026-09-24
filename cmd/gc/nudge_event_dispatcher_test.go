@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -638,6 +639,35 @@ func TestNudgeEventDispatcherActivationAndProviderSwap(t *testing.T) {
 	d.update(evented, &config.City{}, false)
 	if !d.active() || !d.streaming() {
 		t.Fatal("cfg-only update deactivated the dispatcher")
+	}
+}
+
+func TestNudgeEventDispatcherAutoWithoutEventBackendStaysInactive(t *testing.T) {
+	cityPath := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newNudgeEventDispatcher(ctx, cityPath, testWriter(t), "test", gate.ModeUnset)
+	t.Cleanup(func() {
+		cancel()
+		<-d.workerDone
+	})
+
+	wrapped := sessionauto.New(runtime.NewFake(), runtime.NewFake())
+	d.update(wrapped, &config.City{}, true)
+	if d.active() {
+		t.Fatal("active() = true for an auto provider whose backends have no event stream")
+	}
+
+	cr := &CityRuntime{
+		cityPath:    cityPath,
+		cfg:         &config.City{},
+		nudgeEvents: d,
+	}
+	cr.ensureNudgeWakeListener(ctx)
+	if cr.nudgeWakeListener != nil {
+		t.Fatal("wake listener started for an auto provider whose backends have no event stream")
+	}
+	if nudgeDispatcherIsHosting(cityPath) {
+		t.Fatal("wake socket is hosted for an auto provider whose backends have no event stream")
 	}
 }
 

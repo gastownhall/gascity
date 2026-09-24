@@ -175,6 +175,24 @@ func TestSessionEventPumpDeliversThroughAutoProvider(t *testing.T) {
 	})
 }
 
+func TestSessionEventPumpAutoWithoutEventBackendUsesPollingFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var stderr bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pump := newSessionEventPump(ctx, make(chan struct{}, 1), &stderr, "test")
+
+		pump.restart(sessionauto.New(runtime.NewFake(), runtime.NewFake()))
+
+		if pump.streaming() {
+			t.Fatal("streaming() = true for an auto provider whose backends have no event stream")
+		}
+		if got := stderr.String(); !strings.Contains(got, "provider does not support session events") {
+			t.Fatalf("restart logged %q, want the unsupported-provider polling fallback", got)
+		}
+	})
+}
+
 func TestSessionEventPumpLivenessEventsPoke(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		pump, pokeCh, cancel := newTestPump(t)

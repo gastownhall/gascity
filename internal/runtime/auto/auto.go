@@ -431,6 +431,12 @@ func (p *Provider) SleepCapability(name string) runtime.SessionSleepCapability {
 	return runtime.SessionSleepCapabilityDisabled
 }
 
+// SupportsSessionEvents reports whether either wrapped backend supplies a
+// session-event stream.
+func (p *Provider) SupportsSessionEvents() bool {
+	return runtime.SupportsSessionEvents(p.defaultSP) || runtime.SupportsSessionEvents(p.acpSP)
+}
+
 // SubscribeSessionEvents forwards the session-event stream of whichever
 // backend implements runtime.SessionEventProvider. Today only herdr does, so
 // without this method, wrapping an event-capable default backend (e.g.
@@ -443,9 +449,9 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 	dSEP, dok := p.defaultSP.(runtime.SessionEventProvider)
 	aSEP, aok := p.acpSP.(runtime.SessionEventProvider)
 	switch {
-	case dok:
+	case dok && runtime.SupportsSessionEvents(p.defaultSP):
 		return dSEP.SubscribeSessionEvents(ctx)
-	case aok:
+	case aok && runtime.SupportsSessionEvents(p.acpSP):
 		return aSEP.SubscribeSessionEvents(ctx)
 	default:
 		return nil, fmt.Errorf("neither default nor ACP backend implements SubscribeSessionEvents")
