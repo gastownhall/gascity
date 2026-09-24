@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -9642,28 +9643,32 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
-	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
-	for _, key := range githubTokenExecEnvKeys {
+	// bdPinExecEnvKeys are the other deliberately-overridable keys. BD_BIN
+	// carries the workspace bd pin and, since ga-weekw, is projected even when
+	// empty so a stale inherited value is masked. It has never been reserved:
+	// [order.env] BD_BIN already overrode a configured pin before ga-weekw,
+	// and that fix deliberately does not change what an order may override.
+	bdPinExecEnvKeys := []string{"BD_BIN"}
+	deliberatelyOverridable := append(append([]string{}, githubTokenExecEnvKeys...), bdPinExecEnvKeys...)
+	overridable := make(map[string]bool, len(deliberatelyOverridable))
+	for _, key := range deliberatelyOverridable {
 		overridable[key] = true
 	}
 
 	var unreserved []string
 	projectedOverridable := 0
+	projectedBdPin := false
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		if overridable[key] {
-			projectedOverridable++
-			continue
-		}
-		// BD_BIN is projected as the workspace bd pin, and since ga-weekw it
-		// is projected even when empty so a stale inherited value is masked.
-		// It has never been in the reserved guard: [order.env] BD_BIN already
-		// overrode a configured pin before ga-weekw, and the fix deliberately
-		// does not change what an order may override.
-		if key == "BD_BIN" {
+			if slices.Contains(bdPinExecEnvKeys, key) {
+				projectedBdPin = true
+			} else {
+				projectedOverridable++
+			}
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9684,6 +9689,11 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	if projectedOverridable != len(githubTokenExecEnvKeys) {
 		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
 			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
+	}
+	// Same soundness check for the bd pin: with no workspace pin configured
+	// here, BD_BIN must still be projected (empty) to mask an inherited value.
+	if !projectedBdPin {
+		t.Fatalf("BD_BIN not projected into order exec env; the empty pin must mask an inherited BD_BIN (ga-weekw). env=%v", envSlice)
 	}
 }
 
