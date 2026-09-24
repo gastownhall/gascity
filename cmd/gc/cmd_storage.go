@@ -416,15 +416,10 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	// returned on, because it is the moment an operator most needs the rest of
 	// the readout.
 	plan, planErr := resolveCityStoragePlan(request.CityPath, request.Cfg)
+	exitCode := 0
 	if planErr != nil {
 		fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", planErr) //nolint:errcheck // best-effort stdout
-	}
-	// exitServing folds that refusal into every otherwise-successful return.
-	exitServing := func() int {
-		if planErr != nil {
-			return 1
-		}
-		return 0
+		exitCode = 1
 	}
 
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
@@ -465,7 +460,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			switch report.Outcome {
 			case infraMigrationConverged:
 				fmt.Fprintln(stdout, "born-split: clean — the work store holds no infrastructure bead, so the binding may serve.") //nolint:errcheck // best-effort stdout
-				return exitServing()
+				return exitCode
 			case infraMigrationBornSplitBlocked:
 				fmt.Fprintf(stdout, "born-split: BLOCKED — the work store holds %d infrastructure bead(s) the binding cannot read: %s\n", //nolint:errcheck // best-effort stdout
 					len(report.Stranded), strings.Join(report.Stranded, ", "))
@@ -476,7 +471,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			}
 		}
 		fmt.Fprintln(stdout, "binding: none — every class is served by the work store, and nothing migrates.") //nolint:errcheck // best-effort stdout
-		return exitServing()
+		return exitCode
 	}
 	fmt.Fprintf(stdout, "binding: %s\n  database: %s\n  marker:   %s\n  manifest: %s\n", //nolint:errcheck // best-effort stdout
 		target.Binding, target.Database, target.MarkerPath(), target.ManifestPath())
@@ -533,7 +528,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	if !recorded {
 		fmt.Fprintln(stdout, "converged: yes (no proven-copy manifest, so stranded-write detection is off for this city)") //nolint:errcheck // best-effort stdout
-		return exitServing()
+		return exitCode
 	}
 	gap, err := classifyInfraContainmentGap(request.CityPath, target, proven)
 	if err != nil {
@@ -551,7 +546,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
-	return exitServing()
+	return exitCode
 }
 
 // reportBindingRelics prints how many beads the binding still holds under ids
