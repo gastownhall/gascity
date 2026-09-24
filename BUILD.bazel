@@ -231,6 +231,7 @@ filegroup(
         "//internal/beads/contract:bazel_repo_srcs",
         "//internal/beads/exec:bazel_repo_srcs",
         "//internal/beads/proxyendpoint:bazel_repo_srcs",
+        "//internal/beads/proxyendpoint/proxyendpointtest:bazel_repo_srcs",
         "//internal/beads/splittest:bazel_repo_srcs",
         "//internal/bootstrap:bazel_repo_srcs",
         "//internal/bootstrap/packs/core:bazel_repo_srcs",

@@ -482,7 +482,15 @@ jobs:
   # evidence worth paying for. M5-legacy-gc-managed costs nothing today (it
   # skips, see below) and is listed so the gap stays visible in the log rather
   # than being quietly forgotten. M2, the external shapes (M3a, M3b, M4), M6
-  # and M7 are left to a fuller scheduled run.
+  # and M7 run in NO job: this comment used to leave them to "a fuller
+  # scheduled run", and no such run exists (nightly.yml runs no matrix). That
+  # includes their flag-on native lanes and every non-proxied shape's flag-off
+  # payload. What stands in for M2's regression fence — the flag changes
+  # nothing for a scope that is not proxied-server, and never consults the
+  # proxied opener for one — is the unit test
+  # TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone
+  # (internal/beads), which the unit jobs run. Adding a scheduled full-matrix
+  # run needs those rows qualified on a runner first.
   #
   # M5 and the two migration tests need a gc from before the ownership journal.
   # Building one from the v1.4.1 tag was tried and does not work: the fixture
@@ -493,6 +501,16 @@ jobs:
   # for now these skip on their own GC_REQUIRE_ACCEPTANCE_LEGACY_GC switch
   # rather than the tooling one, and the skip is named in the job summary so it
   # reads as a known gap instead of a pass.
+  #
+  # Budget (round3 D-F17): the step -timeouts sum to 75 minutes (30 + 15 + 30)
+  # under the 90-minute job cap, leaving 15 for checkout, setup, the bd build
+  # and the test binary's compile. They used to sum to 115 (35 + 15 + 30 + 35),
+  # so a slow-but-live run was cancelled by the job timeout — losing the
+  # `--- FAIL` line and the tee'd log the skip report reads — instead of being
+  # reported by the test timeout. Measured on a loaded 32-core box:
+  # TestBeadsProxiedDefault 13-15 min, AC-X ~11 min, M1+M5 ~9.5 min; CI
+  # runners are faster. The proxied-native lifecycle and safety rows moved to
+  # their own job below.
   beads-topology-acceptance:
     name: Beads / topology acceptance
     needs:
@@ -554,7 +572,7 @@ jobs:
       - name: Proxied-default acceptance
         run: |
           set -euo pipefail
-          go test -tags acceptance_a -timeout 35m -count=1 -v \
+          go test -tags acceptance_a -timeout 30m -count=1 -v \
             -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
             | tee "${RUNNER_TEMP}/proxied-default.log"
       - name: Migration acceptance (AC-X)
@@ -591,6 +609,99 @@ jobs:
               echo "GC_ACCEPTANCE_LEGACY_GC_BIN is unset: nothing builds a pre-journal gc yet,"
               echo "so M5 and the two migration tests cannot run. Every other skip reason is"
               echo "fatal here under GC_REQUIRE_ACCEPTANCE_TOOLING."
+            else
+              echo "None."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The proxied-native lane's evidence base, in its own job (round3 D-F17).
+  # TestProxiedNativeLifecycle and TestProxiedNativeSafety carry
+  # //go:build acceptance_a and were once selected by no -run expression in any
+  # job (council pr2 C-F1), so everything they prove was a local one-off: the
+  # per-crash-shape ping and recover budgets, foreign-root's "0 pings, 0 dolt
+  # stop", the no-spawn positive control, both no-migrate rows (the
+  # BD_ALLOW_REMOTE_MIGRATE consent fence) and the author-at-commit pin.
+  #
+  # They ran as a fourth step of the topology job, which pushed that job's step
+  # timeouts past its own cap. They get their own runner for a second reason
+  # too: these rows kill processes, and one deliberately corrupts bd's stop
+  # bookkeeping, so they should not share a machine with the topology shapes.
+  # Same path filter, same bd build and verify steps as the topology job, and
+  # an honest budget: one 45-minute test step under a 60-minute job cap (the
+  # two tests measured ~4 and ~2 minutes on a loaded box).
+  beads-proxied-native-acceptance:
+    name: Beads / proxied-native acceptance
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads_topology == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 60
+    env:
+      DOLT_VERSION: "2.1.7"
+      GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
+      # exactly as the topology job does.
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ""
+          install-claude-cli: "false"
+      - name: Resolve bd current pin
+        id: bd
+        run: |
+          set -euo pipefail
+          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd supports proxied-server
+        run: |
+          set -euo pipefail
+          bd version
+          if ! bd init --help | grep -q -- --proxied-server; then
+            echo "::error::bd at $(command -v bd) has no --proxied-server support" >&2
+            exit 1
+          fi
+          dolt version
+      - name: Proxied-native lifecycle and safety
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 45m -count=1 -v \
+            -run 'TestProxiedNativeLifecycle$|TestProxiedNativeSafety$' \
+            ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/proxied-native.log"
+      - name: Report remaining skips
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          skips="$(cat "${RUNNER_TEMP}"/*.log 2>/dev/null | grep -E '^ *--- SKIP:' | sort -u || true)"
+          {
+            echo "## Beads proxied-native acceptance"
+            echo
+            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            echo
+            echo "### Skipped"
+            echo
+            if [ -n "$skips" ]; then
+              echo '```'
+              echo "$skips"
+              echo '```'
             else
               echo "None."
             fi
@@ -1816,6 +1927,7 @@ jobs:
       - ci-preflight
       - ci-integration
       - beads-topology-acceptance
+      - beads-proxied-native-acceptance
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
@@ -1842,8 +1954,10 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           allow_skipped = {
               # Path-gated on the beads_topology filter: skipping on a PR that
-              # touches no Dolt/beads path is the expected pass case.
+              # touches no Dolt/beads path is the expected pass case. The
+              # proxied-native job shares that filter (round3 D-F17).
               "beads-topology-acceptance",
+              "beads-proxied-native-acceptance",
               "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",

@@ -18,6 +18,7 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,16 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		t.Run("doctor-after-start", func(t *testing.T) {
 			assertTopologyDoctor(t, run, nil, "after start")
 		})
+
+		// The flag-on lane, for the shapes that opt in. Registered only when the
+		// shape declares an expectation, so the matrix reports no skips: a skip
+		// in a lane whose whole job is "this shape is unchanged" is
+		// indistinguishable from a pass in a job summary.
+		if run.Topology.CityStoreNativeLane != nil {
+			t.Run("native-lane", func(t *testing.T) {
+				assertTopologyNativeLane(t, run)
+			})
+		}
 
 		t.Run("stop-quiescent", func(t *testing.T) {
 			assertStopRetiresTheScope(t, run, rigDir)
@@ -211,6 +222,13 @@ func assertTopologyDoctor(t *testing.T, run *helpers.TopologyRun, allowedFailure
 	var report doctorReport
 	lastJSONLine(t, out, &report)
 
+	// The store this shape opened, in the lane this run is in. It is read from
+	// the SAME doctor output the check census below reads, so the flag-off lane
+	// costs nothing extra, and it is asserted on payload FIELDS rather than on
+	// the message — the message is the operator's line and is free to change,
+	// these are the contract automation reads.
+	assertTopologyBeadsStore(t, report, run.Topology.CityStore, label)
+
 	allowed := make(map[string]bool, len(allowedFailures)+len(run.Topology.DoctorGaps))
 	for _, name := range allowedFailures {
 		allowed[name] = true
@@ -257,6 +275,105 @@ func assertTopologyDoctor(t *testing.T, run *helpers.TopologyRun, allowedFailure
 	}
 	t.Fatalf("gc doctor on %s reported %d unexpected failure(s) and %d bead-topology warning(s), want none",
 		label, failures, topologyWarnings)
+}
+
+// assertTopologyNativeLane re-runs the real `gc doctor --json` front door with
+// GC_BEADS_PROXIED_NATIVE on and asserts the shape's flag-on expectation.
+//
+// One variable different, same city, same bd, same PATH. That is what makes the
+// two payloads comparable at all: a lane built on a second city would be
+// measuring two cities.
+//
+// It also re-asserts the flag-OFF payload immediately afterwards, on the same
+// city and in the same run. On a proxied shape that pair is the whole claim —
+// BdStore and NativeDoltStore out of one city, seconds apart, one variable
+// different — and it is what rules out the reading that the flag-off expectation
+// only held because the city had not been touched yet. On the non-proxied
+// regression shape the two expectations are deliberately identical, so the pair
+// says less there: what that shape contributes is that turning the flag on
+// changes nothing off its own lane, which is a claim about the first assertion
+// and not about the second.
+func assertTopologyNativeLane(t *testing.T, run *helpers.TopologyRun) {
+	t.Helper()
+	topo := run.Topology
+	lane := run.NativeLaneEnv()
+
+	out, _ := helpers.RunGC(lane, run.City.Dir, "doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
+	var report doctorReport
+	lastJSONLine(t, out, &report)
+	assertTopologyBeadsStore(t, report, *topo.CityStoreNativeLane, topo.Name+" city, flag on")
+
+	out, _ = run.City.GC("doctor", "--json", "--check-timeout", topologyDoctorCheckTimeout)
+	var offReport doctorReport
+	lastJSONLine(t, out, &offReport)
+	assertTopologyBeadsStore(t, offReport, topo.CityStore, topo.Name+" city, flag off (re-checked)")
+}
+
+// assertTopologyBeadsStore checks one `beads-store` payload against a shape's
+// expectation for one lane.
+//
+// Every field is optional: a shape states only what its topology determines, and
+// an empty field is not asserted. The one exception is deliberate —
+// RequireNoVerdict, because "there is no verdict" is itself a real expectation
+// for a served native open and an empty Verdict string cannot express it.
+func assertTopologyBeadsStore(t *testing.T, report doctorReport, want helpers.BeadsStoreExpectation, label string) {
+	t.Helper()
+	if want == (helpers.BeadsStoreExpectation{}) {
+		return
+	}
+	var result *doctorCheckResult
+	for i := range report.Results {
+		if report.Results[i].Name == "beads-store" {
+			result = &report.Results[i]
+			break
+		}
+	}
+	if result == nil {
+		// A shape whose store check did not run at all has nothing to compare.
+		// That is a finding when the shape expects a store and noise when it does
+		// not, so it is reported rather than silently skipped.
+		t.Errorf("%s: gc doctor reported no beads-store check, so %+v could not be checked", label, want)
+		return
+	}
+	if len(result.Payload) == 0 {
+		t.Errorf("%s: beads-store carries no payload (message %q)", label, result.Message)
+		return
+	}
+	var payload beadsStorePayloadDoc
+	if err := json.Unmarshal(result.Payload, &payload); err != nil {
+		t.Fatalf("%s: parse beads-store payload: %v\n%s", label, err, result.Payload)
+	}
+
+	if want.Store != "" && payload.Store != want.Store {
+		t.Errorf("%s: beads-store payload store = %q, want %q (%s)", label, payload.Store, want.Store, describeProxiedAccount(payload))
+	}
+	if want.PreflightGate != "" && payload.PreflightGate != want.PreflightGate {
+		t.Errorf("%s: preflight_gate = %q, want %q — doctor's own matcher and this matrix both key on it, so it must not move when the proxied lane declines",
+			label, payload.PreflightGate, want.PreflightGate)
+	}
+	if want.RefuseProxiedAccount && payload.Proxied != nil {
+		t.Errorf("%s: the payload carries a proxied account it must not have: %s", label, describeProxiedAccount(payload))
+	}
+	if want.RequireProxiedAccount && payload.Proxied == nil {
+		t.Errorf("%s: the payload carries no proxied account (message %q)", label, result.Message)
+		return
+	}
+	if payload.Proxied == nil {
+		return
+	}
+	if want.RequireNoVerdict && payload.Proxied.Verdict != "" {
+		t.Errorf("%s: the lane reported verdict %q; a verdict means it declined", label, payload.Proxied.Verdict)
+	}
+	if want.Verdict != "" && payload.Proxied.Verdict != want.Verdict {
+		t.Errorf("%s: verdict = %q, want %q", label, payload.Proxied.Verdict, want.Verdict)
+	}
+	if want.Evidence != "" && payload.Proxied.Evidence != want.Evidence {
+		t.Errorf("%s: evidence = %q, want %q — a pin on weaker evidence is a pin that a pid reuse can defeat",
+			label, payload.Proxied.Evidence, want.Evidence)
+	}
+	if want.IdlePolicyPrefix != "" && !strings.HasPrefix(payload.Proxied.IdlePolicy, want.IdlePolicyPrefix) {
+		t.Errorf("%s: idle_policy = %q, want one starting %q", label, payload.Proxied.IdlePolicy, want.IdlePolicyPrefix)
+	}
 }
 
 // assertDeferredInit pins the one thing GC_DOLT=skip promises: init records

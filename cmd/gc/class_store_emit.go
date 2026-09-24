@@ -676,6 +676,18 @@ func (s *emittingClassStore) Count(ctx context.Context, query beads.ListQuery, e
 	return counter.Count(ctx, query, excludeTypes...)
 }
 
+// ReadOnly forwards the inner store's mutation fence.
+//
+// A store that has none answers false, which is the honest answer for every
+// engine that cannot be latched. Swallowing the question instead — the state
+// this wrapper was in until the proxied-native latch gave *beads.NativeDoltStore
+// the method — would make a wrapped read-only handle report itself writable,
+// which is the one direction this answer must never be wrong in.
+func (s *emittingClassStore) ReadOnly() bool {
+	reporter, ok := s.Store.(beads.ReadOnlyReporter)
+	return ok && reporter.ReadOnly()
+}
+
 func (s *emittingClassStore) WaitForParentProjection(ctx context.Context, parentID, childID, scope string) error {
 	waiter, ok := s.Store.(beads.ParentProjectionWaiter)
 	if !ok {
