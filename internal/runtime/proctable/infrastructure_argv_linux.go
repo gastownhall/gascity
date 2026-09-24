@@ -23,3 +23,11 @@ func rootArgv(pid int) ([]string, error) {
 	}
 	return pidutil.NormalizeArgv(strings.Split(trimmed, "\x00")), nil
 }
+
+func rootStartIdentity(pid int) string {
+	_, _, startTime, ok, err := readProcStatIdentity(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
+	if err != nil || !ok {
+		return ""
+	}
+	return startTime
+}

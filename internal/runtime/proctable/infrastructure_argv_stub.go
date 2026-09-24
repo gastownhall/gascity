@@ -9,3 +9,5 @@ import "errors"
 func rootArgv(int) ([]string, error) {
 	return nil, errors.New("proctable: argv unavailable on this platform")
 }
+
+func rootStartIdentity(int) string { return "" }

@@ -8,3 +8,11 @@ import "github.com/gastownhall/gascity/internal/pidutil"
 func rootArgv(pid int) ([]string, error) {
 	return pidutil.Cmdline(pid)
 }
+
+func rootStartIdentity(pid int) string {
+	identity, err := ProcessIdentity(pid)
+	if err != nil {
+		return ""
+	}
+	return identity
+}

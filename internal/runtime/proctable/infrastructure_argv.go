@@ -52,3 +52,16 @@ func IsCityInfrastructureRoot(pid int) bool {
 	}
 	return IsCityInfrastructureArgv(argv)
 }
+
+// RootStartIdentity returns pid's start-time token as the scanner would read
+// it, or "" when it cannot be read. Callers use it to tell a recycled pid from
+// the same process, e.g. to report a fenced root once rather than every sweep.
+func RootStartIdentity(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	if err := liveScanGuard(); err != nil {
+		return ""
+	}
+	return rootStartIdentity(pid)
+}
