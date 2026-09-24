@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
@@ -339,6 +340,20 @@ func (w *routeChangeClearingStore) Update(id string, opts UpdateOpts) error {
 // bead's pre-write state, read to recover its prior gc.routed_to and
 // gc.root_bead_id before the routing write overwrote them.
 //
+// An empty oldTarget is ambiguous: it covers both a genuinely new route
+// (e.g. carriedPoolRoute in cmd/gc/route_recovery.go, restoring a bead's
+// legacy gc.run_target to a potentially different executor) and a restore
+// of the route to the SAME executor the bead is already stamped for (e.g.
+// restoreDetachedOrphanRoute in cmd/gc/detached_orphan_lane.go, resolved
+// from the bead's own session). Since before.Metadata's gc.session_name is
+// set from the executor's qualified identity via
+// agent.SanitizeQualifiedNameForSession, decoding it back with
+// UnsanitizeQualifiedNameFromSession and comparing (normalized) against
+// newTarget distinguishes the two: a match means newTarget is the same
+// executor already implied by the existing stamps, so this is a restore,
+// not a genuine reroute, and the stamps must survive it (ga-u5okvo verdict
+// b, refined).
+//
 // A clear failure is logged and swallowed, never returned: the routing write
 // this decorator delegates to has already succeeded by the time
 // clearIfGenuine runs, and that write must never be reported as failed
@@ -346,6 +361,15 @@ func (w *routeChangeClearingStore) Update(id string, opts UpdateOpts) error {
 func (w *routeChangeClearingStore) clearIfGenuine(id string, before Bead, oldTarget, newTarget string) {
 	if w.normalizer(oldTarget) == w.normalizer(newTarget) {
 		return
+	}
+
+	if oldTarget == "" {
+		if stamped := before.Metadata[beadmeta.SessionNameMetadataKey]; stamped != "" {
+			bridged := agent.UnsanitizeQualifiedNameFromSession(stamped)
+			if w.normalizer(bridged) == w.normalizer(newTarget) {
+				return
+			}
+		}
 	}
 
 	clearStamps := map[string]string{

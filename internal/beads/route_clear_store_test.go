@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -150,6 +151,117 @@ func TestRouteChangeClearingStore_SetMetadata_NormalizedEqual_NoOp(t *testing.T)
 		t.Fatalf("SetMetadata: %v", err)
 	}
 	assertStampsIntact(t, wrapped, b.ID)
+}
+
+// testStampedExecutor is the pool-route identity gc.session_name encodes in
+// the empty-oldTarget tests below (ga-34b0ps, implementing the ga-u5okvo
+// ruling, verdict (b) refined -- MPR send-back round 2 on #6217).
+const testStampedExecutor = "gascity/builder"
+
+// seedUnroutedBeadWithSession creates a bead carrying no gc.routed_to (the
+// empty-oldTarget shape both Lane 1 and Lane 2 restore into) but already
+// stamped with the three executor-identity fields, as a bead mid-flight
+// through a real session would be. sessionName is stored as-is (already in
+// session-name/tmux-safe shape); callers encode via
+// agent.SanitizeQualifiedNameForSession when they need it to decode back to a
+// specific qualified identity.
+func seedUnroutedBeadWithSession(t *testing.T, s beads.Store, sessionName string) beads.Bead {
+	t.Helper()
+	created, err := s.Create(beads.Bead{
+		Title: "unrouted, session-stamped bead",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      "",
+			beadmeta.SessionNameMetadataKey:   sessionName,
+			beadmeta.WorkDirMetadataKey:       "worktrees/stamped-executor",
+			beadmeta.LegacyWorkDirMetadataKey: "worktrees/stamped-executor-legacy",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return created
+}
+
+// TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_RestoresSameExecutor_NoOp
+// pins the Lane 1 shape (cmd/gc/detached_orphan_lane.go:restoreDetachedOrphanRoute /
+// sweepDetachedHandoffOrphans): a failed done sequence cleared gc.routed_to
+// (and assignee) together, leaving the bead's gc.session_name stamp as the
+// only trace of who was working it. Recovery re-derives the SAME pool route
+// from that bead's own session bead and writes it back to gc.routed_to. Before
+// this fix, clearIfGenuine treated any empty oldTarget as automatically
+// "genuine" (normalizer("") can never equal normalizer(non-empty)), so this
+// restore wiped the very stamps it was trying to preserve. The fix bridges
+// the stamped session-name-shape identity back to pool-route shape via
+// agent.UnsanitizeQualifiedNameFromSession (existing helper, per the
+// identity-separator-contract-v1 doc) before comparing against newTarget.
+func TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_RestoresSameExecutor_NoOp(t *testing.T) {
+	mem := beads.NewMemStore()
+	wrapped := beads.WithRouteChangeClearing(mem, identityNormalizer)
+
+	sessionName := agent.SanitizeQualifiedNameForSession(testStampedExecutor)
+	b := seedUnroutedBeadWithSession(t, wrapped, sessionName)
+
+	if err := wrapped.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, testStampedExecutor); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := wrapped.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != testStampedExecutor {
+		t.Errorf("gc.routed_to: want %q, got %q", testStampedExecutor, got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+	assertStampsIntact(t, wrapped, b.ID)
+}
+
+// TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_GenuineMismatch_ClearsStamps
+// pins the Lane 2 shape (cmd/gc/route_recovery.go:carriedPoolRoute /
+// recoverUnroutedWorkRoutes): gc.routed_to is restored from the bead's own
+// carried gc.run_target, a legacy/declared field independent of whichever
+// specific session last touched it. When that recovered route genuinely
+// differs from the executor the bead's gc.session_name stamp implies, the
+// stamps must still clear -- this is a real handoff, not a same-executor
+// restore, and is the pre-existing, correct behavior this fix must not
+// regress while fixing Lane 1 above.
+func TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_GenuineMismatch_ClearsStamps(t *testing.T) {
+	mem := beads.NewMemStore()
+	wrapped := beads.WithRouteChangeClearing(mem, identityNormalizer)
+
+	sessionName := agent.SanitizeQualifiedNameForSession(testStampedExecutor)
+	b := seedUnroutedBeadWithSession(t, wrapped, sessionName)
+
+	if err := wrapped.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, testNewTarget); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+
+	got, err := wrapped.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != testNewTarget {
+		t.Errorf("gc.routed_to: want %q, got %q", testNewTarget, got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+	assertStampsCleared(t, wrapped, b.ID)
+}
+
+// TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_NoSessionNameStamped_ClearsStamps
+// guards against an overly broad fix: an empty oldTarget must NOT become a
+// blanket "never clear" carve-out. When the bead carries no gc.session_name
+// at all -- the ordinary first-ever routing of a fresh bead, still the
+// dominant real-world empty-oldTarget case -- there is no stamped identity to
+// bridge against, so clearIfGenuine has nothing to compare and must fall
+// through to its pre-existing unconditional clear.
+func TestRouteChangeClearingStore_SetMetadata_EmptyOldTarget_NoSessionNameStamped_ClearsStamps(t *testing.T) {
+	mem := beads.NewMemStore()
+	wrapped := beads.WithRouteChangeClearing(mem, identityNormalizer)
+
+	b := seedUnroutedBeadWithSession(t, wrapped, "")
+
+	if err := wrapped.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, testNewTarget); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	assertStampsCleared(t, wrapped, b.ID)
 }
 
 func TestRouteChangeClearingStore_SetMetadataBatch_GenuineReroute_ClearsStamps(t *testing.T) {
