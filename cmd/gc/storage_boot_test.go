@@ -2199,6 +2199,31 @@ func TestStorageStatusCarriesBootPlanRefusalOnConfiguredPaths(t *testing.T) {
 	}
 }
 
+// TestStorageStatusCarriesBootPlanRefusalAfterCutover pins the served SQLite
+// arm. That arm has its own final return after the convergence census, so the
+// all-work assertion above cannot catch it accidentally dropping exitCode.
+func TestStorageStatusCarriesBootPlanRefusalAfterCutover(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	stubInfraControllerPing(t, 0)
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 after cutover for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "converged: yes") {
+		t.Errorf("plan refusal suppressed the served binding census:\n%s", stdout.String())
+	}
+}
+
 // TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt covers the HQ pin
 // for a city that never declares a workspace prefix, which is the ordinary
 // case: [workspace] prefix is not in the default city.toml.
