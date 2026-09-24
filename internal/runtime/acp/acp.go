@@ -1097,10 +1097,12 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 
 // isPipeWriteError reports whether err originated from writing to a closed
 // stdin pipe — the signal that the agent process exited between our alive()
-// check and the write. Other sendRequest failures (marshal errors, etc.) are
-// unrelated to lifecycle and should surface immediately.
+// check and the write. os.ErrClosed covers the window where exec.Cmd.Wait has
+// already closed the parent's StdinPipe but sc.done is not yet closed. Other
+// sendRequest failures (marshal errors, etc.) are unrelated to lifecycle and
+// should surface immediately.
 func isPipeWriteError(err error) bool {
-	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE)
+	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 }
 
 // terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
