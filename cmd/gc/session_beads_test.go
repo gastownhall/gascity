@@ -3764,6 +3764,74 @@ func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
 	}
 }
 
+// TestSyncSessionBeads_PoolMintRespectsIdentityLease pins the identity lease on
+// the sync lane's pool mint. It mints bead-scoped names like the planner does,
+// so it must not mint a second generation beside an open, unconfirmed create
+// for the same slot identity (whose runtime teardown may not be confirmed yet,
+// ga-vcjr9). Once that row closes, the same desired entry mints normally.
+func TestSyncSessionBeads_PoolMintRespectsIdentityLease(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+	instance := "pack/worker-1"
+	held, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + instance},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "worker-mc-held",
+			"agent_name":           instance,
+			"pool_slot":            "1",
+			"state":                string(session.StateFailedCreate),
+			"pending_create_claim": "true",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := map[string]TemplateParams{
+		"legacy-worker-1": {
+			TemplateName: template,
+			InstanceName: instance,
+			PoolSlot:     1,
+			Command:      "codex",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, true)
+	for _, b := range allSessionBeads(t, store) {
+		if b.ID != held.ID && b.Status != "closed" {
+			t.Fatalf("sync lane minted %s (session_name %q) beside the open unconfirmed create %s; stderr:\n%s", b.ID, b.Metadata["session_name"], held.ID, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "not creating pool session for "+instance) {
+		t.Fatalf("stderr does not explain the held slot:\n%s", stderr.String())
+	}
+
+	if err := store.Close(held.ID); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, true)
+	minted := 0
+	for _, b := range allSessionBeads(t, store) {
+		if b.ID == held.ID || b.Status == "closed" {
+			continue
+		}
+		minted++
+		if got, want := b.Metadata["session_name"], PoolSessionName(template, b.ID); got != want {
+			t.Fatalf("session_name = %q, want %q", got, want)
+		}
+	}
+	if minted != 1 {
+		t.Fatalf("minted %d pool rows after the holder closed, want 1; stderr:\n%s", minted, stderr.String())
+	}
+}
+
 func TestSyncSessionBeads_DoesNotCompactLivePoolSlotIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 17, 30, 0, 0, time.UTC)}

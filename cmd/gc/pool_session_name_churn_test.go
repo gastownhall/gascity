@@ -372,3 +372,120 @@ func sortedNameSet(m map[string]struct{}) []string {
 	sort.Strings(out)
 	return out
 }
+
+// createBeadScopedPoolRowWithBox mints a bead-scoped pool row and provisions its
+// box without any attribution metadata (GC_SESSION_ID / GC_INSTANCE_TOKEN),
+// the shape of an exec pack without get-meta or a k8s pod whose tmux is not up.
+func createBeadScopedPoolRowWithBox(t *testing.T, store beads.Store, sp *runtime.Fake, now time.Time) sessionpkg.Info {
+	t.Helper()
+	info, err := createPoolSessionBeadWithAlias(store, poolChurnTemplate, nil, newSessionBeadSnapshot(nil), now, poolChurnIdentity(), "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !infoOwnsPoolSessionName(info) {
+		t.Fatalf("fixture precondition: session_name %q is not bead-scoped", info.SessionNameMetadata)
+	}
+	if err := sp.Start(context.Background(), info.SessionNameMetadata, runtime.Config{}); err != nil {
+		t.Fatalf("provisioning box: %v", err)
+	}
+	return info
+}
+
+func successfulPoolStartResult(info sessionpkg.Info, now time.Time) startResult {
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	return startResult{
+		prepared: preparedStart{candidate: startCandidate{
+			info: info,
+			tp:   TemplateParams{SessionName: name, TemplateName: poolChurnTemplate, Command: "true"},
+		}},
+		outcome:  "success",
+		started:  now,
+		finished: now,
+	}
+}
+
+// TestCommitAsyncStart_CanceledSuccessHoldsBeadScopedPoolRowWhenTeardownFails
+// covers the controller-shutdown path: Start succeeded, but the commit context
+// was canceled, so the pending create is rolled back. For a bead-scoped pool row
+// that rollback must go through the teardown gate like every other close of an
+// unconfirmed create: while Stop fails the row stays OPEN with its claim (the
+// lease-expired rollback retries the teardown); once Stop works the box is gone
+// and the row closes.
+func TestCommitAsyncStart_CanceledSuccessHoldsBeadScopedPoolRowWhenTeardownFails(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	now := time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	info := createBeadScopedPoolRowWithBox(t, store, sp, now)
+	name := info.SessionNameMetadata
+	sp.StopErrors[name] = errors.New("apiserver unreachable")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if commitAsyncStartResultWithContext(ctx, successfulPoolStartResult(info, now), sp, store, clk, events.Discard, 0, io.Discard, io.Discard, nil) {
+		t.Fatal("canceled async success reported committed")
+	}
+	got, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("row %s closed on a canceled commit although its runtime teardown failed; box %q is now unaddressable", info.ID, name)
+	}
+	if got.Metadata["pending_create_claim"] != boolMetadata(true) {
+		t.Fatalf("held row pending_create_claim = %q, want kept so the lease-expired rollback retries the teardown", got.Metadata["pending_create_claim"])
+	}
+	if !sp.IsRunning(name) {
+		t.Fatalf("fixture: box %q should still be up while Stop fails", name)
+	}
+
+	delete(sp.StopErrors, name)
+	commitAsyncStartResultWithContext(ctx, successfulPoolStartResult(info, now), sp, store, clk, events.Discard, 0, io.Discard, io.Discard, nil)
+	if got, _ := store.Get(info.ID); got.Status != "closed" {
+		t.Fatalf("row status after a confirmed teardown = %q, want closed", got.Status)
+	}
+	if sp.IsRunning(name) {
+		t.Fatalf("box %q survived the canceled-commit rollback", name)
+	}
+}
+
+// TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime covers
+// the race where the lease-expired rollback closed a bead-scoped pool row while
+// its async Start was still running, and the Start then brought the box up. The
+// successor runs under a new name, so this box must be stopped by name even
+// though its attribution metadata is unreadable. A box that positively carries a
+// different instance token (a newer generation of the same bead) is left alone.
+func TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime(t *testing.T) {
+	now := time.Date(2026, 8, 15, 0, 0, 1, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+
+	t.Run("unattributed box of a closed row is stopped", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		info := createBeadScopedPoolRowWithBox(t, store, sp, now)
+		rollbackPendingCreate(info, sessionFrontDoor(store), now, io.Discard)
+		if got, _ := store.Get(info.ID); got.Status != "closed" {
+			t.Fatalf("fixture: row status = %q, want closed by the rollback", got.Status)
+		}
+		if commitAsyncStartResultWithContext(context.Background(), successfulPoolStartResult(info, now), sp, store, clk, events.Discard, 0, io.Discard, io.Discard, nil) {
+			t.Fatal("stale async start against a closed row reported committed")
+		}
+		if sp.IsRunning(info.SessionNameMetadata) {
+			t.Fatalf("box %q of closed row %s survived; nothing will address it again", info.SessionNameMetadata, info.ID)
+		}
+	})
+
+	t.Run("box carrying a newer instance token is kept", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		info := createBeadScopedPoolRowWithBox(t, store, sp, now)
+		if err := sp.SetMeta(info.SessionNameMetadata, "GC_INSTANCE_TOKEN", "newer-generation-token"); err != nil {
+			t.Fatalf("SetMeta: %v", err)
+		}
+		rollbackPendingCreate(info, sessionFrontDoor(store), now, io.Discard)
+		commitAsyncStartResultWithContext(context.Background(), successfulPoolStartResult(info, now), sp, store, clk, events.Discard, 0, io.Discard, io.Discard, nil)
+		if !sp.IsRunning(info.SessionNameMetadata) {
+			t.Fatalf("box %q positively owned by another generation was stopped", info.SessionNameMetadata)
+		}
+	})
+}

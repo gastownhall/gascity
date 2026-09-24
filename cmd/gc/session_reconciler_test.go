@@ -14106,3 +14106,84 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_RespawnsCanonicalNextTic
 		t.Fatalf("work assignee = %q, want %q (the respawned canonical must find its work)", gotWork.Assignee, identity)
 	}
 }
+
+// TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode is the
+// upgrade guard for the startup-health re-key. An rc-era build ran the claude
+// canonical singleton under the bare name "claude" and keyed its episode there;
+// v1.5.0 keys it on "claude-pool". Without clearing the legacy key on a
+// successful start, a tripped "claude" episode would stay in gc doctor's
+// startup-health report forever although the pool starts fine.
+func TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode(t *testing.T) {
+	seedTripped := func(t *testing.T, is *sessionpkg.Store, key string, now time.Time) {
+		t.Helper()
+		if err := is.SaveStartupHealthEpisode(sessionpkg.StartupHealthEpisode{
+			SessionName:      key,
+			ConsecutiveCount: defaultMaxWakeAttempts,
+			FirstFailureAt:   now.Add(-time.Hour),
+			LastFailureAt:    now.Add(-time.Minute),
+			Kind:             sessionpkg.FailureKindOther,
+			QuarantinedUntil: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("SaveStartupHealthEpisode: %v", err)
+		}
+	}
+
+	t.Run("successful start clears the rc-era bare-identity episode", func(t *testing.T) {
+		store := beads.NewMemStore()
+		clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+		sp := runtime.NewFake()
+		cfg := poolTeardownHoldCity()
+		is := sessionpkg.NewStore(beads.SessionStore{Store: store})
+		seedTripped(t, is, "claude", clk.Now())
+
+		var stderr bytes.Buffer
+		for tick := 0; tick < 3 && len(fakeStartNames(sp)) == 0; tick++ {
+			runPoolTeardownHoldTick(t, cfg, sp, store, clk, &stderr)
+		}
+		starts := fakeStartNames(sp)
+		if len(starts) != 1 || !strings.HasPrefix(starts[0], "claude-") || starts[0] == "claude-pool" {
+			t.Fatalf("starts = %v, want one bead-scoped claude-<beadID> start; stderr:\n%s", starts, stderr.String())
+		}
+		ep, err := is.LoadStartupHealthEpisode("claude")
+		if err != nil {
+			t.Fatalf("LoadStartupHealthEpisode: %v", err)
+		}
+		if ep.ConsecutiveCount != 0 || !ep.QuarantinedUntil.IsZero() {
+			t.Fatalf("legacy episode after a successful start = %+v, want cleared", ep)
+		}
+	})
+
+	t.Run("episode of a non-pool session with that name is kept", func(t *testing.T) {
+		store := beads.NewMemStore()
+		now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+		is := sessionpkg.NewStore(beads.SessionStore{Store: store})
+		seedTripped(t, is, "claude", now)
+		named, err := store.Create(beads.Bead{
+			Title:    "claude",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: map[string]string{"session_name": "claude", "template": "claude"},
+		})
+		if err != nil {
+			t.Fatalf("Create named holder: %v", err)
+		}
+		if err := store.Close(named.ID); err != nil {
+			t.Fatalf("Close named holder: %v", err)
+		}
+		info := sessionpkg.Info{
+			ID:                  "gc-new",
+			Template:            "claude",
+			AgentName:           "claude",
+			SessionNameMetadata: PoolSessionName("claude", "gc-new"),
+			PoolManaged:         true,
+		}
+		clearLegacyPoolStartupHealthEpisode(info, info.SessionNameMetadata, is, io.Discard)
+		ep, err := is.LoadStartupHealthEpisode("claude")
+		if err != nil {
+			t.Fatalf("LoadStartupHealthEpisode: %v", err)
+		}
+		if ep.ConsecutiveCount != defaultMaxWakeAttempts {
+			t.Fatalf("episode owned by a non-pool session was cleared: %+v", ep)
+		}
+	})
+}

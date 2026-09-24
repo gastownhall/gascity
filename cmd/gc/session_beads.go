@@ -1880,6 +1880,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 		}
+		if !exists && isPoolInstance {
+			// Identity lease, same as the planner's create path
+			// (createPoolSessionBeadWithIdentifiers): this lane mints a
+			// bead-scoped name too, so it must not mint a second generation
+			// beside an open, unconfirmed create for the same slot identity —
+			// that row may still own a box whose teardown has not been
+			// confirmed (releaseBeadScopedPoolRuntime, ga-vcjr9).
+			leaseTemplate := tp.TemplateName
+			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
+				leaseTemplate = tp.RigName + "/" + leaseTemplate
+			}
+			if err := ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, leaseTemplate, agentName); err != nil {
+				fmt.Fprintf(stderr, "session beads: not creating pool session for %s: %v\n", agentName, err) //nolint:errcheck
+				continue
+			}
+		}
 		if !exists {
 			// Create a new session bead.
 			createState := state
