@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "auto",
-    srcs = ["auto.go"],
+    srcs = [
+        "auto.go",
+        "proctable.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/auto",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/runtime"],
@@ -14,6 +17,7 @@ go_test(
         "auto_test.go",
         "conformance_test.go",
         "liveness_forwarding_test.go",
+        "proctable_forwarding_test.go",
         "testenv_import_test.go",
     ],
     embed = [":auto"],
