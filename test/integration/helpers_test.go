@@ -4,6 +4,7 @@ package integration
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/test/tmuxtest"
@@ -176,15 +178,19 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 			"GC_CITY_PATH="+cityDir,
 			"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
 		)
-		// A gc-launched Dolt publishes its port under the city; a bd-owned
-		// proxied-local server (the default since #6273) does not, and bd
-		// resolves that endpoint itself, so probe without a pinned port then.
-		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
-			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
-		}
-		lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
-		if lastErr == nil {
-			return lastOut, nil
+		// A gc-launched Dolt (direct mode) must publish its port under the
+		// city before the city counts as ready. A bd-owned proxied-server
+		// scope (the default since #6273) never publishes one: bd resolves
+		// that endpoint itself, so probe it without a pinned port.
+		port, published := currentManagedDoltPortForTest(cityDir)
+		if published || cityUsesProxiedDoltForTest(cityDir) {
+			if published {
+				probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+			}
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -192,6 +198,23 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 		lastErr = fmt.Errorf("timed out after %s waiting for managed Dolt city readiness", timeout)
 	}
 	return lastOut, lastErr
+}
+
+// cityUsesProxiedDoltForTest reports whether the city's beads metadata binds
+// it to bd's proxied-server mode, where bd (not gc) owns the Dolt endpoint.
+func cityUsesProxiedDoltForTest(cityDir string) bool {
+	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "metadata.json"))
+	if err != nil {
+		return false
+	}
+	var metadata struct {
+		Backend  string `json:"backend"`
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return false
+	}
+	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode)
 }
 
 func isTransientManagedDoltInitFailure(out string) bool {
