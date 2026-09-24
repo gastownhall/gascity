@@ -313,3 +313,100 @@ func TestScanWithRootReportsTmuxWrapperAsRoot(t *testing.T) {
 		t.Fatalf("scanWithRoot = %+v, want the tmux-wrapper agent pid 200 reported as a root", got)
 	}
 }
+
+// TestScanWithRootExcludesLiveParentSessionDescendant pins the SCAN-LAYER half
+// of the two-layer protection around processes that merely inherited an agent's
+// GC_SESSION_ID.
+//
+// A daemon spawned from an agent pane (the managed-Dolt scope watchdog is the
+// in-tree instance) carries the seat's GC_SESSION_ID verbatim. While its
+// spawning `gc` is still alive, the ONLY thing keeping it out of the escalation's
+// kill set is this envelope rule: its parent carries the same session id and is
+// not infrastructure, so it is not a root and never reaches the fence. Nothing
+// downstream would save it — the tmux adapter stamps IsTracked/ProviderName by
+// session id alone, and the fence's reparent arm does not fire because its
+// parent is alive.
+//
+// Widening the envelope rule (e.g. to `return true, nil`, a plausible future
+// change to catch Setpgid'd escapees whose spawner still lives) makes that
+// watchdog a passing kill target, and KillByPID signals its whole process
+// GROUP — whose SIGTERM handler stops the city's shared dolt sql-server. That
+// change must fail here rather than silently in production.
+func TestScanWithRootExcludesLiveParentSessionDescendant(t *testing.T) {
+	const (
+		sessionID    = "ga-seat"
+		tmuxServer   = 400
+		paneRoot     = 500
+		liveGC       = 600
+		watchdog     = 700
+		otherSession = "ga-other"
+	)
+	root := t.TempDir()
+	sessionEnv := map[string]string{"GC_SESSION_ID": sessionID, "GC_CITY_PATH": "/city"}
+
+	// The tmux server: infrastructure, and carries no session id of its own.
+	buildFakeProcUnder(t, root, tmuxServer, 1, "tmux", map[string]string{"GC_SESSION_ID": otherSession})
+	// The pane's root process — the ONLY legitimate runtime for this seat.
+	buildFakeProcUnder(t, root, paneRoot, tmuxServer, "claude", sessionEnv)
+	// A live `gc` the agent invoked, still running, same session id.
+	buildFakeProcUnder(t, root, liveGC, paneRoot, "gc", sessionEnv)
+	// The scope watchdog it spawned, still parented to that live `gc`.
+	buildFakeProcUnder(t, root, watchdog, liveGC, "gc", sessionEnv)
+
+	found, err := scanWithRoot(root, sessionID)
+	if err != nil {
+		t.Fatalf("scanWithRoot: %v", err)
+	}
+
+	var pids []int
+	for _, r := range found {
+		pids = append(pids, r.PID)
+	}
+	if len(pids) != 1 || pids[0] != paneRoot {
+		t.Fatalf("scanWithRoot roots = %v, want exactly [%d] (the pane root). "+
+			"A session-descendant with a LIVE parent must not be reported as an agent root: nothing downstream "+
+			"discriminates it, so the drain-ack escalation would force-terminate its process group and stop the "+
+			"city's shared dolt sql-server", pids, paneRoot)
+	}
+}
+
+// The drain-ack escalation's kill fence is stated POSITIVELY — a candidate's
+// parent must be the provider's own server — precisely so it does not depend on
+// detecting a subreaper pid, which is derived from the CALLER's ancestry and is
+// empty whenever the caller and the target descend from different trees. That
+// fence is only worth anything if the scan actually reports the distinction, so
+// it is pinned here, at the source, and not only in the consumer's fake.
+func TestScanWithRootReportsWhetherTheParentIsProviderInfrastructure(t *testing.T) {
+	root := t.TempDir()
+	const sessionID = "ga-parentage"
+	// The tmux server, which inherits the GC_SESSION_ID of the session that
+	// founded it. Infrastructure is never a root itself.
+	buildFakeProcUnder(t, root, 400, 1, "tmux: server", map[string]string{"GC_SESSION_ID": sessionID})
+	// A pane root the server still owns: the seat's actual runtime.
+	buildFakeProcUnder(t, root, 401, 400, "claude", map[string]string{"GC_SESSION_ID": sessionID})
+	// A daemon that merely INHERITED the seat's environment and, once its
+	// spawner exited, was adopted by `systemd --user` — a large, LIVE ppid that
+	// no `ppid <= 1` test reads as an orphan.
+	buildFakeProcUnder(t, root, 402, 3117, "gc", map[string]string{"GC_SESSION_ID": sessionID})
+	buildFakeProcUnder(t, root, 3117, 1, "systemd", nil)
+
+	got, err := scanWithRoot(root, sessionID)
+	if err != nil {
+		t.Fatalf("scanWithRoot error: %v", err)
+	}
+	parentIsInfra := make(map[int]bool, len(got))
+	for _, live := range got {
+		parentIsInfra[live.PID] = live.ParentIsProviderInfrastructure
+	}
+	if len(got) != 2 {
+		t.Fatalf("scanWithRoot returned %d roots (%v), want the pane root and the inherited-env daemon", len(got), parentIsInfra)
+	}
+	if !parentIsInfra[401] {
+		t.Error("the pane root's parent is the tmux server, but the scan did not attribute it to provider infrastructure; " +
+			"a kill fence that requires this attribution would refuse the seat's own runtime and the escalation would never fire")
+	}
+	if parentIsInfra[402] {
+		t.Error("attributed a `systemd --user` parent to provider infrastructure; that is the orphaned-watchdog shape, " +
+			"and killing it signals the process group whose SIGTERM handler stops the city's shared dolt sql-server")
+	}
+}

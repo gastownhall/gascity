@@ -24,9 +24,29 @@ go_test(
         "testenv_import_test.go",
         "waiver_clock_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     embed = [":resourcecensus"],
     deps = [
+        "//internal/bazeltest",
         "//internal/testenv",
         "//internal/testpolicy/waiverclock",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

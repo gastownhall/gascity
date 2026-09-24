@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -270,9 +272,19 @@ func scopeStoreIsExternallyBoundBestEffort(cityPath, scopeRoot string) bool {
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil {
-		cfg = nil
+	return bdStoreForCityWithConfig(dir, cityPath, nil)
+}
+
+// bdStoreForCityWithConfig is bdStoreForCity for a caller that already holds
+// this city's config: the issue prefix and store options are read from cfg
+// instead of reloading city.toml and every pack include. A nil cfg is loaded
+// here (a failed load leaves it nil, as bdStoreForCity always has).
+func bdStoreForCityWithConfig(dir, cityPath string, cfg *config.City) *beads.BdStore {
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err == nil {
+			cfg = loaded
+		}
 	}
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
@@ -736,18 +748,107 @@ func projectCredentialProviderEnv(env map[string]string) {
 // among them — for later.
 var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
 
+// hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
+// per city.
+//
+// The probe answers one boolean, but answering it composes the whole city
+// config: city.toml, every include, and the pack discovery those pull in. The
+// bd environment builder asks up to three times per bd subprocess (once per
+// scope-resolution branch), and a single `gc ready` on maintainer-city loaded
+// its 118 KB config 147 times — 30 s of a 33 s query and 381k file opens
+// (cherry, 2026-09-23, after ga-s3cnmy had already dropped the snapshot). The
+// long-running supervisor asks thousands of times per tick.
+//
+// Entries are keyed by the normalized city.toml path and validated on every
+// hit against the size and mtime of every source file the load reported
+// (city.toml and each include), so an edit to any of them is observed on the
+// next call without a restart. Errors are never cached.
+var hostedCredentialProbeCache sync.Map // normalized city.toml path → *hostedCredentialProbeEntry
+
+// hostedCredentialProbeLoads counts real config loads so tests can assert
+// that repeated probes reuse the entry.
+var hostedCredentialProbeLoads atomic.Int64
+
+type hostedCredentialProbeEntry struct {
+	selected bool
+	sources  []hostedCredentialProbeSource
+}
+
+type hostedCredentialProbeSource struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+func statHostedCredentialProbeSource(path string) (hostedCredentialProbeSource, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return hostedCredentialProbeSource{}, false
+	}
+	return hostedCredentialProbeSource{path: path, size: fi.Size(), modTime: fi.ModTime()}, true
+}
+
+func (e *hostedCredentialProbeEntry) valid() bool {
+	for _, want := range e.sources {
+		got, ok := statHostedCredentialProbeSource(want.path)
+		if !ok || got.size != want.size || !got.modTime.Equal(want.modTime) {
+			return false
+		}
+	}
+	return true
+}
+
+// resetHostedCredentialProbeCache drops every memoized probe (tests only).
+func resetHostedCredentialProbeCache() {
+	hostedCredentialProbeCache.Range(func(key, _ any) bool {
+		hostedCredentialProbeCache.Delete(key)
+		return true
+	})
+}
+
 func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	cityConfigPath := filepath.Join(cityPath, "city.toml")
-	if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+	before, ok := statHostedCredentialProbeSource(cityConfigPath)
+	if !ok {
+		if _, err := os.Stat(cityConfigPath); errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		} else if err != nil {
+			return false, fmt.Errorf("read hosted Beads credential configuration: %w", err)
+		}
 	}
-	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	key := normalizePathForCompare(cityConfigPath)
+	if v, loaded := hostedCredentialProbeCache.Load(key); loaded {
+		if entry, isEntry := v.(*hostedCredentialProbeEntry); isEntry && entry.valid() {
+			return entry.selected, nil
+		}
+		hostedCredentialProbeCache.Delete(key)
+	}
+	cfg, prov, err := config.LoadWithIncludesOptions(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
 	}
-	return configSelectsHostedBeadsCredentialProvider(cfg), nil
+	selected := configSelectsHostedBeadsCredentialProvider(cfg)
+	entry := &hostedCredentialProbeEntry{selected: selected}
+	cacheable := true
+	for _, source := range prov.Sources {
+		stat, ok := statHostedCredentialProbeSource(source)
+		if !ok {
+			cacheable = false
+			break
+		}
+		entry.sources = append(entry.sources, stat)
+	}
+	// A city.toml rewritten while the load was in flight could leave an
+	// entry whose stat describes the new file but whose answer came from the
+	// old one; skip caching so the next call reloads.
+	if after, ok := statHostedCredentialProbeSource(cityConfigPath); !ok || after != before {
+		cacheable = false
+	}
+	if cacheable {
+		hostedCredentialProbeCache.Store(key, entry)
+	}
+	return selected, nil
 }
 
 func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {

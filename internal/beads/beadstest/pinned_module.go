@@ -38,7 +38,39 @@ const PinnedBeadsModulePath = "github.com/steveyegge/beads"
 // instead.
 func PinnedBeadsModuleDir(t *testing.T) string {
 	t.Helper()
+	// Under bazel the module tree arrives as runfiles from the go_deps
+	// external repository (the test declares the schema library as data);
+	// a pure-Bazel machine has no go module cache at all.
+	if dir := bazelRunfilesBeadsModule(); dir != "" {
+		return dir
+	}
 	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+}
+
+// bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
+// runfiles tree, matching any repository directory whose name ends in the
+// go_deps canonical suffix and carrying the module's migration directories.
+func bazelRunfilesBeadsModule() string {
+	for _, rf := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if rf == "" {
+			continue
+		}
+		entries, err := os.ReadDir(rf)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.Contains(name, "go_deps+com_github_steveyegge_beads") {
+				continue
+			}
+			dir := filepath.Join(rf, name)
+			if info, err := os.Stat(filepath.Join(dir, "internal", "storage", "schema", "migrations")); err == nil && info.IsDir() {
+				return dir
+			}
+		}
+	}
+	return ""
 }
 
 // moduleDirReporter is the subset of *testing.T the seam below uses.

@@ -58,6 +58,7 @@ var claimCASMarkers = []string{".Claim(", `"--claim"`}
 // may contain a call at all, and no runtime assertion can observe a call that a
 // future commit has not written yet.
 func TestClaimCASStaysOnTheWorkerPullPath(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading cmd/gc: %v", err)
@@ -105,6 +106,7 @@ var renderedHookConfigRoots = []string{
 // and it would look completely reasonable in review, because the rendered
 // command is claim-free today. The guard is on the SHAPE, not on the argv.
 func TestRenderedHookCommandsReachGcHookOnlyThroughHookRun(t *testing.T) {
+	chdirToRealPackageDir(t)
 	commands := renderedHookCommands(t)
 	if len(commands) == 0 {
 		t.Fatal("found no rendered hook commands; this gate has lost its subject")
@@ -140,6 +142,7 @@ const shippedPromptRoot = "../../internal/bootstrap/packs/core/assets/prompts"
 // worker's budget and teaches the wrong protocol. Re-checking belongs BETWEEN
 // tool calls.
 func TestShippedPromptsDoNotLoopTheClaimInsideOneToolCall(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(shippedPromptRoot)
 	if err != nil {
 		t.Fatalf("reading %s: %v", shippedPromptRoot, err)
@@ -197,6 +200,7 @@ func shellBlocksMentioningClaim(prompt string) []string {
 // explicit: fence the door, or don't ship the prompt. Releasing or updating a
 // bead the worker already holds is unaffected — only acquisition is pinned.
 func TestNoShippedPromptAcquiresWorkThroughTheByIDClaimDoor(t *testing.T) {
+	chdirToRealPackageDir(t)
 	entries, err := os.ReadDir(shippedPromptRoot)
 	if err != nil {
 		t.Fatalf("reading %s: %v", shippedPromptRoot, err)

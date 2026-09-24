@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -5916,5 +5917,112 @@ func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
 	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
 	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
 		t.Fatalf("env = %#v", env)
+	}
+}
+
+// TestBdStoreForCityWithConfigSkipsLoad pins the city-scope bd open split:
+// bdStoreForCityWithConfig reads the issue prefix and store options from the
+// cfg it is handed (a nil cfg still loads), the one-shot bd opener reuses the
+// caller's cfg, and the shared openBdStoreAtWithConfig keeps reloading because
+// long-lived callers (order dispatch, API) can hand it a stale or empty cfg.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestBdStoreForCityWithConfigSkipsLoad(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nbd_compatibility = \"bd-1.0.5\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	store := bdStoreForCityWithConfig(cityDir, cityDir, cfg)
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("bdStoreForCityWithConfig re-parsed city config %d times despite a non-nil cfg", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() = %q, want the supplied config's prefix mc", got)
+	}
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCityWithConfig dropped the supplied config's bd-1.0.5 store options")
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openOneShotBdStoreAtWithConfig(cityDir, cityDir, cfg); err != nil {
+		t.Fatalf("openOneShotBdStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("openOneShotBdStoreAtWithConfig re-parsed city config %d times at the city scope despite a non-nil cfg", grew)
+	}
+
+	// The shared path must ignore even an empty stand-in cfg (what the order
+	// dispatcher substitutes for nil) and read the prefix from disk.
+	before = loadCityConfigCalls.Load()
+	shared, err := openBdStoreAtWithConfig(cityDir, cityDir, &config.City{})
+	if err != nil {
+		t.Fatalf("openBdStoreAtWithConfig(empty cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openBdStoreAtWithConfig parsed city config %d times at the city scope, want exactly 1: long-lived callers must keep the reload", grew)
+	}
+	if bd, ok := shared.(*beads.BdStore); ok && bd.IDPrefix() != "mc" {
+		t.Fatalf("shared open IDPrefix() = %q, want mc from disk, not the empty cfg", bd.IDPrefix())
+	}
+
+	before = loadCityConfigCalls.Load()
+	store = bdStoreForCityWithConfig(cityDir, cityDir, nil)
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("bdStoreForCityWithConfig(nil cfg) parsed city config %d times, want exactly 1 (fallback load)", grew)
+	}
+	if got := store.IDPrefix(); got != "mc" {
+		t.Fatalf("IDPrefix() after fallback load = %q, want mc", got)
+	}
+}
+
+// TestSharedStoreOpenKeepsBdCityReload pins the split one layer up, through
+// the full store open: openStoreAtForCityWithConfig is what the order
+// dispatcher calls (controller tick, API webhook) with the controller's
+// possibly stale cfg, so a bd city-scope open there must still reload config
+// from disk. openCityStoreAtWithConfig (the one-shot entry point used by gc
+// ready, gc hook, drain-ack) must not.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestSharedStoreOpenKeepsBdCityReload(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Skip native preflight so the open goes straight to the bd store.
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	t.Setenv("GC_BEADS", "")
+
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	if _, err := openStoreAtForCityWithConfig(cityDir, cityDir, cfg); err != nil {
+		t.Fatalf("openStoreAtForCityWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("shared openStoreAtForCityWithConfig parsed city config %d times on a bd city scope, want exactly 1: the order dispatcher's open must keep re-reading config from disk", grew)
+	}
+
+	before = loadCityConfigCalls.Load()
+	if _, err := openCityStoreAtWithConfig(cityDir, cfg); err != nil {
+		t.Fatalf("openCityStoreAtWithConfig(cfg): %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("one-shot openCityStoreAtWithConfig parsed city config %d times on a bd city scope, want 0", grew)
 	}
 }

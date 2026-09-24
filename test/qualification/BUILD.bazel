@@ -9,8 +9,17 @@ go_test(
         "q1_support_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/fsys",
         "//internal/mail",
@@ -20,4 +29,16 @@ go_test(
         "//internal/storebinding",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

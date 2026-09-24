@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/clock",
         "//internal/fsys",
     ],
 )
@@ -19,6 +20,7 @@ go_library(
 go_test(
     name = "nudgequeue_test",
     srcs = [
+        "state_test.go",
         "store_test.go",
         "testenv_import_test.go",
         "waits_test.go",
@@ -27,6 +29,19 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/beadstest",
+        "//internal/clock",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

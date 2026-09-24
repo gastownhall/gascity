@@ -7,6 +7,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/config",
         "//internal/fsys",
         "//internal/orders",
     ],
@@ -19,5 +20,20 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":orderdiscovery"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
