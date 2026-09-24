@@ -213,6 +213,54 @@ func TestCompactScriptWatermarkUsesRefHeadNotDateOrder(t *testing.T) {
 	}
 }
 
+// Several parentless commits reachable from HEAD (unrelated histories merged)
+// mean no single root can be trusted: first sight stamps HEAD even when the
+// flatten fingerprint or the .compact-full-history marker would pick root.
+func TestCompactScriptWatermarkMultipleRootsStampsHead(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	setCompactWatermark(t, fixture, "")
+	if err := os.WriteFile(filepath.Join(fixture.dataDir, "beads", ".compact-full-history"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := fixture.run(t, "watermark_multiple_roots", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if got := compactWatermark(t, fixture); got != "headcommit" {
+		t.Fatalf("gc-compact-base = %q, want headcommit when several roots are reachable\n%s", got, out)
+	}
+	if !strings.Contains(out, "set gc-compact-base=headcommit: 2 parentless commits reachable from HEAD") {
+		t.Fatalf("multiple-roots stamp reason missing:\n%s", out)
+	}
+	if log := readCompactDoltLog(t, fixture); strings.Contains(log, "'rootcommit')") {
+		t.Fatalf("multiple-roots history must never be reset to a root:\n%s", log)
+	}
+}
+
+func TestCompactScriptWatermarkRootCountProbeFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ mode, want string }{
+		{mode: "root_count_failure", want: "root count probe failed"},
+		{mode: "root_count_invalid", want: "root count probe returned invalid value=bogus"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			setCompactWatermark(t, fixture, "")
+			out, err := fixture.run(t, tc.mode, "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err == nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("root count probe failure must fail closed: %v\n%s", err, out)
+			}
+			if got := compactWatermark(t, fixture); got != "" {
+				t.Fatalf("failed root count probe stamped gc-compact-base=%q", got)
+			}
+			log := readCompactDoltLog(t, fixture)
+			if strings.Contains(log, "DOLT_TAG") || strings.Contains(log, "DOLT_RESET") {
+				t.Fatalf("failed root count probe allowed a mutation:\n%s", log)
+			}
+		})
+	}
+}
+
 func TestCompactScriptSharedHistoryGuardFailsClosedOnProbeFailure(t *testing.T) {
 	for _, mode := range []string{"remote_count_failure", "remote_count_invalid"} {
 		t.Run(mode, func(t *testing.T) {

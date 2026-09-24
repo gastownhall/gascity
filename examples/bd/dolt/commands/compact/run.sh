@@ -771,12 +771,21 @@ commit_count() {
 # by ancestry, never by commit date: dates are author-supplied and can be
 # skewed (#5958), so the date-earliest commit need not be the root. With
 # several parentless ancestors (unrelated histories merged in), the
-# date-earliest of them is used; any of them is a valid soft-reset target
-# because each is an ancestor of HEAD.
+# date-earliest of them is returned, but resolve_compact_base (root_count)
+# never stamps the watermark at root in that case — it stamps HEAD.
 root_commit() {
   db="$1"
   query_single_cell "$db" "root commit probe failed" \
     "SELECT l.commit_hash FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL ORDER BY l.date ASC LIMIT 1"
+}
+
+# root_count — number of parentless commits reachable from the current branch.
+# More than one means unrelated histories were merged in; resolve_compact_base
+# then stamps the watermark at HEAD rather than trusting any single root.
+root_count() {
+  db="$1"
+  query_single_cell "$db" "root count probe failed" \
+    "SELECT COUNT(*) FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL"
 }
 
 # head_commit — the current branch HEAD. Resolved by ref, never by commit date:
@@ -2540,7 +2549,18 @@ resolve_compact_base() {
     return 0
   fi
 
-  base_owned=$(history_is_compactor_owned "$db" "$base_root") || return 1
+  base_roots=$(root_count "$db") || return 1
+  case "$base_roots" in
+    ''|*[!0-9]*)
+      printf 'compact: db=%s root count probe returned invalid value=%s — fail\n' \
+        "$db" "$base_roots" >&2
+      return 1
+      ;;
+  esac
+  base_owned=0
+  if [ "$base_roots" -le 1 ]; then
+    base_owned=$(history_is_compactor_owned "$db" "$base_root") || return 1
+  fi
   case "$base_owned" in
     ''|*[!0-9]*)
       printf 'compact: db=%s flatten provenance probe returned invalid value=%s — fail\n' \
@@ -2548,7 +2568,16 @@ resolve_compact_base() {
       return 1
       ;;
   esac
-  if [ "$base_owned" -gt 0 ]; then
+  if [ "$base_roots" -gt 1 ]; then
+    if ! compact_base=$(head_commit "$db"); then
+      return 1
+    fi
+    if [ -z "$compact_base" ]; then
+      printf 'compact: db=%s HEAD commit probe returned empty value — fail\n' "$db" >&2
+      return 1
+    fi
+    base_why="$base_roots parentless commits reachable from HEAD (unrelated histories merged) — no single root is trusted, so the whole current history is protected; only later commits will be flattened"
+  elif [ "$base_owned" -gt 0 ]; then
     compact_base="$base_root"
     base_why="history already flattened by this compactor"
   elif [ -f "$(compact_full_history_marker "$db")" ]; then

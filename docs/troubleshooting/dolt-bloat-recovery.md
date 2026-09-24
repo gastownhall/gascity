@@ -228,6 +228,9 @@ it. Where the tag goes:
 - **HEAD**: in every other case, such as `gc rig add --adopt` of an existing
   `.beads/`, a `bd bootstrap` or `dolt clone`, or a database that was never
   compacted before the upgrade. Everything up to that point is kept as it is.
+  HEAD also wins over both root cases above when more than one parentless
+  commit is reachable from HEAD (unrelated histories merged), because no
+  single root can then be trusted.
 
 A flatten soft-resets to the tag, not to root, so it squashes only the
 commits after the tag. The threshold counts only those commits too; the log

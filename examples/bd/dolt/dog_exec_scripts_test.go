@@ -613,10 +613,28 @@ case "$query" in
     fi
     exit 0
     ;;
+  *"SELECT COUNT(*) FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL"*)
+    case "$mode" in
+      root_count_failure)
+        printf 'root count exploded\n' >&2
+        exit 47
+        ;;
+      root_count_invalid)
+        print_cell bogus
+        ;;
+      watermark_multiple_roots)
+        print_cell 2
+        ;;
+      *)
+        print_cell 1
+        ;;
+    esac
+    exit 0
+    ;;
   *"dolt_commit_ancestors"*"WHERE a.parent_hash = '"*)
     # Flatten-provenance probe: is root's child a compactor flatten commit?
     case "$mode" in
-      watermark_owned_history)
+      watermark_owned_history|watermark_multiple_roots)
         print_cell 1
         ;;
       *)

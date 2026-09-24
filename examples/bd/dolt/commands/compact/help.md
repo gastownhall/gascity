@@ -35,6 +35,8 @@ Compact only rewrites history that this city grew.
     `<data_dir>/<db>/.compact-full-history` exists.
   - Otherwise the tag goes on HEAD. Adopted, imported, or pre-existing history
     is then kept as it is.
+  - The tag also goes on HEAD, overriding both rules above, when more than one
+    parentless commit is reachable from HEAD (unrelated histories merged).
   - A flatten squashes only the commits after the tag, and the threshold
     counts only those commits.
   - If the tag is not an ancestor of HEAD (for example after a rollback or
