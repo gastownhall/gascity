@@ -152,22 +152,22 @@ var routedToAllowlist = []routedToSite{
 	// WithRouteChangeClearing wrapped in during the GREEN phase. ---
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5342,
+		line:   5359,
 		reason: "write to a pre-existing bead (canonicalize routed_to spelling on assignee-change repair pass); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   5402,
+		line:   5419,
 		reason: "write to a pre-existing bead (canonicalizeLegacyBoundUnassignedRoutedWork); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6210,
+		line:   6227,
 		reason: "write to a pre-existing bead (controlDispatcherRouteRepair.persist, repairControlDispatcherRoutesForStoreScope); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6237,
+		line:   6254,
 		reason: "in-memory mirror of the line-6210 persisted write (applyRouteRepairInMemory), applied only after the durable write at line 6210 already succeeded; same Root #5 -- wrap that root's store construction in GREEN phase",
 	},
 	{
@@ -262,22 +262,22 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/order_dispatch.go",
-		line:   2305,
+		line:   2411,
 		reason: "creation-time-only: identical fresh-creation labeling pattern to cmd_order.go:903 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1313,
+		line:   1321,
 		reason: "creation-time-only: applyAttemptStepRoute mutates *formula.RecipeStep.Metadata in-memory before molecule.Attach creates the retry-attempt bead (spawnNextAttempt) -- no prior bead exists yet",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1339,
+		line:   1348,
 		reason: "creation-time-only: same applyAttemptStepRoute pattern as line 1313 -- mutates *formula.RecipeStep.Metadata before molecule.Attach -- no prior bead exists yet",
 	},
 	{
 		path:   "internal/dispatch/control.go",
-		line:   1381,
+		line:   1390,
 		reason: "creation-time-only: applyAttemptControlStepRoute mutates *formula.RecipeStep.Metadata before molecule.Attach -- no prior bead exists yet",
 	},
 	{
@@ -287,17 +287,17 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   276,
+		line:   287,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   641,
+		line:   652,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 	{
 		path:   "internal/graphroute/graphroute.go",
-		line:   778,
+		line:   789,
 		reason: "creation-time-only: same ApplyGraphRouting pattern as line 201 -- no prior stamps possible",
 	},
 
