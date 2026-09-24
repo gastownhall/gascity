@@ -517,11 +517,24 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 func TestBdCommandEnvUsesCanonicalRigTarget(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BIN", "/tmp/ambient-gc")
+	invokingDir := t.TempDir()
+	invokingGC := filepath.Join(invokingDir, "gc")
+	if err := os.WriteFile(invokingGC, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write invoking gc fixture: %v", err)
+	}
+	invokingLink := filepath.Join(invokingDir, "gc-link")
+	if err := os.Symlink(invokingGC, invokingLink); err != nil {
+		t.Fatalf("symlink invoking gc fixture: %v", err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return invokingLink, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
 	_ = os.Unsetenv("BEADS_ACTOR")
 
-	cityDir := t.TempDir()
+	cityDir := normalizePathForCompare(t.TempDir())
 	wantPort := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
-	rigDir := filepath.Join(t.TempDir(), "repo")
+	rigDir := filepath.Join(normalizePathForCompare(t.TempDir()), "repo")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -564,9 +577,33 @@ dolt.auto-start: false
 	if got := env["GC_BEADS_PREFIX"]; got != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "repo")
 	}
+	wantGC, err := filepath.EvalSymlinks(invokingGC)
+	if err != nil {
+		t.Fatalf("resolve invoking gc fixture: %v", err)
+	}
+	if got := env["GC_BIN"]; got != wantGC {
+		t.Fatalf("GC_BIN = %q, want physical invoking executable %q", got, wantGC)
+	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
 	}
+}
+
+func TestResolveBdInvokingGCBinaryFailsClosed(t *testing.T) {
+	oldResolve := resolveInvokingExecutable
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	t.Run("resolver error", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "", errors.New("unavailable") }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly succeeded")
+		}
+	})
+	t.Run("relative path", func(t *testing.T) {
+		resolveInvokingExecutable = func() (string, error) { return "gc", nil }
+		if _, err := resolveBdInvokingGCBinary(); err == nil {
+			t.Fatal("resolveBdInvokingGCBinary unexpectedly accepted a relative path")
+		}
+	})
 }
 
 func TestBdCommandEnvRefusesAnUnregisteredBackend(t *testing.T) {
@@ -1394,14 +1431,16 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	cityPath := setupFreshManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
-	cmd := exec.Command("dolt", "sql", "-q", "show tables")
-	cmd.Dir = filepath.Join(cityPath, ".beads", "dolt", "hq")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("dolt sql show tables in hq: %v\n%s", err, out)
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		t.Fatalf("ReadDoltMode(metadata): mode=%q ok=%v err=%v", mode, ok, err)
 	}
-	if !strings.Contains(string(out), "config") {
-		t.Fatalf("hq database missing bead schema tables:\n%s", out)
+	if mode != "proxied-server" {
+		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
+	}
+	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil || !ok || database != "hq" {
+		t.Fatalf("ReadDoltDatabase(metadata) = (%q, %v, %v), want (hq, true, nil)", database, ok, err)
 	}
 
 	rawDir := filepath.Join(cityPath, "fresh-nested")
@@ -1508,6 +1547,7 @@ printf '{"id":"scratch-1","metadata":{"written":true}}\n' > "$SCRATCH_BEAD"
 		{"whole metadata object", "update", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 		{"inline metadata object", "update", []string{`--metadata={"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 		{"create route target", "create", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
+		{"new alias route target", "new", []string{"--metadata", `{"gc.routed_to":"ghostrig/polecat-01"}`}, "ghostrig/polecat-01"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(scratchBead, []byte(original), 0o600); err != nil {
@@ -1564,22 +1604,30 @@ printf 'called' > "$BD_CAPTURE"
 
 	for _, tc := range []struct {
 		name string
+		verb string
 		args []string
 		want string
 	}{
-		{"metadata file", []string{"--metadata", "@metadata.json"}, "@file input"},
-		{"malformed metadata", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
-		{"non-string guarded metadata", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
-		{"malformed set metadata", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
-		{"missing metadata", []string{"--metadata"}, "without a value"},
-		{"missing set metadata", []string{"--set-metadata"}, "without a value"},
+		{"metadata file", "update", []string{"--metadata", "@metadata.json"}, "@file input"},
+		{"malformed metadata", "update", []string{"--metadata", "{not-json}"}, "malformed --metadata"},
+		{"non-string guarded metadata", "update", []string{"--metadata", `{"gc.routed_to":true}`}, "non-string gc.routed_to"},
+		{"malformed set metadata", "update", []string{"--set-metadata", "gc.routed_to"}, "malformed --set-metadata"},
+		{"missing metadata", "update", []string{"--metadata"}, "without a value"},
+		{"missing set metadata", "update", []string{"--set-metadata"}, "without a value"},
+		{"new alias metadata file", "new", []string{"--metadata", "@metadata.json"}, "@file input"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.Remove(capture); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			args := append([]string{"--city", cityDir, "update", "scratch-1"}, tc.args...)
+			args := []string{"--city", cityDir, tc.verb}
+			if tc.verb == "update" {
+				args = append(args, "scratch-1")
+			} else {
+				args = append(args, "scratch")
+			}
+			args = append(args, tc.args...)
 			if got := doBd(args, &stdout, &stderr); got == 0 {
 				t.Fatalf("doBd() = 0, want refusal; stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/testenv"
 )
 
@@ -280,6 +281,9 @@ func isNestedWorktreeRoot(path string) bool {
 // from this file looking for go.mod if git is unavailable.
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err == nil {
 		return strings.TrimSpace(string(out))

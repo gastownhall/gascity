@@ -61,6 +61,7 @@ jobs:
       docker: ${{ steps.filter.outputs.docker == 'true' || steps.filter.outputs.shared == 'true' }}
       k8s: ${{ steps.filter.outputs.k8s == 'true' || steps.filter.outputs.shared == 'true' }}
       beads: ${{ steps.filter.outputs.beads == 'true' || steps.filter.outputs.shared == 'true' }}
+      beads_topology: ${{ steps.filter.outputs.beads_topology == 'true' || steps.filter.outputs.shared == 'true' }}
       packs: ${{ steps.filter.outputs.packs == 'true' || steps.filter.outputs.shared == 'true' }}
       worker: ${{ steps.filter.outputs.worker == 'true' || steps.filter.outputs.shared == 'true' }}
       worker_phase2: ${{ steps.filter.outputs.worker_phase2 == 'true' || steps.filter.outputs.shared == 'true' }}
@@ -96,6 +97,46 @@ jobs:
               - 'deps.env'
               - '.github/scripts/install-bd-archive.sh'
               - 'cmd/gc/init_provider_readiness.go'
+            # Separate from `beads` on purpose: this gates the one job that runs
+            # the bd/dolt-backed topology shapes for real, and those shapes turn
+            # on gc's own Dolt lifecycle code as much as on the beads adapter.
+            #
+            # Deliberately broad. A curated list of cmd/gc files was tried and
+            # was wrong within one commit: the ownership journal, the provider
+            # lifecycle, the bd env plumbing and the `gc init` transport flags
+            # all live in cmd/gc files that matched none of the globs, so a
+            # change to the feature skipped its own acceptance job and
+            # ci-required still went green (the skip is in allow_skipped). The
+            # matrix builds gc from ./cmd/gc and drives it through the bd script
+            # in examples/bd, so anything under either can change what the
+            # shapes do. Over-running this job is cheap next to a silent gate.
+            #
+            # The curated internal/ list was wrong the same way one level out:
+            # internal/doltversion carries the Dolt floor `gc init` enforces,
+            # internal/doltauth places the proxied provider's auth scope,
+            # internal/citylayout the pack state dir the bd script is handed,
+            # and none of them matched. The list is therefore the dependency
+            # graph itself, not a guess at which part of it matters:
+            #
+            #   go list -deps ./test/acceptance/... ./cmd/gc
+            #
+            # answers with 139 of the repo's 166 internal packages; the 27 it
+            # leaves out are test helpers (internal/*test, internal/testutil,
+            # internal/testenv), which the -test graph pulls in anyway. So the
+            # honest spelling of "everything the acceptance binaries import" is
+            # internal/**.
+            beads_topology:
+              - 'go.mod'
+              - 'go.sum'
+              - 'deps.env'
+              - '.github/scripts/install-bd-archive.sh'
+              - '.github/scripts/install-dolt-archive.sh'
+              - '.github/actions/setup-gascity-ubuntu/**'
+              - 'cmd/gc/**'
+              - 'internal/**'
+              - 'examples/bd/**'
+              - 'test/acceptance/**'
+              - '.github/workflows/ci.yml'
             packs:
               - 'examples/gastown/**'
               - 'internal/config/pack.go'
@@ -273,7 +314,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -302,7 +343,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "v1.3.0"
     strategy:
       fail-fast: false
       matrix:
@@ -372,7 +413,7 @@ jobs:
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
   # release). This cell builds bd from gastownhall/beads source at
-  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
+  # BD_CURRENT_REF (deps.env) — a commit, which need not be a tagged release —
   # and runs the same focused CLI contract, so a bd change that breaks gc's
   # decoder/classifier surface against the newer bd is caught before merge.
   # Path-gated on the beads filter; tolerated as a skip by the Check gate.
@@ -413,13 +454,147 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
-      # The conditional-release CAS is the one bd contract only this cell can
-      # run: BdStore.ReleaseIfCurrent prefers bd's --if-assignee/--if-status verb
-      # (a rejected precondition is exit 13), and BD_VERSION — every other job's
-      # bd — is a published release that predates it, so the row skips there and
-      # the wisp-tier fix rides unguarded. The target refuses to skip.
+      # The conditional-release CAS contract is wired only on this cell, but that
+      # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
+      # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
+      # and BD_VERSION — every other job's bd — carries those flags as of
+      # v1.3.0, so the row would run there too. It stays here as the single
+      # home for the one contract that needs a real CAS-capable bd, and
+      # BD_PREV_VERSION (v1.0.4) still cannot run it. The target refuses to skip.
       - name: bd conditional-release CAS contract (current)
         run: make test-bd-conditional-release-contract
+
+  # The beads topology shapes are the only evidence that `gc init` actually
+  # produces the proxied/direct/external Dolt topologies it claims, and until
+  # this job existed not one of them had ever run in CI: every job either had no
+  # bd at all or had one without --proxied-server, so each test called t.Skip and
+  # a suite that executed nothing reported green. GC_REQUIRE_ACCEPTANCE_TOOLING
+  # closes that hole — a runner that loses its bd or dolt now fails here instead
+  # of quietly running zero tests.
+  #
+  # Reduced shape set, sized against measurement rather than taste. A full
+  # eight-shape run was timed locally at over 35 minutes and did not finish:
+  # M1 took ~10 minutes on an idle box and M2-direct-local alone was still
+  # running 13 minutes later, having burned 28 of the 35 on a contended one.
+  # The whole matrix does not belong on a PR gate at that cost.
+  #
+  # M1-proxied-local is the shape this branch makes the default, so it is the
+  # evidence worth paying for. M5-legacy-gc-managed costs nothing today (it
+  # skips, see below) and is listed so the gap stays visible in the log rather
+  # than being quietly forgotten. M2, the external shapes (M3a, M3b, M4), M6
+  # and M7 are left to a fuller scheduled run.
+  #
+  # M5 and the two migration tests need a gc from before the ownership journal.
+  # Building one from the v1.4.1 tag was tried and does not work: the fixture
+  # also needs a bd of that era, and the pinned bd refuses the workspace the old
+  # gc creates — "legacy Dolt server workspace detected; explicit migration is
+  # required before this bd version can open or modify the workspace". Pairing a
+  # BD_PREV-era bd with the legacy gc is the real fix and is its own change, so
+  # for now these skip on their own GC_REQUIRE_ACCEPTANCE_LEGACY_GC switch
+  # rather than the tooling one, and the skip is named in the job summary so it
+  # reads as a known gap instead of a pass.
+  beads-topology-acceptance:
+    name: Beads / topology acceptance
+    needs:
+      - runner-policy
+      - changes
+    if: ${{ needs.changes.outputs.beads_topology == 'true' }}
+    runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    timeout-minutes: 90
+    env:
+      DOLT_VERSION: "2.1.7"
+      GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
+      # Tier A skips the matrix to stay a smoke tier. This is the job that runs
+      # it, so this is the job that opts in.
+      GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
+      # exactly as contract-acceptance-current does, so the bd on PATH and the
+      # beads library in go.mod reach the same upstream commit.
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ""
+          install-claude-cli: "false"
+      - name: Resolve bd current pin
+        id: bd
+        run: |
+          set -euo pipefail
+          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      # Fail here rather than inside a test: a bd that is missing or too old is
+      # a broken job, and the tests below would otherwise be asked to decide it
+      # one skip at a time.
+      - name: Verify bd supports proxied-server
+        run: |
+          set -euo pipefail
+          bd version
+          if ! bd init --help | grep -q -- --proxied-server; then
+            echo "::error::bd at $(command -v bd) has no --proxied-server support" >&2
+            exit 1
+          fi
+          dolt version
+      - name: Proxied-default acceptance
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 35m -count=1 -v \
+            -run 'TestBeadsProxiedDefault$' ./test/acceptance/ 2>&1 \
+            | tee "${RUNNER_TEMP}/proxied-default.log"
+      - name: Migration acceptance (AC-X)
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 15m -count=1 -v \
+            -run 'TestBeadsMigrateLegacyCityToProxied$|TestBeadsMigrateProxiedRefusesLiveLegacyServer$' \
+            ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/migrate.log"
+      - name: Topology matrix (M1, M5)
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 30m -count=1 -v \
+            -run 'TestBeadsInitTopologyMatrix$/^(M1-proxied-local|M5-legacy-gc-managed)$' \
+            ./test/acceptance/ 2>&1 | tee "${RUNNER_TEMP}/topology.log"
+      # A skip that nobody reads is the failure mode this whole job exists to
+      # fix, so the ones that remain are named in the summary.
+      - name: Report remaining skips
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          skips="$(cat "${RUNNER_TEMP}"/*.log 2>/dev/null | grep -E '^ *--- SKIP:' | sort -u || true)"
+          {
+            echo "## Beads topology acceptance"
+            echo
+            echo "bd pin: ${{ steps.bd.outputs.ver }} @ ${{ steps.bd.outputs.ref }}"
+            echo
+            echo "### Skipped"
+            echo
+            if [ -n "$skips" ]; then
+              echo '```'
+              echo "$skips"
+              echo '```'
+              echo
+              echo "GC_ACCEPTANCE_LEGACY_GC_BIN is unset: nothing builds a pre-journal gc yet,"
+              echo "so M5 and the two migration tests cannot run. Every other skip reason is"
+              echo "fatal here under GC_REQUIRE_ACCEPTANCE_TOOLING."
+            else
+              echo "None."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # NON-REQUIRED HEADxHEAD radar: builds bd from beads MAIN HEAD (live, not the
   # pinned BD_CURRENT_REF) and runs gc-HEAD's real bd CLI contract against it —
@@ -569,7 +744,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -583,11 +758,19 @@ jobs:
           GO_TEST_TIMING_NAME: cmd-gc-process-${{ matrix.shard }}-of-12
           GO_TEST_TIMING_VARIANT: linux-default
           GO_TEST_RUNNER_LABEL: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+          # A bd proxied-server failure names a log file and carries nothing
+          # else ("proxy child exited before publishing its OS-assigned port
+          # (see <root>/.beads/dolt/server.log)"). That file lives under the
+          # test's temp dir, which t.Cleanup removes before any workflow step
+          # could read it, so a red shard used to arrive with no evidence at
+          # all. Failing tests copy the allowlisted logs here first.
+          GC_TEST_FAILURE_ARTIFACT_DIR: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
           EXTRA_TEST_ENV: >-
             GO_TEST_TIMING_FILE="$${GO_TEST_TIMING_FILE}"
             GO_TEST_TIMING_NAME="$${GO_TEST_TIMING_NAME}"
             GO_TEST_TIMING_VARIANT="$${GO_TEST_TIMING_VARIANT}"
             GO_TEST_RUNNER_LABEL="$${GO_TEST_RUNNER_LABEL}"
+            GC_TEST_FAILURE_ARTIFACT_DIR="$${GC_TEST_FAILURE_ARTIFACT_DIR}"
             GITHUB_SHA="$${GITHUB_SHA}"
             GITHUB_WORKFLOW="$${GITHUB_WORKFLOW}"
             GITHUB_RUN_ID="$${GITHUB_RUN_ID}"
@@ -597,6 +780,14 @@ jobs:
             RUNNER_OS="$${RUNNER_OS}"
             RUNNER_ARCH="$${RUNNER_ARCH}"
         run: make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 EXTRA_TEST_ENV="$EXTRA_TEST_ENV"
+      - name: Upload cmd/gc process failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-diagnostics-cmd-gc-process-${{ matrix.shard }}-of-12-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure-artifacts/cmd-gc-process-${{ matrix.shard }}-of-12
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload cmd/gc process timing
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -613,7 +804,15 @@ jobs:
       - changes
     if: needs.changes.outputs.cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
-    timeout-minutes: 5
+    # 5 minutes budgeted compile time, not test time: the job's six tests run
+    # in well under a second, but runner-policy resolves runner_32vcpu to
+    # ubuntu-latest (4 vCPU) unless the calling workflow sets force_blacksmith
+    # or the run is a PR from a .github/blacksmith-allowlist.txt author
+    # (pushes to main are downgraded too), so `go build ./cmd/gc` under -tags
+    # productmetrics_testhook alone took 92-95% of the old budget on main, and
+    # any go.sum change (cold actions/setup-go cache) pushed it over and
+    # canceled the job with no failing test in the log (#6396).
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -723,7 +922,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -750,7 +949,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "v1.3.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1403,8 +1602,9 @@ jobs:
       - name: Install Playwright Chromium
         timeout-minutes: 12
         run: |
+          echo 'Acquire::http::Timeout "15";' | sudo tee /etc/apt/apt.conf.d/99-ci-apt-timeout >/dev/null
           for attempt in 1 2 3; do
-            if npm run test:e2e:install:ci; then
+            if timeout 240 npm run test:e2e:install:ci; then
               exit 0
             fi
             if [ "$attempt" = "3" ]; then
@@ -1615,9 +1815,12 @@ jobs:
       - changes
       - ci-preflight
       - ci-integration
+      - beads-topology-acceptance
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
+      - preflight-unit-cover-noncmdgc
+      - preflight-unit-cover-cmdgc
       - worker-core-summary
       - worker-core-phase2-summary
       - pack-gate
@@ -1638,9 +1841,14 @@ jobs:
 
           needs = json.loads(os.environ["NEEDS_JSON"])
           allow_skipped = {
+              # Path-gated on the beads_topology filter: skipping on a PR that
+              # touches no Dolt/beads path is the expected pass case.
+              "beads-topology-acceptance",
               "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
+              "preflight-unit-cover-noncmdgc",
+              "preflight-unit-cover-cmdgc",
               "pack-gate",
               "docker-session",
               "k8s-session",

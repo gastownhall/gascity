@@ -1,0 +1,51 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "worktree",
+    srcs = [
+        "lock.go",
+        "lock_unix.go",
+        "lock_windows.go",
+        "worktree.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/worktree",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/git",
+        "//internal/pathutil",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+go_test(
+    name = "worktree_test",
+    srcs = [
+        "cleanup_attempt_test.go",
+        "cleanup_reachability_test.go",
+        "lock_exclusion_unix_test.go",
+        "testenv_import_test.go",
+        "worktree_test.go",
+    ],
+    embed = [":worktree"],
+    deps = [
+        "//internal/git",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

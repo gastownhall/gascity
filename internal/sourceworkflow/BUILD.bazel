@@ -1,0 +1,41 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "sourceworkflow",
+    srcs = ["sourceworkflow.go"],
+    importpath = "github.com/gastownhall/gascity/internal/sourceworkflow",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/beads/closeorder",
+        "//internal/citylayout",
+        "//internal/pathutil",
+    ],
+)
+
+go_test(
+    name = "sourceworkflow_test",
+    srcs = [
+        "sourceworkflow_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":sourceworkflow"],
+    deps = [
+        "//internal/beads",
+        "//internal/testenv",
+        "//internal/testutil",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

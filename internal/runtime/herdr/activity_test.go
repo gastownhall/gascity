@@ -1,8 +1,11 @@
 package herdr
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // activityTestProvider wires a Provider at the fake server's socket with the
@@ -274,4 +277,48 @@ func shrinkActivityKnobs(t *testing.T) {
 	t.Cleanup(func() { activityPollInterval, activityEventDebounce = pi, ed })
 	activityPollInterval = 25 * time.Millisecond
 	activityEventDebounce = 5 * time.Millisecond
+}
+
+// TestActivityReconcileLoopPollsOnAnyEventKind pins the protection that the
+// event-translation boundary depends on and cannot itself assert. The tracker
+// reads arrival only: it never inspects SessionEvent.Kind, so a provider
+// boundary that filters events by kind silently demotes this acceleration to
+// the fallback ticker, with nothing failing and nothing logging. The fallback
+// here is set far out of reach, so a poll within the deadline can only have
+// come from the event.
+//
+// agent_state_changed is listed because it is the kind a non-idle herdr state
+// translates to, and a boundary that dropped those states instead of
+// translating them is exactly the regression this test exists to catch.
+func TestActivityReconcileLoopPollsOnAnyEventKind(t *testing.T) {
+	for _, kind := range []runtime.SessionEventKind{
+		runtime.SessionEventAgentStateChanged,
+		runtime.SessionEventAgentIdle,
+		runtime.SessionEventAgentDetected,
+		runtime.SessionEventResync,
+		runtime.SessionEventKind("a-kind-no-provider-emits-yet"),
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			prevInterval, prevDebounce := activityPollInterval, activityEventDebounce
+			t.Cleanup(func() {
+				activityPollInterval, activityEventDebounce = prevInterval, prevDebounce
+			})
+			activityPollInterval = time.Hour // the ticker must not be the cause
+			activityEventDebounce = time.Millisecond
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			events := make(chan runtime.SessionEvent, 1)
+			polled := make(chan struct{}, 4)
+			a := &activityTracker{}
+			go a.reconcileLoop(ctx, events, func() { polled <- struct{}{} })
+
+			events <- runtime.SessionEvent{Kind: kind, Session: "beta"}
+			select {
+			case <-polled:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("kind %q did not accelerate a poll; the tracker must treat any event as a hint", kind)
+			}
+		})
+	}
 }

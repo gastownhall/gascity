@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -100,7 +102,12 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged. "heartbeat
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. gc adds one
 subcommand of its own: "release-if-current <issue-id> <assignee>", which
@@ -164,7 +171,108 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
+	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
+	// recursive calls to this exact executable rather than inheriting an
+	// ambient GC_BIN or resolving an unrelated gc from PATH.
+	executable, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return nil, err
+	}
+	overrides["GC_BIN"] = executable
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func resolveBdInvokingGCBinary() (string, error) {
+	executable, err := resolveInvokingExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if !filepath.IsAbs(executable) {
+		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
+	}
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat invoking gc executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
+	}
+	return canonical, nil
+}
+
+// pinBdGCEnvironment replaces ambient GC_BIN with the physical invoking
+// executable before the beads runner merges the child environment.
+func pinBdGCEnvironment(env map[string]string) error {
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
+}
+
+// bestEffortBdGCBinaryWarning fires once per process.
+var bestEffortBdGCBinaryWarning sync.Once
+
+// pinBdGCEnvironmentBestEffort is pinBdGCEnvironment for the legacy managed
+// path, where main never set GC_BIN for gc's own bd invocations at all.
+//
+// The strict resolver refuses when the physical path behind os.Executable() is
+// gone — a Homebrew/Nix upgrade that removed the old store or Cellar directory a
+// still-running supervisor resolved through. Making that refusal fatal for every
+// bd runner turned an upgrade into a supervisor whose session reconciler, store
+// opens, health, recover and its own SIGTERM shutdown all fail until restart,
+// leaving the managed Dolt unstopped. Where GC_BIN is load-bearing — the bd
+// store bridge's hook callbacks, and provider-owned scopes where bd re-invokes
+// gc — the refusal stays; here the pin degrades to main's own fallback chain and
+// says so once.
+func pinBdGCEnvironmentBestEffort(env map[string]string) {
+	if env == nil {
+		return
+	}
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err == nil {
+		env["GC_BIN"] = gcBin
+		return
+	}
+	bestEffortBdGCBinaryWarning.Do(func() {
+		log.Printf("gc: cannot canonicalize the invoking gc executable (%v); bd callbacks will use the ambient GC_BIN or PATH gc until this process restarts", err)
+	})
+	if fallback := bestEffortInvokingGCBinary(); fallback != "" {
+		env["GC_BIN"] = fallback
+	}
+}
+
+// bestEffortInvokingGCBinary reproduces the fallback chain this branch replaced:
+// the absolute path os.Executable() reports, then a gc on PATH, then nothing at
+// all — in which case the caller leaves whatever GC_BIN the environment already
+// carries.
+//
+// Each link has to name a binary that still runs. gc-beads-bd.sh treats any
+// non-empty GC_BIN as authoritative (resolve_gc_helper_bin) and `die`s when the
+// exec fails, so handing it the removed path the strict resolver just rejected
+// turns a recover that would have completed through the script's shell-native
+// fallbacks into one that SIGTERMs the managed Dolt and exits before restarting
+// it. An empty GC_BIN is the better answer than a dead one.
+func bestEffortInvokingGCBinary() string {
+	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) && runnableGCBinary(executable) {
+		return executable
+	}
+	if found, err := exec.LookPath("gc"); err == nil && runnableGCBinary(found) {
+		return found
+	}
+	return ""
+}
+
+// runnableGCBinary reports whether path still names an executable file. Stat
+// follows symlinks, so a link whose target an upgrade removed is refused too.
+func runnableGCBinary(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -221,6 +329,17 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 // preflight cannot interpret exactly are refused before bd can mutate state.
 func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
 	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
+	// create, new"), so the alias has to reach the same admission check AND the
+	// same flag manifest. Normalizing here covers both, because those are the
+	// only two things verb is read for. The gate alone would not: bdflags keys
+	// its manifests under the canonical verb only and performs no alias
+	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
+	// over no value — the failure mode globalValueFlags' doc comment calls
+	// load-bearing.
+	if verb == "new" {
+		verb = "create"
+	}
 	if verb != "create" && verb != "update" {
 		return "", false
 	}
@@ -312,6 +431,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// A `list` that filters on the wisps tier reaches that tier only with
+	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
+	// molecules. See bd_wisp_tier.go.
+	bdArgs = rewriteBdWispTierArgs(bdArgs)
+
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
 	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
@@ -364,6 +488,28 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// ledger cannot answer by class, so the reason it would have been
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
+	}
+	// The same split, on the write side. `gc bd create` is a passthrough too, and
+	// bd writes the work ledger only, so a create whose SHAPE belongs to a
+	// relocated class strands the bead in a ledger that class is never read from
+	// — silently, because bd did what it was asked and exited 0. Placement is
+	// impossible here (only argv crosses to the subprocess), so the create is
+	// refused before anything is written and the refusal names the gc-native
+	// command that mints it correctly.
+	//
+	// The read override above deliberately does not reach this arm: it exists
+	// because the read scan classifies ambiguous TEXT and a refused read can be
+	// re-run, while a stranded mint leaves a row under the wrong prefix that no
+	// later read finds and no migration moves.
+	//
+	// It runs before the by-id door rather than after because the two answer
+	// different questions and cannot shadow each other: this arm reads the
+	// prospective bead's CLASS and never an addressed id, so a create that names
+	// a relocated bead in --parent still reaches the ownership refusal, which
+	// names that bead. When both are true the mint is what has to be stopped.
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, target.ScopeRoot, bdArgs); stranded {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// A by-ID operation whose subject a relocated class owns is answered in
 	// process, from the binding that class is served from, and never handed to
@@ -614,7 +760,7 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (2026-06-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags

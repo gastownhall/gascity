@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"sort"
@@ -541,12 +542,21 @@ func TestCreatePoolSessionBeadWithGuardedAlias_LiveRecensusBypassesStaleForeignC
 	rigPath := t.TempDir()
 	primaryBacking := beads.NewMemStore()
 	primary := beads.NewCachingStoreForTest(primaryBacking, nil)
-	if err := primary.PrimeActive(); err != nil {
+	// Both caches are fully primed (cacheLive) rather than active-only. A
+	// partial prime answers no broad non-closed list query from cache at all,
+	// so the ordinary census below would fall back to the backing store and
+	// observe the external write immediately, collapsing the staleness window
+	// this test exists to reproduce. A fully primed cache serves that census
+	// from its own snapshot, which is the production shape: complete as of the
+	// prime and still blind to a later write committed by another process.
+	// Note the two unrelated senses of "live" here: this is the cache STATE,
+	// whereas the lock-time recensus bypass below is session.ListAllOptions.Live.
+	if err := primary.Prime(context.Background()); err != nil {
 		t.Fatalf("prime primary cache: %v", err)
 	}
 	foreignBacking := beads.NewMemStore()
 	foreign := beads.NewCachingStoreForTest(foreignBacking, nil)
-	if err := foreign.PrimeActive(); err != nil {
+	if err := foreign.Prime(context.Background()); err != nil {
 		t.Fatalf("prime foreign cache: %v", err)
 	}
 	maxSessions := 2

@@ -136,7 +136,7 @@ func TestMailSendJSON(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	var stdout, stderr bytes.Buffer
-	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, true, &stdout, &stderr)
+	code := doMailSendJSON(mp, events.Discard, recipients, "human", []string{"mayor", "build is green"}, nil, "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -155,6 +155,93 @@ func TestMailSendJSON(t *testing.T) {
 	}
 	if got.SchemaVersion != "1" || !got.OK || got.Command != "mail.send" || got.Count != 1 || len(got.Messages) != 1 || got.Messages[0].To != "mayor" {
 		t.Fatalf("payload = %+v", got)
+	}
+}
+
+func TestMailSendDedupSuppressesDuplicate(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+	rec := events.NewFake()
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"mayor", "quarantine: hq", "marker exists"}
+	code := doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("first send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Sent message") {
+		t.Fatalf("first send stdout = %q, want sent confirmation", stdout.String())
+	}
+
+	stdout.Reset()
+	code = doMailSendJSON(mp, rec, recipients, "human", args, nil, "dolt-compact-quarantine:hq", false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Suppressed duplicate") {
+		t.Fatalf("second send stdout = %q, want suppression notice", stdout.String())
+	}
+	if got := len(rec.Events); got != 1 {
+		t.Fatalf("recorded %d mail.sent events; want 1 (no event for a suppressed send)", got)
+	}
+	msgs, err := mp.Inbox("mayor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(msgs); got != 1 {
+		t.Fatalf("inbox has %d messages; want 1", got)
+	}
+}
+
+func TestMailSendDedupJSONReportsAlreadyDone(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	args := []string{"mayor", "quarantine: hq", "marker exists"}
+	var first bytes.Buffer
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &first, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("first send = %d, want 0", code)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("second send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got struct {
+		OK          bool   `json:"ok"`
+		Command     string `json:"command"`
+		ID          string `json:"id"`
+		AlreadyDone bool   `json:"already_done"`
+		Count       int    `json:"count"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if !got.OK || got.Command != "mail.send" || !got.AlreadyDone || got.Count != 0 || got.ID == "" {
+		t.Fatalf("payload = %+v; want ok, already_done, count 0, live-copy id", got)
+	}
+}
+
+// TestMailSendDedupFallsBackWithoutCapability proves the fail-open contract:
+// a provider that does not implement mail.DedupSender still delivers the
+// message (a duplicate notification beats a silently dropped one), with a
+// stderr note.
+func TestMailSendDedupFallsBackWithoutCapability(t *testing.T) {
+	mp := mail.NewFake() // fake provider: no SendDeduped
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"mayor", "subject", "body"}
+	if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nil, "k1", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("send = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does not support --dedup") {
+		t.Fatalf("stderr = %q, want capability note", stderr.String())
+	}
+	if got := len(mp.Messages()); got != 1 {
+		t.Fatalf("provider has %d messages; want 1 (fallback still sends)", got)
 	}
 }
 
@@ -569,9 +656,9 @@ func TestCmdMailSendDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *testi
 	_ = os.Unsetenv("GC_AGENT")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "", "", "", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"recipient", "hello"}, false, false, "", "", "", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -641,9 +728,9 @@ func TestCmdMailSendFromControllerCreatesMessage(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "Dolt health advisory [MEDIUM]", "Latency warning", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	storeAfter, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -713,9 +800,9 @@ func TestCmdMailSendToControllerRecipientIsRejected(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"controller/"}, false, false, "human", "", "Subject", "Body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"controller/"}, false, false, "human", "", "Subject", "Body", "", false, &stdout, &stderr)
 	if code == 0 {
-		t.Fatalf("cmdMailSend() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = 0, want failure; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `unknown recipient "controller/"`) {
 		t.Fatalf("stderr = %q, want unknown controller recipient", stderr.String())
@@ -762,9 +849,9 @@ func TestCmdMailSendTrailingSlashHumanRecipientResolvesToHuman(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"human/"}, false, false, "controller", "", "ESCALATION: test", "escalation body", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON(human/) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	store, err := openCityStoreAt(cityPath)
@@ -1928,9 +2015,10 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -1945,6 +2033,9 @@ func TestMailReplyNotifySuccess(t *testing.T) {
 	if nudged != "alice" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "alice")
 	}
+	if nudgedMessageID == "" || !strings.Contains(stdout.String(), "sent message "+nudgedMessageID) {
+		t.Errorf("nudgeFn called with messageID %q, want the reply's own message ID (stdout: %s)", nudgedMessageID, stdout.String())
+	}
 }
 
 func TestMailReplyNotifyNudgeError(t *testing.T) {
@@ -1952,7 +2043,7 @@ func TestMailReplyNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	mp.Send("alice", "bob", "Hello", "first") //nolint:errcheck
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -3180,9 +3271,10 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	var nudged string
-	nf := func(recipient string) error {
+	var nudged, nudgedMessageID string
+	nf := func(recipient, messageID string) error {
 		nudged = recipient
+		nudgedMessageID = messageID
 		return nil
 	}
 
@@ -3197,6 +3289,9 @@ func TestMailSendNotifySuccess(t *testing.T) {
 	if nudged != "mayor" {
 		t.Errorf("nudgeFn called with %q, want %q", nudged, "mayor")
 	}
+	if nudgedMessageID != "gc-1" {
+		t.Errorf("nudgeFn called with messageID %q, want %q (the sent message's ID)", nudgedMessageID, "gc-1")
+	}
 }
 
 func TestMailSendNotifyNudgeError(t *testing.T) {
@@ -3204,7 +3299,7 @@ func TestMailSendNotifyNudgeError(t *testing.T) {
 	mp := beadmail.New(store)
 	recipients := map[string]bool{"human": true, "mayor": true}
 
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		return fmt.Errorf("session not found")
 	}
 
@@ -3229,7 +3324,7 @@ func TestMailSendNotifyToHuman(t *testing.T) {
 	recipients := map[string]bool{"human": true, "mayor": true}
 
 	nudgeCalled := false
-	nf := func(_ string) error {
+	nf := func(_, _ string) error {
 		nudgeCalled = true
 		return nil
 	}
@@ -3306,6 +3401,103 @@ func TestMailSendSubjectAndMessage(t *testing.T) {
 	}
 	if b.Description != "Token refresh fails after 30min" {
 		t.Errorf("bead Description = %q, want %q", b.Description, "Token refresh fails after 30min")
+	}
+}
+
+// TestMailSendSubjectOnlyStoresEmptyBody pins the storage contract for
+// `gc mail send <to> -s "text"` with no -m and no positional body: an empty
+// body is a legal stored state and stays empty. The subject is required
+// (POST /v0/mail marks it minLength:1) and the body is explicitly optional
+// there, so a subject-only message is well-formed rather than a message whose
+// content went missing. What was broken was the rendering, not the storage;
+// see TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage (ga-6eukj0).
+func TestMailSendSubjectOnlyStoresEmptyBody(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	recipients := map[string]bool{"human": true, "mayor": true}
+
+	var stdout bytes.Buffer
+	code := doMailSend(mp, events.Discard, recipients, "human", []string{"mayor", "Build is green", ""}, nil, &stdout, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("doMailSend = %d, want 0", code)
+	}
+
+	b, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Build is green" {
+		t.Errorf("bead Title = %q, want %q", b.Title, "Build is green")
+	}
+	if b.Description != "" {
+		t.Errorf("bead Description = %q, want empty (an omitted body is a legal state, not a lost one)", b.Description)
+	}
+}
+
+// TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage is the actual
+// ga-6eukj0 defect. A subject-only message reached the agent-facing injection
+// as "[Build is green]: " — a subject in brackets and nothing behind the
+// colon, which reads as a message whose body was lost. The subject IS the
+// message here, so it must render as the message.
+func TestFormatInjectOutputSubjectOnlyRendersSubjectAsMessage(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]: \n") {
+		t.Errorf("subject-only message rendered as an empty-bodied message:\n%s", out)
+	}
+}
+
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce guards the pre-existing
+// subject==body shape produced by the positional form: `gc mail send <to>
+// "text"` arrives with no subject, and beadmail.Send backfills the title from
+// the body, so Title and Description are identical.
+func TestFormatInjectOutputSubjectEqualToBodyRendersOnce(t *testing.T) {
+	out := formatInjectOutput([]mail.Message{
+		{ID: "gc-1", From: "human", To: "mayor", Subject: "Build is green", Body: "Build is green"},
+	})
+
+	if want := "- gc-1 from human: Build is green"; !strings.Contains(out, want) {
+		t.Errorf("inject output missing %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "[Build is green]") {
+		t.Errorf("identical subject and body rendered twice:\n%s", out)
+	}
+}
+
+// TestPrintMessageKeepsBodyIdenticalToSubject pins the documented output of
+// the positional send. `gc mail send <to> "text"` supplies a body and no
+// subject, and beadmail.Send synthesizes the title from that body, so the two
+// fields hold the same string with the SUBJECT being the derived one.
+// Suppressing the Body line here would print only the synthesized field and
+// hide the one the user actually typed, which is the "content renders as
+// though it were lost" failure this command family exists to avoid.
+//
+// This duplicates cmd/gc/testdata/events.txtar:32 on purpose. That txtar runs
+// only under GC_FAST_UNIT=0, so a suppression reintroduced here would survive
+// the whole fast unit loop and surface only in CI.
+//
+// Note the injection path deliberately renders such a message ONCE (see
+// TestFormatInjectOutputSubjectEqualToBodyRendersOnce): it emits a single
+// "from X: message" line, where repeating the string is pure noise. The
+// labeled Subject/Body view is a different contract and shows both.
+func TestPrintMessageKeepsBodyIdenticalToSubject(t *testing.T) {
+	var out bytes.Buffer
+	printMessage(mail.Message{
+		ID: "gc-1", From: "human", To: "mayor",
+		Subject: "hey there", Body: "hey there",
+	}, &out)
+
+	got := out.String()
+	if !strings.Contains(got, "Subject:  hey there") {
+		t.Errorf("missing Subject line:\n%s", got)
+	}
+	if !strings.Contains(got, "Body:     hey there") {
+		t.Errorf("Body line dropped for a positional send; the body is what the user typed:\n%s", got)
 	}
 }
 
@@ -4917,9 +5109,9 @@ func TestCmdMailSendPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -4936,9 +5128,9 @@ func TestCmdMailSendFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/", "positional body"}, false, false, "controller", "", "subject", "flag body", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -4952,9 +5144,9 @@ func TestCmdMailSendNoBodyStillWorks(t *testing.T) {
 	cityPath := mailSendTestCity(t, "mayor")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"mayor/"}, false, false, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"mayor/"}, false, false, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	msg := mailSendTestFindMessage(t, cityPath)
@@ -4971,7 +5163,7 @@ func TestCmdMailSendAllPositionalBodyHonouredWhenSubjectFlagSet(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -4990,7 +5182,7 @@ func TestCmdMailSendAllFlagBodyWinsOverPositional(t *testing.T) {
 	cityPath := mailSendTestCity(t, "worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailSend([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", &stdout, &stderr)
+	code := cmdMailSendJSON([]string{"positional body"}, false, true, "controller", "", "subject", "flag body", "", false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdMailSend --all = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}

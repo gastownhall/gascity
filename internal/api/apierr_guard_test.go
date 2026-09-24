@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // urnLiteralRe matches any Gas City error-type URN literal as it would appear in
@@ -40,7 +41,10 @@ func TestEveryEmittedErrorCodeIsRegistered(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Join(filepath.Dir(currentFile), "..", "..")
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Join(filepath.Dir(currentFile), "..", "..")
+	}
 
 	// Scan git-tracked Go source, not a filesystem walk. A raw WalkDir over
 	// repoRoot descends into nested Gas City runtime state — checked-out worktrees
@@ -50,11 +54,15 @@ func TestEveryEmittedErrorCodeIsRegistered(t *testing.T) {
 	// `git ls-files` is the precise definition of shipped source: it excludes
 	// untracked worktrees and build output while still seeing every tracked .go
 	// under internal/, cmd/, pkg/, the module root, examples/, and so on.
+	var tracked []string
 	out, err := exec.Command("git", "-C", repoRoot, "ls-files", "-z", "--", "*.go").Output()
-	if err != nil {
-		t.Fatalf("git ls-files in %s: %v", repoRoot, err)
+	if err == nil {
+		tracked = strings.Split(strings.TrimRight(string(out), "\x00"), "\x00")
+	} else {
+		// Bazel runfiles trees carry no .git; walk the declared source tree.
+		tracked = apiErrWalkedGoFiles(repoRoot)
 	}
-	for _, rel := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+	for _, rel := range tracked {
 		if rel == "" || strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
@@ -145,4 +153,32 @@ func TestErrorModelSpecProjection(t *testing.T) {
 	if !reflect.DeepEqual(gotURNs, wantURNs) {
 		t.Fatalf("x-gascity-problem-types mismatch:\n got=%v\nwant=%v", gotURNs, wantURNs)
 	}
+}
+
+// apiErrWalkedGoFiles enumerates non-test .go files across the module when
+// the git index is unavailable (bazel runfiles trees).
+func apiErrWalkedGoFiles(root string) []string {
+	var files []string
+	for _, top := range []string{"internal", "cmd", "pkg", "examples", "test", "scripts"} {
+		_ = filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil // best effort
+			}
+			if d.IsDir() {
+				if name := d.Name(); name != "." && strings.HasPrefix(name, ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return nil
+			}
+			if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+				files = append(files, rel)
+			}
+			return nil
+		})
+	}
+	return files
 }

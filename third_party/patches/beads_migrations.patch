@@ -1,0 +1,13 @@
+diff -ruN a/internal/storage/schema/BUILD.bazel b/internal/storage/schema/BUILD.bazel
+--- a/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.244530897 +0000
++++ b/internal/storage/schema/BUILD.bazel	2026-09-23 12:15:55.257530882 +0000
+@@ -0,0 +1,9 @@
++
++# Patched for gascity bazel farm: expose the schema migrations as a public
++# filegroup so the pinned-cursor drift test can declare them as runfiles
++# data (a pure-Bazel machine has no go module cache to read them from).
++filegroup(
++    name = "migrations",
++    srcs = glob(["migrations/**"]),
++    visibility = ["//visibility:public"],
++)

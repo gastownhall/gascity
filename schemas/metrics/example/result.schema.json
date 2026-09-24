@@ -215,7 +215,10 @@
               "beads-metadata-cas",
               "worktree-cleanup",
               "worktree-ensure",
-              "worktree-verify"
+              "worktree-verify",
+              "storage-preflight",
+              "nudge-drop",
+              "beads-city-migrate-proxied"
             ]
           },
           "event_id": {

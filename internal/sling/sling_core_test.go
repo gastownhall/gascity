@@ -137,6 +137,20 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttached(t *testi
 	if !warned {
 		t.Errorf("BeadWarnings = %v, want a warning naming the skipped attachment MOL-1", result.BeadWarnings)
 	}
+
+	// Falling back to a plain route leaves BL-1 routed to builder but still
+	// claimed by reviewer-session with no molecule to drive it -- nothing the
+	// target queries can reach it. The fallback must say so distinctly
+	// (gm-2kyaqy), not just report the skipped attachment.
+	var undeliverable bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "still assigned to") && strings.Contains(w, "reviewer-session") {
+			undeliverable = true
+		}
+	}
+	if !undeliverable {
+		t.Errorf("BeadWarnings = %v, want a warning that BL-1 is undeliverable to builder while reviewer-session holds it", result.BeadWarnings)
+	}
 }
 
 // TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Formula
@@ -193,6 +207,20 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	if !warned {
 		t.Errorf("BeadWarnings = %v, want a warning naming the skipped attachment MOL-1", result.BeadWarnings)
+	}
+
+	// Falling back to a plain route leaves BL-1 routed to builder but still
+	// claimed by reviewer-session with no molecule to drive it -- nothing the
+	// target queries can reach it. The fallback must say so distinctly
+	// (gm-2kyaqy), not just report the skipped attachment.
+	var undeliverable bool
+	for _, w := range result.BeadWarnings {
+		if strings.Contains(w, "still assigned to") && strings.Contains(w, "reviewer-session") {
+			undeliverable = true
+		}
+	}
+	if !undeliverable {
+		t.Errorf("BeadWarnings = %v, want the graph.v2 fallback to warn that BL-1 is undeliverable (parity with the legacy branch)", result.BeadWarnings)
 	}
 
 	convoys, err := deps.Store.List(beads.ListQuery{Type: "convoy", IncludeClosed: true})

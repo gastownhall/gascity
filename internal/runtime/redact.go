@@ -12,9 +12,11 @@ const RedactedValue = "<redacted>"
 // substitutionFloor is the shortest value [RedactSecrets] will substitute.
 // Substitution is blind to word boundaries, so hiding a short value mangles
 // unrelated text: with "no" a secret, herdr's "agent not found" becomes
-// "agent <redacted>t found", and both the herdr client's isAgentNotFound and
-// [IsSessionGone] decide by matching that phrase — a redactor silently taking
-// over branches that turn a tolerated missing session into a hard failure.
+// "agent <redacted>t found", and [IsSessionGone] decides by matching that phrase
+// — a redactor silently taking over branches that turn a tolerated missing
+// session into a hard failure. (The herdr client used to decide the same way and
+// now gates on herdr's reported error code instead, for a related reason: the
+// rendered text it was matching also carried the argv it had passed in.)
 //
 // The floor buys that back because the two populations barely overlap: the
 // credentials that reach a session are long (the instance token is 32 hex

@@ -294,10 +294,10 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 			wantDir: "riga",
 		},
 		{
-			name:    "assigned beats routed at worse priority",
+			name:    "assigned in one store does not beat routed at better priority in another",
 			cityRow: `[{"id":"ci-1","priority":0}]`,
 			rigRow:  `[{"id":"va-1","priority":3,"assignee":"me"}]`,
-			wantDir: "riga",
+			wantDir: "city",
 		},
 		{
 			name:    "within the routed tier, priority decides",
@@ -322,6 +322,39 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 				t.Fatalf("store.dir = %q, want %q", gotStore.dir, tc.wantDir)
 			}
 		})
+	}
+}
+
+// TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores is the direct
+// regression test for ga-t922vm. TestBestStoreWithWorkRanksTierAheadOfPriority
+// above correctly pins that tier dominates priority WITHIN a single store's
+// ranking (that mirrors bd's own three-tier work_query order). But
+// bestStoreWithWork was reusing that exact same tier comparison ACROSS
+// stores too — so a merely assigned-but-open bead in the primary store
+// permanently outranked routed rig work at any priority, and #5491's tie
+// rotation never got a chance to fire because the two candidates were never
+// at equal rank. Confirmed live: gm-j3o0fo (tier=assigned, priority=1) beat
+// ga-4twfqq (tier=routed, priority=1) on 10 consecutive gc hook runs even
+// though the rig bead was P0-equivalent urgent and routed specifically to
+// this agent's rig.
+//
+// Here the primary store's assigned bead is P3 and the rig's routed bead is
+// P0 — the rig bead must win once assigned and routed are tie-equivalent
+// across stores.
+func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":3,"assignee":"x"}]`, nil
+		}
+		return `[{"id":"va-1","priority":0}]`, nil
+	}
+	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga (routed P0 in a rig store must not lose to an assigned-but-open P3 in the primary store)", gotStore.dir)
 	}
 }
 

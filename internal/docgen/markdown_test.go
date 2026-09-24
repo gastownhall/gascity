@@ -2,11 +2,15 @@ package docgen
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 func TestRenderMarkdownCitySchema(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -38,6 +42,7 @@ func TestRenderMarkdownCitySchema(t *testing.T) {
 }
 
 func TestRenderMarkdownFrontmatter(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -60,6 +65,7 @@ func TestRenderMarkdownFrontmatter(t *testing.T) {
 }
 
 func TestRenderMarkdownEmptyFieldTableSuppressed(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -90,6 +96,7 @@ func TestRenderMarkdownEmptyFieldTableSuppressed(t *testing.T) {
 }
 
 func TestRenderMarkdownTableFormat(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -120,6 +127,7 @@ func TestRenderMarkdownTableFormat(t *testing.T) {
 }
 
 func TestRenderMarkdownRequiredFields(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -139,6 +147,7 @@ func TestRenderMarkdownRequiredFields(t *testing.T) {
 }
 
 func TestRenderMarkdownEnumValues(t *testing.T) {
+	chdirModuleRootForBazel(t)
 	s, err := GenerateCitySchema()
 	if err != nil {
 		t.Fatalf("GenerateCitySchema: %v", err)
@@ -155,4 +164,22 @@ func TestRenderMarkdownEnumValues(t *testing.T) {
 	if !strings.Contains(md, "pre_start") {
 		t.Error("pre_start not shown in markdown")
 	}
+}
+
+// chdirModuleRootForBazel points the reflector's module walk at the real
+// checkout when running under `bazel test`, whose runfiles tree is partial.
+func chdirModuleRootForBazel(t *testing.T) {
+	t.Helper()
+	root := bazeltest.OverrideRoot()
+	if root == "" {
+		return
+	}
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
 }

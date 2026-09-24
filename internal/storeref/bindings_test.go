@@ -87,6 +87,61 @@ func TestBuildBindingsObservesAMintingStore(t *testing.T) {
 	}
 }
 
+// TestBuildBindingsRaisesThePessimisticBitOnProof pins the one clause that
+// makes the two relic bits impossible to disagree.
+//
+// A durable record naming this binding is PROOF of what the pessimistic bit only
+// guesses at, so a live census that answered "clean" against it is a census that
+// could not read the store — never grounds to lower the bit. Without the raise,
+// a build whose Relics predicate answers clean (the ga-dx4ho namespace predicate
+// is the one on the way) would produce MintsReserved+clean and retire the probe
+// on a binding proven to hold relics, and probeRefusalPolicy would never be
+// consulted at all.
+func TestBuildBindingsRaisesThePessimisticBitOnProof(t *testing.T) {
+	graph, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatal("graph has no reserved mint prefix")
+	}
+	store := bindingTestMinter{Store: beads.NewMemStore(), prefix: graph}
+	bindings, _ := BuildBindings(
+		[]beads.Store{store},
+		map[beads.Store][]coordclass.Class{store: {coordclass.ClassGraph}},
+		BindingOptions{
+			Relics:      func(beads.Store) bool { return false },
+			KnownRelics: func(StoreRef) bool { return true },
+		},
+	)
+	if len(bindings) != 1 {
+		t.Fatalf("got %d bindings, want 1", len(bindings))
+	}
+	if !bindings[0].HasLegacyResidents {
+		t.Error("a binding a durable record PROVES holds relics reports HasLegacyResidents = false; the proof did not raise the pessimistic bit, so a clean live census can still retire its probe")
+	}
+	if bindings[0].probeRetired() {
+		t.Error("the residence probe retired on a binding proven to hold relics; every id the migration preserved there becomes unreachable")
+	}
+}
+
+// TestProbeRetirementIgnoresNeitherRelicBit is the same invariant enforced where
+// it is READ, for a ClassBinding that never went through BuildBindings.
+//
+// The builder's raise keeps the FIELD honest; this keeps the DECISION safe.
+// storeref exports ClassBinding, so a plane assembling one by hand — the CLI
+// already does, for its refused-city topology — can spell the contradictory
+// state the builder cannot produce, and the failure would be silent: a retired
+// probe answers "no such bead" for exactly the ids the proof is about.
+func TestProbeRetirementIgnoresNeitherRelicBit(t *testing.T) {
+	if (ClassBinding{MintsReserved: true, KnownLegacyResidents: true}).probeRetired() {
+		t.Error("a hand-built binding with proof but no pessimistic bit retired its probe; proof must retire nothing")
+	}
+	if (ClassBinding{MintsReserved: true, HasLegacyResidents: true}).probeRetired() {
+		t.Error("a binding carrying the pessimistic bit retired its probe")
+	}
+	if !(ClassBinding{MintsReserved: true}).probeRetired() {
+		t.Error("a mint-truthful binding with neither relic bit did not retire; the two checks above are unfalsifiable")
+	}
+}
+
 // TestBuildBindingsOrdersByRefRegardlessOfInput covers the difference the two
 // copies had drifted into: the CLI plane sorted, the API plane returned map
 // order fixed by whatever sequence its accessors happened to be listed in.

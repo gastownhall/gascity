@@ -19,8 +19,16 @@ type managementActionResult struct {
 	Path          string `json:"path,omitempty"`
 	Prefix        string `json:"prefix,omitempty"`
 	DefaultBranch string `json:"default_branch,omitempty"`
-	Suspended     *bool  `json:"suspended,omitempty"`
-	State         string `json:"state,omitempty"`
+	// Suspended is the acting command's own view of suspension, never a live
+	// effective-state query. `rig add` and `agent add` report the authored
+	// startup default — for rigs, [config.Rig.EffectiveSuspendedOnStart] — so on
+	// a re-add of an existing rig it can disagree with `gc rig list --json`,
+	// which layers the runtime suspension-state override on top of that default
+	// (buildEffectiveSuspendedRigNames). `rig suspend|resume` and
+	// `agent suspend|resume` report the state the command just applied. Consumers
+	// needing a rig's live effective suspension must read `gc rig list --json`.
+	Suspended *bool  `json:"suspended,omitempty"`
+	State     string `json:"state,omitempty"`
 	// Status and RequestID are additive fields the remote `rig add` path emits so
 	// a script repointed at a remote city keeps the automation-critical keys plus
 	// the async outcome (provisioned/exists) and its idempotency id. Local
@@ -90,7 +98,7 @@ func rigAddJSONSummary(rigPath string, rig config.Rig) managementActionResult {
 		Path:          rigPath,
 		Prefix:        rig.EffectivePrefix(),
 		DefaultBranch: rig.EffectiveDefaultBranch(),
-		Suspended:     managementBoolPtr(rig.Suspended),
+		Suspended:     managementBoolPtr(rig.EffectiveSuspendedOnStart()),
 	}
 	if result.Prefix == "" {
 		result.Prefix = config.DeriveBeadsPrefix(name)

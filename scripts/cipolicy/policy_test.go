@@ -23,9 +23,43 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 	}
 }
 
-func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
-	const want = "\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts"
+func TestPlaywrightChromiumInstallHardensAgainstHungAptMirror(t *testing.T) {
+	docs := loadPolicyDocuments(t)
+	if err := validatePlaywrightInstallHardening(docs.ci); err != nil {
+		t.Fatal(err)
+	}
+}
 
+func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
+	assertTestCIPolicyRecipeLine(t, "the focused static-scope contracts",
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts")
+}
+
+// TestMakeTestCIPolicyRunsVersionPinContracts keeps the bd and Dolt pin
+// contracts on the PR-time critical path.
+//
+// They assert that deps.env, go.mod, the workflow env blocks, the Dockerfiles
+// and the integration suite's own literal all name the same versions. The only
+// other CI jobs that sweep ./scripts — preflight-unit-cover-noncmdgc and
+// preflight-unit-cover-cmdgc — are `if: github.event_name == 'push'`, so
+// without this line a pin bump that misses one anchor goes green on the PR and
+// fails after merge. That is exactly how the integration suite sat on
+// v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
+//
+// It is a separate recipe line rather than more alternatives on the
+// static-scope one so that command stays byte-identical to what
+// TestMakeTestCIPolicyRunsStaticScopeContracts pins.
+func TestMakeTestCIPolicyRunsVersionPinContracts(t *testing.T) {
+	assertTestCIPolicyRecipeLine(t, "the bd and Dolt version-pin contracts",
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestBDVersionPins|TestDoltVersionPins)$$' ./scripts")
+}
+
+// assertTestCIPolicyRecipeLine fails unless want appears exactly once in the
+// test-ci-policy recipe. The whole line is compared, hermetic environment and
+// all: a recipe that reaches the right tests through a different command has
+// not been reviewed for the isolation this target depends on.
+func assertTestCIPolicyRecipeLine(t *testing.T, what, want string) {
+	t.Helper()
 	makefilePath := filepath.Join("..", "..", "Makefile")
 	body, err := os.ReadFile(makefilePath)
 	if err != nil {
@@ -43,7 +77,7 @@ func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 		}
 	}
 	if matches != 1 {
-		t.Fatalf("test-ci-policy recipe must run the focused static-scope contracts with the exact hermetic command:\n%s", want)
+		t.Fatalf("test-ci-policy recipe must run %s with the exact hermetic command:\n%s", what, want)
 	}
 }
 

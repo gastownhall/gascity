@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/pflag"
 )
@@ -1220,4 +1221,231 @@ func assertEveryLegAskedForTheFederatedTier(t *testing.T, surface string, legs i
 			t.Errorf("%s read leg %d at tier %v, want beads.FederatedReadTier (%v); legs that answer at different tiers cannot be merged into one answer", surface, i, tier, beads.FederatedReadTier)
 		}
 	}
+}
+
+// readyCountedRigNames are the bound rigs of the load-count fixture by default.
+// Three is enough to tell "once per invocation" from "once per rig" apart. Pass
+// an explicit list to newReadyCityWithRigs to vary the count; this stays a
+// read-only default so no test has to rebind it.
+var readyCountedRigNames = []string{"alpha", "beta", "gamma"}
+
+// newReadyCityWithRigs writes a real on-disk file-provider city with each rig in
+// rigNames bound and openable, defaulting to readyCountedRigNames when none are
+// given, left ambient (GC_CITY) the way newReadyCityWithBrokenRig leaves its
+// city. The last rig's path is written relative to the city so config loading's
+// rig-path normalisation is part of what the load-count tests exercise. One
+// agent template ("worker") lets the session-close and drain-ack tests resolve a
+// session bead.
+func newReadyCityWithRigs(t *testing.T, rigNames ...string) string {
+	t.Helper()
+	if len(rigNames) == 0 {
+		rigNames = readyCountedRigNames
+	}
+	cityDir := t.TempDir()
+	var cityToml strings.Builder
+	cityToml.WriteString("[workspace]\nname = \"readycounted\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nmax_active_sessions = 1\n")
+	rigDirs := make([]string, 0, len(rigNames))
+	for i, name := range rigNames {
+		dir := filepath.Join(cityDir, "rigs", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("creating rig dir %s: %v", dir, err)
+		}
+		rigDirs = append(rigDirs, dir)
+		tomlPath := dir
+		if i == len(rigNames)-1 {
+			tomlPath = filepath.Join("rigs", name)
+		}
+		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(name) + "\npath = " + strconv.Quote(tomlPath) + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml.String()), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensuring scoped file store layout: %v", err)
+	}
+	for _, scope := range append([]string{cityDir}, rigDirs...) {
+		if err := ensurePersistedScopeLocalFileStore(scope); err != nil {
+			t.Fatalf("ensuring file store at %s: %v", scope, err)
+		}
+	}
+
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag, rigFlag = "", ""
+	t.Cleanup(func() { cityFlag, rigFlag = prevCityFlag, prevRigFlag })
+	t.Setenv("GC_CITY", cityDir)
+	return cityDir
+}
+
+// TestReadyLoadsCityConfigOnce pins `gc ready` to one full city-config load per
+// invocation. The command loads the config up front; every store it then opens
+// (city leg, each rig leg) used to throw that config away and reload city.toml
+// plus every pack include inside the open — 8 loads on a 6-rig city, ~10 s of a
+// work query on maintainer-city. It is a one-shot process, so the config it
+// loaded is the config its opens must use.
+//
+// GC_RIG is set the way an agent's work_query runs (GC_CITY + GC_RIG): without
+// it, city resolution maps the cwd to a rig with a load of its own, which is
+// context resolution rather than a store open and is not what this pins.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestReadyLoadsCityConfigOnce(t *testing.T) {
+	newReadyCityWithRigs(t)
+	t.Setenv("GC_RIG", readyCountedRigNames[0])
+
+	var stdout, stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
+	if code := cmdReady(readyOpts{}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("gc ready loaded the city config %d times over %d bound rigs, want exactly 1: the store opens must reuse the config the command already loaded", grew, len(readyCountedRigNames))
+	}
+}
+
+// TestReadyRigLegStoresReuseSuppliedConfig pins the rig-leg opener on its own:
+// handed a config, it opens every bound rig without loading one.
+func TestReadyRigLegStoresReuseSuppliedConfig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	stores, err := readyRigLegStores(cfg, cityDir)
+	if err != nil {
+		t.Fatalf("readyRigLegStores: %v", err)
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("readyRigLegStores loaded the city config %d times despite a supplied config", grew)
+	}
+	if len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("readyRigLegStores opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+}
+
+// TestControllerRigStoresStillReloadConfigPerRig is the other half of the
+// policy split TestRigStoreOpenPolicyDiffersByCaller pins: the controller's
+// opener is long-lived and deliberately keeps re-resolving config inside each
+// rig open, so threading the one-shot config must not have reached it.
+func TestControllerRigStoresStillReloadConfigPerRig(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	stores := buildStandaloneRigStores(cfg, cityDir, io.Discard)
+	if grew := loadCityConfigCalls.Load() - before; grew != int64(len(readyCountedRigNames)) {
+		t.Fatalf("buildStandaloneRigStores loaded the city config %d times, want once per bound rig (%d): the controller keeps its reload-per-open semantics", grew, len(readyCountedRigNames))
+	}
+	if len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("buildStandaloneRigStores opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+
+	before = loadCityConfigCalls.Load()
+	if stores := buildStandaloneRigStoresWithConfig(cfg, cityDir, io.Discard); len(stores) != len(readyCountedRigNames) {
+		t.Fatalf("buildStandaloneRigStoresWithConfig opened %d rig stores, want %d", len(stores), len(readyCountedRigNames))
+	}
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("buildStandaloneRigStoresWithConfig loaded the city config %d times despite a supplied config", grew)
+	}
+}
+
+// newCountedSessionBead creates an active "worker" session bead in the
+// fixture's city store, holding one in_progress work bead, and returns the
+// session bead.
+func newCountedSessionBead(t *testing.T, cityDir, sessionName string) beads.Bead {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "counted worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": sessionName,
+			"template":     "worker",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+	work, err := store.Create(beads.Bead{
+		Title:    "held work",
+		Type:     "task",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create(work bead): %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("mark work in_progress: %v", err)
+	}
+	return sessionBead
+}
+
+// TestDrainAckReleaseLoadsCityConfigOnce pins drain-ack's held-claim release
+// to one city-config load across the city open and every rig leg. It used to
+// be 2 + one per bound rig (the city open reloaded, then the explicit load,
+// then buildStandaloneRigStores reloaded per rig): 5 on this 3-rig city.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestDrainAckReleaseLoadsCityConfigOnce(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	t.Setenv("GC_BEADS", "file")
+	newCountedSessionBead(t, cityDir, "worker-drained")
+
+	var stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
+	releaseUnexecutedClaimsForSession(cityDir, "worker-drained", &stderr)
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("drain-ack release loaded the city config %d times over %d bound rigs, want exactly 1; stderr=%s", grew, len(readyCountedRigNames), stderr.String())
+	}
+}
+
+// TestSessionCloseRigLegsReuseLoadedConfig pins `gc session close` on the
+// 3-rig fixture: the rig legs of the assigned-work release reuse the config
+// the command loaded instead of reloading once per bound rig. The command
+// still has loads of its own (store open, config load), so the pin is that
+// the total does not scale with the rig count.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestSessionCloseRigLegsReuseLoadedConfig(t *testing.T) {
+	// Compare two rig counts instead of pinning an absolute number: the close
+	// path has loads of its own (store open, the command's config load, the
+	// session/worker plumbing) that unrelated changes may move. What this pins
+	// is that the rig legs add none — before they reused the command's config,
+	// every extra bound rig added one load.
+	oneRig := sessionCloseConfigLoads(t, []string{"alpha"})
+	threeRigs := sessionCloseConfigLoads(t, []string{"alpha", "beta", "gamma"})
+	t.Logf("gc session close config loads: %d with 1 bound rig, %d with 3", oneRig, threeRigs)
+	if threeRigs != oneRig {
+		t.Fatalf("gc session close loaded the city config %d times with 3 bound rigs but %d with 1: the rig legs must reuse the command's config instead of loading once per rig", threeRigs, oneRig)
+	}
+}
+
+// sessionCloseConfigLoads runs `gc session close` on a fresh load-count
+// fixture with the given bound rigs and returns how many city-config loads the
+// command performed.
+func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
+	t.Helper()
+	cityDir := newReadyCityWithRigs(t, rigNames...)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	sessionBead := newCountedSessionBead(t, cityDir, "worker-closed")
+
+	var stdout, stderr bytes.Buffer
+	before := loadCityConfigCalls.Load()
+	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionClose with %d rigs = %d, want 0; stdout=%s stderr=%s", len(rigNames), code, stdout.String(), stderr.String())
+	}
+	return loadCityConfigCalls.Load() - before
 }
