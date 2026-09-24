@@ -939,6 +939,147 @@ func TestPendingControlBudget_FreezesAfterEscalationButNotBefore(t *testing.T) {
 	}
 }
 
+// TestPendingControlBudget_UnlatchedVerbatimRepeatStillRecords pins the freeze
+// guard's OTHER conjunct: the latch.
+//
+// The guard above is deliberately two-sided — latched AND verbatim — but only
+// the verbatim side was covered. Every handler-level pending test that sweeps
+// more than once pins GC_CONTROL_SEMANTIC_RETRY_BUDGET=0s so it need not wait
+// out a window, and a 0s budget latches on the very first sweep; the one that
+// runs on the default budget (FirstRefusalIsNotQuiet) sweeps exactly once. So
+// an UNLATCHED verbatim repeat was unrepresentable, and the cheap variant of
+// the guard — freeze whenever the refusal repeats — passes every one of them.
+// Under that variant, sweep 2 of the motivating case (a removed rig repeating
+// its refusal identically forever) takes the freeze branch while still
+// unlatched, so RecordPendingControlRetry — the only place Expired is ever
+// computed — never runs again and the one-shot control.stalled escalation never
+// fires: the unbounded silence the loudness horizon exists to close,
+// reintroduced under the default budget with the suite green.
+//
+// So this walks the whole horizon on the real default budget and a fake clock:
+// record, record again inside the window, escalate at expiry, freeze after.
+// Sweep 2 is the assertion the cheap variant cannot survive.
+func TestPendingControlBudget_UnlatchedVerbatimRepeatStillRecords(t *testing.T) {
+	clearGCEnv(t)
+	// Deliberately no GC_CONTROL_SEMANTIC_RETRY_BUDGET override: the default is
+	// the budget under which the guard actually has to tell "before the
+	// escalation" from "after" it, and clearGCEnv already scrubs an inherited
+	// one.
+	budget := dispatch.DefaultSemanticRetryBudget
+
+	store, _, finalizerID := newPendingControlBead(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cityPath := t.TempDir()
+
+	// Each sweep is self-contained — fresh store path, clock installed and
+	// restored around the one call — so the sequence models a sequence of
+	// dispatcher passes rather than one long-lived loop.
+	sweep := func(at time.Time) (string, error) {
+		prevNow := workflowTraceNow
+		workflowTraceNow = func() time.Time { return at }
+		defer func() { workflowTraceNow = prevNow }()
+
+		var stderr bytes.Buffer
+		err := runControlDispatcherWithStoreAndConfig(cityPath, t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr)
+		return stderr.String(), err
+	}
+	stalledEvents := func() int {
+		t.Helper()
+		recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+		if err != nil {
+			t.Fatalf("read recorded events: %v", err)
+		}
+		return countEventsOfType(recorded, events.ControlStalled)
+	}
+
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	// Sweep 1: the drift is discovered and anchored, well inside the budget.
+	stderr, err := sweep(start)
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("sweep 1 error = %v, want ErrControlPending", err)
+	}
+	if strings.Contains(stderr, "pending stalled bead=") {
+		t.Fatalf("sweep 1 stderr = %q, want no escalation inside the budget", stderr)
+	}
+	first := mustGetBead(t, store, finalizerID)
+	if got := first.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != "1" {
+		t.Fatalf("sweep 1 %s = %q, want %q", beadmeta.ControlPendingCountMetadataKey, got, "1")
+	}
+	if got := first.Metadata[beadmeta.ControlPendingStalledMetadataKey]; got == "true" {
+		t.Fatalf("%s = %q after sweep 1, want it unlatched — a budget that latches immediately cannot exercise this guard at all", beadmeta.ControlPendingStalledMetadataKey, got)
+	}
+	anchor := first.Metadata[beadmeta.ControlPendingFirstSeenMetadataKey]
+	if anchor == "" {
+		t.Fatalf("%s is empty after sweep 1, want the deadline anchor persisted", beadmeta.ControlPendingFirstSeenMetadataKey)
+	}
+
+	// Sweep 2: same refusal, verbatim, still inside the window and still
+	// unlatched. The freeze must NOT apply — the count it would skip is the
+	// only thing walking this bead toward its horizon.
+	stderr, err = sweep(start.Add(budget / 2))
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("sweep 2 error = %v, want ErrControlPending", err)
+	}
+	if !dispatch.IsQuietControllerRetry(err) {
+		t.Fatal("in-window verbatim repeat was not marked quiet; a permanently-pending bead must not reset the serve loop's idle backoff while it waits out the budget")
+	}
+	if strings.Contains(stderr, "pending stalled bead=") {
+		t.Fatalf("sweep 2 stderr = %q, want no escalation before the budget elapses", stderr)
+	}
+	inWindow := mustGetBead(t, store, finalizerID)
+	if got := inWindow.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != "2" {
+		t.Fatalf("sweep 2 %s = %q, want %q — freezing a verbatim repeat BEFORE the latch skips RecordPendingControlRetry, the only place the budget is evaluated, so the escalation never fires and the silence stays unbounded", beadmeta.ControlPendingCountMetadataKey, got, "2")
+	}
+	if got := inWindow.Metadata[beadmeta.ControlPendingStalledMetadataKey]; got == "true" {
+		t.Fatalf("%s = %q after sweep 2, want it still unlatched inside the window", beadmeta.ControlPendingStalledMetadataKey, got)
+	}
+	if got := inWindow.Metadata[beadmeta.ControlPendingFirstSeenMetadataKey]; got != anchor {
+		t.Fatalf("%s = %q, want the anchor never re-stamped (%q) — re-anchoring hands back unbounded silence through the back door", beadmeta.ControlPendingFirstSeenMetadataKey, got, anchor)
+	}
+	if n := stalledEvents(); n != 0 {
+		t.Fatalf("control.stalled emitted %d times inside the budget, want 0", n)
+	}
+
+	// Sweep 3: the horizon is reached and the escalation fires, once.
+	stderr, err = sweep(start.Add(budget))
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("sweep 3 error = %v, want ErrControlPending (retry stays unbounded)", err)
+	}
+	if !strings.Contains(stderr, "control dispatch: pending stalled bead="+finalizerID) {
+		t.Fatalf("sweep 3 stderr = %q, want the one-shot escalation at expiry", stderr)
+	}
+	escalated := mustGetBead(t, store, finalizerID)
+	if got := escalated.Metadata[beadmeta.ControlPendingStalledMetadataKey]; got != "true" {
+		t.Fatalf("%s = %q at expiry, want %q", beadmeta.ControlPendingStalledMetadataKey, got, "true")
+	}
+	if got := escalated.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != "3" {
+		t.Fatalf("sweep 3 %s = %q, want %q", beadmeta.ControlPendingCountMetadataKey, got, "3")
+	}
+	if n := stalledEvents(); n != 1 {
+		t.Fatalf("control.stalled emitted %d times, want exactly 1", n)
+	}
+
+	// Sweep 4: now — and only now — the verbatim repeat is frozen.
+	stderr, err = sweep(start.Add(budget + time.Minute))
+	if !errors.Is(err, dispatch.ErrControlPending) {
+		t.Fatalf("sweep 4 error = %v, want ErrControlPending", err)
+	}
+	if !dispatch.IsQuietControllerRetry(err) {
+		t.Fatal("frozen repeat was not marked quiet; it would hold the serve loop at its 1s floor forever")
+	}
+	if strings.Contains(stderr, "pending stalled bead=") {
+		t.Fatalf("sweep 4 stderr = %q, want the escalation latched after the first emission", stderr)
+	}
+	frozen := mustGetBead(t, store, finalizerID)
+	if got := frozen.Metadata[beadmeta.ControlPendingCountMetadataKey]; got != "3" {
+		t.Fatalf("sweep 4 %s = %q, want it frozen at %q once the escalation has fired", beadmeta.ControlPendingCountMetadataKey, got, "3")
+	}
+	if n := stalledEvents(); n != 1 {
+		t.Fatalf("control.stalled emitted %d times after the freeze, want exactly 1", n)
+	}
+}
+
 // TestRoutineControlPending_IsNotBudgetedOrEscalated is the scope guard on the
 // pending budget.
 //
