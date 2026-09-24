@@ -53,7 +53,8 @@ func newDelayedQueue(lag time.Duration, wg *sync.WaitGroup) *delayedQueue {
 	if lag > 0 {
 		go func() {
 			for d := range q.ch {
-				time.Sleep(time.Until(d.at))
+				// Simulated lag: run f at its scheduled time.
+				<-time.NewTimer(time.Until(d.at)).C
 				d.f()
 				q.wg.Done()
 			}
