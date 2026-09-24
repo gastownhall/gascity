@@ -310,6 +310,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// documented tokenless-runtime compatibility escape hatch), or a transient
 	// session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
+	// fencedSession is the session bead the claim fence verified as this
+	// runtime's current incarnation (nil when no fence ran or it failed open).
+	// It is what lets the claim honor an identity the supervisor collapsed onto
+	// the session after its runtime env was stamped (hookClaimCollapsedIdentity).
+	var fencedSession *session.Info
 	if opts.Claim {
 		// F-A, at the earliest point that can answer it. tryHookClaim carries the
 		// same fence over the same predicate — it is the seam every ops-level
@@ -322,9 +327,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
 			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
 		}
-		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
+		code, handled, info := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
+		if handled {
 			return code
 		}
+		fencedSession = info
 	}
 
 	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
@@ -404,13 +411,25 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	overrides["GC_AGENT"] = agentForQuery
 	overrides["GC_SESSION_NAME"] = sessionForQuery
+	collapsedIdentity := ""
+	runtimeAlias := ""
 	if sessionTemplateContext {
 		overrides["GC_ALIAS"] = os.Getenv("GC_ALIAS")
+		runtimeAlias = overrides["GC_ALIAS"]
+		// The work query's assigned tiers walk $GC_SESSION_ID $GC_SESSION_NAME
+		// $GC_ALIAS; a session serving a collapsed identity must look up that
+		// identity's assignments too. The recorded claim assignee below still
+		// comes from the runtime's own env (runtimeAlias).
+		if collapsedIdentity = hookClaimCollapsedIdentity(&a, fencedSession, overrides["GC_ALIAS"]); collapsedIdentity != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: session %s serves collapsed identity %q\n", strings.TrimSpace(os.Getenv("GC_SESSION_ID")), collapsedIdentity) //nolint:errcheck
+			overrides["GC_ALIAS"] = collapsedIdentity
+		}
 		overrides["GC_SESSION_ID"] = os.Getenv("GC_SESSION_ID")
 		overrides["GC_SESSION_ORIGIN"] = os.Getenv("GC_SESSION_ORIGIN")
 		overrides["GC_TEMPLATE"] = os.Getenv("GC_TEMPLATE")
 	} else {
 		overrides["GC_ALIAS"] = resolvedAgentName
+		runtimeAlias = resolvedAgentName
 		overrides["GC_SESSION_ID"] = ""
 		overrides["GC_SESSION_ORIGIN"] = ""
 		overrides["GC_TEMPLATE"] = ""
@@ -448,7 +467,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// sessionID feeds only the claim/visibility assignee identity.
 	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
 	sessionName := strings.TrimSpace(sessionForQuery)
-	alias := strings.TrimSpace(overrides["GC_ALIAS"])
+	// The claim is RECORDED under the runtime's own identity (runtimeAlias, not
+	// a collapsed identity the query env may carry), so liveness readers keep
+	// resolving the assignee to this exact session.
+	alias := strings.TrimSpace(runtimeAlias)
 	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
 	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
@@ -461,13 +483,16 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// (ga-80pen8). The bare template stays in RouteTargets, which governs
 	// FRESH claims of UNASSIGNED routed work. The canonical slot / named
 	// holder keep it via `alias` (GC_ALIAS == qualified bare name); only
-	// suffixed workers drop it.
+	// suffixed workers drop it. A single-slot pool session the supervisor
+	// collapsed onto the canonical identity serves that identity, so it adopts
+	// its assignments too (hookClaimCollapsedIdentity).
 	identityCandidates := hookClaimIdentityCandidates(
 		assignee,
 		sessionID,
 		sessionName,
 		alias,
 		agentForQuery,
+		collapsedIdentity,
 	)
 	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	if opts.Claim {
@@ -529,7 +554,7 @@ const (
 // transient session-store fault all return handled=false so the normal claim
 // path runs — the fence never turns an infrastructure hiccup or an
 // in-progress start into a false refusal.
-func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
 	if sessionID == "" {
 		// GC_TEMPLATE is the pool-membership signal (set only alongside
 		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
@@ -548,26 +573,27 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 		// unfenced.
 		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
 			fmt.Fprintf(stderr, "gc hook --claim: refusing unregistered managed session for pool template %q: GC_TEMPLATE is set but GC_SESSION_ID is empty, so no durable session bead can be verified\n", template) //nolint:errcheck
-			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true
+			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true, nil
 		}
-		return 0, false
+		return 0, false, nil
 	}
 	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
 	if instanceToken == "" {
-		return 0, false
+		return 0, false, nil
 	}
-	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
+	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	switch verdict {
 	case hookClaimSessionStale:
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
-		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true
+		return writeHookClaimStaleSessionDrain(opts, stdout, stderr), true, nil
 	case hookClaimSessionStoreUnavailable:
 		// Fail open: let the claim path run and surface/escalate its own store
 		// error rather than reporting a false stale session. Name the fault
 		// without the alarming "stale session" wording.
 		fmt.Fprintf(stderr, "gc hook --claim: session fence unavailable for %s: %s; proceeding to claim\n", sessionID, reason) //nolint:errcheck
-		return 0, false
+		return 0, false, nil
 	default:
-		return 0, false
+		return 0, false, info
 	}
 }
 
@@ -580,17 +606,64 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
+	verdict, reason, _ := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	return verdict, reason
+}
+
+// classifyHookClaimSessionInfo is classifyHookClaimSession that also returns the
+// session Info it read when the verdict is eligible (nil otherwise), so the
+// claim can act on the session bead's persisted identity without a second read.
+func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
 	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
 	// rather than reloading the whole city config inside the open.
 	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
-		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
+		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err), nil
 	}
 	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
 	if err != nil {
-		return classifyHookClaimSessionLookupError(err)
+		verdict, reason := classifyHookClaimSessionLookupError(err)
+		return verdict, reason, nil
 	}
-	return hookClaimSessionEligibility(info, instanceToken)
+	verdict, reason := hookClaimSessionEligibility(info, instanceToken)
+	if verdict != hookClaimSessionEligible {
+		return verdict, reason, nil
+	}
+	return verdict, reason, &info
+}
+
+// hookClaimCollapsedIdentity returns the canonical identity a pool session
+// serves when the supervisor collapsed it onto that identity after its runtime
+// env was stamped, or "" when the session serves only its own runtime identity.
+//
+// A single-slot pool (max_active_sessions = 1, no namepool) whose template is
+// ALSO a [[named_session]] steps its runtime name aside to "<name>-pool"
+// (poolRuntimeSessionName) and launches with a blank GC_ALIAS
+// (clearPoolTemplateRuntimeIdentity). buildDesiredState then collapses the
+// session bead onto the canonical identity ("collapsing phantom pool identity
+// ... to <name>", normalizeNonExpandingPoolSessionInfo) and wakes it on
+// namedWorkReady for work assigned to <name>. The runtime env never learns the
+// collapse, so the claim looked only for <name>-pool / session-id work and
+// drained no_work while the named identity's assignment waited — the olivia
+// seat in maintainer-city, 2026-09-22/23. The persisted alias/agent_name on the
+// fenced session bead is the authority for which identity this seat serves.
+//
+// The ga-80pen8 guard still holds: only a single-slot pool can collapse (there
+// is never a second live member to double-adopt the holder's work), a
+// configured named-session bead already carries its own alias, and a pool
+// session whose bead does NOT carry the canonical identity gets nothing.
+func hookClaimCollapsedIdentity(a *config.Agent, info *session.Info, runtimeAlias string) string {
+	if a == nil || info == nil || info.Closed || !a.UsesCanonicalSingletonPoolIdentity() || isNamedSessionInfo(*info) {
+		return ""
+	}
+	canonical := strings.TrimSpace(a.QualifiedName())
+	if canonical == "" || strings.TrimSpace(runtimeAlias) == canonical {
+		return ""
+	}
+	if strings.TrimSpace(info.Alias) == canonical || strings.TrimSpace(info.AgentName) == canonical {
+		return canonical
+	}
+	return ""
 }
 
 // classifyHookClaimSessionLookupError maps a session Store.Get error to a fence
