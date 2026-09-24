@@ -23,11 +23,12 @@ import (
 // line, and reported as one error, so a continuation line (for example
 // "export CODEX_HOME=..." inside a quoted script) never becomes a top-level
 // key of its own. The closing line is the first later line whose trimmed text
-// ends with the matching quote, holds an odd number of that quote (so a JSON
-// field line such as `"k": "v"` does not close the block), and is not itself
-// a complete one-line assignment (so a typo'd unclosed quote does not swallow
-// the valid KEY="v" lines after it). If no later line qualifies, only the
-// opening line is skipped. A value whose opening quote is closed on the same
+// ends with the matching quote and holds an odd number of that quote. The
+// odd count keeps a JSON field line such as `"k": "v"` from closing the block
+// and, because an identifier key holds no quotes, means a complete balanced
+// one-line assignment (KEY="v") never closes it either, so a typo'd unclosed
+// quote does not swallow the valid assignments after it. If no later line
+// qualifies, only the opening line is skipped. A value whose opening quote is closed on the same
 // line but followed by more text (KEY="v" # c) is kept literally, as before.
 //
 // A line missing '=', or whose key is empty or not a shell identifier
@@ -108,32 +109,11 @@ func isEnvIdentifier(key string) bool {
 func multiLineQuoteEnd(lines []string, from int, q byte) int {
 	for j := from; j < len(lines); j++ {
 		t := strings.TrimSpace(lines[j])
-		if t == "" || t[len(t)-1] != q || strings.Count(t, string(q))%2 == 0 {
-			continue
+		if t != "" && t[len(t)-1] == q && strings.Count(t, string(q))%2 == 1 {
+			return j
 		}
-		if isCompleteEnvAssignment(t, q) {
-			continue
-		}
-		return j
 	}
 	return -1
-}
-
-// isCompleteEnvAssignment reports whether a trimmed line is a valid one-line
-// IDENT=value assignment whose quotes balance: a value opening with a quote
-// closes it on the line, and any other value holds an even number of q.
-func isCompleteEnvAssignment(line string, q byte) bool {
-	_, val, reason := parseEnvAssignment(line)
-	if reason != "" {
-		return false
-	}
-	if _, open := unclosedQuote(val); open {
-		return false
-	}
-	if val != "" && (val[0] == '"' || val[0] == '\'') {
-		return true
-	}
-	return strings.Count(val, string(q))%2 == 0
 }
 
 // unquoteEnvValue strips one layer of matching surrounding single or double

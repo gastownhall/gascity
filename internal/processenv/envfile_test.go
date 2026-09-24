@@ -381,3 +381,21 @@ func TestParseEnvFileDoubleQuotedJSONPasteIsOneBlock(t *testing.T) {
 		t.Fatalf("ParseEnvFile errors = %v, want one error for lines 1-7", errs)
 	}
 }
+
+// TestParseEnvFileScriptBlockClosedByQuotedAssignment asserts that a
+// multi-line quoted script whose closing line is itself a quoted export
+// (`export FOO="bar""`, odd quote count) is skipped as one block, so none of
+// its lines leak as stray keys (the #6022 bug class).
+func TestParseEnvFileScriptBlockClosedByQuotedAssignment(t *testing.T) {
+	content := "S=\"export PATH=/x:$PATH\n" +
+		"export CODEX_HOME=/c\n" +
+		"export FOO=\"bar\"\"\n" +
+		"AFTER=kept\n"
+	got, errs := ParseEnvFile(content)
+	if len(got) != 1 || got["AFTER"] != "kept" {
+		t.Fatalf("ParseEnvFile returned %v, want only AFTER=kept (no stray CODEX_HOME or FOO)", got)
+	}
+	if len(errs) != 1 || !strings.HasPrefix(errs[0].Error(), "lines 1-3:") {
+		t.Fatalf("ParseEnvFile errors = %v, want one error for lines 1-3", errs)
+	}
+}
