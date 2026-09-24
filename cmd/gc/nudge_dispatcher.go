@@ -16,12 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-// pingNudgeWakeSocketDialTimeout bounds how long a producer waits to dial
-// the supervisor wake socket. Producers must not block on a stale or
-// missing socket — legacy-mode cities and pre-start producers expect the
-// dial to fail fast.
-const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
-
 // pingNudgeWakeSocket sends a best-effort wake signal to the supervisor's
 // nudge dispatcher. Callers invoke this after enqueueing a queued nudge so
 // the supervisor delivers within sub-second latency instead of waiting for
@@ -30,17 +24,7 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
 func pingNudgeWakeSocket(cityPath string) {
-	if cityPath == "" {
-		return
-	}
-	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
-	if err != nil {
-		return
-	}
-	defer conn.Close() //nolint:errcheck // best-effort signaling
-	_ = conn.SetWriteDeadline(time.Now().Add(pingNudgeWakeSocketDialTimeout))
-	_, _ = conn.Write([]byte{1})
+	nudgequeue.PingWakeSocket(cityPath)
 }
 
 // nudgeDispatcherIsHosting reports whether a supervisor-hosted nudge

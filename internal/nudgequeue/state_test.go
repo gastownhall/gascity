@@ -14,11 +14,12 @@ import (
 )
 
 func TestWakeSocketPathLongCityUsesPrivatePerUserDirectory(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("environment-specific-temp", 4)))
 	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
 	socketPath := WakeSocketPath(cityPath)
 
-	wantDir := fmt.Sprintf("gascity-nudge-%d", os.Getuid())
-	if got := filepath.Base(filepath.Dir(socketPath)); got != wantDir {
+	wantDir := filepath.Join("/tmp", fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
+	if got := filepath.Dir(socketPath); got != wantDir {
 		t.Fatalf("fallback wake socket directory = %q, want %q", got, wantDir)
 	}
 }

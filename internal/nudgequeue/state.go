@@ -300,7 +300,7 @@ func wakeSocketPath(cityPath string) (string, bool) {
 	}
 	canonical = filepath.Clean(canonical)
 	sum := sha256.Sum256([]byte(canonical))
-	privateDir := filepath.Join(os.TempDir(), fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
+	privateDir := filepath.Join("/tmp", fmt.Sprintf("gascity-nudge-%d", os.Getuid()))
 	return filepath.Join(privateDir, fmt.Sprintf("%x.sock", sum[:16])), true
 }
 

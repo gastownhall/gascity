@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -615,6 +616,27 @@ func TestNudgeDispatcherIsHosting(t *testing.T) {
 
 	if !nudgeDispatcherIsHosting(dir) {
 		t.Error("live listener on the wake socket must report hosting")
+	}
+}
+
+func TestNudgeDispatcherIsHostingLongCityPath(t *testing.T) {
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), strings.Repeat("environment-specific-temp", 4)))
+	cityPath := filepath.Join(t.TempDir(), strings.Repeat("long-city-path", 12))
+	if path := nudgequeue.WakeSocketPath(cityPath); len(path) > 100 {
+		t.Fatalf("fallback wake socket path length = %d, want <= 100: %q", len(path), path)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wakeCh := make(chan struct{}, 1)
+	lis, err := startNudgeWakeListener(ctx, cityPath, wakeCh, nil, "test")
+	if err != nil {
+		t.Fatalf("startNudgeWakeListener for long city path: %v", err)
+	}
+	defer lis.Close() //nolint:errcheck
+
+	if !nudgequeue.DispatcherIsHosting(cityPath) {
+		t.Fatal("DispatcherIsHosting = false for live long-path listener")
 	}
 }
 
