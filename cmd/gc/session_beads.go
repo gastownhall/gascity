@@ -2887,6 +2887,15 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
+		// A bead-scoped pool row may only close once its runtime is confirmed
+		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not
+		// proof of teardown (k8s reports false for a pod whose tmux is not up,
+		// or on an API error), and closing releases the identity lease so a
+		// successor mints under a new name, leaving this box unaddressed. Hold
+		// the row; the next pass retries.
+		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+			continue
+		}
 		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
