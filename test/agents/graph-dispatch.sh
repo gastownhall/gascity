@@ -165,10 +165,17 @@ set_formula_verdict() {
     local bead_id="$1"
     local ref="$2"
 
+    # GC_GRAPH_ITERATE_VERDICT_SUFFIXES lists refs that record "iterate"
+    # instead of "done", so a test can force a review loop into another
+    # iteration.
     case "$ref" in
         *.apply-fixes*)
-            bd update "$bead_id" --set-metadata "review.verdict=done" >/dev/null
-            trace "set-verdict bead=$bead_id key=review.verdict value=done"
+            local verdict="done"
+            if ref_matches_suffix_list "$ref" "${GC_GRAPH_ITERATE_VERDICT_SUFFIXES:-}"; then
+                verdict="iterate"
+            fi
+            bd update "$bead_id" --set-metadata "review.verdict=$verdict" >/dev/null
+            trace "set-verdict bead=$bead_id key=review.verdict value=$verdict"
             ;;
         *.apply-design-changes*)
             bd update "$bead_id" --set-metadata "design_review.verdict=done" >/dev/null
