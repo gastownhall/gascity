@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -77,8 +78,16 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 // PreflightChecker is supplied, so the factory can never select the native
 // store for the control path (the zero checker fails preflight and the
 // factory takes the bd fallback — pinned by
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd); the store comes
-// back raw, matching the control path's deliberately unwrapped handles.
+// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd).
+//
+// The store comes back wrapped with beads.WithRouteChangeClearing: a genuine
+// gc.routed_to reroute written through the control path (e.g. a control-bead
+// reassignment) must clear the stale executor-identity stamps on the
+// rerouted bead the same way every other write-capable composition root
+// does. The wrap declares ConditionalWritesResolveTarget, so conditional
+// writes still resolve to the raw control-plane store underneath — the
+// "deliberately unwrapped handles" guarantee is preserved through that seam,
+// not by returning the raw store directly.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
 	flags, resolved := resolvedConditionalWritesFlags(cfg)
 	mode := gate.ModeUnset
@@ -97,7 +106,9 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 	if err != nil {
 		return nil, err
 	}
-	return result.Store, nil
+	return beads.WithRouteChangeClearing(result.Store, func(target string) string {
+		return agentutil.NormalizePoolRouteTarget(cfg, target)
+	}), nil
 }
 
 // conditionalWritesEventStoreKind maps internal store-kind names onto the

@@ -2990,6 +2990,110 @@ func TestCmdSlingForceBypassesMissingBeadCheck(t *testing.T) {
 	}
 }
 
+// TestCmdSlingGenuineRerouteClearsExecutorIdentityStamps pins the ga-cm2o5t.1.1
+// acceptance criteria end to end through the real `gc sling` composition root
+// (cmd_sling.go's cliBeadRouter.Route, cmd/gc/cmd_sling.go:777): rerouting a
+// bead already picked up by a live executor -- gc.routed_to plus all three
+// executor-identity stamps (gc.session_name, gc.work_dir, legacy work_dir)
+// already populated, simulating an in-flight claim -- to a genuinely
+// different target must clear those three stamps, not just overwrite
+// gc.routed_to. Design ga-cm2o5t.1 secs 2, 3, 13.1, Risk R1.
+func TestCmdSlingGenuineRerouteClearsExecutorIdentityStamps(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	rigDir := filepath.Join(cityDir, "foundations")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+
+	const beadID = "fo-routed-work"
+	const oldTarget = "foundations/worker-a"
+	const newTarget = "foundations/worker-b"
+	writeTestFileStoreBeads(t, rigDir, []beads.Bead{{
+		ID:     beadID,
+		Title:  "already routed and picked up work",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey:      oldTarget,
+			beadmeta.SessionNameMetadataKey:   "gascity--foundations--worker-a",
+			beadmeta.WorkDirMetadataKey:       "worktrees/foundations-worker-a",
+			beadmeta.LegacyWorkDirMetadataKey: "worktrees/foundations-worker-a-legacy",
+		},
+	}})
+
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "foundations"
+path = "foundations"
+prefix = "fo"
+
+[[agent]]
+name = "worker-a"
+dir = "foundations"
+
+[[agent]]
+name = "worker-b"
+dir = "foundations"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{newTarget, beadID},
+		false, false, false,
+		"", nil, "",
+		true, false, false, "",
+		false, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	routed, err := rigStore.Get(beadID)
+	if err != nil {
+		t.Fatalf("rigStore.Get(%s): %v", beadID, err)
+	}
+	if routed.Metadata[beadmeta.RoutedToMetadataKey] != newTarget {
+		t.Fatalf("gc.routed_to = %q, want %q", routed.Metadata[beadmeta.RoutedToMetadataKey], newTarget)
+	}
+	for _, key := range []string{
+		beadmeta.SessionNameMetadataKey,
+		beadmeta.WorkDirMetadataKey,
+		beadmeta.LegacyWorkDirMetadataKey,
+	} {
+		if got := routed.Metadata[key]; got != "" {
+			t.Errorf("%s: want cleared (empty) after genuine reroute via real gc sling, got %q", key, got)
+		}
+	}
+}
+
 func TestCmdSlingForceMissingBeadPrintsAutoConvoyWarning(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BEADS", "file")

@@ -204,9 +204,13 @@ func TestOpenRigStoreThreadsConditionalWrites(t *testing.T) {
 }
 
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
-// routing: the raw control-plane bd store must come back factory-stamped
-// (and raw — control paths are deliberately unwrapped), with native
-// selection impossible (no preflight checker is supplied).
+// routing: the raw control-plane bd store must come back factory-stamped,
+// wrapped only by beads.WithRouteChangeClearing (so a genuine control-driven
+// reroute clears stale executor-identity stamps), with native selection
+// impossible (no preflight checker is supplied). Conditional writes must
+// still resolve through the wrap to the raw store's writer — the "deliberately
+// unwrapped handles" guarantee is preserved via ConditionalWritesResolveTarget,
+// not by skipping the wrap.
 func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 	if err != nil {
@@ -221,8 +225,12 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openControlBdStoreThroughFactory: %v", err)
 	}
-	if store != beads.Store(raw) {
-		t.Fatalf("store = %T, want the raw control bd store back (no policy wrap on control paths)", store)
+	targeter, ok := store.(beads.ConditionalWritesResolveTargeter)
+	if !ok {
+		t.Fatalf("store = %T, want a beads.ConditionalWritesResolveTargeter (the route-clearing wrap)", store)
+	}
+	if targeter.ConditionalWritesResolveTarget() != beads.Store(raw) {
+		t.Fatalf("resolve target = %T, want the raw control bd store underneath the wrap", targeter.ConditionalWritesResolveTarget())
 	}
 	writer, diag, resolveErr := beads.ResolveConditionalWriter(store)
 	if resolveErr != nil || diag != nil {

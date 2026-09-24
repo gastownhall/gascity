@@ -56,6 +56,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -368,7 +369,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// stream reports the verdict this gate reached, and the open's own failure
 	// is what the caller prints.
 	recordStorageBindingOutcome(rec, report, "")
-	routes, err := openStorageRoutes(plan, target)
+	routes, err := openStorageRoutes(plan, target, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +706,17 @@ func recordStorageBindingOutcome(rec events.Recorder, report infraMigrationRepor
 // nothing here changes. A planned binding whose provider does not implement it
 // is a refusal that names the provider — never a fall-through to the work
 // store, which would serve a relocated class out of the ledger it was moved off.
-func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget) (*storageRoutes, error) {
+//
+// The opened store is wrapped with beads.WithRouteChangeClearing before it is
+// distributed into routes.stores: this is the sole place a graph-class
+// storage-binding store is ever constructed, so every bead reached only
+// through a storage binding -- including the findUniqueBeadAcrossStoresView
+// binding-owner path that gc convoy reopen-source uses -- gets the same
+// genuine-reroute stamp clearing as every other write-capable composition
+// root (cmd/gc/api_state.go, cmd/gc/store_rollout.go, cmd/gc/main.go).
+// Wrapping here instead of at each downstream call site means the fix also
+// covers call sites that reach a binding-owned bead this way in the future.
+func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget, cfg *config.City) (*storageRoutes, error) {
 	if plan == nil {
 		return nil, errors.New("storage routing: no resolved plan")
 	}
@@ -730,13 +741,16 @@ func openStorageRoutes(plan *storebinding.StoragePlan, target infraBindingTarget
 	if err != nil {
 		return nil, fmt.Errorf("storage routing: opening binding %q: %w", target.Binding, err)
 	}
+	wrapped := beads.WithRouteChangeClearing(store, func(target string) string {
+		return agentutil.NormalizePoolRouteTarget(cfg, target)
+	})
 	routes := &storageRoutes{
 		stores:  make(map[coordclass.Class]beads.Store, len(planned.AssignedClasses.Classes())),
 		closers: []io.Closer{closer},
 		binding: target.Binding,
 	}
 	for _, class := range planned.AssignedClasses.Classes() {
-		routes.stores[class] = store
+		routes.stores[class] = wrapped
 	}
 	return routes, nil
 }
