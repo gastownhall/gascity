@@ -1387,7 +1387,7 @@ func TestReconcileTerminalScopedMemberRetryAttemptExplicitFailDoesNotAbortScope(
 
 // Regression for gc-pl7ujz: beadOutcomeFailed backs three decision sites —
 // the processScopeCheck non-retry abort branch (runtime.go:482), the
-// reconcileTerminalScopedMember abort branch (runtime.go:1491), and
+// reconcileTerminalScopedMember abort branch (runtime.go:1499), and
 // terminalAbortScopeFailure used by workflow-finalize — and they must never
 // diverge for the same bead again.
 func TestBeadOutcomeFailedConvergesAcrossAbortScopeDecisionSites(t *testing.T) {

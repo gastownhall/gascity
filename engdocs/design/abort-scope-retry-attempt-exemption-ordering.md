@@ -18,11 +18,21 @@ unconditional `gc.outcome=fail` short-circuit, so it was only ever reached by
 a bead whose outcome was bare or unrecognized. A retry attempt that actually
 closed `gc.outcome=fail` hit the short-circuit first and was reported as a
 terminal scope-abort failure regardless of whether the retry controller went
-on to close pass. Because the retry controller itself defaults
-`gc.on_fail=abort_scope` onto every attempt it spawns
-(`internal/formula/ralph.go:237`), this made retries functionally inert for
-any step carrying `gc.on_fail=abort_scope`: the first attempt's failure
-aborted the scope before, or independently of, a later attempt's outcome.
+on to close pass. Because a retry attempt root inherits
+`gc.on_fail=abort_scope` from the frozen step spec — `buildAttemptRecipe`
+copies `step.Metadata` wholesale (`internal/dispatch/control.go:929-933`) —
+this made retries functionally inert for any step carrying
+`gc.on_fail=abort_scope`: the first attempt's failure aborted the scope
+before, or independently of, a later attempt's outcome.
+
+Note the asymmetry this exposes: compiler-minted attempt 1 has `gc.on_fail`,
+`gc.scope_ref` and `gc.scope_role` explicitly deleted
+(`internal/formula/retry.go:105-107`), so only attempts 2+ are `abort_scope`
+scope members at all. (`internal/formula/ralph.go:237` is the *ralph
+body-children* default in `namespaceRalphBodySteps`, not the attempt-root
+opt-in.) The predicate fix neutralizes the symptom rather than restoring that
+symmetry — deliberate, since it also covers the v1 and Ralph paths and matches
+what #4008's superseded-attempt exclusion already assumes.
 
 Measured on the `mtg` rig, workflow `mtg-sjcls`: attempt 1 failed transiently
 at 04:04, the retry controller spawned and passed attempt 2 by 04:32:22, and
@@ -51,6 +61,17 @@ children carry `gc.attempt` and a hardcoded `gc.on_fail=abort_scope` but never
 `gc.logical_bead_id`, because `logicalRecipeStepID`
 (`internal/molecule/molecule.go:1771`) only resolves step IDs ending in
 `.attempt.N` or `.iteration.N`.
+
+For nested seeds (`buildNestedControlSeed`), `control.ID` is the control's
+namespaced step ref rather than a store bead ID, so a nested attempt root's
+`gc.logical_bead_id` carries a ref — the same dual identity `gc.control_for`
+documents at `control.go:938-943`. `isRetryAttemptSubject` only tests
+non-emptiness, so the exemption is unaffected; consumers that resolve the key
+as a bead ID should be audited separately. Note also that
+`terminalAbortScopeFailure`'s closing `return !isRetryAttemptSubject(bead)` is
+now unreachable for `abort_scope` retry attempts, since the reordered
+predicate returns `false` first — harmless redundancy, kept for the
+non-`abort_scope` paths.
 
 This is not lenience: exempting the individual attempt does not remove the
 abort, it moves it to the level that owns the retry budget. The retry
