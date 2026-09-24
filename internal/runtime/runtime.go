@@ -255,6 +255,35 @@ type InteractionProvider interface {
 	Respond(name string, response InteractionResponse) error
 }
 
+// PendingInteractionFor answers "is this seat blocked on a human?" for every
+// caller that must refuse to type into an open prompt. It normalizes the two
+// ways a provider says "ask me something else" — not implementing
+// InteractionProvider at all, and answering ErrInteractionUnsupported — into
+// the same (nil, nil) "nothing pending", and returns every other probe failure
+// verbatim so each caller can fail closed in its own idiom.
+//
+// It exists because that normalization is a policy, not a detail: callers sit
+// in different packages (session delivery, the nudge backstop lanes, the
+// queued-nudge poller) and reach opposite conclusions if they disagree about
+// which errors mean "no prompt". Adding a second unsupported-sentinel to one
+// copy and not the others would silently stop nudging a whole provider fleet,
+// so the sentinel set lives here once. Callers keep their own presentation:
+// a typed error, a stdout line, or a bare refusal.
+func PendingInteractionFor(sp Provider, name string) (*PendingInteraction, error) {
+	ip, ok := sp.(InteractionProvider)
+	if !ok {
+		return nil, nil
+	}
+	pending, err := ip.Pending(name)
+	if err != nil {
+		if errors.Is(err, ErrInteractionUnsupported) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return pending, nil
+}
+
 // IdleWaitProvider is an optional extension for runtimes that can wait for a
 // safe interactive boundary before input is injected.
 //
@@ -363,6 +392,113 @@ type TransportCapabilityProvider interface {
 // input immediately without performing their own wait-idle heuristic first.
 type ImmediateNudgeProvider interface {
 	NudgeNow(name string, content []ContentBlock) error
+}
+
+// ErrNudgeRefusedPendingInteraction reports that a guarded nudge was refused at
+// the keystroke boundary because the seat is blocked on a human. It is the
+// transport-level half of session.ErrPendingInteraction: the delivery layers
+// translate it into their own refusal idiom, and callers that queue treat it as
+// not-delivered rather than as a failure to charge against a retry budget.
+var ErrNudgeRefusedPendingInteraction = errors.New("nudge refused: session has a pending interaction")
+
+// ErrNudgePendingProbeFailed reports that a guarded nudge was refused because
+// the pending-interaction probe could not answer, so nothing was typed and
+// nothing was learned about the seat.
+//
+// It is deliberately NOT ErrNudgeRefusedPendingInteraction: the two lead to
+// different handling — retry the probe, versus wait for the human to answer —
+// and the Pending/PendingStatus surfaces depend on that distinction. What the
+// two share is that neither is a delivery failure, so a caller holding a
+// bounded retry budget must not charge either against it: a flapping pane read
+// would otherwise dead-letter a perfectly deliverable nudge for a seat that was
+// never prompted.
+var ErrNudgePendingProbeFailed = errors.New("probing pending interaction")
+
+// PendingAwareNudgeProvider is an optional extension for runtimes that perform
+// their own courtesy wait inside Nudge and can re-verify, immediately before
+// injecting keystrokes, that the seat is not blocked on a human.
+//
+// It exists because Nudge is not a send. On the tmux runtime it is an
+// up-to-NudgeIdleTimeout WaitForIdle followed by a send, and that wait is
+// correlated with the hazard rather than incidental to it: a seat that raises an
+// approval prompt stops emitting the busy indicator at that moment while the
+// ready-prompt prefix stays on the pane, so the wait is liable to return BECAUSE
+// the dialog opened. A caller that probed before calling Nudge has therefore
+// only proven no prompt was open up to a wait ago.
+//
+// The probe cannot simply move inside Nudge: Nudge is the provider-wide
+// best-effort delivery every lane uses, including lanes that deliberately type
+// into whatever is on the pane, and a new error return there is a contract
+// change for all of them. So the guarded sequence is a second, opt-in method,
+// and the runtime keeps its own wait semantics (timeout, model-switch modal
+// recovery) rather than having a generic caller re-implement them.
+//
+// Any runtime whose Nudge is not a bare send MUST implement this, or
+// [NudgeUnlessPendingFor] will probe in front of that whole sequence and the
+// gap reopens: the generic path cannot see a step it did not perform. The
+// compile-time assertions on the tmux, auto, and hybrid providers pin the
+// current set; herdr is deliberately absent because its Nudge is the send
+// (NudgeNow calls straight through to it), so a probe in front of it is already
+// adjacent.
+type PendingAwareNudgeProvider interface {
+	NudgeUnlessPending(name string, content []ContentBlock) error
+}
+
+// NudgeUnlessPendingFor delivers a nudge that refuses, at the keystroke
+// boundary, to type into a seat that is blocked on a human.
+//
+// It only ever ADDS a probe. It never substitutes a different delivery call for
+// the runtime's own: a generic caller cannot tell a runtime that waits from one
+// that delivers immediately, so swapping Nudge for NudgeNow here would silently
+// strip the courtesy wait that keeps deliveries out of active tool calls, and
+// synthesizing a wait would put an up-to-30s delay in front of every herdr
+// delivery, whose Nudge has never waited. A runtime with pre-delivery steps of
+// its own therefore keeps them by implementing [PendingAwareNudgeProvider] and
+// running the probe between those steps and its keystrokes; every other runtime
+// gets the probe in front of exactly the [Provider.Nudge] it had before.
+func NudgeUnlessPendingFor(sp Provider, name string, content []ContentBlock) error {
+	if guarded, ok := sp.(PendingAwareNudgeProvider); ok {
+		return guarded.NudgeUnlessPending(name, content)
+	}
+	if err := refusePendingInteraction(sp, name); err != nil {
+		return err
+	}
+	return sp.Nudge(name, content)
+}
+
+// SendUnlessPending probes for a pending interaction and injects the content
+// immediately when there is none, so the probe and the keystrokes are adjacent.
+// It is the half of [NudgeUnlessPendingFor] a runtime with its own pre-delivery
+// sequence reuses after running that sequence, so the refusal policy is not
+// re-derived per runtime. Unlike [NudgeUnlessPendingFor] it deliberately
+// prefers the immediate send: its callers have already performed their own
+// wait, and going back through Nudge would perform it twice.
+func SendUnlessPending(sp Provider, name string, content []ContentBlock) error {
+	if err := refusePendingInteraction(sp, name); err != nil {
+		return err
+	}
+	if immediate, ok := sp.(ImmediateNudgeProvider); ok {
+		return immediate.NudgeNow(name, content)
+	}
+	return sp.Nudge(name, content)
+}
+
+// refusePendingInteraction reports why the seat must not be typed into, or nil
+// when it may be. A probe that fails is reported, never swallowed: every caller
+// of this policy fails closed on a broken probe, and it is reported under its
+// own [ErrNudgePendingProbeFailed] sentinel rather than as the refusal sentinel
+// because the two lead to different handling — retry the probe, versus wait for
+// the human to answer. Both are still refusals rather than delivery failures,
+// which is what the sentinel lets a caller with a retry budget recognize.
+func refusePendingInteraction(sp Provider, name string) error {
+	pending, err := PendingInteractionFor(sp, name)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrNudgePendingProbeFailed, err)
+	}
+	if pending != nil {
+		return fmt.Errorf("%w: %s", ErrNudgeRefusedPendingInteraction, name)
+	}
+	return nil
 }
 
 // InterruptedTurnResetProvider is an optional extension for runtimes that can

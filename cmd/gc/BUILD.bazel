@@ -1121,6 +1121,7 @@ go_test(
         "named_session_materialization_test.go",
         "native_dolt_env_cfg_reuse_test.go",
         "native_reopen_wiring_test.go",
+        "nudge_backstop_pending_test.go",
         "nudge_dispatcher_test.go",
         "nudge_honesty_test.go",
         "nudge_mail_sweep_test.go",

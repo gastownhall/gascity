@@ -273,7 +273,12 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		// Guarded delivery: the runtime's Nudge is a wait followed by a send,
+		// and the queued-nudge poller reaches this arm for exactly the traffic
+		// a wait-idle refusal queued. Refusing at the keystroke boundary is
+		// what makes the poller's ErrPendingInteraction release branch
+		// reachable on the handle it actually resolves.
+		if err := h.nudgeUnlessPending(req.Text); err != nil {
 			return NudgeResult{}, err
 		}
 		result = NudgeResult{Delivered: true}
@@ -327,17 +332,18 @@ func (h *RuntimeHandle) History(ctx context.Context, _ HistoryRequest) (*History
 }
 
 // Pending returns the current blocking interaction for a runtime-only session if supported.
+//
+// The unsupported-probe normalization is [runtime.PendingInteractionFor]'s and
+// not this handle's: a copy here is how the handle came to report a broken
+// probe as "nothing pending" while every sibling guard failed closed on the
+// same error. A probe that cannot answer is returned to the caller.
 func (h *RuntimeHandle) Pending(context.Context) (*PendingInteraction, error) {
-	ip, ok := h.provider.(runtime.InteractionProvider)
-	if !ok {
-		return nil, nil
-	}
-	pending, err := ip.Pending(h.sessionName)
-	if errors.Is(err, runtime.ErrInteractionUnsupported) || pending == nil {
-		return nil, nil
-	}
+	pending, err := runtime.PendingInteractionFor(h.provider, h.sessionName)
 	if err != nil {
 		return nil, err
+	}
+	if pending == nil {
+		return nil, nil
 	}
 	return &PendingInteraction{
 		RequestID: pending.RequestID,
@@ -414,6 +420,35 @@ func (h *RuntimeHandle) nudgeNow(message string) error {
 	return h.provider.Nudge(h.sessionName, content)
 }
 
+// nudgeUnlessPending delivers through the runtime's guarded path and reports a
+// refusal as sessionpkg.ErrPendingInteraction, the sentinel every delivery
+// caller above this boundary already understands: the mail and sling lanes fold
+// it into their queue fallback and the queued-nudge poller releases its claims
+// on it instead of charging a delivery attempt.
+func (h *RuntimeHandle) nudgeUnlessPending(message string) error {
+	err := runtime.NudgeUnlessPendingFor(h.provider, h.sessionName, runtime.TextContent(message))
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		return fmt.Errorf("%w: %s", sessionpkg.ErrPendingInteraction, h.sessionName)
+	}
+	return err
+}
+
+// pendingInteractionRefusal reports sessionpkg.ErrPendingInteraction when the
+// seat is blocked on a human, and the probe failure itself when the probe
+// cannot answer. It deliberately does not route through h.Pending: the refusal
+// policy is runtime.PendingInteractionFor's, and a guard must fail closed on a
+// probe error.
+func (h *RuntimeHandle) pendingInteractionRefusal() error {
+	pending, err := runtime.PendingInteractionFor(h.provider, h.sessionName)
+	if err != nil {
+		return fmt.Errorf("getting pending interaction: %w", err)
+	}
+	if pending != nil {
+		return fmt.Errorf("%w: %s", sessionpkg.ErrPendingInteraction, h.sessionName)
+	}
+	return nil
+}
+
 func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -436,6 +471,15 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 	if !ok {
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredProviderUnsupported}, nil
 	}
+	// The Manager's guard does not cover this path: every LIVE seat resolves a
+	// RuntimeHandle rather than a Manager-backed one, and a live seat is the
+	// only seat that can be holding a prompt. Probe here for the fast refusal,
+	// and again below for the one that matters — a prompted seat reads as idle
+	// to WaitForIdle (busy indicator cleared, ready-prefix still captured), so
+	// the wait is liable to return BECAUSE the dialog opened.
+	if err := h.pendingInteractionRefusal(); err != nil {
+		return NudgeResult{Delivered: false}, err
+	}
 	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return NudgeResult{Delivered: false}, err
@@ -447,6 +491,15 @@ func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (Nu
 			return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
 		}
 		return NudgeResult{Delivered: false, Undelivered: NudgeUndeliveredNoIdleBoundary}, nil
+	}
+	// Probe again, immediately before delivering. The pre-wait probe only
+	// proves no prompt was open up to runtimeHandleWaitIdleTimeout ago, and
+	// nudgeNow below clears the input line and pastes: on a seat that raised an
+	// approval dialog during the wait it would answer the operator's question
+	// for them. The Manager's wait-idle lanes close the same distance the same
+	// way; this is the lane that resolves the live seat.
+	if err := h.pendingInteractionRefusal(); err != nil {
+		return NudgeResult{Delivered: false}, err
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
 		return NudgeResult{}, err

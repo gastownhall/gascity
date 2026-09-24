@@ -1764,12 +1764,59 @@ func parseNudgeDeliveryMode(raw string) (nudgeDeliveryMode, error) {
 	}
 }
 
+// pollerSeatReadyForDelivery reports whether a live seat may receive its queued
+// nudges on this pass: quiescent for long enough, and not sitting at a prompt.
+//
+// Quiescence alone is not evidence the seat can receive. A seat parked at an
+// approval prompt reads as idle to pollerSessionIdleEnough — the busy indicator
+// is gone and the ready-prompt prefix is still on the pane — and a wait-idle
+// refusal upstream is exactly what queued these items, so this is the lane a
+// refused nudge lands in. The handle refuses a prompt that opens later (its
+// guarded delivery re-probes between the runtime's wait and the keystrokes),
+// but that refusal arrives after the claim; deciding here keeps the items
+// pending for the next pass instead.
+func pollerSeatReadyForDelivery(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
+		return false
+	}
+	return !pollerSeatAwaitsHumanInput(target, sp)
+}
+
+// queuedNudgeDeliveryRefused reports whether a failed delivery must release its
+// claims and retry, rather than count toward failedQueuedNudge's attempt cap. A
+// vanished session, a seat that is waiting on a human, and a probe that could
+// not read the seat at the guarded-delivery boundary are all refusals, not
+// delivery failures: charging them would eventually dead-letter a perfectly
+// good nudge for the sin of arriving at the wrong moment.
+//
+// The probe failure belongs here for the same reason the pre-claim gate refuses
+// free on it (see pollerSeatAwaitsHumanInput): nothing was typed, so a flapping
+// capture-pane would otherwise spend the whole dead-letter budget of a seat
+// that was never prompted. It stays a distinct sentinel rather than being
+// folded into ErrPendingInteraction because only the latter means "wait for the
+// human".
+//
+// That boundary is the scope of the claim, not a property of every probe on the
+// way here. session.(*Manager).pendingInteractionLocked hand-rolls the same
+// refusal policy and still reports a probe failure as a bare "getting pending
+// interaction: …", which carries no sentinel, and it is the pre-probe this lane
+// reaches through SendLiveOnly: unless the underlying error is
+// ErrSessionNotFound, a failure there is charged rather than released.
+// worker.(*RuntimeHandle).pendingInteractionRefusal is a third copy of the same
+// policy, on the wait-idle lane this classifier never sees. Single-sourcing all
+// three on runtime.refusePendingInteraction is tracked in ga-00cur.
+func queuedNudgeDeliveryRefused(err error) bool {
+	return errors.Is(err, runtime.ErrSessionNotFound) ||
+		errors.Is(err, session.ErrPendingInteraction) ||
+		errors.Is(err, runtime.ErrNudgePendingProbeFailed)
+}
+
 func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.Store, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) (bool, error) {
 	matches, err := nudgeTargetLiveGenerationMatches(target, obs, sp)
 	if err != nil || !matches {
 		return false, err
 	}
-	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
+	if !pollerSeatReadyForDelivery(target, sp, quiescence, obs) {
 		return false, nil
 	}
 	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
@@ -1846,39 +1893,66 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		Source:   "queue",
 		Wake:     worker.NudgeWakeLiveOnly,
 	})
-	if err != nil {
-		telemetry.RecordNudge(context.Background(), target.agentKey(), err)
-		if errors.Is(err, runtime.ErrSessionNotFound) {
-			if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
-				return false, errors.Join(bookkeepErr, recErr)
-			}
-			return false, bookkeepErr
+	return resolveQueuedNudgeDelivery(target, deliveryStore, deliverySessFront, items, result, err, bookkeepErr)
+}
+
+// resolveQueuedNudgeDelivery decides what one delivery attempt meant for the
+// claimed items: ack them, release the claims for a later pass, or charge the
+// failure toward the dead letter. Split out of tryDeliverQueuedNudgesByPoller so
+// the caller reads as the gate-and-claim sequence it is and each outcome has
+// room to state why it is not one of the others — the distinctions here are the
+// whole reason a good nudge does not get dead-lettered for arriving at a bad
+// moment.
+func resolveQueuedNudgeDelivery(
+	target nudgeTarget,
+	deliveryStore beads.Store,
+	deliverySessFront *session.Store,
+	items []queuedNudge,
+	result worker.NudgeResult,
+	err error,
+	bookkeepErr error,
+) (bool, error) {
+	if err == nil {
+		if !result.Delivered {
+			// The runtime declined without an error (e.g. the session stopped
+			// between observation and delivery). Release the claims so the next
+			// pass retries promptly instead of waiting out the in-flight lease.
+			relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+			return false, errors.Join(bookkeepErr, relErr)
 		}
-		if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
-			// The submit Enter was delivered and the composer drained; only the
-			// busy-indicator OBSERVATION timed out. Delivery is proven, so this
-			// must ack like a success, not run through failedQueuedNudge's
-			// attempt-counting/dead-letter path — that would re-inject the same
-			// reminder on the next pass.
-			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
-			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
-			return true, errors.Join(bookkeepErr, ackErr)
-		}
-		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
+		telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
+		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+	}
+	telemetry.RecordNudge(context.Background(), target.agentKey(), err)
+	// A refusal is not a delivery failure. Both of the guard's refusals reach
+	// here from the same place: this lane resolves a RuntimeHandle for a live
+	// seat, and that handle's default delivery re-probes after the runtime's
+	// wait-idle. ErrPendingInteraction means a prompt opened between the
+	// poller's pre-claim check and the keystrokes; ErrNudgePendingProbeFailed
+	// means that re-probe could not answer and the delivery failed closed. In
+	// neither case was anything typed, so release the claims like a vanished
+	// session and retry on the next pass.
+	if queuedNudgeDeliveryRefused(err) {
+		if recErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); recErr != nil {
 			return false, errors.Join(bookkeepErr, recErr)
 		}
 		return false, bookkeepErr
 	}
-	if !result.Delivered {
-		// The runtime declined without an error (e.g. the session stopped
-		// between observation and delivery). Release the claims so the next
-		// pass retries promptly instead of waiting out the in-flight lease.
-		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
-		return false, errors.Join(bookkeepErr, relErr)
+	if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
+		// The submit Enter was delivered and the composer drained; only the
+		// busy-indicator OBSERVATION timed out. Delivery is proven, so this
+		// must ack like a success, not run through failedQueuedNudge's
+		// attempt-counting/dead-letter path — that would re-inject the same
+		// reminder on the next pass.
+		stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
+		ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
+		return true, errors.Join(bookkeepErr, ackErr)
 	}
-	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
-	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
-	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+	if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), err, time.Now()); recErr != nil {
+		return false, errors.Join(bookkeepErr, recErr)
+	}
+	return false, bookkeepErr
 }
 
 func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t time.Time) {
@@ -1888,6 +1962,22 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 	// Best-effort stamp. Delivery already succeeded, so a metadata write
 	// failure here must not bubble back to the caller and force a redelivery.
 	_ = sessFront.SetMarker(sessionID, session.MetadataLastNudgeDeliveredAt, t.UTC().Format(time.RFC3339))
+}
+
+// pollerSeatAwaitsHumanInput reports whether the push poller's target seat is
+// sitting at a blocking interaction, which no queued nudge may be typed into.
+//
+// Fails closed on a probe error, like every other consumer of this refusal.
+// Deferring costs only the next poll here: the items stay pending, the queue's
+// own expiry still bounds them, and the agent-pulled `gc nudge drain` path is
+// unaffected because an agent draining its own queue is already at a real
+// boundary. Nothing terminal is withheld by waiting.
+func pollerSeatAwaitsHumanInput(target nudgeTarget, sp runtime.Provider) bool {
+	if sp == nil || target.sessionName == "" {
+		return false
+	}
+	pending, err := runtime.PendingInteractionFor(sp, target.sessionName)
+	return err != nil || pending != nil
 }
 
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {

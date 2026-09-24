@@ -821,8 +821,38 @@ func formatWaitIdleReminder(source, message string) string {
 }
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
-	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	return m.recordNudgeResult(ctx, sessName, m.nudgeContent(sessName, runtime.TextContent(message), immediate))
+}
+
+// nudgeGuardedLocked delivers to a seat the caller has just probed.
+//
+// The immediate path lands where that probe left off, so it needs nothing more.
+// The waiting path does: m.sp.Nudge is not a send but the runtime's own
+// up-to-30s wait followed by a send, and the wait is liable to return BECAUSE a
+// dialog opened — a prompted seat stops emitting the busy indicator while the
+// ready-prompt prefix stays on the pane. Only the runtime can put a probe
+// between its own wait and its own keystrokes, so the guarded delivery does,
+// and reports a refusal as this package's ErrPendingInteraction: the same error
+// the caller's own probe returns for the same condition, so no caller sees a
+// new failure mode.
+//
+// It is not live-only despite where it started: sendLocked's non-immediate arm
+// is the same wait-then-send shape reached from the HTTP API's background
+// message and the ordinary claude submit path, so it shares this helper rather
+// than re-deriving the refusal. The live-only callers keep their own IsRunning
+// early-out; this helper never starts anything.
+func (m *Manager) nudgeGuardedLocked(ctx context.Context, sessName, message string, immediate bool) error {
+	if immediate {
+		return m.nudgeSession(ctx, sessName, message, true)
+	}
+	err := runtime.NudgeUnlessPendingFor(m.sp, sessName, runtime.TextContent(message))
+	if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+		err = ErrPendingInteraction
+	}
+	return m.recordNudgeResult(ctx, sessName, err)
+}
+
+func (m *Manager) recordNudgeResult(ctx context.Context, sessName string, err error) error {
 	recordCtx := ctx
 	if recordCtx == nil || recordCtx.Err() != nil {
 		recordCtx = context.Background()
@@ -856,12 +886,21 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 		if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
 			return false, err
 		}
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return false, err
+		}
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 	if err := m.ensureRunning(ctx, id, b, sessName, resumeCommand, hints); err != nil {
+		return false, err
+	}
+	// Checked after ensureRunning, as sendLocked does: a dormant session has
+	// no pane to probe, and refusing before the start would turn a managed
+	// wake into an error.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return false, err
 	}
 	if providerKind(b) != "claude" {
@@ -874,6 +913,19 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
+	// Probe again, immediately before delivering. The pre-wait probe only
+	// proves no prompt was open up to waitIdleNudgeTimeout ago, and the wait
+	// is not a neutral delay: a seat that raises an approval prompt stops
+	// emitting the busy indicator at that moment while the ready-prompt prefix
+	// stays in the captured lines, which snapshotPaneIdleWithPrefix reads as
+	// idle. So WaitForIdle is liable to return BECAUSE the dialog opened, and
+	// the immediate nudge below would answer it on the operator's behalf.
+	// sendLocked closes the same distance by handing delivery to
+	// nudgeGuardedLocked, which re-probes between the runtime's wait and its
+	// keystrokes; this path performs the wait itself, so it must re-probe here.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
+	}
 	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
 	}
@@ -883,6 +935,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, id string, b beads
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string) (bool, error) {
 	if !m.sp.IsRunning(sessName) {
 		return false, nil
+	}
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -900,6 +955,11 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 	if err := waiter.WaitForIdle(ctx, sessName, waitIdleNudgeTimeout); err != nil {
 		return false, nil
 	}
+	// Re-probe before delivering, for the reason spelled out in
+	// tryWaitIdleNudgeLocked: the wait can return because a prompt opened.
+	if err := m.pendingInteractionLocked(sessName); err != nil {
+		return false, err
+	}
 	if err := m.nudgeSession(ctx, sessName, formatWaitIdleReminder(normalizeWaitIdleNudgeSource(source), message), true); err != nil {
 		return false, nil
 	}
@@ -907,14 +967,12 @@ func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Be
 }
 
 func (m *Manager) pendingInteractionLocked(sessName string) error {
-	if ip, ok := m.sp.(runtime.InteractionProvider); ok {
-		pending, err := ip.Pending(sessName)
-		if err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-			return fmt.Errorf("getting pending interaction: %w", err)
-		}
-		if pending != nil {
-			return ErrPendingInteraction
-		}
+	pending, err := runtime.PendingInteractionFor(m.sp, sessName)
+	if err != nil {
+		return fmt.Errorf("getting pending interaction: %w", err)
+	}
+	if pending != nil {
+		return ErrPendingInteraction
 	}
 	return nil
 }
@@ -949,7 +1007,14 @@ func (m *Manager) sendLocked(ctx context.Context, id string, b beads.Bead, sessN
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return err
 	}
-	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+	// The probe above proves nothing beyond the immediate arm. With
+	// immediate=false the delivery is the runtime's own wait followed by a
+	// send, so the seat can raise a dialog inside that wait — and the wait is
+	// liable to return because it did. Deliver through the same guarded helper
+	// the live-only lanes use, which re-probes at the keystroke boundary and
+	// refuses with the ErrPendingInteraction this function already returns one
+	// line above for the same condition.
+	if err := m.nudgeGuardedLocked(ctx, sessName, message, immediate); err != nil {
 		return err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
@@ -979,7 +1044,16 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 			delivered = false
 			return nil
 		}
-		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		// Live-only delivery is where refused wait-idle nudges come back: the
+		// mail and sling lanes queue what they could not deliver, and the push
+		// poller re-delivers it here. Probing after the IsRunning early-out
+		// costs nothing — the session is live, so there is a pane to read, and
+		// the dormant-probe hazard that forces the post-ensureRunning ordering
+		// elsewhere does not arise.
+		if err := m.pendingInteractionLocked(sessName); err != nil {
+			return err
+		}
+		if err := m.nudgeGuardedLocked(ctx, sessName, message, immediate); err != nil {
 			return err
 		}
 		delivered = true

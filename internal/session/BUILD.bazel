@@ -81,6 +81,7 @@ go_test(
         "assignee_identities_test.go",
         "canonical_identity_test.go",
         "chat_empty_session_key_test.go",
+        "chat_live_only_guard_test.go",
         "chat_test.go",
         "circuit_state_test.go",
         "create_options_test.go",

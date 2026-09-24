@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -186,89 +188,266 @@ func runNudgeBackstop(
 
 	for i := range sessionBeads {
 		s := &sessionBeads[i]
-		if !pred.governs(*s) {
-			continue
-		}
 		sessName := strings.TrimSpace(s.Metadata["session_name"])
-		if sessName == "" || !sp.IsRunning(sessName) {
+		if sessName == "" {
 			continue
 		}
-
-		target, resolution := pred.resolve(*s, sessName)
-		switch resolution {
-		case backstopResolutionHold:
-			continue
-		case backstopResolutionClear:
-			pred.clear(store, s, stdout)
-			continue
-		case backstopResolutionOutstanding:
-			// Continue below.
-		default:
-			continue
-		}
-
-		same, attempts, last := pred.state(*s, target)
-		if !same {
-			// First observation of this assignment: start the grace clock,
-			// don't nudge yet — a normal claim/confirmation almost always
-			// lands within the grace window.
-			pred.observe(store, s, target, now, stdout)
-			continue
-		}
-
-		if decayedWindow(pred, store, s, target, sessName, attempts, last, now, stdout) {
-			continue
-		}
-
-		switch decideBackstopAction(attempts, last, now) {
-		case backstopActionWait:
-			continue
-		case backstopActionExhausted:
-			pred.exhausted(store, s, stdout)
-			continue
-		case backstopActionNudge:
-			switch pred.revalidate(target) {
-			case backstopResolutionHold:
-				continue
-			case backstopResolutionClear:
-				pred.clear(store, s, stdout)
-				continue
-			case backstopResolutionOutstanding:
-				// Deliver below.
-			default:
-				continue
-			}
-			content := pred.content(*s)
-			if content == "" {
-				// Nothing is deliverable for this session — an ordinary path
-				// rather than an exotic one in every lane, though for different
-				// reasons. The lanes that resolve content through the
-				// default-nudge fallback (the claim and execution backstops)
-				// reach it only when the template or agent cannot be resolved
-				// at all; the continuation lane reads the configured nudge
-				// directly, and `agent.Nudge` is optional and routinely unset.
-				// Skipping silently parks the state machine on its observe
-				// marker forever: no attempt is ever reserved, the cap is never
-				// reached, and the predicate's terminal action never runs —
-				// which for the execution backstop is the drain that is the only
-				// thing that releases the claim. The bounded attempts exist to
-				// give the agent a chance to ANSWER a nudge; with no nudge to
-				// send there is nothing to wait for, so go straight to the
-				// terminal action after the same grace window.
-				pred.exhausted(store, s, stdout)
-				continue
-			}
-			// Write ahead of the external delivery. If the process crashes
-			// after this point, an attempt may be consumed without delivery,
-			// but a crash or store failure can never replay an unbounded nudge.
-			if !pred.reserve(store, s, target, attempts+1, now, stdout) {
-				continue
-			}
-			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
-				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
-				continue
-			}
-			fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+		if !nudgeBackstopSeat(sp, store, s, pred, sessName, label, now, stdout) {
+			// Every outcome except the prompted skip means this lane is not
+			// waiting on a human at this seat — including the filters that drop
+			// it before any probe runs (no longer governed, resolved away, gone,
+			// or simply paced to wait). Reclaiming here rather than at each exit
+			// is what keeps the process-global notice map down to the seats this
+			// pass still enumerates. It cannot reclaim more than the pass sees:
+			// a seat whose session bead is closed while it sits at its prompt
+			// leaves sessionBeads entirely (loadSessionBeadSnapshot deliberately
+			// does not load closed history) and never reaches this loop again.
+			backstopPromptNoticeForget(label, sessName)
 		}
 	}
+}
+
+// nudgeBackstopSeat runs one seat through the lane's pacing state machine and
+// reports whether this tick ended in the prompted skip — the one outcome whose
+// notice bookkeeping must survive to the next tick, so waiting on a human is
+// announced once per prompt rather than once per reconcile tick.
+func nudgeBackstopSeat(
+	sp runtime.Provider,
+	store beads.Store,
+	s *beads.Bead,
+	pred backstopPredicate,
+	sessName, label string,
+	now time.Time,
+	stdout io.Writer,
+) bool {
+	if !pred.governs(*s) {
+		return false
+	}
+	if !sp.IsRunning(sessName) {
+		return false
+	}
+
+	target, resolution := pred.resolve(*s, sessName)
+	switch resolution {
+	case backstopResolutionHold:
+		return false
+	case backstopResolutionClear:
+		pred.clear(store, s, stdout)
+		return false
+	case backstopResolutionOutstanding:
+		// Continue below.
+	default:
+		return false
+	}
+
+	same, attempts, last := pred.state(*s, target)
+	if !same {
+		// First observation of this assignment: start the grace clock,
+		// don't nudge yet — a normal claim/confirmation almost always
+		// lands within the grace window.
+		pred.observe(store, s, target, now, stdout)
+		return false
+	}
+
+	if decayedWindow(pred, store, s, target, sessName, attempts, last, now, stdout) {
+		return false
+	}
+
+	switch decideBackstopAction(attempts, last, now) {
+	case backstopActionExhausted:
+		pred.exhausted(store, s, stdout)
+	case backstopActionNudge:
+		return deliverBackstopNudge(sp, store, s, pred, target, sessName, label, attempts, now, stdout)
+	case backstopActionWait:
+	}
+	return false
+}
+
+// deliverBackstopNudge runs the delivery arm for one session the timing engine
+// has decided to nudge on this tick: revalidate → content → seat probe →
+// reserve → deliver. Split out of runNudgeBackstop so the engine reads as the
+// pacing state machine it is and the pre-delivery refusals have room to state
+// their own reasoning. Reports whether the tick ended in a prompted skip, which
+// is what keeps the seat's notice entry from being reclaimed under it.
+func deliverBackstopNudge(
+	sp runtime.Provider,
+	store beads.Store,
+	s *beads.Bead,
+	pred backstopPredicate,
+	target backstopTarget,
+	sessName, label string,
+	attempts int,
+	now time.Time,
+	stdout io.Writer,
+) bool {
+	switch pred.revalidate(target) {
+	case backstopResolutionHold:
+		return false
+	case backstopResolutionClear:
+		pred.clear(store, s, stdout)
+		return false
+	case backstopResolutionOutstanding:
+		// Deliver below.
+	default:
+		return false
+	}
+	content := pred.content(*s)
+	if content == "" {
+		// Nothing is deliverable for this session — an ordinary path
+		// rather than an exotic one in every lane, though for different
+		// reasons. The lanes that resolve content through the
+		// default-nudge fallback (the claim and execution backstops)
+		// reach it only when the template or agent cannot be resolved
+		// at all; the continuation lane reads the configured nudge
+		// directly, and `agent.Nudge` is optional and routinely unset.
+		// Skipping silently parks the state machine on its observe
+		// marker forever: no attempt is ever reserved, the cap is never
+		// reached, and the predicate's terminal action never runs —
+		// which for the execution backstop is the drain that is the only
+		// thing that releases the claim. The bounded attempts exist to
+		// give the agent a chance to ANSWER a nudge; with no nudge to
+		// send there is nothing to wait for, so go straight to the
+		// terminal action after the same grace window.
+		pred.exhausted(store, s, stdout)
+		return false
+	}
+	wait, episode, probeErr := backstopSeatAwaitsHumanInput(sp, sessName)
+	switch wait {
+	case backstopSeatPrompted:
+		// A seat sitting at an approval or selection prompt is waiting on a
+		// human, not stalled. Nudging it types into that prompt and answers on
+		// the operator's behalf. This skip is deliberately unbounded and
+		// deliberately reserves nothing: a human may take as long as they
+		// take, and no attempt may be spent — nor pacing state advanced —
+		// while the lane is waiting on one. Reported once per prompt rather
+		// than once per tick, because the tick rate is the reconciler's, not
+		// the operator's.
+		if backstopPromptNoticeIsNew(label, sessName, episode) {
+			fmt.Fprintf(stdout, "%s: %s skipped: awaiting human input\n", label, sessName) //nolint:errcheck // best-effort
+		}
+		return true
+	case backstopSeatProbeFailed:
+		// A probe that will not answer is not a human, and must not be paid
+		// for like one. Refusing unboundedly here is the same shape the
+		// content == "" comment above rejects: no attempt is ever reserved,
+		// the cap is never reached, and the terminal action — for the
+		// execution backstop, the drain that is the only thing that releases
+		// the claim — never runs, on a condition that has nothing to do with
+		// anyone waiting. So still refuse the delivery, but charge it an
+		// attempt exactly as an undeliverable nudge is charged below, and let
+		// the bounded ladder reach pred.exhausted if the probe stays broken.
+		fmt.Fprintf(stdout, "%s: %s skipped: probing pending interaction: %v (attempt %d/%d)\n", label, sessName, probeErr, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+		pred.reserve(store, s, target, attempts+1, now, stdout)
+		return false
+	}
+	// Write ahead of the external delivery. If the process crashes
+	// after this point, an attempt may be consumed without delivery,
+	// but a crash or store failure can never replay an unbounded nudge.
+	if !pred.reserve(store, s, target, attempts+1, now, stdout) {
+		return false
+	}
+	// Deliver through the guarded path rather than sp.Nudge: that call is a
+	// wait and then a send, so the probe above only proves the seat was
+	// unprompted a wait ago — on the tmux runtime, up to NudgeIdleTimeout ago,
+	// and that wait is liable to return precisely because a dialog opened. The
+	// guarded path re-probes between the wait and the keystrokes.
+	if err := runtime.NudgeUnlessPendingFor(sp, sessName, runtime.TextContent(content)); err != nil {
+		if errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction) {
+			// The human the probe above refuses for, arriving during the wait.
+			// Reported on its own line because it is a different observation
+			// than the pre-probe skip, and because the reserved attempt above
+			// is not given back: the write-ahead is what stops a crash from
+			// replaying an unbounded nudge. It normally costs one attempt per
+			// prompt episode, but not because the next tick re-probes: the
+			// reservation advances last, so the ticks inside the backoff take
+			// backstopActionWait and reach no probe at all. The first tick that
+			// does reach one meets the still-open prompt at the pre-probe,
+			// which reserves nothing. Those waiting ticks return false, so the
+			// notice is reclaimed and that pre-probe skip announces itself
+			// again.
+			fmt.Fprintf(stdout, "%s: %s skipped: prompted during delivery (attempt %d/%d)\n", label, sessName, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+			return true
+		}
+		fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
+		return false
+	}
+	fmt.Fprintf(stdout, "%s: nudged %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+	return false
+}
+
+// backstopSeatWait is why a seat must not be nudged on this tick.
+//
+// The two refusals are reported apart because they must be PACED apart: one is
+// a human the lane owes unlimited patience, the other is a broken observation
+// that must never be allowed to withhold the lane's terminal action. Collapsing
+// them into one bool is what made the probe-error case indistinguishable, so
+// the distinction lives in the type rather than in the caller's guesswork.
+type backstopSeatWait int
+
+const (
+	// backstopSeatReady means nothing blocks delivery.
+	backstopSeatReady backstopSeatWait = iota
+	// backstopSeatPrompted means the seat is sitting at an approval or
+	// selection prompt and a human is being waited on.
+	backstopSeatPrompted
+	// backstopSeatProbeFailed means the probe itself could not answer, so the
+	// seat's state is simply unknown.
+	backstopSeatProbeFailed
+)
+
+// backstopSeatAwaitsHumanInput reports why, if at all, sessName must not be
+// nudged right now. episode identifies the specific prompt a prompted seat is
+// sitting at, so a caller can report one notice per prompt instead of one per
+// tick; err carries the probe failure for backstopSeatProbeFailed.
+//
+// Refuses on probe error as well as on a confirmed prompt, via the shared
+// runtime.PendingInteractionFor normalization. The two failure directions are
+// not symmetric: skipping a nudge costs one tick, because the backstop
+// re-evaluates the same seat on the next pass, while delivering into an open
+// prompt answers on the operator's behalf and cannot be taken back.
+func backstopSeatAwaitsHumanInput(sp runtime.Provider, sessName string) (wait backstopSeatWait, episode string, err error) {
+	pending, err := runtime.PendingInteractionFor(sp, sessName)
+	switch {
+	case err != nil:
+		return backstopSeatProbeFailed, "", err
+	case pending != nil:
+		return backstopSeatPrompted, pending.RequestID, nil
+	}
+	return backstopSeatReady, "", nil
+}
+
+// backstopPromptNoticeSeen remembers the prompt each lane last reported a seat
+// as blocked on, so the unbounded prompted skip stays observable without
+// emitting a line on every reconcile tick for as long as an operator takes to
+// answer. Keyed by lane and seat; the entry is dropped on any tick that does
+// not end in the prompted skip — including the ticks that filter the seat out
+// before probing it — so the next prompt is reported again.
+//
+// The reclaim reaches exactly as far as the enumeration does. A seat whose
+// session bead is closed while it sits at its prompt drops out of the snapshot
+// and keeps its entry for the life of the process: a residue of one small entry
+// per (lane, seat), and a stale-suppressing one. The episode is the prompt's
+// RequestID, and on tmux — today the only runtime that ever reports a prompt —
+// that is a content hash of the approval: "tmux-" followed by the first eight
+// bytes of sha256(ToolName + "\x00" + Input), see approvalHash in
+// internal/runtime/tmux. So a later prompt of the SAME shape on a reused seat
+// name compares equal to the residue and is suppressed; only a differently
+// shaped prompt re-announces.
+var backstopPromptNoticeSeen sync.Map // label \x00 sessName -> episode
+
+func backstopPromptNoticeKey(label, sessName string) string {
+	return label + "\x00" + sessName
+}
+
+// backstopPromptNoticeIsNew reports whether this lane has yet to announce that
+// sessName is blocked on this particular episode, and records that it has.
+func backstopPromptNoticeIsNew(label, sessName, episode string) bool {
+	previous, seen := backstopPromptNoticeSeen.Swap(backstopPromptNoticeKey(label, sessName), episode)
+	return !seen || previous != episode
+}
+
+// backstopPromptNoticeForget clears the recorded episode for a seat this lane
+// has just observed unblocked.
+func backstopPromptNoticeForget(label, sessName string) {
+	backstopPromptNoticeSeen.Delete(backstopPromptNoticeKey(label, sessName))
 }

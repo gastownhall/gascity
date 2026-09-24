@@ -40,6 +40,7 @@ var (
 	_ runtime.DeadRuntimeSessionChecker     = (*Provider)(nil)
 	_ runtime.EnvironmentBatchProvider      = (*Provider)(nil)
 	_ runtime.ImmediateNudgeProvider        = (*Provider)(nil)
+	_ runtime.PendingAwareNudgeProvider     = (*Provider)(nil)
 	_ runtime.InterruptBoundaryWaitProvider = (*Provider)(nil)
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
@@ -543,24 +544,45 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // multi-pane resolution, retry with backoff, and SIGWINCH wake.
 // Best-effort: returns nil if the session doesn't exist.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	p.waitForNudgeIdleBoundary(name)
+	return p.NudgeNow(name, content)
+}
+
+// waitForNudgeIdleBoundary is Nudge's courtesy wait, shared with
+// [Provider.NudgeUnlessPending] so the guarded delivery waits on exactly the
+// same terms — configured timeout and modal recovery included — as the
+// unguarded one it replaces.
+func (p *Provider) waitForNudgeIdleBoundary(name string) {
 	// Wait for the agent to be idle before sending, unless disabled.
 	// This prevents interrupting active tool calls — the prompt is visible
 	// in scrollback during inter-tool-call gaps, so immediate send-keys
 	// would inject text mid-execution. See upstream dfd945e9/6bc898ce.
-	if idleTimeout := p.tm.cfg.NudgeIdleTimeout; idleTimeout > 0 {
-		// Best-effort wait — if it fails (session gone, timeout), proceed
-		// with the nudge anyway. The message may arrive during active work,
-		// but Claude's cooperative queue will handle it at the next turn.
-		if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
-			// Not idle within the window. A mid-session Codex/GPT model-switch
-			// modal ("approaching rate limits — switch model?") blocks input and
-			// would otherwise hang the session; dismiss it (keep current model,
-			// no downgrade) so the nudge can land. No-op if the modal is absent,
-			// so this never disturbs a genuinely busy pane.
-			p.tm.DismissModelSwitchModalIfPresent(name)
-		}
+	idleTimeout := p.tm.cfg.NudgeIdleTimeout
+	if idleTimeout <= 0 {
+		return
 	}
-	return p.NudgeNow(name, content)
+	// Best-effort wait — if it fails (session gone, timeout), proceed
+	// with the nudge anyway. The message may arrive during active work,
+	// but Claude's cooperative queue will handle it at the next turn.
+	if err := p.tm.WaitForIdle(context.Background(), name, idleTimeout); err != nil {
+		// Not idle within the window. A mid-session Codex/GPT model-switch
+		// modal ("approaching rate limits — switch model?") blocks input and
+		// would otherwise hang the session; dismiss it (keep current model,
+		// no downgrade) so the nudge can land. No-op if the modal is absent,
+		// so this never disturbs a genuinely busy pane.
+		p.tm.DismissModelSwitchModalIfPresent(name)
+	}
+}
+
+// NudgeUnlessPending is Nudge with the refusal a caller cannot express from
+// outside: the idle wait runs on the provider's own terms, and the
+// pending-interaction probe then sits between that wait and the keystrokes,
+// where no window separates them. It implements
+// [runtime.PendingAwareNudgeProvider]; see that interface for why the probe
+// cannot simply move into Nudge.
+func (p *Provider) NudgeUnlessPending(name string, content []runtime.ContentBlock) error {
+	p.waitForNudgeIdleBoundary(name)
+	return runtime.SendUnlessPending(p, name, content)
 }
 
 // NudgeNow sends a message immediately without performing a wait-idle check.

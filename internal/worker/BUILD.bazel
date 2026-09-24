@@ -71,6 +71,7 @@ go_test(
         "operation_events_1a_test.go",
         "operation_events_test.go",
         "provider_resume_test.go",
+        "runtime_handle_pending_test.go",
         "runtime_handle_reminder_test.go",
         "session_record_equiv_test.go",
         "sessionlog_adapter_test.go",
