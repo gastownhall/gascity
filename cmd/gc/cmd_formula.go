@@ -638,6 +638,7 @@ func newFormulaCookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var metadata []string
 	var attach string
 	var jsonOutput bool
+	var priority int
 	cmd := &cobra.Command{
 		Use:   "cook <formula-name>",
 		Short: "Instantiate a formula into the current bead store",
@@ -691,6 +692,9 @@ store, copy them into the binding with
 ` + storageRecoveryInstruction() + `.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("priority") && (priority < 0 || priority > 4) {
+				return formulaCommandError(stderr, "gc formula cook", jsonOutput, fmt.Errorf("--priority must be 0-4, got %d", priority))
+			}
 			cityPath, err := resolveCity()
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -969,6 +973,11 @@ store, copy them into the binding with
 					return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
 				}
 				emitAttachedFormulaCookExecutionFacts(store, cfg, cityPath, result.WorkflowRootID, stderr)
+				if cmd.Flags().Changed("priority") {
+					if err := applyCookPriority(attachStore, result.RootID, result.IDMapping, priority); err != nil {
+						return formulaCommandError(stderr, "gc formula cook: attach", jsonOutput, err)
+					}
+				}
 
 				if jsonOutput {
 					if err := writeCLIJSONLineOrErr(stdout, stderr, "gc formula cook", formulaCookJSONResult{
@@ -1076,6 +1085,11 @@ store, copy them into the binding with
 				}
 			}
 
+			if cmd.Flags().Changed("priority") {
+				if err := applyCookPriority(rootStore, result.RootID, result.IDMapping, priority); err != nil {
+					return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
+				}
+			}
 			rootMeta, err := parseMetadataArgs(metadata)
 			if err != nil {
 				return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
@@ -1116,7 +1130,30 @@ store, copy them into the binding with
 	cmd.Flags().StringArrayVar(&metadata, "meta", nil, "set root bead metadata after cook (key=value, repeatable)")
 	cmd.Flags().StringVar(&attach, "attach", "", "attach sub-DAG to existing bead (bead gains blocking dep on sub-DAG root)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output JSONL summary")
+	cmd.Flags().IntVar(&priority, "priority", 2, "priority (0-4, 0=highest) for the root and every cooked step, overriding the formula's own; workers claim in (priority, age) order")
 	return cmd
+}
+
+// applyCookPriority sets one priority on the cooked root and every step bead.
+// A formula's step priorities are authored once for every run; a run that
+// others wait on (a merge-train restack behind which every later PR stands)
+// has to outrank the rest at cook time, not through a second listing and
+// update pass by the caller.
+func applyCookPriority(store beads.Store, rootID string, idMapping map[string]string, priority int) error {
+	ids := []string{rootID}
+	for _, id := range idMapping {
+		if id != rootID {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids[1:])
+	for _, id := range ids {
+		p := priority
+		if err := store.Update(id, beads.UpdateOpts{Priority: &p}); err != nil {
+			return fmt.Errorf("setting priority %d on %s: %w", priority, id, err)
+		}
+	}
+	return nil
 }
 
 // emitFormulaCookExecutionFacts projects the cooked run's execution facts from

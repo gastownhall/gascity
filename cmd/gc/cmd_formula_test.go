@@ -1283,6 +1283,87 @@ title = "Do work"
 	}
 }
 
+// TestFormulaCookPriorityOverridesEveryCookedBead pins --priority: workers claim
+// in (priority, created_at) order across every run, so a run that others wait
+// on must outrank the default on each of its beads, root and steps alike, and
+// the flag must do it at cook time rather than through a second update pass.
+func TestFormulaCookPriorityOverridesEveryCookedBead(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
+[workspace]
+name = "my-city"
+provider = "claude"
+
+[daemon]
+formula_v2 = true
+`, "claude")+testControlDispatcherAgentTOML("")), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	formulaDir := filepath.Join(cityDir, "formulas")
+	if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+		t.Fatalf("mkdir formulas: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte(`
+formula = "graph-work"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "step"
+title = "Do work"
+priority = 3
+
+[[steps]]
+id = "after"
+title = "Then this"
+needs = ["step"]
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+	formulatest.SetupHermeticCookEnv(t, cityDir, cityDir)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newFormulaCookCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"graph-work", "--json", "--priority", "1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula cook: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	var res formulaCookJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("parse cook json %q: %v", stdout.String(), err)
+	}
+	store, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ids := []string{res.RootID}
+	for _, id := range res.IDMapping {
+		ids = append(ids, id)
+	}
+	if len(ids) < 3 {
+		t.Fatalf("cook created %d beads, want the root and two steps: %#v", len(ids), res.IDMapping)
+	}
+	for _, id := range ids {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if b.Priority == nil || *b.Priority != 1 {
+			t.Fatalf("bead %s priority = %v, want 1 (--priority overrides the formula's own on every bead)", id, b.Priority)
+		}
+	}
+
+	// Out of range is refused before anything is cooked.
+	var out2, err2 bytes.Buffer
+	bad := newFormulaCookCmd(&out2, &err2)
+	bad.SetArgs([]string{"graph-work", "--priority", "7"})
+	if err := bad.Execute(); err == nil || !strings.Contains(err2.String(), "--priority must be 0-4") {
+		t.Fatalf("cook --priority 7: err = %v, stderr = %q, want a 0-4 range error", err, err2.String())
+	}
+}
+
 // TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig is the rig-rooted
 // variant of the above: the incident that motivated sr-xz9f (ticket-lifecycle
 // runs cooked standalone by the support intake poller) was rig-scoped, so this
