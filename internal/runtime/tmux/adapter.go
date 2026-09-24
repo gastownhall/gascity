@@ -1470,6 +1470,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
 }
 
+// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
+// capture it).
+var startupDialogWarningOut io.Writer = os.Stderr
+
 // launchOrchestration runs the post-agent-launch startup steps against a session
 // whose agent pane has just been created (doStartSession) or respawned (the
 // un-weld relaunch path): wait for the agent command, accept startup dialogs
@@ -1477,10 +1481,6 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 // run session_setup, send the startup nudge, and apply session_live. The caller
 // is responsible for the lifecycle gating (one-shot / no-managed-hints) before
 // invoking this — these steps assume a managed, non-one-shot session.
-// startupDialogWarningOut receives startup-dialog warnings (a var so tests can
-// capture it).
-var startupDialogWarningOut io.Writer = os.Stderr
-
 func launchOrchestration(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) error {
 	// Step 2: Wait for agent command to appear (not still in shell).
 	if len(cfg.ProcessNames) > 0 {
