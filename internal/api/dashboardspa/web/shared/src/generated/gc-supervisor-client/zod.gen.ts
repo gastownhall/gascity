@@ -160,13 +160,6 @@ export const zBeadWorktreeReapedPayload = z.object({
     rig: z.string()
 });
 
-export const zBeadsDiagnostic = z.object({
-    beads_store: z.string(),
-    native_store_eligible: z.boolean(),
-    preflight_gate: z.string().optional(),
-    preflight_reason: z.string().optional()
-});
-
 /**
  * Lifecycle state of a session binding.
  */
@@ -381,6 +374,11 @@ export const zConvoyProgress = z.object({
 
 export const zConvoyRemoveInputBody = z.object({
     items: z.array(z.string()).nullish()
+});
+
+export const zCursors = z.object({
+    ignored: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    main: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
 export const zDeliveryContextRecord = z.object({
@@ -1328,6 +1326,30 @@ export const zProviderUpdateInputBody = z.object({
     prompt_flag: z.string().optional(),
     prompt_mode: z.string().optional(),
     ready_delay_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+export const zProxiedEndpointStamp = z.object({
+    generation: z.string().optional(),
+    pid: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    port: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional()
+});
+
+export const zProxiedDiagnostic = z.object({
+    cursors: zCursors,
+    demoted: z.boolean().optional(),
+    detail: z.string().optional(),
+    endpoint: zProxiedEndpointStamp,
+    evidence: z.string().optional(),
+    idle_policy: z.string().optional(),
+    verdict: z.string().optional()
+});
+
+export const zBeadsDiagnostic = z.object({
+    beads_store: z.string(),
+    native_store_eligible: z.boolean(),
+    preflight_gate: z.string().optional(),
+    preflight_reason: z.string().optional(),
+    proxied: zProxiedDiagnostic.optional()
 });
 
 export const zPublishReceipt = z.object({
