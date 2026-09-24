@@ -22,11 +22,13 @@ import (
 //
 // Why a bound is needed at all: a session bead that enters drain and never
 // finalizes stays status=open forever, and an open session bead owns its
-// session_name. A pool slot's runtime name is a pure function of its identity
-// by design (ga-vcjr9 — minting a second box beside a live one leaks a runtime
-// nothing will ever address again), so the pool cannot route around the held
-// name. It drops to ZERO seats and every bead routed to that template becomes
-// unclaimable. Production ran that way for 3d10h (ga-rxhu2).
+// session_name and occupies its pool slot. The pool cannot route around it:
+// a tmux_alias slot's runtime name is a pure function of its identity, and an
+// unaliased slot's bead-scoped successor is only minted once the open row
+// releases the slot (ga-vcjr9 — minting a second box beside a live one leaks a
+// runtime nothing will ever address again). It drops to ZERO seats and every
+// bead routed to that template becomes unclaimable. Production ran that way for
+// 3d10h (ga-rxhu2).
 //
 // Ordering, load-bearing: this deadline must stay well ABOVE the drain-ack
 // deadline cycle and strandedRepairConfirmGrace (session_beads.go) so the

@@ -1882,6 +1882,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				}
 			}
 		}
+		if !exists && isPoolInstance {
+			// Identity lease, same as the planner's create path
+			// (createPoolSessionBeadWithIdentifiers): this lane mints a
+			// bead-scoped name too, so it must not mint a second generation
+			// beside an open, unconfirmed create for the same slot identity —
+			// that row may still own a box whose teardown has not been
+			// confirmed (releaseBeadScopedPoolRuntime, ga-vcjr9).
+			leaseTemplate := tp.TemplateName
+			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
+				leaseTemplate = tp.RigName + "/" + leaseTemplate
+			}
+			if err := ensurePoolIdentityNotHeldByOpenRow(store, cfg, nil, leaseTemplate, agentName); err != nil {
+				fmt.Fprintf(stderr, "session beads: not creating pool session for %s: %v\n", agentName, err) //nolint:errcheck
+				continue
+			}
+		}
 		if !exists {
 			// Create a new session bead.
 			createState := state
@@ -1999,11 +2015,13 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			finalizeCreatedSessionName := func() {
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
-					// Derived from the pool identity, never the bead ID: a
-					// bead-ID name is a fresh runtime box per attempt, which is
-					// the ga-vcjr9 leak. Same derivation as the planner's
-					// create path (derivePoolSessionName).
-					createdSessionName = poolRuntimeSessionName(cfg, agentName, qualifiedTemplate, transientPoolSlot)
+					// Bead-ID scoped, same as the planner's create path
+					// (createPoolSessionBeadWithIdentifiers): the runtime name
+					// resolves back to its bead. ga-vcjr9's leak is closed by
+					// releaseBeadScopedPoolRuntime (a failed create's runtime is
+					// torn down before its row may close) plus the identity
+					// lease, not by reusing a name across generations.
+					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
 					if err := sessFront.SetMarker(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck
@@ -2868,6 +2886,15 @@ func reapStaleSessionBeads(
 			if now.Sub(startedAt) < grace {
 				continue
 			}
+		}
+		// A bead-scoped pool row may only close once its runtime is confirmed
+		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not
+		// proof of teardown (k8s reports false for a pod whose tmux is not up,
+		// or on an API error), and closing releases the identity lease so a
+		// successor mints under a new name, leaving this box unaddressed. Hold
+		// the row; the next pass retries.
+		if !releaseBeadScopedPoolRuntime(info, sp, stderr) {
+			continue
 		}
 		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
