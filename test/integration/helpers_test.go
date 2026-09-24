@@ -4,7 +4,6 @@ package integration
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -159,6 +159,18 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 	}
 }
 
+// isProviderOwnedProxiedDoltCity reports whether cityDir's beads store is in
+// provider-owned proxied mode (dolt_mode == "proxied-server" in
+// .beads/metadata.json). Any read or parse error resolves to false: this
+// helper must never fail the caller's wait loop.
+func isProviderOwnedProxiedDoltCity(cityDir string) bool {
+	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json"))
+	if err != nil || !ok {
+		return false
+	}
+	return mode == "proxied-server"
+}
+
 func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	var (
@@ -166,27 +178,41 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 		lastErr error
 	)
 	for time.Now().Before(deadline) {
-		probeEnv := filterEnvMany(env,
-			"GC_CITY",
-			"GC_CITY_PATH",
-			"GC_CITY_ROOT",
-			"GC_CITY_RUNTIME_DIR",
-			"GC_DOLT_PORT",
-		)
-		probeEnv = append(probeEnv,
-			"GC_CITY="+cityDir,
-			"GC_CITY_PATH="+cityDir,
-			"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
-		)
-		// A gc-launched Dolt (direct mode) must publish its port under the
-		// city before the city counts as ready. A bd-owned proxied-server
-		// scope (the default since #6273) never publishes one: bd resolves
-		// that endpoint itself, so probe it without a pinned port.
-		port, published := currentManagedDoltPortForTest(cityDir)
-		if published || cityUsesProxiedDoltForTest(cityDir) {
-			if published {
-				probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+			)
+			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
+			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+			if lastErr == nil {
+				return lastOut, nil
 			}
+		} else if isProviderOwnedProxiedDoltCity(cityDir) {
+			// Callers such as bdDolt pass env already carrying appendManagedDoltEndpointEnv hints; those must not reach the portless probe.
+			probeEnv := filterEnvMany(env,
+				"GC_CITY",
+				"GC_CITY_PATH",
+				"GC_CITY_ROOT",
+				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_HOST",
+				"GC_DOLT_PORT",
+				"BEADS_DOLT_SERVER_HOST",
+				"BEADS_DOLT_SERVER_PORT",
+			)
+			probeEnv = append(probeEnv,
+				"GC_CITY="+cityDir,
+				"GC_CITY_PATH="+cityDir,
+				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+			)
 			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
 			if lastErr == nil {
 				return lastOut, nil
@@ -200,21 +226,179 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 	return lastOut, lastErr
 }
 
-// cityUsesProxiedDoltForTest reports whether the city's beads metadata binds
-// it to bd's proxied-server mode, where bd (not gc) owns the Dolt endpoint.
-func cityUsesProxiedDoltForTest(cityDir string) bool {
-	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "metadata.json"))
+// TestIsProviderOwnedProxiedDoltCity exercises the dolt_mode detection helper
+// used by waitForManagedDoltCityReady to decide whether to fall back to a
+// portless bd probe. Any read/parse failure must resolve to false rather than
+// erroring, since the caller must never fail the wait loop because of it.
+func TestIsProviderOwnedProxiedDoltCity(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata string // empty means no metadata.json file at all
+		want     bool
+	}{
+		{name: "proxied-server mode", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`, want: true},
+		{name: "server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`, want: false},
+		{name: "missing dolt_mode field", metadata: `{"backend":"dolt"}`, want: false},
+		{name: "malformed json", metadata: `{"backend":"dolt", not-json`, want: false},
+		{name: "missing metadata.json", metadata: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if tc.metadata != "" {
+				beadsDir := filepath.Join(cityDir, ".beads")
+				if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+					t.Fatalf("mkdir .beads: %v", err)
+				}
+				metaPath := filepath.Join(beadsDir, "metadata.json")
+				if err := os.WriteFile(metaPath, []byte(tc.metadata), 0o644); err != nil {
+					t.Fatalf("write metadata.json: %v", err)
+				}
+			}
+			if got := isProviderOwnedProxiedDoltCity(cityDir); got != tc.want {
+				t.Errorf("isProviderOwnedProxiedDoltCity(%q) = %v, want %v", cityDir, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWaitForManagedDoltCityReady_ProxiedModeProbesWithoutPortHint covers fix
+// spec point 2: when no managed-Dolt port is discoverable but the city is
+// provider-owned proxied-server mode, the readiness probe must still run,
+// without injecting a port hint, so bd resolves the proxied endpoint itself.
+func TestWaitForManagedDoltCityReady_ProxiedModeProbesWithoutPortHint(t *testing.T) {
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	fakeBD := filepath.Join(t.TempDir(), "bd")
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$GC_DOLT_HOST\" ] || [ -n \"$GC_DOLT_PORT\" ] || [ -n \"$BEADS_DOLT_SERVER_HOST\" ] || [ -n \"$BEADS_DOLT_SERVER_PORT\" ]; then\n" +
+		"  echo 'unexpected endpoint hint injected' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"echo '[]'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd script: %v", err)
+	}
+
+	prevBDBinary := bdBinary
+	bdBinary = fakeBD
+	t.Cleanup(func() { bdBinary = prevBDBinary })
+
+	start := time.Now()
+	out, err := waitForManagedDoltCityReady(nil, cityDir, 5*time.Second)
+	elapsed := time.Since(start)
+
 	if err != nil {
-		return false
+		t.Fatalf("waitForManagedDoltCityReady() error = %v, out = %q", err, out)
 	}
-	var metadata struct {
-		Backend  string `json:"backend"`
-		DoltMode string `json:"dolt_mode"`
+	if strings.TrimSpace(out) != "[]" {
+		t.Errorf("waitForManagedDoltCityReady() out = %q, want []", out)
 	}
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return false
+	if elapsed >= 5*time.Second {
+		t.Errorf("waitForManagedDoltCityReady() took %s, want well under the 5s timeout (portless probe branch likely never fired)", elapsed)
 	}
-	return contract.IsProxiedDoltMode(metadata.Backend, metadata.DoltMode)
+}
+
+// TestWaitForManagedDoltCityReady_ProxiedModeStripsInheritedEndpointHints
+// covers callers such as bdDolt whose env already carries managed-Dolt
+// endpoint hints: the portless probe must strip every host/port hint so bd
+// resolves the proxied endpoint itself instead of a stale one.
+func TestWaitForManagedDoltCityReady_ProxiedModeStripsInheritedEndpointHints(t *testing.T) {
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	fakeBD := filepath.Join(t.TempDir(), "bd")
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$GC_DOLT_HOST\" ] || [ -n \"$GC_DOLT_PORT\" ] || [ -n \"$BEADS_DOLT_SERVER_HOST\" ] || [ -n \"$BEADS_DOLT_SERVER_PORT\" ]; then\n" +
+		"  echo 'unexpected endpoint hint injected' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"echo '[]'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd script: %v", err)
+	}
+
+	prevBDBinary := bdBinary
+	bdBinary = fakeBD
+	t.Cleanup(func() { bdBinary = prevBDBinary })
+
+	env := []string{
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=1",
+		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT=1",
+	}
+	start := time.Now()
+	out, err := waitForManagedDoltCityReady(env, cityDir, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("waitForManagedDoltCityReady() error = %v, out = %q", err, out)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Errorf("waitForManagedDoltCityReady() out = %q, want []", out)
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("waitForManagedDoltCityReady() took %s, want well under the 5s timeout (inherited endpoint hints likely reached the probe)", elapsed)
+	}
+}
+
+// TestWaitForManagedDoltCityReady_ProxiedModeSurfacesProbeError covers the
+// second half of fix spec point 2: a failing portless probe must be recorded
+// in lastErr and the loop must continue, so the eventual error surfaces the
+// probe's own failure instead of the generic loop-timeout message.
+func TestWaitForManagedDoltCityReady_ProxiedModeSurfacesProbeError(t *testing.T) {
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	fakeBD := filepath.Join(t.TempDir(), "bd")
+	script := "#!/bin/sh\necho 'boom: no proxied endpoint configured' >&2\nexit 1\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd script: %v", err)
+	}
+
+	prevBDBinary := bdBinary
+	bdBinary = fakeBD
+	t.Cleanup(func() { bdBinary = prevBDBinary })
+
+	out, err := waitForManagedDoltCityReady(nil, cityDir, 1200*time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForManagedDoltCityReady() error = nil, want the probe's own failure surfaced")
+	}
+	// runCommand (unlike runCommandStdout) does not fold stderr into the
+	// returned error -- it returns the raw exec error ("exit status 1") and
+	// merges stdout+stderr into out via CombinedOutput. So "surfaces the
+	// probe's own failure" means: the generic loop-timeout message must not
+	// win (lastErr must be non-nil from the probe), and the probe's stderr
+	// text must be observable in out.
+	if strings.Contains(err.Error(), "timed out after") {
+		t.Errorf("waitForManagedDoltCityReady() error = %q, want the probe's own exec error, not the generic loop-timeout message", err.Error())
+	}
+	if !strings.Contains(out, "boom: no proxied endpoint configured") {
+		t.Errorf("waitForManagedDoltCityReady() out = %q, want it to contain the probe's own stderr output", out)
+	}
 }
 
 func isTransientManagedDoltInitFailure(out string) bool {
