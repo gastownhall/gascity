@@ -1281,13 +1281,22 @@ var managedDoltSessionScopedEnvKeys = []string{
 	"CLAUDE_CODE_SESSION_ID",
 }
 
-// doltServerEnv returns the environment applied to every managed dolt
-// sql-server we launch, and to the scope watchdog that supervises it.
-func doltServerEnv(cityPath string, parent []string) []string {
-	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+// withoutSessionIdentityEnv returns env with every
+// managedDoltSessionScopedEnvKeys entry removed. Every long-lived, detached
+// city-infrastructure process gc spawns (managed Dolt, its scope watchdog, a
+// drift-respawned supervisor) goes through it, because a reparented process
+// carrying an agent's GC_SESSION_ID is that session's orphan-sweep target.
+func withoutSessionIdentityEnv(env []string) []string {
 	for _, key := range managedDoltSessionScopedEnvKeys {
 		env = removeEnvKey(env, key)
 	}
+	return env
+}
+
+// doltServerEnv returns the environment applied to every managed dolt
+// sql-server we launch, and to the scope watchdog that supervises it.
+func doltServerEnv(cityPath string, parent []string) []string {
+	env := withoutSessionIdentityEnv(removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH"))
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient

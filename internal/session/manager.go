@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // State represents the runtime state of a chat session.
@@ -729,6 +730,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			continue
 		}
 		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		// A root carrying this session's identity may be city infrastructure
+		// that merely inherited it: a managed Dolt scope watchdog or bd's
+		// db-proxy-child started from this session's shell. Terminating it
+		// signals its process group and takes the city's Dolt server down
+		// (#6316), so a same-session restart must never reach it.
+		if proctable.IsCityInfrastructureRoot(live.PID) {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {

@@ -37,13 +37,16 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 const (
 	// managedDoltScopeWatchdogArg is the argv[1] re-exec marker for the
 	// production scope watchdog. No production `gc` invocation collides with
 	// it; reaching init() with it set is proof of an intentional re-exec.
-	managedDoltScopeWatchdogArg = "__gc-managed-dolt-scope-watchdog"
+	// It lives in proctable because the orphan kill paths fence on it.
+	managedDoltScopeWatchdogArg = proctable.ManagedDoltScopeWatchdogVerb
 
 	// managedDoltScopeWatchdogEnv disables the production scope watchdog
 	// when set to "0" (the managed server is then spawned directly, exactly

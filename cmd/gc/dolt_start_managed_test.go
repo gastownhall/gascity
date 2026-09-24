@@ -1753,3 +1753,55 @@ func TestRegisterManagedDoltTestProcessSnapshotsIdentity(t *testing.T) {
 		t.Errorf("StartIdentity = %q, want non-empty snapshot", got.StartIdentity)
 	}
 }
+
+// TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity covers the
+// flag-off path (GC_DOLT_SCOPE_WATCHDOG=0): the managed server is spawned
+// directly, Setpgid, and reparents to init once `gc` exits, so it must not
+// carry the spawning agent session's identity either. The live environ of the
+// spawned process is read back from /proc.
+func TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/environ")
+	}
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "")
+	t.Setenv(managedDoltScopeWatchdogEnv, "0")
+	if managedDoltScopeWatchdogEnabled() || managedDoltTestWatchdogEnabled() {
+		t.Fatal("fixture did not select the direct-spawn path")
+	}
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	t.Setenv("PATH", fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "stamped")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	started, err := startManagedDoltSQLServer("", configPath, logPath, logFile)
+	if err != nil {
+		t.Fatalf("start managed dolt directly: %v", err)
+	}
+	t.Cleanup(func() { cleanupManagedDoltTestPID(t, started.PID) })
+	if started.WatchdogPID != 0 {
+		t.Fatalf("direct spawn reported watchdog pid %d", started.WatchdogPID)
+	}
+
+	env := waitForProcEnviron(t, started.PID)
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		if value, ok := env[key]; ok {
+			t.Errorf("directly spawned dolt sql-server pid %d inherited %s=%q from the spawning session", started.PID, key, value)
+		}
+	}
+	if !strings.HasPrefix(env["PATH"], fakeDoltDir) {
+		t.Errorf("dolt sql-server PATH = %q, want the parent's PATH carried through", env["PATH"])
+	}
+}

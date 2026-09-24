@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/hostboot"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -3265,7 +3266,18 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
-		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below
+		// here: bead is closed, or confirmed absent (ErrNotFound) — reap below,
+		// unless the root is city infrastructure that merely inherited the
+		// session's environment (a managed Dolt scope watchdog or bd's
+		// db-proxy-child started from an agent shell). Terminating it signals
+		// its process group and takes the city's Dolt server down with it
+		// (#6316). The fence is per-process argv, so it also covers watchdogs
+		// stamped before doltServerEnv began scrubbing session identity, and bd
+		// versions that still pass GC_SESSION_ID to the proxy.
+		if proctable.IsCityInfrastructureRoot(live.PID) {
+			fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: city infrastructure (managed Dolt watchdog or bd proxy)\n", live.PID, live.SessionID) //nolint:errcheck
+			continue
+		}
 		if err := scanner.TerminateRuntime(live); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: terminating process-table orphan pid=%d session=%s: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
 			continue

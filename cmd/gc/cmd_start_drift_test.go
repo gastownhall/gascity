@@ -541,3 +541,53 @@ func TestPrintDriftReport(t *testing.T) {
 		}
 	}
 }
+
+// TestSpawnDetachedSupervisorScrubsSessionIdentity pins the sibling of #6316:
+// a `gc start` drift respawn run from an agent shell forks a Setpgid
+// supervisor that outlives it and reparents to init. Carrying the agent's
+// GC_SESSION_ID would make that supervisor the session's orphan-sweep target
+// once the session closes. The child here is /bin/sh, not the test binary, so
+// the snapshot is the environment exactly as spawnDetachedSupervisor built it.
+func TestSpawnDetachedSupervisorScrubsSessionIdentity(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("requires /bin/sh")
+	}
+	t.Setenv("GC_HOME", t.TempDir())
+	snapshot := filepath.Join(t.TempDir(), "supervisor.env")
+	t.Setenv("GC_TEST_SUPERVISOR_ENV_SNAPSHOT", snapshot)
+	t.Setenv("GC_TEST_SUPERVISOR_ENV_CONTROL", "kept")
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "stamped")
+	}
+
+	if err := spawnDetachedSupervisor("/bin/sh", "-c", `env > "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT.tmp" && mv "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT.tmp" "$GC_TEST_SUPERVISOR_ENV_SNAPSHOT"`); err != nil {
+		t.Fatalf("spawnDetachedSupervisor: %v", err)
+	}
+	var data []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var err error
+		data, err = os.ReadFile(snapshot)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("supervisor child did not write its environment: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	env := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			env[key] = value
+		}
+	}
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		if value, ok := env[key]; ok {
+			t.Errorf("detached supervisor inherited %s=%q from the spawning session", key, value)
+		}
+	}
+	if env["GC_TEST_SUPERVISOR_ENV_CONTROL"] != "kept" {
+		t.Errorf("detached supervisor lost unrelated env; GC_TEST_SUPERVISOR_ENV_CONTROL=%q", env["GC_TEST_SUPERVISOR_ENV_CONTROL"])
+	}
+}

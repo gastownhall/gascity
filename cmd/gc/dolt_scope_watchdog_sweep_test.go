@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -100,5 +101,58 @@ func writeFakeProcEntry(t *testing.T, root string, pid, ppid int, comm string, e
 	}
 	if err := os.WriteFile(filepath.Join(dir, "comm"), []byte(comm+"\n"), 0o644); err != nil {
 		t.Fatalf("write comm: %v", err)
+	}
+}
+
+// TestSweepProcessTableOrphansFencesCityInfrastructureByArgv covers what the
+// env scrub cannot: a scope watchdog stamped before the upgrade, and bd's
+// db-proxy-child, which bd spawns with its own inherited environment. Both
+// carry the closed session's GC_SESSION_ID and reparent to init, so the
+// scanner reports them as that session's roots; the sweep must recognize them
+// by argv and leave them alone, while still reaping a genuine orphaned agent
+// runtime of the same session. The dolt child under the watchdog must not be
+// promoted to a root in the watchdog's place.
+func TestSweepProcessTableOrphansFencesCityInfrastructureByArgv(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("drives the scanner against a procfs-shaped tree")
+	}
+	cityPath := t.TempDir()
+	sessionEnv := []string{
+		"PATH=/usr/bin",
+		"GC_CITY_PATH=" + cityPath,
+		"GC_SESSION_ID=gc-restarter",
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "gc-restarter", Status: "closed"}}, nil)
+
+	root := t.TempDir()
+	writeFakeProcEntry(t, root, 4100, 1, "gc", sessionEnv)
+	writeFakeProcCmdline(t, root, 4100, "/usr/local/bin/gc", managedDoltScopeWatchdogArg, "/city/.beads/dolt-config.yaml", "/city/.gc/dolt.log", cityPath)
+	writeFakeProcEntry(t, root, 4101, 4100, "dolt", sessionEnv)
+	writeFakeProcCmdline(t, root, 4101, "dolt", "sql-server", "--config", "/city/.beads/dolt-config.yaml")
+	writeFakeProcEntry(t, root, 4200, 1, "bd", sessionEnv)
+	writeFakeProcCmdline(t, root, 4200, "/opt/beads/bd-1.3.0", proxyendpoint.ChildVerb, "--root", cityPath+"/.beads/proxy")
+	writeFakeProcEntry(t, root, 4300, 1, "claude", sessionEnv)
+	writeFakeProcCmdline(t, root, 4300, "claude", "--resume")
+	t.Cleanup(proctable.SetScanRootForTesting(root))
+
+	sp := &procfsSweepScanner{Fake: runtime.NewFake()}
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, nil, store, cityPath, &stderr)
+	if got != 1 || len(sp.terminated) != 1 || sp.terminated[0].PID != 4300 {
+		t.Fatalf("sweepProcessTableOrphans() = %d reaped, terminated %v, want only the agent pid 4300; stderr=%q", got, sp.terminated, stderr.String())
+	}
+	for _, pid := range []string{"pid=4100", "pid=4200"} {
+		if !strings.Contains(stderr.String(), "leaving process-table root "+pid) {
+			t.Errorf("stderr %q does not report leaving %s alone", stderr.String(), pid)
+		}
+	}
+}
+
+// writeFakeProcCmdline writes the cmdline file the kill-path argv fence reads.
+func writeFakeProcCmdline(t *testing.T, root string, pid int, argv ...string) {
+	t.Helper()
+	path := filepath.Join(root, strconv.Itoa(pid), "cmdline")
+	if err := os.WriteFile(path, []byte(strings.Join(argv, "\x00")+"\x00"), 0o644); err != nil {
+		t.Fatalf("write cmdline: %v", err)
 	}
 }
