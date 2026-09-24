@@ -80,13 +80,16 @@ func drainAckRewakeTick(
 	)
 }
 
-// settleAsyncDrainAckStops gives the detached drain-ack stop goroutines a
-// bounded window to land before the next tick observes liveness.
-func settleAsyncDrainAckStops(sp *runtime.Fake, name string) {
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && sp.IsRunning(name) {
-		time.Sleep(10 * time.Millisecond)
+// settleAsyncDrainAckStops waits for the detached drain-ack stop goroutines
+// to finish (the tracker's lifecycle signal) before the next tick observes
+// liveness. wait latches the tracker as stopping, so a fresh, equivalent
+// tracker replaces it for the following ticks.
+func settleAsyncDrainAckStops(t *testing.T, tracker **asyncStartTracker) {
+	t.Helper()
+	if !(*tracker).wait(10 * time.Second) {
+		t.Fatalf("async drain-ack stops did not finish")
 	}
+	*tracker = &asyncStartTracker{}
 }
 
 func dumpDrainAckRewakeState(t *testing.T, store beads.Store, sp *runtime.Fake, tick int) {
@@ -181,7 +184,7 @@ func TestDrainAckStopPendingPoolSeatWithOpenTriggerIsReplaced(t *testing.T) {
 			for tick := 0; tick < 6 && (!replacementRan || !originalClosed); tick++ {
 				drainAckRewakeTick(t, cityPath, cfg, sp, store, dops, dt, tracker, clk, &out)
 				if tick == 0 && !tc.parked {
-					settleAsyncDrainAckStops(sp, name)
+					settleAsyncDrainAckStops(t, &tracker)
 				}
 				dumpDrainAckRewakeState(t, store, sp, tick)
 				if got, err := store.Get(seat.ID); err == nil && got.Status == "closed" {
@@ -295,7 +298,7 @@ func TestDrainAckStopPendingNamedSeatRewakesOnDemand(t *testing.T) {
 			for tick := 0; tick < 6 && !rewoke; tick++ {
 				drainAckRewakeTick(t, cityPath, cfg, sp, store, dops, dt, tracker, clk, &out)
 				if tick == 0 && live {
-					settleAsyncDrainAckStops(sp, sessionName)
+					settleAsyncDrainAckStops(t, &tracker)
 				}
 				dumpDrainAckRewakeState(t, store, sp, tick)
 				starts := 0
