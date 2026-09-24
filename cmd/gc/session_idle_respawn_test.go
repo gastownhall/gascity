@@ -21,11 +21,22 @@ func reconcileIdleRespawnTestTick(
 	work beads.Bead,
 	ready bool,
 ) {
+	reconcileIdleRespawnTestTickWithDrainOps(t, env, session, work, ready, nil)
+}
+
+func reconcileIdleRespawnTestTickWithDrainOps(
+	t *testing.T,
+	env *reconcilerTestEnv,
+	session beads.Bead,
+	work beads.Bead,
+	ready bool,
+	dops drainOps,
+) {
 	t.Helper()
 	cfgNames := configuredSessionNames(env.cfg, "", env.store)
 	reconcileSessionBeads(
 		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
-		env.store, nil, []beads.Bead{work}, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		env.store, dops, []beads.Bead{work}, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
 		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
 		withReadyAssignedFlags([]bool{ready}),
 	)
@@ -199,6 +210,53 @@ func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t 
 	}
 	if ack == "1" {
 		t.Fatal("idle-respawn published a drain acknowledgement after activity resumed")
+	}
+}
+
+func TestReconcileSessionBeads_IdleRespawnRechecksClaimBeforeStop(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 2*time.Minute)
+	dops := newDrainOps(env.sp)
+	idleGate := make(chan struct{})
+	env.sp.WaitForIdleErrors["worker"] = nil
+	env.sp.WaitForIdleGates["worker"] = idleGate
+
+	// Tick 1 launches the idle probe; tick 2 consumes it, begins the drain,
+	// and publishes the reconciler-owned acknowledgement.
+	reconcileIdleRespawnTestTickWithDrainOps(t, env, session, work, true, dops)
+	close(idleGate)
+	waitForIdleProbeReady(t, env.dt, session.ID)
+	fresh, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session before drain begin: %v", err)
+	}
+	reconcileIdleRespawnTestTickWithDrainOps(t, env, fresh, work, true, dops)
+	if ack, err := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); err != nil || ack != "1" {
+		t.Fatalf("drain acknowledgement = %q, %v; want 1", ack, err)
+	}
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("idle-respawn drain missing after acknowledgement")
+	}
+
+	// The worker claims and resumes activity before the next reconcile tick.
+	claimed := "in_progress"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &claimed}); err != nil {
+		t.Fatalf("claim assigned work: %v", err)
+	}
+	work.Status = claimed
+	env.sp.SetActivity("worker", ds.startedAt.Add(5*time.Second))
+	env.clk.Advance(10 * time.Second)
+	fresh, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session before stop tick: %v", err)
+	}
+	reconcileIdleRespawnTestTickWithDrainOps(t, env, fresh, work, false, dops)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("idle-respawn stopped a worker that claimed work after acknowledgement")
+	}
+	if ack, err := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); err != nil || ack != "" {
+		t.Fatalf("drain acknowledgement after claim = %q, %v; want cleared", ack, err)
 	}
 }
 

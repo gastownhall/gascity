@@ -2733,6 +2733,31 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						continue
 					}
+					if alive && reconcilerOwnedAck && ackReason == idleRespawnDrainReason {
+						unsafe, unsafeReason, unsafeErr := idleRespawnAckUnsafeToStop(
+							cityPath, cfg, store, rigStores, infoByID[id], sp, dt, name,
+						)
+						if unsafe {
+							if unsafeErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: canceling idle-respawn stop for %s after revalidation failure: %v\n", name, unsafeErr) //nolint:errcheck
+							}
+							_ = clearReconcilerDrainAckMetadata(sp, name)
+							_ = dops.clearDrain(name)
+							if dt != nil {
+								dt.clearIdleProbe(id)
+								dt.remove(id)
+							}
+							telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
+							if trace != nil {
+								fields := traceRecordPayload{"revalidation_reason": unsafeReason}
+								if unsafeErr != nil {
+									fields["error"] = unsafeErr.Error()
+								}
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode(ackReason), TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, fields)
+							}
+							continue
+						}
+					}
 					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
 						if assignedErr != nil {
@@ -4597,6 +4622,45 @@ func sessionHasOpenAssignedWorkForConfigInfo(cityPath string, cfg *config.City, 
 // not suppress claim-less parked-session recovery.
 func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, info sessionpkg.Info) (bool, error) {
 	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
+}
+
+// idleRespawnAckUnsafeToStop revalidates the two facts that can change after
+// an idle-respawn acknowledgement was published: the worker may have claimed
+// its assigned bead, or it may have resumed runtime activity. A missing
+// in-memory drain record means the controller cannot establish the activity
+// boundary that licensed the acknowledgement, so recovery fails closed.
+func idleRespawnAckUnsafeToStop(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	sp runtime.Provider,
+	dt *drainTracker,
+	name string,
+) (bool, string, error) {
+	holdsClaim, err := sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return true, "claim-observation-error", err
+	}
+	if holdsClaim {
+		return true, "claimed-work", nil
+	}
+	if dt == nil {
+		return true, "missing-drain-state", nil
+	}
+	ds := dt.get(info.ID)
+	if ds == nil || ds.reason != idleRespawnDrainReason {
+		return true, "missing-drain-state", nil
+	}
+	lastActivity, err := workerSessionTargetLastActivityWithConfig(cityPath, store, sp, cfg, name)
+	if err != nil {
+		return true, "activity-observation-error", err
+	}
+	if lastActivity.After(ds.startedAt) {
+		return true, "activity-resumed", nil
+	}
+	return false, "", nil
 }
 
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
