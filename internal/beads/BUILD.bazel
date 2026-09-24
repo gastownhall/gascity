@@ -163,7 +163,10 @@ go_test(
     ) + [
         "//:go.mod",
         "//:repo_source_tree",
+        "@com_github_steveyegge_beads//internal/storage/issueops:drift_srcs",
+        "@com_github_steveyegge_beads//internal/storage/schema:drift_srcs",
         "@com_github_steveyegge_beads//internal/storage/schema:migrations",
+        "@com_github_steveyegge_beads//internal/types:drift_srcs",
     ],
     embed = [":beads"],
     deps = [
