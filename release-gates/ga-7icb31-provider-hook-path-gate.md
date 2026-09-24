@@ -90,3 +90,21 @@ including:
 No `.github`, `*.yml`, or `*.yaml` files changed in
 `origin/main...6e58758993fbf9590ffab79270a2a7288b1367ae`, so no CI-config
 specific lane was required.
+
+## CI on PR head 9db0dee
+
+The PASS verdict above stands, but GitHub CI on PR head
+`9db0deed8b628b92f09f79452b9696c063b712e5` was **not fully green**. No failing
+check is in this deploy's diff-owned paths (`internal/hooks`, `test/packlint`,
+doctor/codex hook tests).
+
+- CI run `36069729299`, `cmd/gc process / shard 7 of 12`: the only failing test
+  is `TestPoolSessionCreate_TerminalProviderErrorTearsDownBeforeRollback`, the
+  known red-main signature tracked by ga-z8yi2j (see Criterion 3a).
+- bazel-test run `36069729291`: `//cmd/gc:gc_test`, `//internal/beads:beads_test`
+  and `//internal/beads/proxyendpoint:proxyendpoint_test` failed.
+  - `//cmd/gc:gc_test` also fails on `main` (bazel-test runs `36056058476` at
+    `51eb05c` and `36025176746` at `af2b084`).
+  - `//internal/beads` and `//internal/beads/proxyendpoint` fail the same way on
+    unrelated branches in the same window (bazel-test runs `36069570596` and
+    `36068219790`). This PR does not touch either package.

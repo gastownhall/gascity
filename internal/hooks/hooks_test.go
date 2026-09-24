@@ -768,6 +768,64 @@ func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
 	}
 }
 
+func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded codex overlay: %v", err)
+	}
+	for _, tc := range []struct {
+		name            string
+		sessionStart    string
+		wantPrefix      string
+		wantGCToken     string
+		forbidSubstring string
+	}{
+		{
+			name:            "legacy prepend and bare gc",
+			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefix,
+			wantGCToken:     "gc",
+			forbidSubstring: "${GC_BIN",
+		},
+		{
+			name:            "current append and GC_BIN",
+			sessionStart:    canonicalGCPathPrefixAppend + managedGCBinInvocation + ` prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefixAppend,
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			existing, err := json.Marshal(map[string]any{
+				"hooks": map[string]any{
+					"SessionStart": []any{map[string]any{
+						"hooks": []any{map[string]any{"type": "command", "command": tc.sessionStart}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			got, changed, err := upgradeCodexHooks(existing, desired, "/city")
+			if err != nil {
+				t.Fatalf("upgradeCodexHooks: %v", err)
+			}
+			if !changed {
+				t.Fatal("upgradeCodexHooks changed = false, want true")
+			}
+			if want := tc.wantPrefix + preCompactCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "PreCompact") != want {
+				t.Fatalf("PreCompact command = %q, want %q", codexHookCommand(t, got, "PreCompact"), want)
+			}
+			if want := tc.wantPrefix + sessionStartCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "SessionStart") != want {
+				t.Fatalf("SessionStart command = %q, want %q", codexHookCommand(t, got, "SessionStart"), want)
+			}
+			if strings.Contains(string(got), tc.forbidSubstring) {
+				t.Fatalf("upgraded hooks switched shape, found %q:\n%s", tc.forbidSubstring, got)
+			}
+		})
+	}
+}
+
 func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
 	for name, root := range map[string]any{
