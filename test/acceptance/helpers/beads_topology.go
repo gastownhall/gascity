@@ -87,6 +87,39 @@ type ScopeShape struct {
 	EndpointOrigin string
 }
 
+// BeadsStoreExpectation is what doctor's `beads-store` payload must say about
+// one scope in one flag lane.
+//
+// Every field is optional and an empty one is not asserted, so a shape states
+// only what its topology actually determines. The assertion is on payload FIELDS
+// and never on the message: the message is the operator's line and is free to be
+// rewritten, while these are the contract automation reads.
+type BeadsStoreExpectation struct {
+	// Store is the store gc opened: "BdStore", "NativeDoltStore", ...
+	Store string
+	// PreflightGate is the gate field, which must NOT move when the
+	// proxied-native lane declines: doctor's own matcher and this matrix both
+	// key on proxied_provider for a healthy bd-owned proxied scope.
+	PreflightGate string
+	// Verdict is the proxied lane's typed refusal. "" means "assert that there
+	// is none", which is a real expectation for a served native open, so it is
+	// distinguished from "do not assert" by RequireNoVerdict.
+	Verdict string
+	// RequireNoVerdict asserts the proxied account carries no verdict at all.
+	RequireNoVerdict bool
+	// Evidence is how the proxy's liveness was established, e.g. "argv+birth".
+	Evidence string
+	// IdlePolicyPrefix is matched as a PREFIX, because the rendered policy names
+	// the evidence that decided it ("never(argv)", "never(sidecar)") and which
+	// evidence won is not this matrix's business.
+	IdlePolicyPrefix string
+	// RequireProxiedAccount asserts the payload carries a proxied account at
+	// all; RefuseProxiedAccount asserts it carries none, which is the flag-off
+	// lane's wire-compatibility fence.
+	RequireProxiedAccount bool
+	RefuseProxiedAccount  bool
+}
+
 // BeadsTopology is one supported way to initialize a Gas City beads scope.
 type BeadsTopology struct {
 	Name string
@@ -120,6 +153,38 @@ type BeadsTopology struct {
 	// whoever's bead vocabulary made it until gc's lifecycle runs over it.
 	// After start there are no allowances.
 	PreStartDoctorGaps []string
+	// CityStore is what doctor's `beads-store` payload must report for the CITY
+	// scope with the proxied-native flag OFF — the lane every shape runs in
+	// today.
+	//
+	// It is on the TOPOLOGY and named for the city, not on ScopeShape, and that
+	// is council C-F6. On ScopeShape it read as a per-scope expectation and was
+	// one for the city alone: the matrix registers the flag-on lane on the
+	// city's field and all three assertion sites name City, so a Rig shape that
+	// declared one was configuration nothing read — which M4-proxied-external's
+	// did, while reading to a reviewer, and to the P2-17 headline "per-scope
+	// doctor assertion in both flag lanes", as coverage of rig scopes in both
+	// lanes. They are covered in neither.
+	//
+	// A rig expectation is not assertable at all today, and the reason lives in
+	// doctor: a rig's store check is `rig:<name>:beads`, and RigBeadsCheck emits
+	// a Status and a Message with NO payload — its own comment says why
+	// (NewRigBeadsCheck takes a factory returning a bare beads.Store, and rig
+	// store diagnostics are retained nowhere). So there is nothing structured
+	// for an expectation to be compared against. Moving the fields here makes
+	// the misleading declaration inexpressible rather than merely discouraged;
+	// when RigBeadsCheck grows a payload, a RigStore field beside this one is
+	// the change to make.
+	CityStore BeadsStoreExpectation
+	// CityStoreNativeLane is what it must report with the flag ON, or nil for a
+	// shape the flag-on lane does not run.
+	//
+	// Nil is the default on purpose. The flag-on lane costs a second `gc doctor`
+	// per shape, and in PR2 only the proxied shapes can change behavior at all;
+	// one non-proxied shape opts in anyway, as the fence that says the flag
+	// changes nothing off its own lane.
+	CityStoreNativeLane *BeadsStoreExpectation
+
 	// DoctorGaps names checks this shape fails for a reason that predates this
 	// work and is not this feature's to fix. Every entry needs a comment saying
 	// what the limitation is; an unexplained entry is a suppressed failure.
@@ -273,6 +338,18 @@ func (e *ExternalDolt) ProvisionBeadsDatabase(t *testing.T, env *Env, bdPath, wo
 
 // BeadsTopologies returns the matrix in the order AC-M lists it.
 func BeadsTopologies() []BeadsTopology {
+	// The bd-owned proxied store, as doctor reports it with the flag off: the
+	// designed outcome for a proxied scope, not a degradation.
+	proxiedProviderStore := BeadsStoreExpectation{
+		Store: "BdStore", PreflightGate: "proxied_provider", RefuseProxiedAccount: true,
+	}
+	// And with the flag on: the store that serves the reads is the native one
+	// (design 5.3), pinned to a generation established from argv AND the birth
+	// token, on a proxy gc's own init pins resident.
+	proxiedNativeStore := &BeadsStoreExpectation{
+		Store: "NativeDoltStore", RequireProxiedAccount: true, RequireNoVerdict: true,
+		Evidence: "argv+birth", IdlePolicyPrefix: "never",
+	}
 	proxiedLocalScope := ScopeShape{
 		DoltMode: "proxied-server", Sidecar: true, IdleTimeout: -1,
 		Journaled: true, Proxies: 1, Servers: 1, Owner: OwnerProvider,
@@ -280,6 +357,12 @@ func BeadsTopologies() []BeadsTopology {
 	directLocalScope := ScopeShape{
 		DoltMode: "server", Journaled: true, Proxies: 0, Servers: 1, Owner: OwnerProvider,
 	}
+	bdFrontDoorStore := BeadsStoreExpectation{Store: "BdStore", RefuseProxiedAccount: true}
+	// The regression shape the flag-on lane also runs. A direct scope has no
+	// proxy to serve over, so the arm is unreachable for it by construction —
+	// and a shape that is byte-identical in both lanes is the only thing that
+	// can say so from outside.
+	bdFrontDoorStoreNativeLane := &BeadsStoreExpectation{Store: "BdStore", RefuseProxiedAccount: true}
 	directExternalScope := ScopeShape{
 		DoltMode: "server", Journaled: true, Proxies: 0, Servers: 0, Owner: OwnerUpstream,
 	}
@@ -309,17 +392,21 @@ func BeadsTopologies() []BeadsTopology {
 	directExternalDoctorGaps := []string{"order-firing-current"}
 	return []BeadsTopology{
 		{
-			Name:     "M1-proxied-local",
-			Doc:      "the default: no selector at all, bd owns a proxy and its Dolt child",
-			City:     proxiedLocalScope,
-			Rig:      proxiedLocalScope,
-			InitArgs: func(*ExternalDolt) []string { return nil },
+			Name:                "M1-proxied-local",
+			Doc:                 "the default: no selector at all, bd owns a proxy and its Dolt child",
+			City:                proxiedLocalScope,
+			Rig:                 proxiedLocalScope,
+			CityStore:           proxiedProviderStore,
+			CityStoreNativeLane: proxiedNativeStore,
+			InitArgs:            func(*ExternalDolt) []string { return nil },
 		},
 		{
 			Name:                     "M2-direct-local",
 			Doc:                      "the documented escape hatch: bd owns a server-mode Dolt, no proxy",
 			City:                     directLocalScope,
 			Rig:                      directLocalScope,
+			CityStore:                bdFrontDoorStore,
+			CityStoreNativeLane:      bdFrontDoorStoreNativeLane,
 			ExpectedTopologyWarnings: bdOwnedDirectStoreWarning,
 			InitArgs: func(*ExternalDolt) []string {
 				return []string{"--beads-transport", "direct", "--beads-target", "local"}
@@ -355,6 +442,7 @@ func BeadsTopologies() []BeadsTopology {
 			Upstream:                 true,
 			City:                     directExternalScope,
 			Rig:                      directExternalScope,
+			CityStore:                bdFrontDoorStore,
 			ExpectedTopologyWarnings: bdOwnedDirectStoreWarning,
 			DoctorGaps:               directExternalDoctorGaps,
 			InitArgs: func(up *ExternalDolt) []string {
@@ -378,6 +466,16 @@ func BeadsTopologies() []BeadsTopology {
 				ExternalUpstreamSidecar: true,
 				Journaled:               true, Proxies: 1, Servers: 0, Owner: OwnerProvider,
 			},
+			// The proxy is gc-initialized and pinned resident exactly as M1's is;
+			// what differs is whose Dolt is behind it, which the lane never talks
+			// to directly. So the flag-on expectation is the same one, and that
+			// sameness is the claim: the lane keys on the proxy record and the
+			// database's own cursors, not on who runs the backend.
+			//
+			// City-scoped, and only the city: the rig of this shape used to
+			// declare the same pair and nothing read it (council C-F6).
+			CityStore:           proxiedProviderStore,
+			CityStoreNativeLane: proxiedNativeStore,
 			InitArgs: func(up *ExternalDolt) []string {
 				return []string{
 					"--beads-transport", "proxied", "--beads-target", "external",
@@ -401,6 +499,14 @@ func BeadsTopologies() []BeadsTopology {
 				DoltMode: "server", Journaled: false, Proxies: 0, Servers: 1,
 				ManagedDoltState: true, Owner: OwnerCity, EndpointOrigin: "managed_city",
 			},
+			// gc runs this city's Dolt itself, so the store is reached through the
+			// ordinary preflight and the proxied arm must never be consulted. The
+			// store NAME is deliberately not asserted: a grandfathered city's
+			// preflight outcome depends on the store the old binary left behind,
+			// which is not this feature's to pin. What IS this feature's is that
+			// the proxied account is absent, because its presence would mean the
+			// new arm ran on a shape that has no proxy at all.
+			CityStore: BeadsStoreExpectation{RefuseProxiedAccount: true},
 			Rig: ScopeShape{
 				DoltMode: "server", Journaled: false, Proxies: 0, Servers: 0,
 				Owner: OwnerCity, EndpointOrigin: "inherited_city",
@@ -440,13 +546,15 @@ func BeadsTopologies() []BeadsTopology {
 			InitArgs: func(*ExternalDolt) []string { return nil },
 		},
 		{
-			Name:     "M7-deferred-init",
-			Doc:      "GC_DOLT=skip: init records the intent and creates nothing; start finishes the store",
-			Env:      map[string]string{"GC_DOLT": "skip"},
-			Deferred: true,
-			City:     proxiedLocalScope,
-			Rig:      proxiedLocalScope,
-			InitArgs: func(*ExternalDolt) []string { return nil },
+			Name:                "M7-deferred-init",
+			Doc:                 "GC_DOLT=skip: init records the intent and creates nothing; start finishes the store",
+			Env:                 map[string]string{"GC_DOLT": "skip"},
+			Deferred:            true,
+			City:                proxiedLocalScope,
+			Rig:                 proxiedLocalScope,
+			CityStore:           proxiedProviderStore,
+			CityStoreNativeLane: proxiedNativeStore,
+			InitArgs:            func(*ExternalDolt) []string { return nil },
 		},
 	}
 }
@@ -592,10 +700,24 @@ func TopologyEnv(t *testing.T, base *Env, root, bdPath, doltPath string) *Env {
 	env := base.Clone()
 	entries := filepath.SplitList(env.Get("PATH"))
 	path := append([]string{entries[0], linkDir}, entries[1:]...)
+	// The proxied-native flag is REMOVED, not merely left unset: every shape's
+	// baseline is the flag-off lane, and an operator running the matrix with
+	// GC_BEADS_PROXIED_NATIVE exported would otherwise measure the other lane
+	// against flag-off expectations and read the result as a regression.
 	return env.With("PATH", strings.Join(path, string(os.PathListSeparator))).
 		With("GC_BEADS", "bd").
 		Without("GC_DOLT").
-		Without("GC_BEADS_BACKEND")
+		Without("GC_BEADS_BACKEND").
+		Without(EnvProxiedNative)
+}
+
+// NativeLaneEnv is r's environment with the proxied-native flag on.
+//
+// It clones, because Env.With mutates in place and the flag-off lane must keep
+// running against the same city, the same bd and the same PATH: the matrix's
+// claim is that one variable is the only difference between the two lanes.
+func (r *TopologyRun) NativeLaneEnv() *Env {
+	return r.Env.Clone().With(EnvProxiedNative, "1")
 }
 
 // StartTopology builds one shape: its root, its environment, its upstream if it

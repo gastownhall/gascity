@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // State represents the runtime state of a chat session.
@@ -359,6 +360,11 @@ type Info struct {
 	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
 	// (clear/first-increment gates), so the mirror keeps the raw string.
 	ChurnCount string // churn_count (raw)
+	// IdleRespawnAttempts is the RAW idle_respawn_attempts metadata. The
+	// reconciler bounds idle-respawn retries for one assigned bead with it.
+	IdleRespawnAttempts string // idle_respawn_attempts (raw)
+	// IdleRespawnBeadID identifies the assigned bead the retry count belongs to.
+	IdleRespawnBeadID string // idle_respawn_bead_id (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
@@ -734,6 +740,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			continue
 		}
 		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		// A root carrying this session's identity may be city infrastructure
+		// that merely inherited it: a managed Dolt scope watchdog or bd's
+		// db-proxy-child started from this session's shell. Terminating it
+		// signals its process group and takes the city's Dolt server down
+		// (#6316), so a same-session restart must never reach it.
+		if proctable.IsCityInfrastructureRoot(live.PID) {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {

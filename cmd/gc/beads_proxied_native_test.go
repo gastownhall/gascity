@@ -1,0 +1,1763 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint/proxyendpointtest"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
+)
+
+// proxiedScopeFixture is a scope that looks, on disk, exactly like one bd serves
+// through its proxy: a proxied-server metadata binding, the proxied sidecar, and
+// bd's own proxy.pid record under .beads/dolt.
+//
+// The files are REAL (proxyendpoint decodes them with production code) and the
+// three effects a unit test cannot afford — the process table, the TCP probe and
+// the bd fork — are injected. That split is what makes these tests provable on a
+// box with no dolt, no bd and no proxy, while still proving gc agrees with the
+// document bd writes rather than with a stub.
+type proxiedScopeFixture struct {
+	t         *testing.T
+	scopeRoot string
+	root      string
+	record    proxyendpoint.Record
+	alive     bool
+	argv      []string
+}
+
+func newProxiedScopeFixture(t *testing.T) *proxiedScopeFixture {
+	t.Helper()
+	// bd's own environment arms must not decide the root under test.
+	t.Setenv(proxyendpoint.RootPathEnv, "")
+	t.Setenv(proxyendpoint.DoltDataDirEnv, "")
+	t.Setenv(proxyendpoint.SharedServerModeEnv, "")
+	t.Setenv(proxyendpoint.SharedServerDirEnv, "")
+
+	scopeRoot := t.TempDir()
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	root := filepath.Join(beadsDir, proxyendpoint.DefaultRootDirName)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"beads"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.SidecarPath(beadsDir),
+		[]byte(`{"root_path":"dolt","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &proxiedScopeFixture{t: t, scopeRoot: scopeRoot, root: root, alive: true}
+	f.argv = []string{"/opt/beads/bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, root}
+	f.writeRecord(7001, "11223344")
+	return f
+}
+
+func (f *proxiedScopeFixture) writeRecord(pid int, start string) {
+	f.t.Helper()
+	rootID, err := proxyendpoint.RootID(f.root)
+	if err != nil {
+		f.t.Fatalf("RootID(%s): %v", f.root, err)
+	}
+	f.record = proxyendpoint.Record{
+		PID:         pid,
+		Port:        44561,
+		UpstreamID:  "upstream",
+		Schema:      proxyendpoint.SchemaV2,
+		Kind:        proxyendpoint.RecordKind,
+		Birth:       proxyendpoint.BirthToken("boot-fixture", start),
+		RootID:      rootID,
+		ControlPort: 44562,
+	}
+	body, err := json.Marshal(f.record)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.PIDPath(f.root), body, 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *proxiedScopeFixture) removeRecord() {
+	f.t.Helper()
+	if err := os.Remove(proxyendpoint.PIDPath(f.root)); err != nil && !os.IsNotExist(err) {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *proxiedScopeFixture) processTable() proxyendpoint.ProcessTable {
+	return proxyendpoint.ProcessTable{
+		Alive: func(pid int) bool { return f.alive && pid == f.record.PID },
+		Argv: func(pid int) ([]string, error) {
+			if !f.alive || pid != f.record.PID {
+				return nil, errors.New("no such process")
+			}
+			return f.argv, nil
+		},
+		Birth: func(pid int) (string, error) {
+			if !f.alive || pid != f.record.PID {
+				return "", errors.New("no such process")
+			}
+			return f.record.Birth, nil
+		},
+	}
+}
+
+func (f *proxiedScopeFixture) pinnedCursors() proxyendpoint.Cursors {
+	main, ignored := beads.PinnedSchemaCursors()
+	return proxyendpoint.Cursors{Main: main, Ignored: ignored}
+}
+
+// admit runs a real admission pass against the fixture, which is the only way to
+// obtain a beads.Pin outside internal/beads: Pin's fields are unexported and only
+// beads.Admit mints an admitted one. That fence is the reason this helper exists
+// rather than a hand-built struct.
+func (f *proxiedScopeFixture) admit(t *testing.T, longLived bool) beads.Pin {
+	t.Helper()
+	pin, err := beads.Admit(context.Background(), beads.AdmissionInput{
+		ScopeRoot:    f.scopeRoot,
+		Database:     "beads",
+		ProcessTable: f.processTable(),
+		Probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+		},
+		LongLived: longLived,
+		Observed:  beads.NewGenerationSet(),
+		Recovered: beads.NewGenerationSet(),
+		Sleep:     func(context.Context, time.Duration) error { return nil },
+		SkipMemo:  true,
+	})
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	return pin
+}
+
+// TestProxiedOpenEnvForPinGolden is the whole environment the linked library is
+// opened with over bd's proxy, asserted as an exact map.
+//
+// Exact, not "contains": the window this map is projected through UNSETS every
+// listed key the map omits, so a key that quietly appeared here would be a new
+// decision gc made about somebody else's database, and a key that quietly
+// vanished would be a decision silently handed back to the ambient shell.
+//
+// Two absences are load-bearing enough to assert by name:
+//
+//   - BEADS_DOLT_PROXIED_SERVER. beads v1.3.0 reads it only in cmd/bd
+//     (init.go:450, :2938, :3501) and nowhere under the library storage path, so
+//     scrubbing it cannot change library behavior today. It is belt and braces
+//     for the day a future bd moves that read (plan Q3).
+//   - every GC_DOLT_* key. Those configure gc's MANAGED Dolt server, which does
+//     not exist on a proxied scope; projecting one would point the library at a
+//     server bd does not own.
+func TestProxiedOpenEnvForPinGolden(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+
+	for _, tc := range []struct {
+		name      string
+		longLived bool
+		maxConns  string
+	}{
+		{"one-shot", false, "1"},
+		{"long-lived", true, "4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pin := f.admit(t, tc.longLived)
+			env := nativeDoltProxiedOpenEnvForPin("demo", pin, tc.longLived)
+
+			want := map[string]string{
+				"BEADS_DOLT_SERVER_MODE":     "1",
+				"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+				"BEADS_DOLT_SERVER_PORT":     "44561",
+				"BEADS_DOLT_SERVER_USER":     "root",
+				"BEADS_DOLT_SERVER_DATABASE": "beads",
+				"BEADS_DOLT_AUTO_START":      "0",
+				"BEADS_DOLT_MAX_CONNS":       tc.maxConns,
+				"GIT_AUTHOR_NAME":            "gc",
+				"GIT_AUTHOR_EMAIL":           "gc@demo",
+			}
+			if !reflect.DeepEqual(env, want) {
+				t.Fatalf("proxied open env =\n%s\nwant\n%s", renderEnv(env), renderEnv(want))
+			}
+			for _, forbidden := range []string{"BEADS_DOLT_PROXIED_SERVER", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_DATA_DIR"} {
+				if _, present := env[forbidden]; present {
+					t.Errorf("the proxied open env names %s; it must decide nothing about a server bd owns", forbidden)
+				}
+			}
+		})
+	}
+
+	// The author anchor is the city NAME (decision Q4). A city with none, or one
+	// whose "name" is really a path — which is what citylayout's GC_CITY anchor
+	// actually holds, the trap this arm exists to keep closed — falls back rather
+	// than writing a host path into a Dolt commit that anybody can read.
+	t.Run("an unusable city name falls back rather than leaking a path", func(t *testing.T) {
+		pin := f.admit(t, false)
+		for _, name := range []string{"", "   ", "/home/op/cities/demo", "demo city"} {
+			env := nativeDoltProxiedOpenEnvForPin(name, pin, false)
+			if got := env["GIT_AUTHOR_EMAIL"]; got != "gc@unknown-city" {
+				t.Errorf("GIT_AUTHOR_EMAIL for city name %q = %q, want gc@unknown-city", name, got)
+			}
+		}
+		if got := proxiedNativeAuthorCityName(&config.City{Workspace: config.Workspace{Name: "demo"}}); got != "demo" {
+			t.Fatalf("proxiedNativeAuthorCityName = %q, want the configured workspace name", got)
+		}
+	})
+}
+
+func renderEnv(env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&b, "  %s=%s\n", key, env[key])
+	}
+	return b.String()
+}
+
+// scriptedProviderOps records every provider verb the ladder spent, in order.
+type scriptedProviderOps struct {
+	mu   sync.Mutex
+	ops  []string
+	fail map[string]error
+}
+
+func (s *scriptedProviderOps) run(op string) error {
+	s.mu.Lock()
+	s.ops = append(s.ops, op)
+	err := s.fail[op]
+	s.mu.Unlock()
+	return err
+}
+
+func (s *scriptedProviderOps) spent() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.ops...)
+}
+
+// TestProxiedReopenEscalationLadder is the bd-verb budget of the whole lane.
+//
+// The lane's reason to exist is that a healthy proxied scope costs ZERO forks,
+// and its safety argument is that an unhealthy one costs a BOUNDED number: at
+// most one probe and one recover per proxy generation, and never a spawn. Both
+// halves are asserted here on the sequence of verbs, not on the outcome — a
+// ladder that reached the right verdict by forking bd three times would pass
+// every verdict-only assertion while destroying the property.
+func TestProxiedReopenEscalationLadder(t *testing.T) {
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, ops *scriptedProviderOps, probe func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult) *proxiedNativeOpener {
+		t.Helper()
+		observed := beads.NewGenerationSet()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			ops:          proxiedProviderOps{cityPath: t.TempDir(), observed: observed},
+			processTable: f.processTable(),
+			probe:        probe,
+			observed:     observed,
+			recovered:    beads.NewGenerationSet(),
+			sleep:        func(context.Context, time.Duration) error { return nil },
+		}
+	}
+	servedProbe := func(f *proxiedScopeFixture) func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+		}
+	}
+
+	t.Run("a healthy proxy spends nothing", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		pin, err := newOpener(t, f, ops, servedProbe(f)).admit(context.Background(), true)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if !pin.Admitted() {
+			t.Fatal("admit returned an unadmitted pin")
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Fatalf("a healthy proxy cost %v; the lane exists because it costs nothing", spent)
+		}
+	})
+
+	t.Run("a stopped proxy costs exactly one probe", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops, servedProbe(f))
+		// bd removed the record on an orderly stop. The verb brings it back.
+		f.removeRecord()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error {
+			err := ops.run(op)
+			f.writeRecord(7002, "55667788")
+			return err
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		pin, err := opener.admit(context.Background(), true)
+		if err != nil {
+			t.Fatalf("admit after a provider probe: %v", err)
+		}
+		if pin.PoolKey().PID != 7002 {
+			t.Fatalf("admitted pid %d, want the proxy the probe produced (7002)", pin.PoolKey().PID)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]", spent)
+		}
+	})
+
+	t.Run("a zombie costs one probe then one recover, and then stops", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		// The endpoint accepts and never greets, forever: the worst case, where
+		// every rung is spent and the ladder must still terminate.
+		silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		opener := newOpener(t, f, ops, silent)
+
+		_, err := opener.admit(context.Background(), true)
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictProxyZombie {
+			t.Fatalf("admit = %v, want the proxy_zombie verdict", err)
+		}
+		if !verdict.Terminal() {
+			t.Error("a zombie that survived the whole ladder must be terminal; gc has asked bd everything it may ask")
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp+","+proxiedProviderRecoverOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe recover]", spent)
+		}
+
+		// A second open in the same process against the SAME generation spends
+		// nothing more: the rungs are per generation, ever.
+		before := len(ops.spent())
+		if _, err := opener.admit(context.Background(), true); err == nil {
+			t.Fatal("the second admission of a zombie succeeded")
+		}
+		if after := len(ops.spent()); after != before {
+			t.Fatalf("the second admission spent %d more verb(s) on the same generation: %v", after-before, ops.spent())
+		}
+	})
+
+	t.Run("the real zombie: bd's own ping exits 1, and the same one-shot open recovers it", func(t *testing.T) {
+		// The shape a real bd produces (round3 review, completeness). The
+		// zombie row above scripts a ping that SUCCEEDS on a silent proxy; a
+		// real `bd ping` against a zombie adopts it, fails its SELECT 1 and
+		// exits 1. That failure is produced here by the PRODUCTION runner
+		// executing a script that exits 1, so the whole chain is real: the
+		// runner keeps the exit status, Ping marks it as bd's answer, and the
+		// ladder spends the recover on it in the same open — the one-shot shape
+		// `gc doctor` takes, whose acceptance row wants [probe recover] and a
+		// native store.
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		recovered := false
+		opener := newOpener(t, f, ops, func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if !recovered {
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+			}
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+		})
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string, _ func() error) error {
+			_ = ops.run(op)
+			if op == proxiedProviderRecoverOp {
+				// `bd dolt stop` then `bd ping`: a new generation, which greets.
+				f.writeRecord(7004, "99887766")
+				recovered = true
+				return nil
+			}
+			return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit = %v after verbs [%s]: a zombie whose ping bd reported as failed was not recovered",
+				err, strings.Join(ops.spent(), " "))
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp+","+proxiedProviderRecoverOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe recover]", spent)
+		}
+		if pin.PoolKey().PID != 7004 {
+			t.Fatalf("admitted pid %d, want the generation the recover produced (7004)", pin.PoolKey().PID)
+		}
+	})
+
+	t.Run("only a recover bd ran and refused ends the lane", func(t *testing.T) {
+		// round4 recheck M1, through the PRODUCTION runner. A recover is `bd
+		// dolt stop` plus a `bd ping` that cold-starts Dolt; the row that
+		// matters is the runner SIGKILLing it at gc's deadline, which used to
+		// come back a terminal proxy_zombie and demote the handle for the
+		// process. The ping exits 1 in every row (the real zombie), so each
+		// row reaches the recover in the same open.
+		//
+		// The open is LONG-LIVED, the read path's reopen shape, so the
+		// opener's own passes run after the first: a non-terminal row's final
+		// answer is the held rung's, and it must still have spent one recover.
+		for _, tc := range []struct {
+			name     string
+			recover  string
+			budget   time.Duration
+			terminal bool
+		}{
+			{
+				name:    "gc's own op budget SIGKILLed the recover mid-cold-start",
+				recover: "exec sleep 30",
+				budget:  300 * time.Millisecond,
+			},
+			{
+				name:    "the script declined the recover (its not-needed status)",
+				recover: "exit 2",
+				budget:  30 * time.Second,
+			},
+			{
+				name:     "bd ran the recover and refused",
+				recover:  "echo 'Error: ping: invalid connection' >&2; exit 1",
+				budget:   30 * time.Second,
+				terminal: true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newProxiedScopeFixture(t)
+				ops := &scriptedProviderOps{}
+				silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+					return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+				}
+				opener := newOpener(t, f, ops, silent)
+				script := writeExitingProviderScript(t, t.TempDir(), `case "$1" in
+recover) `+tc.recover+` ;;
+*) echo 'Error: ping: invalid connection' >&2; exit 1 ;;
+esac`)
+				restore := providerOwnedScopeLifecycleOp
+				providerOwnedScopeLifecycleOp = func(ctx context.Context, _, _, op string, _ func() error) error {
+					_ = ops.run(op)
+					budget := 30 * time.Second
+					if op == proxiedProviderRecoverOp {
+						budget = tc.budget
+					}
+					return runProviderOwnedOpStrict(ctx, budget, script, nil, op)
+				}
+				t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+				start := time.Now()
+				_, err := opener.admit(context.Background(), true)
+				verdict, typed := beads.ProxiedVerdictOf(err)
+				if !typed {
+					t.Fatalf("admit = %v, want a typed verdict", err)
+				}
+				if tc.terminal && verdict.Verdict != beads.ProxiedVerdictProxyZombie {
+					t.Fatalf("admit = %v, want the proxy_zombie verdict", err)
+				}
+				if verdict.Terminal() != tc.terminal {
+					t.Fatalf("terminal = %v, want %v for %v: a long-lived handle may be demoted for the process only on "+
+						"a recover bd ran and refused", verdict.Terminal(), tc.terminal, err)
+				}
+				if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp+","+proxiedProviderRecoverOp {
+					t.Fatalf("verbs spent = [%s], want exactly [probe recover]: the long-lived ladder's later passes "+
+						"must hold the failed recover's rung, not re-fork it", spent)
+				}
+				if elapsed := time.Since(start); elapsed > 15*time.Second {
+					t.Fatalf("admit took %s: the recover was not ended at gc's budget", elapsed)
+				}
+			})
+		}
+	})
+
+	t.Run("a rig sharing the city's proxy root leaves the recover to the city", func(t *testing.T) {
+		// round4 recheck M2, through the production opener: the city path the
+		// opener carries is what tells admission which scope may spend the
+		// recover rung. The rig reaches the zombie first, as the reader that
+		// hits the dead pool first may; the city's ladder must still run its
+		// recover afterwards.
+		f := newProxiedScopeFixture(t)
+		rig := sharedRootRigScope(t, f)
+
+		recovered := false
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered {
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+		var mu sync.Mutex
+		spent := map[string][]string{}
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string, _ func() error) error {
+			mu.Lock()
+			spent[scopeRoot] = append(spent[scopeRoot], op)
+			mu.Unlock()
+			if op == proxiedProviderRecoverOp && scopeRoot == f.scopeRoot {
+				// The city's `bd dolt stop` then `bd ping`: a new generation.
+				f.writeRecord(7004, "99887766")
+				recovered = true
+				return nil
+			}
+			return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		// ONE pair of ledgers for both openers, as newProxiedNativeOpener
+		// wires the package-level ones.
+		observed, recoveredSet := beads.NewGenerationSet(), beads.NewGenerationSet()
+		opener := func(scopeRoot, database string) *proxiedNativeOpener {
+			return &proxiedNativeOpener{
+				cityPath:     f.scopeRoot,
+				scopeRoot:    scopeRoot,
+				database:     database,
+				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed},
+				processTable: f.processTable(),
+				probe:        probe,
+				observed:     observed,
+				recovered:    recoveredSet,
+				sleep:        func(context.Context, time.Duration) error { return nil },
+			}
+		}
+
+		_, err := opener(rig, "rig").admit(context.Background(), true)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Terminal() {
+			t.Fatalf("rig admit = %v, want non-terminal: the rig cannot cycle the shared proxy", err)
+		}
+		pin, err := opener(f.scopeRoot, "beads").admit(context.Background(), true)
+		if err != nil {
+			t.Fatalf("city admit = %v after the rig's ladder: the city's zombie was never recovered", err)
+		}
+		if pin.PoolKey().PID != 7004 {
+			t.Fatalf("the city admitted pid %d, want the generation its recover produced (7004)", pin.PoolKey().PID)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got := strings.Join(spent[rig], ","); got != proxiedProviderProbeOp {
+			t.Fatalf("the rig spent [%s], want exactly [probe]: its recover is a ping, and the rung is the city's", got)
+		}
+		if got := strings.Join(spent[f.scopeRoot], ","); got != proxiedProviderRecoverOp {
+			t.Fatalf("the city spent [%s], want exactly [recover]: bd already answered this generation's ping", got)
+		}
+	})
+
+	t.Run("a city ladder spends nothing while a shared-root rig's ping is in flight, then recovers", func(t *testing.T) {
+		// round4 review F1 and round5 recheck M1, through two production
+		// openers, long-lived (the reopen shape), sharing one ledger pair. The
+		// rig reaches the zombie first and its `bd ping` (the production
+		// runner, exit 1) holds the city's lifecycle slot. The city's ladder
+		// reaches the rung meanwhile: it used to find the ping "spent", claim
+		// the recover and queue `bd dolt stop` behind a ping bd had not
+		// answered. It now runs nothing and answers non-terminal; the rig's
+		// ping comes back refused, the rig leaves the recover to the city, and
+		// the city's next open spends it.
+		f := newProxiedScopeFixture(t)
+		rig := sharedRootRigScope(t, f)
+		var recovered atomic.Bool
+		probe := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			if recovered.Load() {
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			}
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		script := writeExitingProviderScript(t, t.TempDir(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+
+		observed, recoveredSet := beads.NewGenerationSet(), beads.NewGenerationSet()
+		opener := func(scopeRoot, database string) *proxiedNativeOpener {
+			return &proxiedNativeOpener{
+				cityPath:     f.scopeRoot,
+				scopeRoot:    scopeRoot,
+				database:     database,
+				ops:          proxiedProviderOps{cityPath: f.scopeRoot, observed: observed, recovered: recoveredSet},
+				processTable: f.processTable(),
+				probe:        probe,
+				observed:     observed,
+				recovered:    recoveredSet,
+				sleep:        func(context.Context, time.Duration) error { return nil },
+			}
+		}
+
+		var mu sync.Mutex
+		spent := map[string][]string{}
+		var cityDuringPing error
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(ctx context.Context, _, scopeRoot, op string, _ func() error) error {
+			mu.Lock()
+			spent[scopeRoot] = append(spent[scopeRoot], op)
+			mu.Unlock()
+			switch {
+			case scopeRoot == rig && op == proxiedProviderProbeOp:
+				// The rig's ping holds the slot; the city's ladder runs now.
+				_, cityDuringPing = opener(f.scopeRoot, "beads").admit(context.Background(), true)
+				return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+			case scopeRoot == f.scopeRoot && op == proxiedProviderRecoverOp:
+				// The city's `bd dolt stop` then `bd ping`: a new generation.
+				f.writeRecord(7004, "99887766")
+				recovered.Store(true)
+				return nil
+			default:
+				return runProviderOwnedOpStrict(ctx, 30*time.Second, script, nil, op)
+			}
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		_, rigErr := opener(rig, "rig").admit(context.Background(), true)
+		if verdict, typed := beads.ProxiedVerdictOf(cityDuringPing); !typed || verdict.Terminal() {
+			t.Fatalf("city admit during the rig's ping = %v, want non-terminal", cityDuringPing)
+		}
+		if verdict, typed := beads.ProxiedVerdictOf(rigErr); !typed || verdict.Terminal() {
+			t.Fatalf("rig admit = %v, want non-terminal: the recover of the shared proxy is the city's, and "+
+				"it had not been spent", rigErr)
+		}
+		mu.Lock()
+		cityBefore := strings.Join(spent[f.scopeRoot], ",")
+		mu.Unlock()
+		if cityBefore != "" {
+			t.Fatalf("while the rig's ping was in flight the city spent [%s], want nothing: bd had not answered "+
+				"the generation's only ping", cityBefore)
+		}
+
+		cityPin, cityErr := opener(f.scopeRoot, "beads").admit(context.Background(), true)
+		if cityErr != nil || cityPin.PoolKey().PID != 7004 {
+			t.Fatalf("city admit = (pid %d, %v), want the generation its recover produced (7004)", cityPin.PoolKey().PID, cityErr)
+		}
+		pin, err := opener(rig, "rig").admit(context.Background(), true)
+		if err != nil || pin.PoolKey().PID != 7004 {
+			t.Fatalf("the rig's next admit = (pid %d, %v), want it to follow the city onto 7004", pin.PoolKey().PID, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got := strings.Join(spent[rig], ","); got != proxiedProviderProbeOp {
+			t.Fatalf("the rig spent [%s], want exactly [probe]", got)
+		}
+		if got := strings.Join(spent[f.scopeRoot], ","); got != proxiedProviderRecoverOp {
+			t.Fatalf("the city spent [%s], want exactly [recover]", got)
+		}
+	})
+
+	t.Run("a ping that failed on gc's side never reaches the recover", func(t *testing.T) {
+		// The semaphore wait or the op budget running out is a deadline, not
+		// bd's answer (council A-F5): one probe, no recover, non-terminal.
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{fail: map[string]error{
+			proxiedProviderProbeOp: fmt.Errorf("waiting for provider lifecycle slot for %q: %w", f.scopeRoot, context.DeadlineExceeded),
+		}}
+		silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting, Err: errors.New("no greeting")}
+		}
+		_, err := newOpener(t, f, ops, silent).admit(context.Background(), false)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Terminal() {
+			t.Fatalf("admit = %v, want a non-terminal verdict", err)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: gc's own contention must never cost a `bd dolt stop`", spent)
+		}
+	})
+
+	t.Run("a one-shot never waits out a drain", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		refused := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeRefused, Err: errors.New("connection refused")}
+		}
+		opener := newOpener(t, f, ops, refused)
+
+		start := time.Now()
+		_, err := opener.admit(context.Background(), false)
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictDraining {
+			t.Fatalf("admit = %v, want the draining verdict", err)
+		}
+		if verdict.Terminal() {
+			t.Error("draining must be non-terminal: the next open re-admits against whatever bd produced")
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("a one-shot waited %s for a draining proxy; it should take the bd front door immediately", elapsed)
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Fatalf("a drain cost %v; a proxy shutting down is not something to ask bd about", spent)
+		}
+	})
+
+	t.Run("the readiness memo skips a second probe on a generation bd just produced", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		observed := beads.NewGenerationSet()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		provider := proxiedProviderOps{cityPath: t.TempDir(), observed: observed}
+		if err := provider.Ping(context.Background(), f.scopeRoot); err != nil {
+			t.Fatalf("Ping: %v", err)
+		}
+		generation := proxyendpoint.NewPoolKey(f.record, "").Generation()
+		if !observed.Has(generation) {
+			t.Fatalf("the readiness memo did not record generation %s after a successful probe", generation)
+		}
+		// A later open that finds THAT generation silent goes straight to the
+		// recover rung instead of re-asking for a ping gc itself produced.
+		if observed.Add(generation) {
+			t.Fatal("the memo let a second ping be spent on a generation gc had just asked bd for")
+		}
+	})
+}
+
+// TestProxiedGuardRecoveryAdmitsWithoutForkingBd is council A-F1's production
+// half: the guard tick now has a recovery path for a non-terminally demoted
+// handle, and that path must not break the tick's "never forks bd" invariant.
+//
+// The invariant is stated in proxied_guard_tick.go's header ("It holds NO
+// ProviderOps: a tick never forks bd. An escalation rung is the read path's to
+// spend, through the reopen hook, where a caller is waiting for an answer and
+// the cost is attributable"). The recovery runs on the tick's goroutine, so it
+// admits with nil Ops. The control is the same scope admitted through the
+// ordinary path, which DOES spend the probe — without it this test would pass
+// against a fixture that simply had nothing to escalate.
+func TestProxiedGuardRecoveryAdmitsWithoutForkingBd(t *testing.T) {
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, ops *scriptedProviderOps) *proxiedNativeOpener {
+		t.Helper()
+		observed := beads.NewGenerationSet()
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error {
+			err := ops.run(op)
+			f.writeRecord(7104, "1a2b3c4d")
+			return err
+		}
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			ops:          proxiedProviderOps{cityPath: t.TempDir(), observed: observed},
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			},
+			observed:  observed,
+			recovered: beads.NewGenerationSet(),
+			sleep:     func(context.Context, time.Duration) error { return nil },
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				return nil, errors.New("this test never reaches the library open")
+			},
+		}
+	}
+
+	t.Run("the ordinary admission path spends the probe", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops)
+		f.removeRecord()
+
+		if _, err := opener.admit(context.Background(), true); err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if spent := strings.Join(ops.spent(), ","); spent != proxiedProviderProbeOp {
+			t.Fatalf("verbs spent = [%s], want exactly [probe]: without this control the assertion below is vacuous", spent)
+		}
+	})
+
+	t.Run("the guard recovery spends nothing", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		ops := &scriptedProviderOps{}
+		opener := newOpener(t, f, ops)
+		f.removeRecord()
+
+		_, _, err := opener.recoverNativeLeaf()(context.Background())
+		if err == nil {
+			t.Fatal("the recovery admitted a scope whose proxy record is gone")
+		}
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("the recovery returned an untyped error the tick cannot classify: %v", err)
+		}
+		if verdict.Terminal() {
+			t.Errorf("a stopped proxy is not a fact about the database, so the refusal must be non-terminal: %v", verdict)
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Fatalf("the guard recovery forked bd for %v; a tick never forks bd, and the rung belongs to the read path", spent)
+		}
+	})
+}
+
+// TestProxiedGuardRecoverySpendsAtMostOneProbeSession is council pr2 D-F5: the
+// guard tick's documented budget is one probe session per tick, and the
+// recovery of a non-terminally demoted handle is a tick.
+//
+// It drives the REAL recoverNativeLeaf on a virtual clock. Before the cap the
+// recovery was the ordinary long-lived ladder — three outer passes, each able
+// to walk the three-attempt no-greeting ladder or the 60s drain — so a demoted
+// controller on a proxy that accepts and stays silent spent nine probe
+// sessions and ~6s of sleeps every interval, and one on a refusing port ran
+// the drain, forever. The ordinary admission row is the control: it must still
+// walk the ladder, or the cap has been applied to the wrong caller.
+func TestProxiedGuardRecoverySpendsAtMostOneProbeSession(t *testing.T) {
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, outcome proxyendpoint.ProbeOutcome, probes, sleeps *int) *proxiedNativeOpener {
+		t.Helper()
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+		clock := time.Unix(1_700_000_000, 0)
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				*probes++
+				// Served rows need a checked reality (council pr2 D-F11); for
+				// every other outcome the reality is meaningless.
+				result := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+				result.Outcome = outcome
+				return result
+			},
+			observed:  beads.NewGenerationSet(),
+			recovered: beads.NewGenerationSet(),
+			now:       func() time.Time { return clock },
+			sleep: func(_ context.Context, d time.Duration) error {
+				*sleeps++
+				clock = clock.Add(d)
+				return nil
+			},
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				return nil, nil
+			},
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		outcome proxyendpoint.ProbeOutcome
+	}{
+		{name: "a proxy that accepts and stays silent", outcome: proxyendpoint.ProbeAcceptedNoGreeting},
+		{name: "a port that refuses", outcome: proxyendpoint.ProbeRefused},
+		{name: "a probe that learned nothing", outcome: proxyendpoint.ProbeUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newProxiedScopeFixture(t)
+			var probes, sleeps int
+			opener := newOpener(t, f, tc.outcome, &probes, &sleeps)
+
+			_, _, err := opener.recoverNativeLeaf()(context.Background())
+			verdict, typed := beads.ProxiedVerdictOf(err)
+			if !typed {
+				t.Fatalf("the recovery returned %v, want a typed verdict the tick can classify", err)
+			}
+			if tc.outcome != proxyendpoint.ProbeUnknown && verdict.Terminal() {
+				t.Errorf("a recovery the next tick can retry came back terminal: %v", verdict)
+			}
+			if probes != 1 || sleeps != 0 {
+				t.Fatalf("one recovery tick spent %d probe session(s) and %d sleep(s), want 1 and 0: "+
+					"the tick's budget is one session, and the next tick is the retry", probes, sleeps)
+			}
+		})
+	}
+
+	t.Run("a served database spends its one session and opens", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var probes, sleeps int
+		opener := newOpener(t, f, proxyendpoint.ProbeServed, &probes, &sleeps)
+		if _, pin, err := opener.recoverNativeLeaf()(context.Background()); err != nil || !pin.Admitted() {
+			t.Fatalf("recovery = (%+v, %v), want an admitted pin", pin, err)
+		}
+		if probes != 1 || sleeps != 0 {
+			t.Fatalf("a healthy recovery spent %d probe session(s) and %d sleep(s), want 1 and 0", probes, sleeps)
+		}
+	})
+
+	t.Run("control: the ordinary long-lived admission still walks the ladder", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var probes, sleeps int
+		opener := newOpener(t, f, proxyendpoint.ProbeAcceptedNoGreeting, &probes, &sleeps)
+		if _, err := opener.admitWith(context.Background(), true, nil); err == nil {
+			t.Fatal("a silent proxy admitted")
+		}
+		if probes <= 1 {
+			t.Fatalf("the ordinary long-lived admission spent %d probe session(s); the cap leaked into the caller that needs the ladder", probes)
+		}
+	})
+}
+
+// TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget is council pr2 D-F16.
+//
+// The recovery's library open holds nativeDoltOpenEnvMu, a process-global lock
+// every other scope's native open waits on. It ran under the 90s long-lived
+// admission budget, on a background timer with no caller waiting, where the
+// read path's equivalent reopen is held to ProxiedReadBudget. The row captures
+// the deadline the library open actually receives.
+func TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	beads.ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+	var openBudget time.Duration
+	opener := &proxiedNativeOpener{
+		cityPath:     t.TempDir(),
+		scopeRoot:    f.scopeRoot,
+		database:     "beads",
+		processTable: f.processTable(),
+		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			return proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+		},
+		observed:  beads.NewGenerationSet(),
+		recovered: beads.NewGenerationSet(),
+		sleep:     func(context.Context, time.Duration) error { return nil },
+		openNative: func(ctx context.Context, _ string, _ map[string]string, _ ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("the recovery's library open ran with no deadline at all")
+			}
+			openBudget = time.Until(deadline)
+			return nil, nil
+		},
+	}
+
+	if _, _, err := opener.recoverNativeLeaf()(context.Background()); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if limit := beads.ProxiedReadBudget(); openBudget <= 0 || openBudget > limit {
+		t.Fatalf("the recovery's library open had %s left on its clock, want at most the read budget %s: "+
+			"it holds the process-global open-env lock on a background timer with no caller waiting",
+			openBudget.Round(time.Second), limit)
+	}
+}
+
+// TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot is the wiring assertion.
+//
+// Every earlier group built machinery that nothing calls; this is the commit
+// where a proxied city can actually take the native lane, and the only thing
+// standing between "the code exists" and "the city uses it" is whether each
+// composition root passes the opener and the long-lived shape. Neither can be
+// proven by opening a real store in a unit test (that needs Dolt), so both are
+// proven at the factory boundary.
+func TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot(t *testing.T) {
+	t.Run("the CLI and controller city store", func(t *testing.T) {
+		cityDir := t.TempDir()
+		writeMinimalCityToml(t, cityDir)
+
+		var captured beads.StoreOpenOptions
+		restore := openStoreFactoryForCity
+		openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+			captured = opts
+			return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+		}
+		t.Cleanup(func() { openStoreFactoryForCity = restore })
+
+		for _, longLived := range []bool{false, true} {
+			if _, err := openStoreResultAtForCityWithConfig(
+				cityDir, cityDir, &config.City{}, gate.ModeUnset, false, false, longLived); err != nil {
+				t.Fatalf("openStoreResultAtForCityWithConfig(longLived=%v): %v", longLived, err)
+			}
+			if captured.LongLived != longLived {
+				t.Errorf("LongLived = %v, want %v; the idle rule and the pool shape both turn on it",
+					captured.LongLived, longLived)
+			}
+			if captured.OpenProxiedStore == nil {
+				t.Fatal("the city store open passes no proxied opener; the lane can never be reached")
+			}
+			if captured.OpenBdStore == nil {
+				t.Fatal("the city store open passes no bd opener")
+			}
+		}
+	})
+
+	t.Run("the controller rig store", func(t *testing.T) {
+		cityDir := t.TempDir()
+		writeMinimalCityToml(t, cityDir)
+		rigDir := filepath.Join(cityDir, "rigs", "repo")
+		if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		var captured beads.StoreOpenOptions
+		restore := controllerStateOpenRigStoreAtForCity
+		controllerStateOpenRigStoreAtForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+			captured = opts
+			return beads.StoreOpenResult{Store: beads.NewMemStore()}, nil
+		}
+		t.Cleanup(func() { controllerStateOpenRigStoreAtForCity = restore })
+
+		cs := &controllerState{cityPath: cityDir}
+		cs.openRigStore("bd", "repo", rigDir, "rp", &config.City{})
+		if !captured.LongLived {
+			t.Error("the controller rig store is not marked long-lived; it is held for the process lifetime")
+		}
+		if captured.OpenProxiedStore == nil {
+			t.Fatal("the rig store open passes no proxied opener; a migrated rig can never take the lane")
+		}
+	})
+
+	t.Run("a scope with no canonical database refuses with a typed verdict", func(t *testing.T) {
+		// A scope the contract cannot resolve AT ALL — the error return, not a
+		// missing dolt_database key — declines, and declines VISIBLY: a nil
+		// opener would make "no database" indistinguishable from "the lane was
+		// never wired here", and the cursors admission gates on are
+		// DATABASE()-scoped, so a probe with none selected would read zeros and
+		// call them evidence. The missing-KEY case is a different answer and is
+		// pinned in TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity.
+		ops := &scriptedProviderOps{}
+		restore := providerOwnedScopeLifecycleOp
+		providerOwnedScopeLifecycleOp = func(_ context.Context, _, _, op string, _ func() error) error { return ops.run(op) }
+		t.Cleanup(func() { providerOwnedScopeLifecycleOp = restore })
+
+		opener := proxiedNativeStoreOpenerForScope(t.TempDir(), t.TempDir(), &config.City{}, func() (beads.Store, error) {
+			t.Fatal("the bd write leaf was opened for a scope that has no database")
+			return nil, nil
+		})
+		if opener == nil {
+			t.Fatal("no opener was built at all; the factory would never even consult the lane")
+		}
+		_, _, err := opener(context.Background(), false)
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Verdict != beads.ProxiedVerdictNoOwnershipRecord {
+			t.Fatalf("open = %v, want the no_ownership_record verdict", err)
+		}
+		if spent := ops.spent(); len(spent) != 0 {
+			t.Fatalf("an unresolvable scope cost %v bd verb(s)", spent)
+		}
+	})
+}
+
+// TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity pins the database
+// resolution against the on-disk shape a real `gc init` leaves behind.
+//
+// This is the defect the acceptance fork gate found on its first run, and it is
+// worth a named test rather than a one-line change, because the mechanism is
+// counter-intuitive: the lane's own resolution asked for an AUTHORITATIVE scope
+// config, and the one shape it exists to serve — a gc-initialized proxied city —
+// deliberately has none. gc retires its canonical Dolt config for a scope bd
+// owns, so what is left is bd's `issue_prefix:`-only config.yaml, which the
+// contract classifies ScopeConfigLegacyMinimal. Every proxied open on such a
+// city therefore resolved an empty database and refused with
+// no_ownership_record, with the flag on, silently.
+//
+// The negative half is asserted too. Without it the test would pass just as
+// happily against the old resolution if some later change made proxied cities
+// authoritative again, and the reason this function does not use
+// canonicalScopeDoltTarget would quietly stop being true.
+func TestProxiedScopeDatabaseResolvesTheBdShapedProxiedCity(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	// bd's own config.yaml, as `bd init --proxied-server` writes it and as gc
+	// leaves it on a scope bd owns: the issue prefix and nothing else. No
+	// gc.endpoint_origin, no dolt.mode, no host or port.
+	if err := os.WriteFile(filepath.Join(f.scopeRoot, ".beads", "config.yaml"),
+		[]byte("issue_prefix: hq\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := proxiedScopeDatabase(f.scopeRoot, f.scopeRoot); got != "beads" {
+		t.Fatalf("proxiedScopeDatabase = %q, want %q — admission refuses an empty database with a terminal verdict, so an unresolved name turns the whole lane off on the shape it exists for",
+			got, "beads")
+	}
+
+	if _, ok, err := canonicalScopeDoltTarget(f.scopeRoot, f.scopeRoot); err != nil || ok {
+		t.Fatalf("canonicalScopeDoltTarget(bd-shaped proxied city) = ok %v, err %v; want ok=false — if this starts answering, the comment on proxiedScopeDatabase needs rewriting, not deleting",
+			ok, err)
+	}
+
+	// Council C-F13. The missing-KEY case is a GUESS, not a decline:
+	// ResolveDoltConnectionTarget initializes Database: "beads" unconditionally
+	// and overwrites it only when metadata.json names one. The old doc said the
+	// lane "declines rather than guessing", which is true only of the total
+	// resolution failure below. The guess is fenced — a wrong database fails
+	// the probe, and a shared proxy root serving a differently-prefixed
+	// database is caught by proxiedPrefixAgreement — so this pins the behavior
+	// rather than changing it, and pins it where a reader looking for the
+	// decline will find it.
+	t.Run("metadata with no dolt_database yields beads' own default", func(t *testing.T) {
+		metadata := filepath.Join(f.scopeRoot, ".beads", "metadata.json")
+		if err := os.WriteFile(metadata, []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := proxiedScopeDatabase(f.scopeRoot, f.scopeRoot); got != "beads" {
+			t.Fatalf("proxiedScopeDatabase with no dolt_database = %q, want %q: the contract defaults "+
+				"the name rather than declining, and the doc must say which it does", got, "beads")
+		}
+	})
+
+	// And the lane still declines for a scope the contract cannot resolve at
+	// all, rather than inventing beads' default database name for it.
+	empty := t.TempDir()
+	if got := proxiedScopeDatabase(empty, empty); got != "" {
+		t.Errorf("proxiedScopeDatabase(a directory with no beads scope) = %q, want \"\"", got)
+	}
+}
+
+// TestProxiedOpenArmsTheGuardForALongLivedStore is the cmd/gc half of council
+// C-F8.
+//
+// `if longLived { store.StartGuard() }` is the sole production call site, and
+// deleting it leaves every controller store holding a native leaf with no
+// generation or cursor watch for the process lifetime — the moved-root hazard
+// proxied_guard_tick.go's header says no read can detect. Nothing failed:
+// TestProxiedNativeOpenerIsWiredAtEveryCompositionRoot asserts only that
+// OpenProxiedStore is non-nil, and P2-15 states the tick is undrivable from a
+// one-shot CLI.
+//
+// Driving open() to that line needs a real library open, i.e. Dolt, so the
+// behavioral proof is the acceptance lifecycle row (now wired into CI by the
+// C-F1 fix) and beads' own TestStartGuardArmsARealTicker, which drives the
+// exported entry point with a real ticker. What is left for a unit test is the
+// WIRING, and this asserts it on the source: the long-lived arm arms the guard,
+// and the one-shot arm does not.
+//
+// A source assertion is the weaker instrument and it is chosen deliberately
+// over adding an exported accessor to ProxiedStore purely so a test could see
+// the ticker — the finding is about a line that can be deleted unnoticed, and
+// this notices.
+func TestProxiedOpenArmsTheGuardForALongLivedStore(t *testing.T) {
+	body, err := os.ReadFile("beads_proxied_native.go")
+	if err != nil {
+		t.Fatalf("read beads_proxied_native.go: %v", err)
+	}
+	source := string(body)
+
+	openBody, ok := functionBody(source, "func (o *proxiedNativeOpener) open(")
+	if !ok {
+		t.Fatal("proxiedNativeOpener.open not found; this guard cannot see what it is guarding")
+	}
+	if !strings.Contains(openBody, "store.StartGuard()") {
+		t.Fatal("proxiedNativeOpener.open no longer calls store.StartGuard(): every long-lived store " +
+			"would hold a native leaf with no generation or cursor watch for the process lifetime, " +
+			"including the moved-root hazard no read can detect")
+	}
+	guardLine := strings.Index(openBody, "store.StartGuard()")
+	longLivedArm := strings.LastIndex(openBody[:guardLine], "if longLived {")
+	if longLivedArm < 0 {
+		t.Fatal("store.StartGuard() is no longer inside an `if longLived` arm: a one-shot store lives " +
+			"for 40ms, and a ticker plus a probe session on it is bought for nothing")
+	}
+}
+
+// functionBody returns the body of the first function whose declaration starts
+// with prefix, by brace balance from the opening brace of the declaration.
+func functionBody(source, prefix string) (string, bool) {
+	start := strings.Index(source, prefix)
+	if start < 0 {
+		return "", false
+	}
+	open := strings.Index(source[start:], "{")
+	if open < 0 {
+		return "", false
+	}
+	depth := 0
+	for i := start + open; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return source[start+open : i], true
+			}
+		}
+	}
+	return "", false
+}
+
+// TestProxiedOpenRefusesAnOpenThatMovedHead is council pr2 D-F3's production
+// half: the post-open observation that catches what the pre-open schema gate
+// cannot see.
+//
+// A-F2's gate is sound for what it covers — a database it admits is one whose
+// numbered ignored series does not replay. It cannot cover the writes a
+// writable library open still makes on an admitted database (the dolt_ignore
+// seed, the tracked-cursor heal, the content_hash pass), each ending in a
+// DOLT_COMMIT. A cursor comparison is blind to all three; a HEAD hash moves for
+// every one of them.
+//
+// The rows assert what the CALLER sees, and what the check COSTS: a moved HEAD
+// must abort the open, close the leaf it opened, arrive as a verdict the factory
+// can fall back on, and make the next open re-probe; and the re-read must go
+// over the handle the open just built, never through another probe session.
+func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
+	type counters struct {
+		probes, reads int
+	}
+	newOpener := func(t *testing.T, f *proxiedScopeFixture, head string, n *counters, readHead func() (string, error)) *proxiedNativeOpener {
+		t.Helper()
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				n.probes++
+				served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+				served.Head = head
+				return served
+			},
+			observed:  beads.NewGenerationSet(),
+			recovered: beads.NewGenerationSet(),
+			sleep:     func(context.Context, time.Duration) error { return nil },
+			openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+				// A nil leaf is enough: the assertions are about the opener's
+				// control flow, and CloseStore is nil-safe by construction.
+				return nil, nil
+			},
+			leafObserve: func(context.Context, *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
+				n.reads++
+				head, err := readHead()
+				return observedHead(head), err
+			},
+		}
+	}
+
+	t.Run("an open that moved HEAD is refused non-terminally, and the next open re-probes", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "after11111", nil })
+		// A REAL leaf over a close-counting storage, so "close the leaf it
+		// opened" is asserted rather than claimed (council pr2 E-I5): with the
+		// fixture's nil leaf, deleting the close left this row green while
+		// production leaked a live pool on bd's proxy per head_moved.
+		leafStorage := &closeCountingStorage{}
+		opener.openNative = func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(leafStorage), nil
+		}
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if pin.Head() != "before0000" {
+			t.Fatalf("the pin carries head %q, want the probe's: admission must record what it saw", pin.Head())
+		}
+
+		_, err = opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen)
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed {
+			t.Fatalf("openNativeLeaf err = %v, want a typed verdict the factory can fall back on", err)
+		}
+		if verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("verdict = %q, want %q", verdict.Verdict, beads.ProxiedVerdictHeadMoved)
+		}
+		if verdict.Terminal() {
+			t.Error("gc cannot tell its own commit from another bd client's in the same window, " +
+				"so head_moved must not pin a scope to the bd front door for the process")
+		}
+		for _, want := range []string{"before0000", "after11111", "beads"} {
+			if !strings.Contains(verdict.Detail, want) {
+				t.Errorf("the verdict detail omits %q, which is what an operator needs to act: %s", want, verdict.Detail)
+			}
+		}
+		if n.reads != 1 {
+			t.Fatalf("the open re-read HEAD %d time(s), want exactly 1", n.reads)
+		}
+		if n.probes != 1 {
+			t.Fatalf("the open spent %d probe session(s), want only admission's 1: the re-read must ride the library's pool", n.probes)
+		}
+		if leafStorage.closed != 1 {
+			t.Fatalf("the refused open closed the leaf it opened %d time(s), want 1: an unclosed leaf is a live "+
+				"pool on bd's proxy for the process lifetime, per head_moved", leafStorage.closed)
+		}
+
+		// The memoized pin carries no hash, so an open served from it would walk
+		// past the check that just fired. It must have been forgotten.
+		if _, err := opener.admit(context.Background(), false); err != nil {
+			t.Fatalf("re-admit: %v", err)
+		}
+		if n.probes != 2 {
+			t.Fatalf("the open after a head_moved verdict was served from the memo (%d probe session(s) in total, want 2)", n.probes)
+		}
+	})
+
+	t.Run("an open that left HEAD alone is admitted, and a memoized open spends nothing", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "steady0000", &n, func() (string, error) { return "steady0000", nil })
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen); err != nil {
+			t.Fatalf("a healthy open was refused: %v", err)
+		}
+		if n.reads != 1 || n.probes != 1 {
+			t.Fatalf("a healthy open cost %d probe(s) and %d re-read(s), want 1 and 1", n.probes, n.reads)
+		}
+
+		// The control for the row above: a healthy open leaves the memo in
+		// place, and the memo's pin has no hash to compare against.
+		memoized, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit (memoized): %v", err)
+		}
+		if n.probes != 1 {
+			t.Fatalf("the second open probed again (%d sessions); this row must exercise the memo", n.probes)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), memoized, false, beads.ProxiedIncidentSiteOpen); err != nil {
+			t.Fatalf("a memoized open was refused: %v", err)
+		}
+		if n.reads != 1 {
+			t.Fatalf("a memoized open re-read HEAD (%d reads in total, want 1): it has nothing to compare", n.reads)
+		}
+	})
+
+	t.Run("a re-read that fails says nothing about what the open did, and says so loudly", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) {
+			return "", errors.New("invalid connection")
+		})
+		var logged strings.Builder
+		opener.logger = slog.New(slog.NewTextHandler(&logged, nil))
+
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		if _, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen); err != nil {
+			t.Fatalf("a failed belt-and-braces re-read refused an open the schema gate admitted: %v", err)
+		}
+		// Council pr2 E-S2: the check that exists to catch gc writing to bd's
+		// database did not run, and that used to be a silent nil.
+		line := logged.String()
+		for _, want := range []string{"level=WARN", "msg=" + beads.ProxiedPostOpenUnobservedMessage, "site=open", "invalid connection"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("the failed re-read's log line lacks %q:\n%s", want, line)
+			}
+		}
+
+		// The same on the read path's reopen, which is the other library open.
+		logged.Reset()
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return &closeCountingStorage{}, nil
+		}
+		opener.storageObserve = func(context.Context, beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+			return proxyendpoint.PostOpenReport{}, errors.New("invalid connection")
+		}
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		if _, err := opener.reopen(false)(context.Background()); err != nil {
+			t.Fatalf("a failed re-read refused the reopen: %v", err)
+		}
+		if line := logged.String(); !strings.Contains(line, "msg="+beads.ProxiedPostOpenUnobservedMessage) ||
+			!strings.Contains(line, `site="read-path reopen"`) {
+			t.Fatalf("the reopen's failed re-read was not logged with its site:\n%s", line)
+		}
+	})
+
+	t.Run("the read path's reopen takes the same check over the storage it opened", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		storage := &closeCountingStorage{}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		var readFrom beads.NativeStorage
+		opener.storageObserve = func(_ context.Context, s beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+			readFrom = s
+			return observedHead("after11111"), nil
+		}
+
+		got, err := opener.reopen(false)(context.Background())
+		if verdict, typed := beads.ProxiedVerdictOf(err); !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("reopen = (%v, %v), want the head_moved verdict", got, err)
+		}
+		if got != nil {
+			t.Error("a refused reopen handed back a storage handle")
+		}
+		if readFrom != beads.NativeStorage(storage) {
+			t.Error("the reopen re-read HEAD somewhere other than the handle it had just opened")
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+	})
+
+	// Council pr2 E-S3. The rows above inject storageObserve, so none of them
+	// could see what the PRODUCTION re-read actually observes on the reopen
+	// path: beads leaves the connection its open-time checks ran on pinned to
+	// the pre-open session root when MigrateUp commits without applying a
+	// numbered migration (the dolt_ignore seed, the content_hash pass), and
+	// that connection's first statement answers the pre-open HEAD (be-itm5).
+	// The reopen issues no statement of its own before the check (the first
+	// open reads issue_prefix first, which masked this there), so a single
+	// DOLT_HASHOF('HEAD') was that first statement and a HEAD the open moved
+	// read as unmoved. This row leaves storageObserve nil and hands the reopen a
+	// pool that behaves that way.
+	t.Run("the reopen detects a HEAD its own open moved, through the production re-read", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"},
+			proxyendpointtest.State{Head: "after11111"})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		storage := &poolExportingStorage{db: pool.DB}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		opener.storageObserve = nil
+
+		got, err := opener.reopen(false)(context.Background())
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+			t.Fatalf("reopen = (%v, %v), want the head_moved verdict: the re-read answered from the "+
+				"connection's pre-open root", got, err)
+		}
+		if !strings.Contains(verdict.Detail, "after11111") {
+			t.Errorf("the verdict does not name the post-open hash: %s", verdict.Detail)
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+
+		// Control: an open that moved nothing is served, on the same shape.
+		steady := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"}, proxyendpointtest.State{Head: "before0000"})
+		t.Cleanup(func() { _ = steady.DB.Close() })
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return &poolExportingStorage{db: steady.DB}, nil
+		}
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		if _, err := opener.reopen(false)(context.Background()); err != nil {
+			t.Fatalf("a reopen that moved nothing was refused: %v", err)
+		}
+	})
+
+	// Council pr2 E-S4. The dolt_ignore'd plane is never committed, so HEAD
+	// cannot see a write to it; the same post-open statement reads the plane's
+	// sentinels. HEAD is unmoved here and a sentinel is absent after the open:
+	// a plane the next writable open replays, which this leaf must not serve.
+	t.Run("the reopen refuses an ignored plane the open left short of a sentinel, with HEAD unmoved", func(t *testing.T) {
+		f := newProxiedScopeFixture(t)
+		var n counters
+		opener := newOpener(t, f, "before0000", &n, func() (string, error) { return "unused", nil })
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"},
+			proxyendpointtest.State{Head: "before0000", AbsentColumns: map[string]bool{"leases.granted_node": true}})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		storage := &poolExportingStorage{db: pool.DB}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		opener.storageObserve = nil
+
+		got, err := opener.reopen(false)(context.Background())
+		verdict, typed := beads.ProxiedVerdictOf(err)
+		if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved || verdict.Terminal() {
+			t.Fatalf("reopen = (%v, %v), want the non-terminal head_moved verdict for the ignored plane", got, err)
+		}
+		for _, want := range []string{"ignored plane", "leases.granted_node", "cursor at 11"} {
+			if !strings.Contains(verdict.Detail, want) {
+				t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+			}
+		}
+		if storage.closed != 1 {
+			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
+		}
+	})
+}
+
+// observedHead is a post-open report of a healthy ignored plane with the given
+// HEAD — the shape of every observation the rows that are about HEAD alone need.
+// The zero report is NOT that: it says the ignored cursor table is gone.
+func observedHead(head string) proxyendpoint.PostOpenReport {
+	return proxyendpoint.PostOpenReport{Head: head, IgnoredCursorTable: true}
+}
+
+// poolExportingStorage is a library handle whose real surface is the pool it
+// exports through UnderlyingDB, as server-mode *dolt.DoltStore does, plus a
+// counted Close.
+type poolExportingStorage struct {
+	beads.NativeStorage
+	db     *sql.DB
+	closed int
+}
+
+func (s *poolExportingStorage) UnderlyingDB() *sql.DB { return s.db }
+
+func (s *poolExportingStorage) Close() error {
+	s.closed++
+	return nil
+}
+
+// closeCountingStorage is a library handle whose only real surface is Close.
+type closeCountingStorage struct {
+	beads.NativeStorage
+	closed int
+}
+
+func (s *closeCountingStorage) Close() error {
+	s.closed++
+	return nil
+}
+
+// writeExitingProviderScript writes a provider-script double whose every op
+// runs body, so a test can hand the PRODUCTION runner a child that exits the
+// way it needs.
+func writeExitingProviderScript(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, "gc-beads-exit-double")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil { //nolint:gosec // the double must be executable
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestProxiedPingMarksOnlyBdsOwnAnswer pins which provider-op failures the
+// no-greeting ladder may escalate on (round3 review, completeness).
+//
+// Only a script that RAN and exited with a status of its own is bd's answer
+// about the proxy. Each unmarked row is a failure that would otherwise cost a
+// `bd dolt stop` on gc's own contention (council A-F5).
+func TestProxiedPingMarksOnlyBdsOwnAnswer(t *testing.T) {
+	dir := t.TempDir()
+	run := func(ctx context.Context, body string) error {
+		t.Helper()
+		return runProviderOwnedOpStrict(ctx, 30*time.Second, writeExitingProviderScript(t, t.TempDir(), body), nil, proxiedProviderProbeOp)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name   string
+		err    func() error
+		marked bool
+	}{
+		{"bd ping exited 1", func() error { return run(context.Background(), "echo 'Error: ping: invalid connection' >&2; exit 1") }, true},
+		{"the script exited 7", func() error { return run(context.Background(), "exit 7") }, true},
+		{"the script's not-needed status (exit 2)", func() error { return run(context.Background(), "exit 2") }, false},
+		{"the child was killed by a signal", func() error { return run(context.Background(), "kill -9 $$") }, false},
+		{"the op budget was already spent", func() error { return run(canceled, "exit 1") }, false},
+		{"the lifecycle semaphore wait ran out", func() error {
+			return fmt.Errorf("waiting for provider lifecycle slot for %q: %w", dir, context.DeadlineExceeded)
+		}, false},
+		{"an ownership refusal before the script started", func() error {
+			return errors.New("provider-owned scope requires an exec beads provider")
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err()
+			if err == nil {
+				t.Fatal("the op succeeded; the row needs a failure")
+			}
+			got := markProviderReportedFailure(err)
+			if got.Error() != err.Error() {
+				t.Errorf("marking changed the error's text: %q, want %q", got.Error(), err.Error())
+			}
+			if marked := errors.Is(got, beads.ErrProviderReportedFailure); marked != tc.marked {
+				t.Fatalf("marked = %v, want %v for %v", marked, tc.marked, err)
+			}
+		})
+	}
+
+	// The runner's text is what every other caller reads, and it is unchanged:
+	// the op, then bd's own stderr.
+	err := run(context.Background(), "echo 'Error: ping: invalid connection' >&2; exit 1")
+	if want := "provider-owned beads probe: Error: ping: invalid connection"; err == nil || err.Error() != want {
+		t.Fatalf("runner error = %v, want %q", err, want)
+	}
+}
+
+// sharedRootRigScope writes a rig scope whose sidecar names the CITY fixture's
+// proxy root through a relative `..` path — the shape `gc beads city
+// migrate-proxied` leaves, one proxy and one Dolt child serving hq and every
+// rig — and returns the rig's root.
+func sharedRootRigScope(t *testing.T, f *proxiedScopeFixture) string {
+	t.Helper()
+	rig := t.TempDir()
+	rigBeads := filepath.Join(rig, ".beads")
+	if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(rigBeads, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"rig"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.SidecarPath(rigBeads),
+		[]byte(`{"root_path":"`+rel+`","port":44561,"idle_timeout":-1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return rig
+}
+
+// TestProxiedRecoverRunsNothingOnceTheZombieIsGone is round4 review F3, through
+// the production runner and the production precondition.
+//
+// Admission's recover queues on the per-city lifecycle slot. The contender it
+// meets there is the health loop's recover of the same zombie, which brings up
+// a healthy proxy first; the queued recover then ran `bd dolt stop` on that
+// healthy proxy and cold-started hq and every rig a second time. The test
+// holds the slot itself (the health loop's recover), replaces the record while
+// admission's recover waits, and releases it.
+func TestProxiedRecoverRunsNothingOnceTheZombieIsGone(t *testing.T) {
+	setup := func(t *testing.T) (*proxiedScopeFixture, string, string) {
+		t.Helper()
+		f := newProxiedScopeFixture(t)
+		logPath := filepath.Join(t.TempDir(), "provider-invocations")
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.scopeRoot, "city.toml"),
+			[]byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f, logPath, proxyendpoint.NewPoolKey(f.record, "").Generation()
+	}
+	// recoverUnderHeldSlot runs the production Recover while the test holds
+	// the city's slot, runs during() with it held, then releases it.
+	recoverUnderHeldSlot := func(t *testing.T, f *proxiedScopeFixture, generation string, during func()) error {
+		t.Helper()
+		release, err := acquireProviderSemaphore(context.Background(), f.scopeRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- proxiedProviderOps{cityPath: f.scopeRoot}.Recover(context.Background(), f.scopeRoot, generation)
+		}()
+		select {
+		case err := <-done:
+			release()
+			t.Fatalf("Recover returned %v while another holder had the lifecycle slot", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		during()
+		release()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(30 * time.Second):
+			t.Fatal("Recover never returned after the slot was released")
+			return nil
+		}
+	}
+	invocations := func(t *testing.T, logPath string) string {
+		t.Helper()
+		data, err := os.ReadFile(logPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	t.Run("the health loop replaced the zombie while the recover waited: nothing runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		err := recoverUnderHeldSlot(t, f, zombie, func() { f.writeRecord(7002, "55667788") })
+		if !errors.Is(err, beads.ErrRecoverTargetMoved) {
+			t.Fatalf("Recover = %v, want ErrRecoverTargetMoved", err)
+		}
+		if errors.Is(err, beads.ErrProviderReportedFailure) {
+			t.Fatalf("Recover = %v is marked as bd's answer, but bd was never asked", err)
+		}
+		if got := invocations(t, logPath); got != "" {
+			t.Fatalf("the provider ran %q against a proxy nobody saw as a zombie, want nothing", got)
+		}
+	})
+
+	t.Run("the record is gone while the recover waited: nothing runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		err := recoverUnderHeldSlot(t, f, zombie, f.removeRecord)
+		if !errors.Is(err, beads.ErrRecoverTargetMoved) {
+			t.Fatalf("Recover = %v, want ErrRecoverTargetMoved: `bd dolt stop` is never aimed at a proxy gc cannot name", err)
+		}
+		if got := invocations(t, logPath); got != "" {
+			t.Fatalf("the provider ran %q, want nothing", got)
+		}
+	})
+
+	t.Run("control: the zombie is still there once the slot is granted, and the recover runs", func(t *testing.T) {
+		f, logPath, zombie := setup(t)
+		if err := recoverUnderHeldSlot(t, f, zombie, func() {}); err != nil {
+			t.Fatalf("Recover = %v, want the provider's recover run", err)
+		}
+		if got := invocations(t, logPath); got != proxiedProviderRecoverOp {
+			t.Fatalf("the provider ran %q, want exactly %q", got, proxiedProviderRecoverOp)
+		}
+	})
+}
+
+// TestProxiedRecoverIssuesOneStopPerGeneration is round5 recheck M1's last
+// gate, through the production Recover, runner and precondition: per proxy
+// generation, at most one `bd dolt stop` is ever issued by this process.
+//
+// The recover rung is retryable after a recover gc's own budget cut short
+// (round4 recheck M1), and the generation can still be current afterwards —
+// the script was killed before its stop landed, or the stop landed and the
+// record has not moved yet. A second recover of that generation used to run
+// the provider's `bd dolt stop` again.
+func TestProxiedRecoverIssuesOneStopPerGeneration(t *testing.T) {
+	f := newProxiedScopeFixture(t)
+	logPath := filepath.Join(t.TempDir(), "provider-invocations")
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	// The provider logs the op and fails without moving the record: the
+	// shape of a recover cut short after its script started.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+logPath+"\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.scopeRoot, "city.toml"),
+		[]byte("[workspace]\nname = \"t\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	zombie := proxyendpoint.NewPoolKey(f.record, "").Generation()
+	ops := proxiedProviderOps{cityPath: f.scopeRoot, recovered: beads.NewGenerationSet()}
+	runs := func() int {
+		data, err := os.ReadFile(logPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(data), proxiedProviderRecoverOp)
+	}
+
+	first := ops.Recover(context.Background(), f.scopeRoot, zombie)
+	if first == nil || errors.Is(first, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("first Recover = %v, want the provider's own failure", first)
+	}
+	if got := runs(); got != 1 {
+		t.Fatalf("the first Recover ran the provider's recover %d time(s), want 1", got)
+	}
+	second := ops.Recover(context.Background(), f.scopeRoot, zombie)
+	if !errors.Is(second, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("second Recover of the same generation = %v, want ErrRecoverAlreadyIssued", second)
+	}
+	if errors.Is(second, beads.ErrProviderReportedFailure) {
+		t.Fatalf("second Recover = %v is marked as bd's answer, but bd was never asked", second)
+	}
+	if got := runs(); got != 1 {
+		t.Fatalf("the provider's recover ran %d time(s) on one generation, want exactly 1", got)
+	}
+
+	// Another generation is its own stop.
+	f.writeRecord(7002, "55667788")
+	if err := ops.Recover(context.Background(), f.scopeRoot, proxyendpoint.NewPoolKey(f.record, "").Generation()); errors.Is(err, beads.ErrRecoverAlreadyIssued) {
+		t.Fatalf("a new generation's first Recover = %v, want it run", err)
+	}
+	if got := runs(); got != 2 {
+		t.Fatalf("the provider's recover ran %d time(s) over two generations, want 2", got)
+	}
+}

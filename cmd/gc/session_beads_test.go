@@ -3759,8 +3759,76 @@ func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("session bead count = %d, want 1", len(all))
 	}
-	if got, want := all[0].Metadata["session_name"], poolIdentitySessionName(alias, template); got != want {
+	if got, want := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got != want {
 		t.Fatalf("session_name = %q, want %q", got, want)
+	}
+}
+
+// TestSyncSessionBeads_PoolMintRespectsIdentityLease pins the identity lease on
+// the sync lane's pool mint. It mints bead-scoped names like the planner does,
+// so it must not mint a second generation beside an open, unconfirmed create
+// for the same slot identity (whose runtime teardown may not be confirmed yet,
+// ga-vcjr9). Once that row closes, the same desired entry mints normally.
+func TestSyncSessionBeads_PoolMintRespectsIdentityLease(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 15, 8, 30, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	template := "pack/worker"
+	instance := "pack/worker-1"
+	held, err := store.Create(beads.Bead{
+		Title:  "worker-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:" + instance},
+		Metadata: map[string]string{
+			"template":             template,
+			"session_name":         "worker-mc-held",
+			"agent_name":           instance,
+			"pool_slot":            "1",
+			"state":                string(session.StateFailedCreate),
+			"pending_create_claim": "true",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := map[string]TemplateParams{
+		"legacy-worker-1": {
+			TemplateName: template,
+			InstanceName: instance,
+			PoolSlot:     1,
+			Command:      "codex",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, true)
+	for _, b := range allSessionBeads(t, store) {
+		if b.ID != held.ID && b.Status != "closed" {
+			t.Fatalf("sync lane minted %s (session_name %q) beside the open unconfirmed create %s; stderr:\n%s", b.ID, b.Metadata["session_name"], held.ID, stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "not creating pool session for "+instance) {
+		t.Fatalf("stderr does not explain the held slot:\n%s", stderr.String())
+	}
+
+	if err := store.Close(held.ID); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	syncSessionBeads("", store, desired, sp, allConfiguredDS(desired), nil, clk, &stderr, true)
+	minted := 0
+	for _, b := range allSessionBeads(t, store) {
+		if b.ID == held.ID || b.Status == "closed" {
+			continue
+		}
+		minted++
+		if got, want := b.Metadata["session_name"], PoolSessionName(template, b.ID); got != want {
+			t.Fatalf("session_name = %q, want %q", got, want)
+		}
+	}
+	if minted != 1 {
+		t.Fatalf("minted %d pool rows after the holder closed, want 1; stderr:\n%s", minted, stderr.String())
 	}
 }
 
@@ -7020,6 +7088,88 @@ func TestReapStaleSessionBeads_StartedPendingCreateReapedPastPendingGrace(t *tes
 	if len(open) != 0 {
 		t.Fatalf("open beads = %d, want 0", len(open))
 	}
+}
+
+// TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed pins
+// the ga-vcjr9 teardown gate on the stale-creating reaper. IsRunning=false is
+// not proof a bead-scoped pool box is gone, and closing the row releases its
+// identity lease so a successor mints under a new name. The reaper must hold
+// the row open while Stop fails and close it once Stop succeeds. Rows without a
+// bead-scoped pool name are reaped as before.
+func TestReapStaleSessionBeads_BeadScopedPoolRowHeldUntilTeardownConfirmed(t *testing.T) {
+	t.Run("bead-scoped pool row", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		created, err := store.Create(beads.Bead{
+			Title:  "claude",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":         "claude-placeholder", // rewritten to claude-<id> below
+				"template":             "claude",
+				"agent_name":           "claude",
+				"state":                "creating",
+				poolManagedMetadataKey: boolMetadata(true),
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		name := PoolSessionName("claude", created.ID)
+		if err := store.SetMetadata(created.ID, "session_name", name); err != nil {
+			t.Fatalf("SetMetadata(session_name): %v", err)
+		}
+		sp.StopErrors[name] = errors.New("apiserver unreachable")
+		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
+
+		var stderr bytes.Buffer
+		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 0 {
+			t.Fatalf("reapStaleSessionBeads() = %d, want 0 while the runtime teardown fails\nstderr: %s", got, stderr.String())
+		}
+		if got, _ := store.Get(created.ID); got.Status == "closed" {
+			t.Fatalf("row %s closed although its runtime teardown failed; box %q is now unaddressable", created.ID, name)
+		}
+		if !strings.Contains(stderr.String(), "holding pool session "+created.ID+" open") {
+			t.Fatalf("stderr does not name the held row:\n%s", stderr.String())
+		}
+
+		delete(sp.StopErrors, name)
+		stderr.Reset()
+		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+			t.Fatalf("reapStaleSessionBeads() after recovery = %d, want 1\nstderr: %s", got, stderr.String())
+		}
+		if got, _ := store.Get(created.ID); got.Status != "closed" {
+			t.Fatalf("row status after a confirmed teardown = %q, want closed", got.Status)
+		}
+	})
+
+	t.Run("non-pool row is reaped even when Stop would fail", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		created, err := store.Create(beads.Bead{
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": "worker-1",
+				"template":     "worker",
+				"state":        "creating",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sp.StopErrors["worker-1"] = errors.New("apiserver unreachable")
+		now := created.CreatedAt.Add(staleCreatingStateTimeout + time.Minute)
+
+		var stderr bytes.Buffer
+		if got := reapStaleSessionBeads(store, sp, nil, &clock.Fake{Time: now}, &stderr); got != 1 {
+			t.Fatalf("reapStaleSessionBeads() = %d, want 1 for a non-pool row\nstderr: %s", got, stderr.String())
+		}
+		if got, _ := store.Get(created.ID); got.Status != "closed" {
+			t.Fatalf("non-pool row status = %q, want closed", got.Status)
+		}
+	})
 }
 
 func TestReapStaleSessionBeads_HonorsRecentCreationCompleteProtection(t *testing.T) {

@@ -49,11 +49,40 @@ const (
 	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
 	// internal packages, so the filter is now the graph itself.
 	//
-	// reviewed delta: cmd-gc-productmetrics-testhook timeout-minutes 5 -> 12
-	// (#6396: canceled at the 5-minute budget with no failing test).
-	expectedCIExecutionHash      = "2031411e7a08368893efa4e5bbcaf11dac7f8a53d6653f1d633a54873b2e386c"
-	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	expectedNightlyExecutionHash = "9cc6663eacb2279f8d98b6e0acc72de7b8907b0f58ef85c2f8dc684791c2a823" // reviewed delta: Beads v1.3.0-rc.2 -> v1.3.0
+	// Bumped again for one added step in the same job: "Proxied-native
+	// lifecycle and safety" (council pr2 C-F1). TestProxiedNativeLifecycle and
+	// TestProxiedNativeSafety carry //go:build acceptance_a and were selected
+	// by no -run expression in any job, so the proxied-native lane's whole
+	// evidence base — the per-crash-shape ping/recover budgets, foreign-root's
+	// "0 pings, 0 dolt stop", the no-spawn positive control, both no-migrate
+	// rows and the author-at-commit pin — was a local one-off no regression
+	// could fail. Reviewed delta: one `go test` step, same job, same tooling,
+	// no new trigger and no new permission.
+	//
+	// Bumped again to split that step into its own job (round3 D-F17). The
+	// topology job's four step -timeouts summed to 115 minutes against its own
+	// 90-minute cap, so a slow-but-live run was canceled by the job timeout
+	// and lost its `--- FAIL` line and tee'd log. Reviewed delta: the topology
+	// job's -timeouts become 30/15/30 (75 under 90); the lifecycle and safety
+	// step moves to a new "Beads / proxied-native acceptance" job with the same
+	// needs, the same beads_topology `if`, the same runner, env, bd build and
+	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
+	// skip summary; ci-required needs the new job and allows its skip exactly
+	// as it does the topology job's. No new trigger and no new permission.
+	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
+	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
+	// failing test).
+	expectedCIExecutionHash     = "71bfa3a539e5dd0cb7973c5f265ef6582a1ed943ccbd36fb39f39fda744c1cd2"
+	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
+	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
+	// timeout-minutes 60, env GC_REQUIRE_ACCEPTANCE_TOOLING=1 and
+	// GC_ACCEPTANCE_PERF=1, the setup action with dolt and no released bd, the
+	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
+	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
+	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
+	// provider selector.
+	expectedNightlyExecutionHash = "04ca67750b129d1e4b52702116e79f0c0547e67d1a1f050932511cf3fed10db2"
 	expectedSetupActionHash      = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 

@@ -102,6 +102,66 @@ jobs:
       - name: Acceptance tests (SQLite coordination store, Tier A)
         run: make test-acceptance
 
+  # The proxied-native lane's wall-clock line (`gc status --json` <= 0.5s on a
+  # warm proxied city, gated at 3x headroom). TestBeadsProxiedDefault asserts
+  # it only under GC_ACCEPTANCE_PERF, because wall clock on a shared PR runner
+  # is a statement about the runner, and the plan leaves the number to "the
+  # GC_ACCEPTANCE_PERF nightly lane" — which did not exist, so nothing
+  # enforced it (round3 review, completeness). This is that lane: the same
+  # test the PR topology job runs, with the gate on. bd is built from
+  # BD_CURRENT_REF exactly as the PR jobs build it, so the bd on PATH and the
+  # beads library in go.mod reach the same upstream commit.
+  beads-proxied-perf:
+    name: Beads / proxied-native perf lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
+      GC_ACCEPTANCE_PERF: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ""
+          install-claude-cli: "false"
+      - name: Resolve bd current pin
+        id: bd
+        run: |
+          set -euo pipefail
+          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+        run: |
+          set -euo pipefail
+          src="${RUNNER_TEMP}/beads-src"
+          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
+          mkdir -p "${HOME}/.local/bin"
+          go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
+          echo "GC_ACCEPTANCE_BD_BIN=${HOME}/.local/bin/bd" >> "$GITHUB_ENV"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify bd supports proxied-server
+        run: |
+          set -euo pipefail
+          bd version
+          if ! bd init --help | grep -q -- --proxied-server; then
+            echo "::error::bd at $(command -v bd) has no --proxied-server support" >&2
+            exit 1
+          fi
+          dolt version
+      - name: Proxied-default acceptance with the perf gate on
+        run: |
+          set -euo pipefail
+          go test -tags acceptance_a -timeout 45m -count=1 -v \
+            -run 'TestBeadsProxiedDefault$' ./test/acceptance/
+
   # Catches registry-side drift: a new gastown release published to
   # gascity-packs makes the local pins stale without any PR to trigger
   # the pack-gate pin check in ci.yml.
