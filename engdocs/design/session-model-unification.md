@@ -706,9 +706,9 @@ select the current ownership string in this order:
 2. `configured_named_identity` for a recovered named session whose alias is
    temporarily absent
 3. session bead ID for a pool-managed or `ephemeral` session (`pool_managed`,
-   `pool_slot`, or `session_origin=ephemeral`); a pool `session_name` is a
-   reusable slot handle shared by successive occupants, and hook claims
-   already record unaliased sessions under the bead ID
+   `pool_slot`, or `session_origin=ephemeral`); the bead ID is the stable
+   per-session identity that hook claims, `BEADS_ACTOR`, and the stored
+   assignee share, independent of how the runtime `session_name` is shaped
 4. raw persisted `session_name`
 5. session bead ID when no name metadata exists
 

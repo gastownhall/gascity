@@ -70,12 +70,14 @@ func isPoolManagedIdentity(i Info) bool {
 // AssigneeIdentifier returns the durable agent-facing ownership identity of a
 // session: its current public alias or configured named identity always win.
 // Otherwise, an unaliased pool-managed or ephemeral session claims under its
-// unique session bead ID: pool session_name is a chair reused by every
-// occupant of a slot, so stamping it as the ownership identity lets a dead
-// occupant's claim look held by whoever the controller seats there next, and
-// it would disagree with the bead ID gc hook --claim records. Other sessions
-// keep the runtime session name, falling back to the bead ID when no name
-// metadata is present.
+// session bead ID. The bead ID is the stable per-session identity that the
+// claim (gc hook --claim records it), the bd actor (BEADS_ACTOR) and the stored
+// assignee all share, independent of how the runtime is named: a runtime
+// session_name is a provider-facing name whose shape has changed across
+// releases (slot-derived chair names on rc builds, <template>-<beadID> again
+// since #6549) and may be identity-derived for tmux_alias pools. Other
+// sessions keep the runtime session name, falling back to the bead ID when no
+// name metadata is present.
 // This is the same alias-first identity RuntimeEnvWithSessionContext exposes
 // through GC_ALIAS and BEADS_ACTOR; GC_AGENT mirrors it only for compatibility.
 // Keeping API assignment normalization on this rule prevents one session from
