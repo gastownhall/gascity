@@ -3953,7 +3953,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		wakeEvals[target.info.ID] = eval
 	}
 
-	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, clk.Now())
 	for _, target := range wakeTargets {
 		if _, deferred := runtimeObservationErrors[infoByID[target.info.ID].SessionNameMetadata]; deferred {
 			delete(idleProbeTargets, target.info.ID)
@@ -4216,10 +4216,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
-			beganIdleRespawn, observationErr := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+			beganIdleRespawn, idleRespawnFold, observationErr := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)
+			tick.apply(target.info.ID, idleRespawnFold)
 			if observationErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: deferring idle-respawn drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
-				continue
 			}
 			if beganIdleRespawn {
 				// Idle session awake only for assigned work: drained to asleep
@@ -6305,13 +6305,39 @@ func shouldBeginIdleDrainInfo(
 // open, never closed) so resume-on-ready re-spawns it fresh to run that work.
 // The reason is non-cancelable (drainReasonCancelable) so the persistent
 // assigned-work demand cannot undo the drain before the session sleeps.
-const idleRespawnDrainReason = "idle-respawn"
+const (
+	idleRespawnDrainReason         = "idle-respawn"
+	maxIdleRespawnAttemptsPerBead  = 1
+	idleRespawnAttemptsMetadataKey = "idle_respawn_attempts"
+	idleRespawnBeadIDMetadataKey   = "idle_respawn_bead_id"
+)
 
 // idleAssignedWorkOnly reports whether a session's sole reason to be awake is
 // owning assigned work — the case eligible to sleep-and-respawn rather than
 // stay pinned awake-but-idle.
 func idleAssignedWorkOnly(eval wakeEvaluation) bool {
 	return eval.Reason == "assigned-work" && len(eval.Reasons) == 1 && containsWakeReason(eval.Reasons, WakeWork)
+}
+
+// idleRespawnEligible applies the non-negotiable safety gates before an idle
+// probe can recycle a session. Only ready open work qualifies: a live claim
+// holder may be waiting on a background tool or subagent even when its prompt
+// looks idle. The same configured duration used by ordinary idle sleep must
+// also have elapsed.
+func idleRespawnEligible(info sessionpkg.Info, eval wakeEvaluation, now time.Time) bool {
+	if !idleAssignedWorkOnly(eval) || eval.AssignedWorkClaimed || strings.TrimSpace(eval.AssignedWorkBeadID) == "" || eval.Policy.Duration <= 0 {
+		return false
+	}
+	idleSince, err := time.Parse(time.RFC3339, strings.TrimSpace(info.DetachedAt))
+	return err == nil && !idleSince.IsZero() && now.Sub(idleSince) >= eval.Policy.Duration
+}
+
+func idleRespawnAttemptAvailable(info sessionpkg.Info, assignedBeadID string) bool {
+	if strings.TrimSpace(info.IdleRespawnBeadID) != strings.TrimSpace(assignedBeadID) {
+		return true
+	}
+	attempts, err := strconv.Atoi(info.IdleRespawnAttempts)
+	return err != nil || attempts < maxIdleRespawnAttemptsPerBead
 }
 
 // beginIdleRespawnDrainIfIdle drains an alive session that is awake only for
@@ -6321,9 +6347,16 @@ func idleAssignedWorkOnly(eval wakeEvaluation) bool {
 // after reading it), but once the drain is begun it is deliberately never
 // canceled on the wake path for these sessions — that cancel is what previously
 // pinned them awake-but-idle.
-func beginIdleRespawnDrainIfIdle(info sessionpkg.Info, eval wakeEvaluation, dt *drainTracker, sp runtime.Provider, clk clock.Clock) (bool, error) {
-	if !idleAssignedWorkOnly(eval) {
-		return false, nil
+func beginIdleRespawnDrainIfIdle(
+	info sessionpkg.Info,
+	eval wakeEvaluation,
+	dt *drainTracker,
+	sp runtime.Provider,
+	sessFront *sessionpkg.Store,
+	clk clock.Clock,
+) (bool, sessionpkg.MetadataPatch, error) {
+	if !idleRespawnEligible(info, eval, clk.Now()) {
+		return false, nil, nil
 	}
 	// Restrict to pool sessions on the interactive-resume sleep path. Named
 	// sessions are materialized by the named-session loop, not pool respawn, and
@@ -6331,16 +6364,30 @@ func beginIdleRespawnDrainIfIdle(info sessionpkg.Info, eval wakeEvaluation, dt *
 	// shouldBeginIdleDrainInfo short-circuits true for them without a probe). Both
 	// keep their existing "stay awake with assigned work" behavior.
 	if isNamedSessionInfo(info) || eval.Policy.Class == config.SessionSleepNonInteractive {
-		return false, nil
+		return false, nil, nil
+	}
+	if !idleRespawnAttemptAvailable(info, eval.AssignedWorkBeadID) {
+		dt.clearIdleProbe(info.ID)
+		return false, nil, nil
 	}
 	shouldBegin, err := shouldBeginIdleDrainInfo(info, eval, dt, sp)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !shouldBegin {
-		return false, nil
+		return false, nil, nil
 	}
-	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), nil
+	patch := sessionpkg.MetadataPatch{
+		idleRespawnAttemptsMetadataKey: "1",
+		idleRespawnBeadIDMetadataKey:   strings.TrimSpace(eval.AssignedWorkBeadID),
+	}
+	if sessFront == nil {
+		return false, nil, errors.New("session store is unavailable")
+	}
+	if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
+		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
+	}
+	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
 }
 
 func selectIdleProbeTargets(
@@ -6348,6 +6395,7 @@ func selectIdleProbeTargets(
 	wakeEvals map[string]wakeEvaluation,
 	dt *drainTracker,
 	infoByID map[string]sessionpkg.Info,
+	now time.Time,
 ) map[string]bool {
 	targets := make(map[string]bool)
 	if dt == nil {
@@ -6404,6 +6452,10 @@ func selectIdleProbeTargets(
 			continue
 		}
 		if eval.Policy.Class == config.SessionSleepNonInteractive {
+			continue
+		}
+		if idleAssignedWorkOnly(eval) && (!idleRespawnEligible(infoByID[target.info.ID], eval, now) ||
+			!idleRespawnAttemptAvailable(infoByID[target.info.ID], eval.AssignedWorkBeadID)) {
 			continue
 		}
 		candidates = append(candidates, target.info.ID)

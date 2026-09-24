@@ -599,6 +599,32 @@ func advanceSessionDrainsWithSessionsTraced(
 			continue
 		}
 
+		// Idle-respawn is a recovery action, not permission to interrupt a
+		// session that resumed work after the probe completed. Revalidate both
+		// the assigned-work premise and runtime activity immediately before the
+		// reconciler publishes its drain acknowledgement. Observation failures
+		// fail closed and leave the session running.
+		if ds.reason == idleRespawnDrainReason {
+			eval, exists := wakeEvals[info.ID]
+			lastActivity, activityErr := workerSessionTargetLastActivityWithConfig("", store, sp, cfg, name)
+			if !exists || !idleRespawnEligible(info, eval, clk.Now()) || activityErr != nil || lastActivity.After(ds.startedAt) {
+				dt.clearIdleProbe(id)
+				if ds.ackSet {
+					_ = clearReconcilerDrainAckMetadata(sp, name)
+				}
+				dt.remove(id)
+				telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
+				if trace != nil {
+					fields := traceRecordPayload{"activity_resumed": lastActivity.After(ds.startedAt)}
+					if activityErr != nil {
+						fields["activity_error"] = activityErr.Error()
+					}
+					trace.RecordDecision(TraceSiteDrainCancel, TraceReasonCode(ds.reason), TraceOutcomeCancel, normalizedSessionTemplateInfo(info, cfg), name, fields)
+				}
+				continue
+			}
+		}
+
 		if eval, ok := wakeEvals[info.ID]; ok &&
 			containsWakeReason(eval.Reasons, WakePending) &&
 			pendingDrainReasonCancelable(ds.reason) {

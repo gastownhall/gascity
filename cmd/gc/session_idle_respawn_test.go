@@ -1,16 +1,206 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+func reconcileIdleRespawnTestTick(
+	t *testing.T,
+	env *reconcilerTestEnv,
+	session beads.Bead,
+	work beads.Bead,
+	ready bool,
+) {
+	t.Helper()
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, []beads.Bead{work}, nil, env.dt, map[string]int{"worker": 1}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+		withReadyAssignedFlags([]bool{ready}),
+	)
+}
+
+func newIdleRespawnReconcilerTest(t *testing.T, workStatus string, detachedAgo time.Duration) (*reconcilerTestEnv, beads.Bead, beads.Bead) {
+	t.Helper()
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
+		Agents:       []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	detachedAt := env.clk.Now().Add(-detachedAgo).UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&session, map[string]string{
+		"state":        "active",
+		"last_woke_at": detachedAt,
+		"detached_at":  detachedAt,
+	})
+	work, err := env.store.Create(beads.Bead{
+		Title:    "assigned work",
+		Type:     "task",
+		Assignee: session.ID,
+	})
+	if err != nil {
+		t.Fatalf("create assigned work: %v", err)
+	}
+	if workStatus != "open" {
+		if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &workStatus}); err != nil {
+			t.Fatalf("set assigned work status: %v", err)
+		}
+		work.Status = workStatus
+	}
+	return env, session, work
+}
+
+func completeIdleRespawnProbe(t *testing.T, env *reconcilerTestEnv, session beads.Bead, work beads.Bead, ready bool) {
+	t.Helper()
+	idleGate := make(chan struct{})
+	env.sp.WaitForIdleErrors["worker"] = nil
+	env.sp.WaitForIdleGates["worker"] = idleGate
+	reconcileIdleRespawnTestTick(t, env, session, work, ready)
+	close(idleGate)
+	waitForIdleProbeReady(t, env.dt, session.ID)
+	fresh, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	reconcileIdleRespawnTestTick(t, env, fresh, work, ready)
+}
+
+func idleRespawnUnitStore(t *testing.T, info sessionpkg.Info) *sessionpkg.Store {
+	t.Helper()
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	if _, err := store.Create(beads.Bead{
+		ID:   info.ID,
+		Type: sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": info.SessionNameMetadata,
+			"generation":   info.Generation,
+			"detached_at":  info.DetachedAt,
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return sessionFrontDoor(store)
+}
+
+func TestReconcileSessionBeads_IdleRespawnNeverDrainsClaimHolder(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "in_progress", 2*time.Minute)
+
+	reconcileIdleRespawnTestTick(t, env, session, work, false)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("claimed in-progress work must veto idle-respawn, got drain %+v", ds)
+	}
+	if _, ok := env.dt.idleProbe(session.ID); ok {
+		t.Fatal("claimed in-progress work must not launch an idle-respawn probe")
+	}
+}
+
+func TestReconcileSessionBeads_IdleRespawnHonorsConfiguredDuration(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 30*time.Second)
+
+	reconcileIdleRespawnTestTick(t, env, session, work, true)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("session inside sleep_after_idle must not drain, got %+v", ds)
+	}
+	if _, ok := env.dt.idleProbe(session.ID); ok {
+		t.Fatal("session inside sleep_after_idle must not launch an idle probe")
+	}
+}
+
+func TestReconcileSessionBeads_IdleRespawnIsBoundedPerAssignedBead(t *testing.T) {
+	env, session, work := newIdleRespawnReconcilerTest(t, "open", 2*time.Minute)
+
+	completeIdleRespawnProbe(t, env, session, work, true)
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != idleRespawnDrainReason {
+		t.Fatalf("first idle-respawn cycle did not begin: %+v", ds)
+	}
+
+	// Model the replacement incarnation reaching the same idle state while the
+	// same ready bead remains assigned. A second reconcile cycle must leave it
+	// running rather than starting an unbounded stop/respawn loop.
+	env.dt.remove(session.ID)
+	env.stdout = bytes.Buffer{}
+	env.stderr = bytes.Buffer{}
+	fresh, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("reload session after first cycle: %v", err)
+	}
+	reconcileIdleRespawnTestTick(t, env, fresh, work, true)
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("second idle-respawn cycle for the same bead must be suppressed, got %+v", ds)
+	}
+	if _, ok := env.dt.idleProbe(session.ID); ok {
+		t.Fatal("second idle-respawn cycle for the same bead must not launch another probe")
+	}
+}
+
+func TestReconcileSessionBeads_IdleRespawnCancelsWhenActivityResumesBeforeAck(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := runtime.NewFake()
+	name := "worker-1"
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	info := sessionpkg.Info{
+		ID:                  "session-1",
+		SessionNameMetadata: name,
+		Generation:          "1",
+		DetachedAt:          clk.Now().Add(-2 * time.Minute).Format(time.RFC3339),
+	}
+	eval := wakeEvaluation{
+		Reason:             "assigned-work",
+		Reasons:            []WakeReason{WakeWork},
+		AssignedWorkBeadID: "work-1",
+		Policy: resolvedSessionSleepPolicy{
+			Class:      config.SessionSleepInteractiveResume,
+			Effective:  "60s",
+			Capability: runtime.SessionSleepCapabilityFull,
+			Duration:   time.Minute,
+		},
+	}
+	dt := newDrainTracker()
+	if !beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout) {
+		t.Fatal("begin idle-respawn drain")
+	}
+	sp.SetActivity(name, clk.Now().Add(time.Second))
+
+	advanceSessionDrainsWithSessionsTraced(
+		dt,
+		sp,
+		nil,
+		func(id string) (sessionpkg.Info, bool) { return info, id == info.ID },
+		map[string]wakeEvaluation{info.ID: eval},
+		&config.City{},
+		clk,
+		nil,
+	)
+
+	if ds := dt.get(info.ID); ds != nil {
+		t.Fatalf("activity after the idle probe must cancel idle-respawn, got %+v", ds)
+	}
+	ack, err := sp.GetMeta(name, "GC_DRAIN_ACK")
+	if err != nil {
+		t.Fatalf("get runtime metadata: %v", err)
+	}
+	if ack == "1" {
+		t.Fatal("idle-respawn published a drain acknowledgement after activity resumed")
+	}
+}
 
 type unavailableIdleActivityProvider struct {
 	*runtime.Fake
@@ -59,18 +249,20 @@ func TestSelectIdleProbeTargets_IncludesAssignedWorkOnly(t *testing.T) {
 		Class:      config.SessionSleepInteractiveResume,
 		Effective:  "60s",
 		Capability: runtime.SessionSleepCapabilityFull,
+		Duration:   time.Minute,
 	}
-	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: "run-operator-1"}
+	now := time.Now().UTC()
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: "run-operator-1", DetachedAt: now.Add(-2 * time.Minute).Format(time.RFC3339)}
 	target := wakeTarget{
 		info:  info,
 		alive: true,
 	}
 	wakeEvals := map[string]wakeEvaluation{
-		"s1": {Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy},
+		"s1": {Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy, AssignedWorkBeadID: "work-1"},
 	}
 	infoByID := map[string]sessionpkg.Info{"s1": info}
 	dt := newDrainTracker()
-	got := selectIdleProbeTargets([]wakeTarget{target}, wakeEvals, dt, infoByID)
+	got := selectIdleProbeTargets([]wakeTarget{target}, wakeEvals, dt, infoByID, now)
 	if !got["s1"] {
 		t.Fatalf("assigned-work-only idle session must be idle-probe-eligible, got %v", got)
 	}
@@ -94,7 +286,7 @@ func TestSelectIdleProbeTargets_SkipsOtherWakeReasons(t *testing.T) {
 		"s1": {Reason: "pending", Reasons: []WakeReason{WakePending}, Policy: policy},
 	}
 	infoByID := map[string]sessionpkg.Info{"s1": info}
-	got := selectIdleProbeTargets([]wakeTarget{target}, wakeEvals, newDrainTracker(), infoByID)
+	got := selectIdleProbeTargets([]wakeTarget{target}, wakeEvals, newDrainTracker(), infoByID, time.Now())
 	if got["s1"] {
 		t.Fatalf("a pending-wake session must not be idle-probe-eligible, got %v", got)
 	}
@@ -110,15 +302,16 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: name, Generation: "1"}
-	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}
-	eval := wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: name, Generation: "1", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Effective: "60s", Capability: runtime.SessionSleepCapabilityFull, Duration: time.Minute}
+	eval := wakeEvaluation{Reason: "assigned-work", Reasons: []WakeReason{WakeWork}, Policy: policy, AssignedWorkBeadID: "work-1"}
+	sessFront := idleRespawnUnitStore(t, info)
 
 	// Positive: completed, successful idle probe + idle agent.
 	dt := newDrainTracker()
 	probe := dt.startIdleProbe(info.ID)
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
-	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)
 	if err != nil {
 		t.Fatalf("begin idle-respawn drain: %v", err)
 	}
@@ -134,7 +327,7 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 	p2 := dt2.startIdleProbe(info.ID)
 	dt2.finishIdleProbe(info.ID, p2, true, clk.Now().Add(-time.Second))
 	other := wakeEvaluation{Reason: "min-active", Reasons: []WakeReason{WakeConfig}, Policy: policy}
-	began, err = beginIdleRespawnDrainIfIdle(info, other, dt2, sp, clk)
+	began, _, err = beginIdleRespawnDrainIfIdle(info, other, dt2, sp, sessFront, clk)
 	if err != nil {
 		t.Fatalf("evaluate other wake reason: %v", err)
 	}
@@ -144,7 +337,7 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 
 	// Negative: no completed idle probe → no drain (guards against false sleep).
 	dt3 := newDrainTracker()
-	began, err = beginIdleRespawnDrainIfIdle(info, eval, dt3, sp, clk)
+	began, _, err = beginIdleRespawnDrainIfIdle(info, eval, dt3, sp, sessFront, clk)
 	if err != nil {
 		t.Fatalf("evaluate incomplete probe: %v", err)
 	}
@@ -160,20 +353,23 @@ func TestBeginIdleRespawnDrainIfIdle_PropagatesUnavailableActivity(t *testing.T)
 	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: name, Generation: "1"}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: name, Generation: "1", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
 	eval := wakeEvaluation{
 		Reason:  "assigned-work",
 		Reasons: []WakeReason{WakeWork},
 		Policy: resolvedSessionSleepPolicy{
 			Class:      config.SessionSleepInteractiveResume,
+			Effective:  "60s",
 			Capability: runtime.SessionSleepCapabilityFull,
+			Duration:   time.Minute,
 		},
+		AssignedWorkBeadID: "work-1",
 	}
 	dt := newDrainTracker()
 	probe := dt.startIdleProbe(info.ID)
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
 
-	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, idleRespawnUnitStore(t, info), clk)
 	if began {
 		t.Fatal("activity observation failure must not begin an idle-respawn drain")
 	}
@@ -192,16 +388,17 @@ func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
 	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	info := sessionpkg.Info{ID: "ni", SessionNameMetadata: name, Generation: "1"}
+	info := sessionpkg.Info{ID: "ni", SessionNameMetadata: name, Generation: "1", DetachedAt: clk.Now().Add(-2 * time.Minute).Format(time.RFC3339)}
 	eval := wakeEvaluation{
-		Reason:  "assigned-work",
-		Reasons: []WakeReason{WakeWork},
-		Policy:  resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive},
+		Reason:             "assigned-work",
+		Reasons:            []WakeReason{WakeWork},
+		Policy:             resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive, Effective: "60s", Duration: time.Minute},
+		AssignedWorkBeadID: "work-1",
 	}
 	dt := newDrainTracker()
 	probe := dt.startIdleProbe(info.ID)
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
-	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	began, _, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, idleRespawnUnitStore(t, info), clk)
 	if err != nil {
 		t.Fatalf("evaluate non-interactive session: %v", err)
 	}

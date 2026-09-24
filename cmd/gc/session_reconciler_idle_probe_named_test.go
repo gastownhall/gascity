@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -34,7 +35,7 @@ func TestSelectIdleProbeTargets_ExcludesNamedAssignedWorkOnly(t *testing.T) {
 	infoByID := infoByIDForTargets(wakeTargets)
 	dt := newDrainTracker()
 
-	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	first := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if first["s1"] {
 		t.Fatalf("tick 1: named assigned-work-only session must not be idle-probe-eligible, got %v", first)
 	}
@@ -42,7 +43,7 @@ func TestSelectIdleProbeTargets_ExcludesNamedAssignedWorkOnly(t *testing.T) {
 		t.Fatal("tick 1: no probe should have been started for a named session")
 	}
 
-	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	second := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, time.Now())
 	if second["s1"] {
 		t.Fatalf("tick 2: named assigned-work-only session must still not be idle-probe-eligible, got %v", second)
 	}
