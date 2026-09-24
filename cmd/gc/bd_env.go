@@ -131,17 +131,22 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 // externally bound stores, while managed-city process environments use this
 // optional form to carry a valid pin when one exists.
 //
-// A BD_BIN that is set but not an absolute executable is an error here, in
-// both the workspace.env and the ambient branch. This layer answers "which bd
-// did the operator pin", so a value that cannot be a pin is a configuration
-// fault to report, not a value to quietly drop — reporting it names the stale
-// pin instead of running a different bd against a Dolt store. That is a
-// deliberately narrower contract than execCommandRunner in
-// internal/beads/bdstore.go, which reads BD_BIN off an already-resolved child
-// environment as a last-mile executable override and treats a non-absolute
-// value as "no override" so it falls back to PATH. Keep both sides in mind
-// when changing either: this function decides whether a pin exists, that one
-// only applies a pin already decided here.
+// A workspace.env BD_BIN that is set but not an absolute executable is an
+// error here. workspace.env is a declared pin: this layer answers "which bd
+// did the operator pin", so a declared value that cannot be a pin is a
+// configuration fault to report, not a value to quietly drop — reporting it
+// names the stale pin instead of running a different bd against a Dolt store.
+//
+// An ambient (inherited process) BD_BIN is not a declared pin. A relative or
+// non-executable ambient value is ignored with a one-line stderr warning and
+// resolves as "no pin", so a stale value left in a long-lived shell cannot
+// take the whole city offline (ga-weekw). applyWorkspacePinnedBdBinary then
+// writes the empty result into the child env, masking the stale inherited
+// value so execCommandRunner in internal/beads/bdstore.go — which reads
+// BD_BIN off the resolved child environment as a last-mile executable
+// override — falls back to PATH instead of exec'ing it. Keep both sides in
+// mind when changing either: this function decides whether a pin exists,
+// that one only applies a pin already decided here.
 func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
 		return "", nil
@@ -193,15 +198,35 @@ func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	// above remain authoritative.
 	if raw := strings.TrimSpace(os.Getenv("BD_BIN")); raw != "" {
 		if !filepath.IsAbs(raw) {
-			return "", fmt.Errorf("ambient BD_BIN %q must be an absolute executable path", raw)
+			warnIgnoredAmbientBdBin(raw, "not an absolute path")
+			return "", nil
 		}
 		candidate, err := exec.LookPath(raw)
 		if err != nil {
-			return "", fmt.Errorf("ambient BD_BIN %q is not executable: %w", raw, err)
+			warnIgnoredAmbientBdBin(raw, "not executable")
+			return "", nil
 		}
 		return candidate, nil
 	}
 	return "", nil
+}
+
+// ambientBdBinWarnOut receives the ignored-ambient-BD_BIN warning. Tests swap
+// it to capture the line.
+var ambientBdBinWarnOut io.Writer = os.Stderr
+
+// ambientBdBinWarned dedupes the warning per ignored value: one gc process
+// resolves the pin on several paths (preflight, env composition, exec), and
+// the operator needs the line once, not once per resolution.
+var ambientBdBinWarned sync.Map
+
+// warnIgnoredAmbientBdBin reports, once per process and value, that an
+// inherited BD_BIN was ignored rather than treated as a pin.
+func warnIgnoredAmbientBdBin(raw, reason string) {
+	if _, loaded := ambientBdBinWarned.LoadOrStore(raw, struct{}{}); loaded {
+		return
+	}
+	fmt.Fprintf(ambientBdBinWarnOut, "gc: warning: ignoring ambient BD_BIN %q (%s); using bd from PATH\n", raw, reason) //nolint:errcheck // best-effort stderr
 }
 
 // errBdNotOnPath reports that neither the workspace pin nor the ambient
@@ -2076,9 +2101,9 @@ func applyWorkspacePinnedBdBinary(env map[string]string, cityPath string) error 
 	if err != nil {
 		return err
 	}
-	if pinned != "" {
-		env["BD_BIN"] = pinned
-	}
+	// Always write the resolved value: an empty pin masks a stale inherited
+	// BD_BIN that execCommandRunner would otherwise exec from the base env.
+	env["BD_BIN"] = pinned
 	return nil
 }
 
