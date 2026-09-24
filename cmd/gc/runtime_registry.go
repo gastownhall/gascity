@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
@@ -56,11 +57,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := sessionacp.Config{
-			HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-			NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-			OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
-		}
+		cfg := acpConfigFromSession(sc, cityPath)
 		if cityPath != "" {
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
@@ -176,4 +173,19 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 		return true
 	}
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
+}
+
+// acpConfigFromSession builds the ACP provider config for a city. Capture
+// transcripts are city-rooted (citylayout.ACPTranscriptsDir) so they survive a
+// supervisor restart; a city-less provider has no root and captures nothing.
+func acpConfigFromSession(sc config.SessionConfig, cityPath string) sessionacp.Config {
+	cfg := sessionacp.Config{
+		HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
+	}
+	if cityPath != "" {
+		cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
+	}
+	return cfg
 }

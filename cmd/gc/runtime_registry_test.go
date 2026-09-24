@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -303,5 +304,20 @@ func TestPackRuntimeDeclarationChanged(t *testing.T) {
 				t.Errorf("packRuntimeDeclarationChanged = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRuntimeRegistryACPConfigWiresCityTranscriptRoot proves the acp
+// registration roots capture transcripts at the city (not the ephemeral
+// provider state dir) through the shared citylayout helper, and that a
+// city-less provider leaves capture disabled.
+func TestRuntimeRegistryACPConfigWiresCityTranscriptRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := acpConfigFromSession(config.SessionConfig{}, cityPath)
+	if want := citylayout.ACPTranscriptsDir(cityPath); cfg.TranscriptRoot != want {
+		t.Fatalf("TranscriptRoot = %q, want %q", cfg.TranscriptRoot, want)
+	}
+	if got := acpConfigFromSession(config.SessionConfig{}, "").TranscriptRoot; got != "" {
+		t.Fatalf("city-less TranscriptRoot = %q, want empty (capture disabled)", got)
 	}
 }

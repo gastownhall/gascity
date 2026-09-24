@@ -1,6 +1,7 @@
 package citylayout
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,64 @@ func SessionDiagnosticsDirForRuntimeDir(runtimeDir string) string {
 		return ""
 	}
 	return filepath.Join(runtimeDir, SessionDiagnosticsRoot)
+}
+
+// ACPTranscriptsRoot is the city-relative root holding ACP JSON-RPC capture
+// transcripts, one directory per GC_SESSION_ID and one file per
+// GC_CONTINUATION_EPOCH. It is city-rooted rather than under the provider
+// state directory because that directory lives in the ephemeral supervisor
+// runtime dir, and transcripts must outlive a supervisor restart.
+const ACPTranscriptsRoot = ".gc/transcripts/acp"
+
+// acpTranscriptExt is the file extension of an ACP capture transcript.
+const acpTranscriptExt = ".jsonl"
+
+// ACPTranscriptsDir returns the directory holding ACP capture transcripts for
+// a city.
+//
+// The capture writer (internal/runtime/acp, configured with this directory)
+// and every transcript reader MUST resolve paths through ACPTranscriptPath or
+// ACPTranscriptPathForDir so writer and reader cannot drift apart (see
+// SessionDiagnosticsDir for the failure this prevents).
+func ACPTranscriptsDir(cityRoot string) string {
+	return RuntimePath(cityRoot, "transcripts", "acp")
+}
+
+// ACPTranscriptPath returns the capture transcript path for one session
+// continuation epoch: <city>/.gc/transcripts/acp/<sessionID>/<epoch>.jsonl.
+// It rejects empty components, path separators, NUL bytes, and "." / "..",
+// so a hostile or malformed identifier cannot escape the transcripts root.
+func ACPTranscriptPath(cityRoot, sessionID, continuationEpoch string) (string, error) {
+	return ACPTranscriptPathForDir(ACPTranscriptsDir(cityRoot), sessionID, continuationEpoch)
+}
+
+// ACPTranscriptPathForDir returns the same path as ACPTranscriptPath for a
+// caller that holds the transcripts directory rather than the city root (the
+// ACP provider is configured with the directory). An empty dir is an error
+// rather than a path relative to the process working directory.
+func ACPTranscriptPathForDir(transcriptsDir, sessionID, continuationEpoch string) (string, error) {
+	if transcriptsDir == "" {
+		return "", fmt.Errorf("acp transcript path: empty transcripts directory")
+	}
+	if err := validateACPTranscriptComponent("session id", sessionID); err != nil {
+		return "", err
+	}
+	if err := validateACPTranscriptComponent("continuation epoch", continuationEpoch); err != nil {
+		return "", err
+	}
+	return filepath.Join(transcriptsDir, sessionID, continuationEpoch+acpTranscriptExt), nil
+}
+
+func validateACPTranscriptComponent(label, value string) error {
+	switch {
+	case value == "":
+		return fmt.Errorf("acp transcript path: empty %s", label)
+	case value == "." || value == "..":
+		return fmt.Errorf("acp transcript path: %s %q is a relative path element", label, value)
+	case strings.ContainsAny(value, "/\\\x00"):
+		return fmt.Errorf("acp transcript path: %s %q contains a path separator or NUL", label, value)
+	}
+	return nil
 }
 
 // SessionNameLocksDir returns the canonical root for explicit session-name locks.

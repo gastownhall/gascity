@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,11 @@ type sessionConn struct {
 	// before session metadata is removed.
 	activityPublisher       *activityPublisher
 	activityPublisherClosed bool
+
+	// capture records JSON-RPC traffic to the session transcript; nil when
+	// capture is disabled. Set before readLoop starts and closed by the
+	// process monitor after readLoop exits.
+	capture *transcriptCapture
 
 	// stdinMu serializes writes to the agent's stdin pipe. Separate from
 	// mu so that a slow/blocked stdin write cannot prevent dispatch (which
@@ -85,16 +91,20 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
 
 		var msg JSONRPCMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+		if err := json.Unmarshal(line, &msg); err != nil {
 			continue // skip non-JSON lines (e.g., startup banners)
 		}
 
+		if sc.capture != nil {
+			// scanner.Bytes is reused by the next Scan; the capture owns a copy.
+			sc.capture.record(captureIn, bytes.Clone(line))
+		}
 		sc.dispatch(msg)
 	}
 
@@ -238,10 +248,7 @@ func (sc *sessionConn) sendRequest(msg JSONRPCMessage) (chan JSONRPCMessage, err
 		return nil, fmt.Errorf("marshal: %w", err)
 	}
 
-	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
-	if err != nil {
+	if err := sc.writeMessage(data); err != nil {
 		sc.mu.Lock()
 		delete(sc.pending, *msg.ID)
 		sc.mu.Unlock()
@@ -257,9 +264,18 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	return sc.writeMessage(data)
+}
+
+// writeMessage writes one encoded JSON-RPC message to the agent's stdin. Every
+// stdin write goes through here so each one is captured, and captured in wire
+// order: the out record is queued under stdinMu before the write, so it also
+// precedes any reply the read loop captures.
+func (sc *sessionConn) writeMessage(data []byte) error {
 	sc.stdinMu.Lock()
-	_, err = fmt.Fprintf(sc.stdin, "%s\n", data)
-	sc.stdinMu.Unlock()
+	defer sc.stdinMu.Unlock()
+	sc.capture.record(captureOut, data)
+	_, err := fmt.Fprintf(sc.stdin, "%s\n", data)
 	return err
 }
 

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "acp.go",
         "activity_publisher.go",
+        "capture.go",
         "conn.go",
         "cutover.go",
         "protocol.go",
@@ -13,6 +14,7 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/runtime/acp",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/citylayout",
         "//internal/fsys",
         "//internal/runtime",
     ],
@@ -23,6 +25,7 @@ go_test(
     srcs = [
         "acp_test.go",
         "activity_test.go",
+        "capture_test.go",
         "meta_privacy_test.go",
         "protocol_test.go",
         "seams_test.go",
