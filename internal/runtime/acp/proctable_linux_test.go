@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -223,5 +224,115 @@ func TestTerminateRuntimeRefusesInitAndInvalidPIDs(t *testing.T) {
 		if err := p.TerminateRuntime(runtime.LiveRuntime{PID: pid, SessionID: "sid"}); err == nil {
 			t.Errorf("TerminateRuntime(PID %d) = nil, want refusal", pid)
 		}
+	}
+}
+
+// The common in-place crash: the agent dies, its dead conn stays in the table
+// until the next Start, and the pre-start orphan sweep scans through the same
+// Provider. The escaped tool child must be untracked so it is reaped.
+func TestFindRuntimesBySessionIDIgnoresDeadConn(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	sessionID := "sid-" + name
+	agentPID, toolPID := startOrphaningSession(t, p, name, sessionID, t.TempDir())
+
+	p.mu.Lock()
+	sc := p.conns[name]
+	p.mu.Unlock()
+	if err := syscall.Kill(agentPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill agent: %v", err)
+	}
+	select {
+	case <-sc.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent conn did not observe the process exit")
+	}
+	p.mu.Lock()
+	stillThere := p.conns[name] == sc
+	p.mu.Unlock()
+	if !stillThere {
+		t.Fatal("dead conn left the table; the test no longer models the crash window")
+	}
+
+	var found []runtime.LiveRuntime
+	scanSnapshot(t, func() { found = findOnly(t, p, sessionID) }, agentPID, toolPID)
+	if len(found) != 1 || found[0].PID != toolPID || found[0].IsTracked || found[0].ProviderName != "" {
+		t.Fatalf("found = %+v, want untracked tool root pid %d", found, toolPID)
+	}
+}
+
+// During the startup handshake the conn table holds a cmd-less reservation.
+// A concurrent scan (a controller tick) must neither panic on it nor count the
+// half-started agent as tracked.
+func TestFindRuntimesBySessionIDDuringHandshake(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	sessionID := "sid-" + name
+	// The agent reports its pid through a fifo, so the test blocks on the
+	// write instead of polling for a file.
+	pidFIFO := filepath.Join(t.TempDir(), "agent.pid")
+	if err := syscall.Mkfifo(pidFIFO, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	startErr := make(chan error, 1)
+	go func() {
+		// The agent never answers initialize, holding Start in the handshake
+		// until Stop cancels it.
+		startErr <- p.Start(context.Background(), name, runtime.Config{
+			// The trailing no-op keeps the shell from exec'ing sleep, so the
+			// reported pid keeps a stable identity (an exec in flight can hide
+			// the process from a scan).
+			Command: fmt.Sprintf("echo $$ > %q; sleep 300; :", pidFIFO),
+			WorkDir: t.TempDir(),
+			Env:     map[string]string{"GC_SESSION_ID": sessionID},
+		})
+	}()
+
+	pidData := make(chan []byte, 1)
+	go func() {
+		data, _ := os.ReadFile(pidFIFO)
+		pidData <- data
+	}()
+	var agentPID int
+	select {
+	case data := <-pidData:
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 1 {
+			t.Fatalf("agent pid %q: %v", data, err)
+		}
+		agentPID = pid
+	case err := <-startErr:
+		t.Fatalf("Start returned before the agent reported its pid: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent never reported its pid")
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-agentPID, syscall.SIGKILL) })
+
+	// The agent's parent is this test process, which carries no GC_SESSION_ID,
+	// so the agent shell is a root; its sleep child is not.
+	p.mu.Lock()
+	sc := p.conns[name]
+	p.mu.Unlock()
+	if sc == nil || sc.cmd != nil {
+		t.Fatalf("conn = %+v, want the handshake reservation", sc)
+	}
+
+	var found []runtime.LiveRuntime
+	scanSnapshot(t, func() { found = findOnly(t, p, sessionID) }, agentPID)
+	if len(found) != 1 || found[0].PID != agentPID || found[0].IsTracked {
+		t.Fatalf("found = %+v, want untracked handshaking agent root pid %d", found, agentPID)
+	}
+
+	if err := p.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	select {
+	case err := <-startErr:
+		if err == nil {
+			t.Fatal("Start = nil after Stop during handshake, want an error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after Stop canceled the handshake")
 	}
 }

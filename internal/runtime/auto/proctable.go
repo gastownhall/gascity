@@ -18,8 +18,14 @@ var _ runtime.ProcessTableScanner = (*Provider)(nil)
 // it hosts. A root is therefore tracked when ANY backend tracks it, and the
 // tracking backend's record (with its ProviderName) is kept. Results are
 // ordered by PID. Backend errors are labeled and joined; partial results from
-// a failing backend are still merged, per the best-effort contract. With no
-// scanning backend it finds nothing.
+// a failing backend are still merged, per the best-effort contract.
+//
+// Forwarding requires the default backend to scan. The ACP scanner tracks only
+// ACP-hosted sessions, so behind a scannerless default (hybrid, herdr,
+// t3bridge, exec, k8s) it would report every live default-hosted runtime
+// carrying GC_SESSION_ID as an untracked orphan, and orphan reaping would kill
+// it. With a scannerless default this therefore finds nothing, as before the
+// composite forwarded the scanner.
 //
 // Without this forwarding, routing any session in a city to ACP would hide the
 // default backend's scanner behind the composite and silently turn orphan
@@ -48,9 +54,10 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 
 // TerminateRuntime implements [runtime.ProcessTableScanner]. A scanned root is
 // a host process rather than a routed session, so it is terminated by exactly
-// one backend: the default backend's scanner when it has one, else the ACP
-// backend's. Local scanners terminate by identity-checked PID signaling, so the
-// choice does not change which process is signaled.
+// one backend: the default backend's scanner. Local scanners terminate by
+// identity-checked PID signaling, so the choice does not change which process
+// is signaled. With a scannerless default it returns an error, matching
+// FindRuntimesBySessionID, which surfaces nothing to terminate.
 func (p *Provider) TerminateRuntime(r runtime.LiveRuntime) error {
 	backends := p.scanningBackends()
 	if len(backends) == 0 {
@@ -65,12 +72,14 @@ type scanningBackend struct {
 }
 
 // scanningBackends returns the backends implementing
-// [runtime.ProcessTableScanner], default first.
+// [runtime.ProcessTableScanner], default first. It returns none when the
+// default backend cannot scan; see [Provider.FindRuntimesBySessionID].
 func (p *Provider) scanningBackends() []scanningBackend {
-	var out []scanningBackend
-	if s, ok := p.defaultSP.(runtime.ProcessTableScanner); ok {
-		out = append(out, scanningBackend{label: "default", scanner: s})
+	s, ok := p.defaultSP.(runtime.ProcessTableScanner)
+	if !ok {
+		return nil
 	}
+	out := []scanningBackend{{label: "default", scanner: s}}
 	if s, ok := p.acpSP.(runtime.ProcessTableScanner); ok {
 		out = append(out, scanningBackend{label: "acp", scanner: s})
 	}

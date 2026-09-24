@@ -10,7 +10,8 @@ import (
 )
 
 // scannerlessProvider hides every optional interface of the wrapped provider,
-// modeling a backend (e.g. k8s) that cannot inspect a process table.
+// modeling a backend that cannot inspect a process table (hybrid, herdr,
+// t3bridge, exec, k8s).
 type scannerlessProvider struct {
 	runtime.Provider
 }
@@ -108,7 +109,11 @@ func TestFindRuntimesBySessionIDKeepsDefaultBackendTracking(t *testing.T) {
 	}
 }
 
-func TestFindRuntimesBySessionIDSkipsBackendsWithoutScanner(t *testing.T) {
+// Behind a scannerless default (hybrid, herdr, t3bridge, exec, k8s) the ACP
+// scanner cannot tell a live default-hosted runtime carrying GC_SESSION_ID
+// from an orphan, so forwarding it would reap live sessions. Nothing is
+// surfaced and the ACP backend is not scanned.
+func TestFindRuntimesBySessionIDScannerlessDefaultFindsNothing(t *testing.T) {
 	acp := runtime.NewFake()
 	acp.OrphanedRuntimes["sid-x"] = runtime.LiveRuntime{SessionID: "sid-x", PID: 900}
 	p := New(&scannerlessProvider{Provider: runtime.NewFake()}, acp)
@@ -117,8 +122,11 @@ func TestFindRuntimesBySessionIDSkipsBackendsWithoutScanner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindRuntimesBySessionID: %v", err)
 	}
-	if len(found) != 1 || found[0].PID != 900 || found[0].IsTracked {
-		t.Fatalf("found = %+v, want the ACP backend's untracked root", found)
+	if len(found) != 0 {
+		t.Fatalf("found = %+v, want nothing behind a scannerless default", found)
+	}
+	if acp.CountCalls("FindRuntimesBySessionID", "sid-x") != 0 {
+		t.Error("ACP backend scanned behind a scannerless default")
 	}
 }
 
@@ -164,14 +172,14 @@ func TestTerminateRuntimeUsesDefaultBackendScanner(t *testing.T) {
 	}
 }
 
-func TestTerminateRuntimeFallsBackToACPScanner(t *testing.T) {
+func TestTerminateRuntimeScannerlessDefaultErrors(t *testing.T) {
 	acp := runtime.NewFake()
 	r := runtime.LiveRuntime{SessionID: "sid", PID: 321}
-	if err := New(&scannerlessProvider{Provider: runtime.NewFake()}, acp).TerminateRuntime(r); err != nil {
-		t.Fatalf("TerminateRuntime: %v", err)
+	if err := New(&scannerlessProvider{Provider: runtime.NewFake()}, acp).TerminateRuntime(r); err == nil {
+		t.Fatal("TerminateRuntime = nil, want an error behind a scannerless default")
 	}
-	if acp.CountCalls("TerminateRuntime", "sid") != 1 {
-		t.Error("ACP backend TerminateRuntime not called")
+	if acp.CountCalls("TerminateRuntime", "sid") != 0 {
+		t.Error("ACP backend TerminateRuntime called behind a scannerless default")
 	}
 }
 

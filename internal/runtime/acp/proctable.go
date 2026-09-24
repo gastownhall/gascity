@@ -22,13 +22,22 @@ var _ runtime.ProcessTableScanner = (*Provider)(nil)
 // that merely inherited GC_SESSION_ID (a daemon started from inside the agent)
 // is likewise untracked once its session has no live conn; that matches the
 // tmux and subprocess providers.
+//
+// Tracking is owner-process-only. A second Provider on the same state
+// directory (another gc process) sees the session through its control socket
+// in IsRunning and ListRunning, yet reports its root untracked here. The same
+// holds for a session still in its startup handshake, whose conn is only a
+// reservation. Callers must reap untracked roots only for sessions they have
+// independently established are not running.
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	found, scanErr := proctable.ScanBySessionID(id)
 
 	p.mu.Lock()
 	trackedBySessionID := make(map[string]string, len(p.conns))
 	for name, sc := range p.conns {
-		// Handshake sentinels carry no cmd; they are not yet a runtime.
+		// Handshake sentinels carry no cmd; they are not yet a runtime. A dead
+		// conn lingers in the table until the next Start or Stop, and must not
+		// keep its session's escaped tool children tracked.
 		if sc == nil || sc.cmd == nil || !sc.alive() {
 			continue
 		}
