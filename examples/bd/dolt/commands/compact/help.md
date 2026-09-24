@@ -17,8 +17,12 @@ Compact only rewrites history that this city grew.
   instead. `.no-sync`, `--skip-fetch`, and `--dry-run` do not bypass this.
   - A pending-GC marker left by an earlier flatten still gets its local
     `DOLT_GC('--full')`. The deferred push is dropped, and the log says so.
-  - A pending-push marker is held untouched and reported. It is not
-    force-pushed.
+    The log also records the marker's `compacted_from_head` (the pre-flatten
+    HEAD) before the GC runs.
+  - A pending-push marker is held untouched. It is not force-pushed. Compact
+    reports it on stderr, emits a `dolt.compact.quarantine` event, and mails
+    the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
+    `mayor`), with the same reminder cadence as quarantine alerts.
   - `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` lifts the guard. Flattened history is
     then **force-pushed** to the remote. Set it only for a compaction window
     you have announced to every clone of that history.
@@ -36,8 +40,10 @@ Compact only rewrites history that this city grew.
   - If the tag is not an ancestor of HEAD (for example after a rollback or
     restore to an earlier point), compact refuses the flatten and fails with
     instructions. Delete the tag with `CALL DOLT_TAG('-d', 'gc-compact-base')`
-    to set it again at HEAD. To set it at root instead, create
-    `.compact-full-history` before deleting the tag.
+    and the next run sets it again by the same first-sight rule: at HEAD, or
+    at root when the commit after root is a flatten commit or
+    `.compact-full-history` exists. Create that marker before deleting the tag
+    only if this city grew the whole history.
 
 ## Flags
 

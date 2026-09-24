@@ -133,6 +133,9 @@ func TestCompactScriptSharedHistoryGuardRetriesPendingGCLocally(t *testing.T) {
 	if _, err := os.Stat(compactStateMarkerPath(fixture, "compact-pending-push")); !os.IsNotExist(err) {
 		t.Fatalf("guarded pending-GC retry must not record a pending push: %v", err)
 	}
+	if !strings.Contains(out, "compacted_from_head=headcommit remote=origin — pre-flatten HEAD recorded before full GC") {
+		t.Fatalf("pre-flatten HEAD from the marker must be logged before the full GC:\n%s", out)
+	}
 	if !strings.Contains(out, "deferred push dropped by shared-history guard") ||
 		!strings.Contains(out, "remote=origin still holds the full shared history") {
 		t.Fatalf("dropped push must be reported with operator guidance:\n%s", out)
@@ -163,6 +166,50 @@ func TestCompactScriptSharedHistoryGuardHoldsPendingPush(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT force-pushing") || !strings.Contains(out, "GC_DOLT_COMPACT_ALLOW_FEDERATED=1") {
 		t.Fatalf("held marker must be reported with operator guidance:\n%s", out)
+	}
+	gcLog := readCompactGCLog(t, fixture)
+	if !strings.Contains(gcLog, "event emit dolt.compact.quarantine --actor controller --message db=beads type=compact-pending-push-held") {
+		t.Fatalf("held marker must emit a compactor event:\n%s", gcLog)
+	}
+	mails := compactGCLogLinesWithPrefix(gcLog, "gc mail send mayor --from controller -s dolt compact quarantine: beads compact-pending-push-held")
+	if len(mails) != 1 {
+		t.Fatalf("held marker must mail the alert recipient once, got %d:\n%s", len(mails), gcLog)
+	}
+
+	// A second cycle with the marker unchanged is deduplicated by the
+	// renotify cadence: event again, no second mail; marker still untouched.
+	resetCompactGCLog(t, fixture)
+	if out, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"); err != nil {
+		t.Fatalf("second cycle failed: %v\n%s", err, out)
+	}
+	gcLog = readCompactGCLog(t, fixture)
+	if n := len(compactGCLogLinesWithPrefix(gcLog, "gc mail send")); n != 0 {
+		t.Fatalf("unchanged held marker re-mailed inside the backstop window:\n%s", gcLog)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != markerData {
+		t.Fatalf("alert bookkeeping rewrote the held marker: %v\n%s", err, data)
+	}
+}
+
+// HEAD and root are resolved by ref and ancestry, never by commit date: a
+// clock-skewed adopted commit must not become the watermark (#5958 review).
+func TestCompactScriptWatermarkUsesRefHeadNotDateOrder(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	setCompactWatermark(t, fixture, "")
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if got := compactWatermark(t, fixture); got != "headcommit" {
+		t.Fatalf("gc-compact-base = %q, want the ref HEAD headcommit (not a date-ordered commit)\n%s", got, out)
+	}
+	log := readCompactDoltLog(t, fixture)
+	if strings.Contains(log, "ORDER BY date DESC LIMIT 1") || strings.Contains(log, "FROM dolt_log ORDER BY date ASC LIMIT 1") {
+		t.Fatalf("compact still resolves HEAD or root by commit date:\n%s", log)
+	}
+	if !strings.Contains(log, "SELECT HASHOF('HEAD')") || !strings.Contains(log, "WHERE a.parent_hash IS NULL") {
+		t.Fatalf("compact must resolve HEAD by ref and root by ancestry:\n%s", log)
 	}
 }
 

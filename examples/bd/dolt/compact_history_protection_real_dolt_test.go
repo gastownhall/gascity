@@ -77,7 +77,12 @@ func (c *historyProtectionCity) commits() int {
 }
 
 func (c *historyProtectionCity) head() string {
-	return c.cell("SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1")
+	return c.cell("SELECT HASHOF('HEAD')")
+}
+
+// rootCommit is the parentless commit reachable from HEAD (by ancestry, not date).
+func (c *historyProtectionCity) rootCommit() string {
+	return c.cell("SELECT l.commit_hash FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL")
 }
 
 func (c *historyProtectionCity) tag() string {
@@ -117,6 +122,13 @@ func (c *historyProtectionCity) compact(extraEnv ...string) string {
 // init + schema + n commits (n+2 commits in total).
 func seedTeamHistory(t *testing.T, doltPath, dir string, n int) {
 	t.Helper()
+	seedTeamHistoryWithDates(t, doltPath, dir, n, nil)
+}
+
+// seedTeamHistoryWithDates is seedTeamHistory with author dates overridden for
+// the given team commit numbers (clock skew on the machines that grew them).
+func seedTeamHistoryWithDates(t *testing.T, doltPath, dir string, n int, dates map[int]string) {
+	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
@@ -125,7 +137,11 @@ func seedTeamHistory(t *testing.T, doltPath, dir string, n int) {
 	runDoltForCompactTest(t, doltPath, dir, "commit", "-Am", "schema")
 	for i := 1; i <= n; i++ {
 		runDoltForCompactTest(t, doltPath, dir, "sql", "-q", fmt.Sprintf("INSERT INTO beads VALUES (%d, 'b%d');", i, i))
-		runDoltForCompactTest(t, doltPath, dir, "commit", "-Am", fmt.Sprintf("team commit %d", i))
+		args := []string{"commit", "-Am", fmt.Sprintf("team commit %d", i)}
+		if date, ok := dates[i]; ok {
+			args = append(args, "--date", date)
+		}
+		runDoltForCompactTest(t, doltPath, dir, args...)
 	}
 }
 
@@ -277,7 +293,7 @@ func TestCompactHistoryRealDoltPreviouslyCompactedDatabaseStillFullyFlattens(t *
 	c := newHistoryProtectionCity(t)
 	seedTeamHistory(t, c.dolt, c.dbDir(), 0)
 	c.start()
-	root := c.cell("SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1")
+	root := c.rootCommit()
 	c.addCommits(1, 5)
 	c.sql(fmt.Sprintf("CALL DOLT_RESET('--soft', '%s'); CALL DOLT_COMMIT('-Am', 'compaction: flatten history');", root))
 	c.addCommits(100, historyProtectionThreshold+10)
@@ -366,5 +382,62 @@ func TestCompactHistoryRealDoltRollbackBeforeWatermarkRefuses(t *testing.T) {
 	}
 	if c.commits() != wantCommits {
 		t.Fatalf("re-stamp run flattened history: commits=%d want %d", c.commits(), wantCommits)
+	}
+}
+
+// A clock-skewed adopted history (one commit dated in the future, one in the
+// past) must still be stamped at the real HEAD: date order is not ancestry.
+// Before the fix the future-dated commit was taken as "HEAD", the watermark
+// landed on it, and the adopted commits after it were flattened on the first
+// run (43 -> 9 with 40 adopted commits and threshold 20).
+func TestCompactHistoryRealDoltClockSkewedAdoptedHistoryStampsRealHead(t *testing.T) {
+	c := newHistoryProtectionCity(t)
+	seedTeamHistoryWithDates(t, c.dolt, c.dbDir(), 40, map[int]string{
+		6:  "2035-01-01T00:00:00",
+		30: "1999-01-01T00:00:00",
+	})
+	c.start()
+	realHead := c.head()
+
+	out := c.compact()
+	if tag := c.tag(); tag != realHead {
+		t.Fatalf("gc-compact-base = %q, want real HEAD %s\n%s", tag, realHead, out)
+	}
+	if got := c.commits(); got != 42 {
+		t.Fatalf("first run flattened adopted history: commits=%d\n%s", got, out)
+	}
+
+	c.addCommits(1000, historyProtectionThreshold+5)
+	c.compact()
+	if got := c.commits(); got != 43 {
+		t.Fatalf("commits = %d, want 43 (42 adopted + 1 flatten)", got)
+	}
+	if n := c.cell("SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'team commit %'"); n != "40" {
+		t.Fatalf("adopted commits in history = %s, want 40", n)
+	}
+}
+
+// A past-dated commit after a previous flatten must not be mistaken for root:
+// the compactor-owned fingerprint (root's child is a flatten commit) is found
+// by ancestry, so the database keeps full flattening.
+func TestCompactHistoryRealDoltPastDatedCommitDoesNotHideRoot(t *testing.T) {
+	c := newHistoryProtectionCity(t)
+	seedTeamHistory(t, c.dolt, c.dbDir(), 0)
+	c.start()
+	root := c.rootCommit()
+	c.addCommits(1, 5)
+	c.sql(fmt.Sprintf("CALL DOLT_RESET('--soft', '%s'); CALL DOLT_COMMIT('-Am', 'compaction: flatten history');", root))
+	c.sql("INSERT INTO beads VALUES (99, 'skewed'); CALL DOLT_COMMIT('-Am', 'skewed city commit', '--date', '1999-01-01T00:00:00');")
+	c.addCommits(100, historyProtectionThreshold+10)
+
+	out := c.compact()
+	if !strings.Contains(out, "set gc-compact-base="+root+": history already flattened by this compactor") {
+		t.Fatalf("previously compacted database was not stamped at the real root %s:\n%s", root, out)
+	}
+	if got := c.commits(); got != 2 {
+		t.Fatalf("commits = %d, want 2 (root + flatten)", got)
+	}
+	if rows := c.cell("SELECT COUNT(*) FROM beads"); rows != "36" {
+		t.Fatalf("rows = %s, want 36", rows)
 	}
 }

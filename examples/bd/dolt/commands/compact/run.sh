@@ -767,18 +767,25 @@ commit_count() {
     "SELECT COUNT(*) FROM (SELECT 1 FROM dolt_log LIMIT 200000) AS t"
 }
 
-# root_commit — earliest commit hash on the current branch.
+# root_commit — the parentless commit reachable from the current branch. Chosen
+# by ancestry, never by commit date: dates are author-supplied and can be
+# skewed (#5958), so the date-earliest commit need not be the root. With
+# several parentless ancestors (unrelated histories merged in), the
+# date-earliest of them is used; any of them is a valid soft-reset target
+# because each is an ancestor of HEAD.
 root_commit() {
   db="$1"
   query_single_cell "$db" "root commit probe failed" \
-    "SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1"
+    "SELECT l.commit_hash FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL ORDER BY l.date ASC LIMIT 1"
 }
 
-# head_commit — current branch HEAD hash before flattening.
+# head_commit — the current branch HEAD. Resolved by ref, never by commit date:
+# a future-dated commit (clock skew) would otherwise masquerade as HEAD and
+# misplace the gc-compact-base watermark and the HEAD-stability checks (#5958).
 head_commit() {
   db="$1"
   query_single_cell "$db" "HEAD commit probe failed" \
-    "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"
+    "SELECT HASHOF('HEAD')"
 }
 
 # user_tables — emit one user-table name per line (excludes dolt_*
@@ -2525,7 +2532,7 @@ resolve_compact_base() {
     if [ "$base_in_log" != "1" ]; then
       base_head=$(head_commit "$db" || true)
       base_delete_sql="CALL DOLT_TAG('-d', '$compact_base_tag')"
-      printf 'compact: db=%s REFUSING flatten: %s=%s is not an ancestor of HEAD=%s — the history was rolled back or restored to before the watermark, or the tag was moved; nothing was changed. Operator action: to protect the current history as-is, run %s in database %s and the next run re-stamps the tag at HEAD; if this history was grown entirely by this city, also touch %s first so it is re-stamped at root (see docs/troubleshooting/dolt-bloat-recovery.md "History protection")\n' \
+      printf 'compact: db=%s REFUSING flatten: %s=%s is not an ancestor of HEAD=%s — the history was rolled back or restored to before the watermark, or the tag was moved; nothing was changed. Operator action: run %s in database %s and the next run re-stamps the tag by the first-sight rule — at HEAD, protecting the current history as-is, unless the child of root is a compactor flatten commit or %s exists, in which case at root (touch that marker first only if this history was grown entirely by this city) (see docs/troubleshooting/dolt-bloat-recovery.md "History protection")\n' \
         "$db" "$compact_base_tag" "$base_tag" "${base_head:-<unknown>}" "$base_delete_sql" "$db" "$(compact_full_history_marker "$db")" >&2
       return 1
     fi
@@ -2598,6 +2605,31 @@ run_bare_gc() {
   return 0
 }
 
+# report_held_pending_push DB REMOTE
+#   Raise a pending-push marker held by the shared-history guard through the
+#   compactor alert path (event every run; mail gated by marker_should_notify
+#   and the renotify backstop). Bookkeeping lives in the notify-state sidecar,
+#   so the held marker itself is never rewritten.
+report_held_pending_push() {
+  held_db="$1"
+  held_remote="$2"
+  held_marker=$(compact_marker_path "$pending_push_dir" "$held_db")
+  held_created_at=$(compact_marker_value "$pending_push_dir" "$held_db" created_at || true)
+  held_reason="pending push to remote=$held_remote held by shared-history guard; reconcile manually or push during an announced window with GC_DOLT_COMPACT_ALLOW_FEDERATED=1"
+  emit_compact_quarantine_event "$held_db" "compact-pending-push-held" "$held_marker" "$held_reason" "${held_created_at:-<unknown>}"
+  if marker_should_notify "$pending_push_dir" "$held_db" "$held_reason" "$compact_renotify_backstop_secs"; then
+    quarantine_notify_error=""
+    if mail_compact_quarantine_alert "$held_db" "compact-pending-push-held" "$held_marker" "$held_reason" "${held_created_at:-<unknown>}"; then
+      record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 1
+    else
+      record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 0 "$quarantine_notify_error"
+    fi
+  else
+    record_marker_notify_state "$pending_push_dir" "$held_db" "$held_reason" 0
+  fi
+  return 0
+}
+
 # compact_shared_history_database handles a database the shared-history guard
 # protects: never flatten, never push. A pending-GC marker (an earlier run
 # already flattened locally) still gets its local DOLT_GC --full, with the
@@ -2612,6 +2644,11 @@ compact_shared_history_database() {
 
   if has_compact_marker "$pending_gc_dir" "$db"; then
     guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
+    guard_pending_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
+    # The marker is the operator's only record of the pre-flatten HEAD, and
+    # DOLT_GC --full below makes that commit unreachable; log it first.
+    printf 'compact: db=%s pending_gc marker=%s compacted_from_head=%s remote=%s — pre-flatten HEAD recorded before full GC\n' \
+      "$db" "$(compact_marker_path "$pending_gc_dir" "$db")" "${guard_pending_from_head:-<unknown>}" "${guard_pending_remote:-<none>}" >&2
     if [ -n "$dry_run" ]; then
       printf 'compact: db=%s pending_gc=present — dry-run (would retry DOLT_GC --full locally; deferred push dropped by shared-history guard)\n' "$db"
       return 0
@@ -2633,6 +2670,9 @@ compact_shared_history_database() {
     guard_pending_remote=$(compact_marker_value "$pending_push_dir" "$db" remote || true)
     printf 'compact: db=%s pending_push=present remote=%s — NOT force-pushing: the shared-history guard holds %s for operator review. Reconcile the flattened local history manually, or re-run with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 during an announced window to force-push it (see docs/troubleshooting/dolt-bloat-recovery.md "Databases with remotes")\n' \
       "$db" "${guard_pending_remote:-<unknown>}" "$(compact_marker_path "$pending_push_dir" "$db")" >&2
+    if [ -z "$dry_run" ]; then
+      report_held_pending_push "$db" "${guard_pending_remote:-<unknown>}"
+    fi
   fi
 
   if [ -n "$dry_run" ]; then

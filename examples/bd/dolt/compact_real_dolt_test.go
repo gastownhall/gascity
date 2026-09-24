@@ -177,7 +177,7 @@ func doltHeadForCompactTest(t *testing.T, doltPath, dir string) string {
 
 func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) string {
 	t.Helper()
-	rows := doltServerQueryForCompactTest(t, doltPath, port, "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1")
+	rows := doltServerQueryForCompactTest(t, doltPath, port, "SELECT HASHOF('HEAD')")
 	if len(rows) == 0 || strings.TrimSpace(rows[0]) == "" {
 		t.Fatalf("unexpected server HEAD output: %q", rows)
 	}

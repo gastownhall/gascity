@@ -179,13 +179,26 @@ do not bypass this guard.
 
 Markers left by runs from before this guard existed:
 
-- **`compact-pending-gc/<database>`**: the local full GC still runs. The
-  deferred push is dropped, and the log warns that the remote still holds the
-  full history. `gc dolt sync` then reports the database as diverged until you
-  reconcile it. Either re-clone from the remote, or push the flattened history
-  during an announced window (see below).
-- **`compact-pending-push/<database>`**: the marker is held untouched and the
-  log explains why. Nothing is force-pushed.
+- **`compact-pending-gc/<database>`**: the local full GC still runs. Before
+  it runs, the log records the marker's `compacted_from_head`, which is the
+  HEAD from before the flatten. The deferred push is dropped, and the log
+  warns that the remote still holds the full history. `gc dolt sync` then
+  reports the database as diverged until you reconcile it. Either re-clone
+  from the remote, or push the flattened history during an announced window
+  (see below).
+- **`compact-pending-push/<database>`**: the marker is held untouched, and
+  nothing is force-pushed. Compact reports it on stderr, emits a
+  `dolt.compact.quarantine` event of type `compact-pending-push-held`, and
+  mails the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
+  `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
+  it the same way as a pending-GC marker.
+
+> **Warning:** re-cloning from the remote discards every commit made to the
+> local database since the flatten. Those writes exist only locally. Before
+> you re-clone, take a copy of `.dolt`. Then export the local changes with
+> `dolt diff <flatten-commit> HEAD`, where `<flatten-commit>` is the latest
+> `compaction: flatten history` commit, and re-apply them after the re-clone.
+> The `compacted_from_head` commit itself is gone after the full GC.
 
 To flatten a database that has a remote, first announce a compaction window to
 every clone of that history. Then run:
@@ -236,8 +249,9 @@ database and fails the run until you act:
 compact: db=<database> REFUSING flatten: gc-compact-base=<hash> is not an ancestor of HEAD=<hash> ...
 ```
 
-- To keep the current history as it is, delete the tag. The next run sets it
-  again at HEAD:
+- Delete the tag. The next run sets it again by the first-sight rule: at HEAD
+  (keeping the current history as it is), or at root if the commit after root
+  is a flatten commit or `.compact-full-history` exists:
 
   ```bash
   gc dolt sql -q "USE <database>; CALL DOLT_TAG('-d', 'gc-compact-base')"

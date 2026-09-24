@@ -574,6 +574,18 @@ set_hash() {
   printf '%%s\n' "$1" > "$hash_state_file"
 }
 case "$query" in
+  *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)
+    # Legacy date-ordered "HEAD" probe. A future-dated (clock-skewed) commit
+    # sorts first, so this is NOT the branch HEAD; compact must resolve HEAD
+    # with HASHOF('HEAD') instead (#5958).
+    print_cell futuredatedcommit
+    exit 0
+    ;;
+  *"FROM dolt_log ORDER BY date ASC LIMIT 1"*)
+    # Legacy date-ordered "root" probe; a past-dated commit sorts first.
+    print_cell pastdatedcommit
+    exit 0
+    ;;
   *"FROM dolt_tags WHERE tag_name = 'gc-compact-base'"*)
     if [ "$mode" = "watermark_tag_probe_failure" ]; then
       printf 'dolt_tags unavailable\n' >&2
@@ -601,7 +613,8 @@ case "$query" in
     fi
     exit 0
     ;;
-  *"dolt_commit_ancestors"*)
+  *"dolt_commit_ancestors"*"WHERE a.parent_hash = '"*)
+    # Flatten-provenance probe: is root's child a compactor flatten commit?
     case "$mode" in
       watermark_owned_history)
         print_cell 1
@@ -827,7 +840,7 @@ case "$query" in
     fi
     exit 0
     ;;
-  *"SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1"*)
+  *"SELECT HASHOF('HEAD')"*)
     if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
       calls_file="$state_file.$db-head-calls"
       calls=0
@@ -917,7 +930,7 @@ case "$query" in
     print_cell "$(current_head)"
     exit 0
     ;;
-  *"SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1"*)
+  *"FROM dolt_log l JOIN dolt_commit_ancestors a ON a.commit_hash = l.commit_hash WHERE a.parent_hash IS NULL"*)
     if [ "$mode" = "root_commit_failure" ]; then
       printf 'root commit exploded\n' >&2
       exit 46
