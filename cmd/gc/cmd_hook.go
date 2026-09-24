@@ -831,11 +831,14 @@ func hookSessionAgentForQuery() string {
 //
 // An unaliased pool spawn has no occupant name in the environment except its
 // session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS, and the
-// slot-derived runtime session name (GC_SESSION_NAME) is a CHAIR: it is stable
-// across every session that ever occupies the slot, by design
-// (poolRuntimeSessionName — a bead-ID-scoped runtime name leaked one sandbox per
-// failed start, ga-vcjr9). Recording a claim under it makes every "is the holder
-// still alive?" consumer answer about the chair, so a dead occupant's in_progress
+// runtime session name (GC_SESSION_NAME) is only a name for the runtime. Where
+// that name is identity-derived — tmux_alias pools, and unaliased rows minted by
+// pre-v1.5.0 builds (poolRuntimeSessionName) — it is a CHAIR: it is stable
+// across every session that ever occupies the slot. Unaliased pools are
+// bead-scoped again (PoolSessionName, <template>-<beadID>), but the bead id
+// stays the canonical claim identity. Recording a claim under a chair name
+// makes every "is the holder still alive?" consumer answer about the chair, so
+// a dead occupant's in_progress
 // bead reads as held by whoever sits there next and is never released, resumed,
 // or replaced. On maintainer-city one such label was the session_name of 24
 // distinct session beads, and the worst of them 66. The runtime projection
