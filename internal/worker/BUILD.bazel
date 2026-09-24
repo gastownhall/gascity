@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "worker",
     srcs = [
+        "activity_memo.go",
         "catalog.go",
         "factory.go",
         "factory_resolved.go",
@@ -23,6 +24,7 @@ go_library(
         "structured_tool.go",
         "structured_tool_error.go",
         "structured_wire.go",
+        "subagent_guard.go",
         "transcript_boundary.go",
         "transcriptmeta_reconcile.go",
         "types.go",
@@ -52,9 +54,12 @@ go_library(
 go_test(
     name = "worker_test",
     srcs = [
+        "activity_memo_test.go",
         "factory_resolved_test.go",
         "factory_test.go",
         "handle_clone_test.go",
+        "handle_history_provider_test.go",
+        "handle_stop_intent_test.go",
         "handle_test.go",
         "handle_transcriptmeta_test.go",
         "invocation_telemetry_label_test.go",
@@ -73,8 +78,17 @@ go_test(
         "start_command_equiv_test.go",
         "structured_tool_test.go",
         "structured_wire_test.go",
+        "subagent_guard_adapter_test.go",
+        "subagent_guard_test.go",
         "testenv_import_test.go",
         "transcriptmeta_reconcile_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//internal/worker/workertest:testdata",
     ],
     embed = [":worker"],
     deps = [
@@ -95,4 +109,21 @@ go_test(
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],
+)
+
+exports_files(
+    ["operation_events.go"],
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

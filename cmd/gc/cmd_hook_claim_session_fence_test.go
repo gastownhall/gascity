@@ -288,6 +288,45 @@ func TestHookCommandClaimAbsentSessionBeadDrainsStale(t *testing.T) {
 	}
 }
 
+// TestHookClaimSessionFenceReusesLoadedConfig pins the claim fence's session-store
+// open to the config `gc hook` already loaded (cmd_hook.go's loadCityConfig, whose
+// cfg it threads into classifyHookClaimSession): handed that cfg, the open must not
+// re-parse city.toml and every pack include.
+//
+// This is the fourth and hottest of the one-shot sites the config threading
+// converted — the fence runs on the startup path of every routed worker — and it
+// was the only one without a load-count pin, so reverting its open to
+// openCityStoreAt left the whole suite green. The three siblings are pinned by
+// TestReadyLoadsCityConfigOnce, TestDrainAckReleaseLoadsCityConfigOnce, and
+// TestSessionCloseRigLegsReuseLoadedConfig; this is the same shape for the fence.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestHookClaimSessionFenceReusesLoadedConfig(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	verdict, reason := classifyHookClaimSession(cityDir, cfg, sessionID, "live-token")
+	grew := loadCityConfigCalls.Load() - before
+
+	// Assert the verdict first: a fence whose store open failed would also add no
+	// loads, so the zero-load assertion is only meaningful once we know the open
+	// succeeded and the session bead was actually read.
+	if verdict != hookClaimSessionEligible {
+		t.Fatalf("classifyHookClaimSession = %v (%s), want eligible: the load-count assertion below only means something if the fence actually opened the store and read the session bead", verdict, reason)
+	}
+	if grew != 0 {
+		t.Fatalf("the gc hook --claim fence loaded the city config %d times despite a supplied config, want 0: its session-store open must reuse the config the command already loaded", grew)
+	}
+}
+
 // TestHookCommandClaimFailsOpenOnSessionStoreError proves a GENUINE session-store
 // fault — here a corrupt/unreadable store file, so the fence's store open itself
 // fails — is NOT mislabeled as a stale session: the fence fails open and lets the

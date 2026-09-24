@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 694
-baseline_files = 198
+baseline_calls = 701
+baseline_files = 202
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +23,8 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 482
-baseline_files = 174
+baseline_calls = 488
+baseline_files = 177
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 470
-baseline_files = 132
+baseline_calls = 473
+baseline_files = 134
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,8 +64,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 317
-baseline_files = 120
+baseline_calls = 318
+baseline_files = 121
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -421,8 +421,8 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 451
-baseline_files = 125
+baseline_calls = 454
+baseline_files = 127
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -434,8 +434,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 317
-baseline_files = 120
+baseline_calls = 318
+baseline_files = 121
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"

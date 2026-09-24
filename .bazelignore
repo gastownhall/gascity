@@ -2,7 +2,4 @@
 .worktrees
 ga-
 bin
-docs
-engdocs
 frontend
-contrib

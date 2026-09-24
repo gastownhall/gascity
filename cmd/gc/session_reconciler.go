@@ -469,6 +469,11 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 	// one test poke a later test's swapped-in counter. Capturing the value here
 	// confines each goroutine to the seam that was live when its stop was queued.
 	poke := drainAckAsyncStopPokeController
+	// Same treatment, same reason, for the confirm-dead bounds: they are mutable
+	// package-global test seams read inside the detached goroutine, so a test that
+	// restores them while a queued stop is still looping is a data race, and a
+	// goroutine outliving its test would otherwise adopt the next test's bounds.
+	confirmTimeout, confirmPoll := drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -501,7 +506,7 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// (the reassigned next step stays runtime-missing). The expected token is
 		// threaded through so each re-kill stays fenced against a re-woken
 		// same-name replacement. Mirrors #4089's confirm-dead contract.
-		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr)
+		confirmDrainAckRuntimeDead(cityPath, store, sp, cfg, name, expectedToken, processNames, stderr, confirmTimeout, confirmPoll)
 		// The runtime session is now confirmed dead (or the confirm-dead
 		// deadline passed and we proceed best-effort), but its pool session
 		// bead stays open (occupying the pool slot) until
@@ -529,8 +534,12 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 // when a definite token mismatch shows the name now belongs to a replacement —
 // and false if it outlived the deadline (caller proceeds best-effort). Mirrors
 // #4089's confirm-dead contract.
-func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer) bool {
-	deadline := time.Now().Add(drainAckStopConfirmDeadTimeout)
+//
+// timeout/poll are passed in rather than read from the package globals so a
+// detached caller can bind them on its own goroutine at queue time; see
+// queueDrainAckAsyncStop. Synchronous callers pass the globals directly.
+func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, name, expectedToken string, processNames []string, stderr io.Writer, timeout, poll time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for {
 		running, alive, livenessErr := observeRuntimeProviderLiveness(sp, name, processNames)
 		if livenessErr != nil {
@@ -562,7 +571,7 @@ func confirmDrainAckRuntimeDead(cityPath string, store beads.Store, sp runtime.P
 		if err := workerKillSessionTargetWithConfig(cityPath, store, sp, cfg, name); err != nil && !runtime.IsSessionGone(err) {
 			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s re-kill: %v\n", name, err) //nolint:errcheck
 		}
-		time.Sleep(drainAckStopConfirmDeadPoll)
+		time.Sleep(poll)
 	}
 }
 
@@ -998,7 +1007,16 @@ func finalizeDrainAckStopPendingSessions(
 			// killing the pane. Ask the agent to acknowledge and leave.
 			// See drain_reminder.go.
 			remindStopPendingDrain(sp, store, info, clk, stderr)
-			queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			// The reminder is informational and cannot end the loop by itself.
+			// Once the row's bound has elapsed, escalate: record the attempt, raise
+			// a counted event, and queue a FORCEFUL termination off-tick — the
+			// ordinary stop is what has already failed on this row every tick.
+			// Nothing is closed here; a later tick's own liveness observation owns
+			// that. Every gate fails closed, so a false return leaves the historical
+			// behavior untouched. See drain_ack_escalation.go.
+			if !escalateWedgedDrainAckStopPending(cityPath, cfg, sp, store, rigStores, info, name, processNames, asyncStopTracker, clk, rec, stderr) {
+				queueDrainAckAsyncStop(cityPath, store, sp, cfg, info.ID, name, info.InstanceToken, processNames, asyncStopTracker, stderr)
+			}
 			continue
 		}
 		// Pool-managed stop-pending beads close here instead of staying open as
@@ -1890,6 +1908,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			continue
 		}
 
+		// Bound a pool slot stuck in drain (ga-rxhu2). Runs AFTER the drain-ack
+		// stop-pending handler above, which owns the state=draining population
+		// outright and continues before this point. What reaches here is the
+		// population that handler leaves behind: a seat that drain-acked into
+		// state=drained and then never closed, plus the asleep/awake shapes the
+		// state heal decays it into. Such a drain has no exit of its own — the
+		// bead stays open, an open bead owns its session_name, and a pool slot
+		// cannot route around its own name, so the template falls to zero seats
+		// until someone kills the pane by hand. See
+		// retirePoolSlotAtDrainDeadline for the gates.
+		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, rigStores, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, stderr); retired {
+			tick.apply(id, fold)
+			tick.markClosed(id)
+			if shadowTick != nil {
+				shadowTick.markSkip(id, skipEarlyContinue)
+			}
+			continue
+		}
+
 		// Skip beads with unrecognized states. This enables forward-compatible
 		// rollback: if a newer version writes "draining" or "archived", the
 		// older reconciler ignores those beads rather than crashing. The skip is
@@ -2695,6 +2732,31 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							})
 						}
 						continue
+					}
+					if alive && reconcilerOwnedAck && ackReason == idleRespawnDrainReason {
+						unsafe, unsafeReason, unsafeErr := idleRespawnAckUnsafeToStop(
+							cityPath, cfg, store, rigStores, infoByID[id], sp, dt, name,
+						)
+						if unsafe {
+							if unsafeErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: canceling idle-respawn stop for %s after revalidation failure: %v\n", name, unsafeErr) //nolint:errcheck
+							}
+							_ = clearReconcilerDrainAckMetadata(sp, name)
+							_ = dops.clearDrain(name)
+							if dt != nil {
+								dt.clearIdleProbe(id)
+								dt.remove(id)
+							}
+							telemetry.RecordDrainTransition(context.Background(), name, ackReason, "cancel")
+							if trace != nil {
+								fields := traceRecordPayload{"revalidation_reason": unsafeReason}
+								if unsafeErr != nil {
+									fields["error"] = unsafeErr.Error()
+								}
+								trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonCode(ackReason), TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, fields)
+							}
+							continue
+						}
 					}
 					if reconcilerOwnedAck && assignedWorkDrainReasonCancelable(ackReason) {
 						hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, infoByID[id])
@@ -3916,7 +3978,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		wakeEvals[target.info.ID] = eval
 	}
 
-	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID)
+	idleProbeTargets := selectIdleProbeTargets(wakeTargets, wakeEvals, dt, infoByID, clk.Now())
 	for _, target := range wakeTargets {
 		if _, deferred := runtimeObservationErrors[infoByID[target.info.ID].SessionNameMetadata]; deferred {
 			delete(idleProbeTargets, target.info.ID)
@@ -4132,25 +4194,84 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// See #1893 (controller: alive on_demand session ignores
 			// bd update --assignee).
 			if decision.RequiresFreshCycle && info.WakeMode == "fresh" {
-				if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
-					if fold != nil {
-						tick.apply(target.info.ID, fold)
+				claimed, claimErr := sessionFrontDoor(store).CurrentClaimBeadID(target.info.ID)
+				selfClaimed := claimErr == nil && claimed != "" && claimed == decision.AssignedWorkBeadID
+				if !selfClaimed {
+					// A stale currently_processing_bead_id pointer must not force
+					// a cycle when the previous bead is still open (defer to a
+					// later tick) or when this incarnation's awake_started_at is
+					// already after the previous bead's closed_at (already fresh —
+					// the stamp below just hasn't caught up yet). Fail toward the
+					// pre-existing cycle behavior on any lookup or parse error.
+					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
+						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(store, prev)
+						if err == nil && prevOpen {
+							continue
+						}
+						if err == nil && !prevOpen {
+							if awakeStart, perr := time.Parse(time.RFC3339Nano, info.AwakeStartedAt); perr == nil &&
+								!prevClosedAt.IsZero() && awakeStart.After(prevClosedAt) {
+								continue
+							}
+						}
 					}
-					continue
+					if ran, fold := cycleAliveSessionForFreshReassign(infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
+						if fold != nil {
+							tick.apply(target.info.ID, fold)
+						}
+						continue
+					}
 				}
+				// selfClaimed: the session already claimed this bead itself
+				// (gc hook --claim) before this tick caught up. No cycle and no
+				// separate stamp here — fall through to the
+				// recordCurrentBeadIDOnWake backstop below, which re-stamps
+				// currently_processing_bead_id to match.
 			}
-			// Stamp currently_processing_bead_id so the next divergence
-			// check has a baseline. Backfills legacy sessions that were
-			// already alive before this metadata existed and refreshes the
-			// record after the agent picks up its next bead in resume mode.
+			// Stamp currently_processing_bead_id so the next divergence check has
+			// a baseline. Backfills legacy sessions that were already alive before
+			// this metadata existed and refreshes the record after the agent
+			// picks up its next bead in resume mode. Unconditional on
+			// idleAssignedWorkOnly: a resume-mode session reassigned while alive
+			// and idle-assigned-work-only would otherwise never refresh this
+			// record, so a later crash-recovery restart could re-anchor on a
+			// stale sibling bead instead of the session's actual current
+			// assignment (Finding 4/#3835 review). Idempotent —
+			// recordCurrentBeadIDOnWake no-ops when the bead ID is unchanged.
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
 			}
-			// Session is correctly awake. Cancel any non-drift drain
-			// (handles scale-back-up: agent returns to desired set while draining).
-			cancelSessionDrainInfo(info, sp, dt)
-			clearCompletedIdleProbe(target.info.ID, dt)
+			beganIdleRespawn, idleRespawnFold, observationErr := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, sessFront, clk)
+			tick.apply(target.info.ID, idleRespawnFold)
+			if observationErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: deferring idle-respawn drain for %s after activity observation failure: %v\n", name, observationErr) //nolint:errcheck
+			}
+			if beganIdleRespawn {
+				// Idle session awake only for assigned work: drained to asleep
+				// (open bead) so resume-on-ready re-spawns it fresh to run its
+				// own ready bead. No nudge, no cancel.
+				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, idleRespawnDrainReason) //nolint:errcheck
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, nil)
+				}
+			} else if !idleAssignedWorkOnly(eval) {
+				// Session is correctly awake. Cancel any non-drift drain
+				// (handles scale-back-up: agent returns to desired set while draining).
+				// Assigned-work-only sessions are intentionally skipped here so
+				// their idle probe can run to completion (sleep-and-respawn).
+				cancelSessionDrainInfo(info, sp, dt)
+				clearCompletedIdleProbe(target.info.ID, dt)
+			}
 			if info.SleepIntent == "idle-stop-pending" {
+				// Clear unconditionally on any re-wake, including
+				// assigned-work-only sessions that skip the cancel/clear above so
+				// their idle-respawn drain/probe can run to completion: the
+				// session did new work between the mark and now, so a future
+				// idle decision must re-prove idleness via
+				// shouldBeginIdleDrainInfo rather than bypass it on this stale
+				// authorization (Finding 2/#3835 review — an unhoisted clear let
+				// reason=="idle" fall through to beginSessionDrainInfo on
+				// authorization set before the work ran).
 				// OPTIMISTIC fold (origin/main parity): main cleared sleep_intent with an
 				// error-ignored write and folded the clear UNCONDITIONALLY (tick.apply),
 				// so the local fold must survive a failed write here too. This runs on an
@@ -4503,6 +4624,45 @@ func sessionHasInProgressAssignedWorkForConfig(cityPath string, cfg *config.City
 	return sessionHasAssignedWorkInStoresForStatuses(cityPath, cfg, store, rigStores, sessionAssignmentIdentifiersForConfigInfo(info, cfg), []string{"in_progress"})
 }
 
+// idleRespawnAckUnsafeToStop revalidates the two facts that can change after
+// an idle-respawn acknowledgement was published: the worker may have claimed
+// its assigned bead, or it may have resumed runtime activity. A missing
+// in-memory drain record means the controller cannot establish the activity
+// boundary that licensed the acknowledgement, so recovery fails closed.
+func idleRespawnAckUnsafeToStop(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+	sp runtime.Provider,
+	dt *drainTracker,
+	name string,
+) (bool, string, error) {
+	holdsClaim, err := sessionHasInProgressAssignedWorkForConfig(cityPath, cfg, store, rigStores, info)
+	if err != nil {
+		return true, "claim-observation-error", err
+	}
+	if holdsClaim {
+		return true, "claimed-work", nil
+	}
+	if dt == nil {
+		return true, "missing-drain-state", nil
+	}
+	ds := dt.get(info.ID)
+	if ds == nil || ds.reason != idleRespawnDrainReason {
+		return true, "missing-drain-state", nil
+	}
+	lastActivity, err := workerSessionTargetLastActivityWithConfig(cityPath, store, sp, cfg, name)
+	if err != nil {
+		return true, "activity-observation-error", err
+	}
+	if lastActivity.After(ds.startedAt) {
+		return true, "activity-resumed", nil
+	}
+	return false, "", nil
+}
+
 // sessionHasOpenAssignedWorkForReachableStore reports whether any open or
 // in-progress work bead is assigned to the given session in the store its
 // configured agent can query and claim from.
@@ -4580,6 +4740,22 @@ func assignedWorkExistsForSession(
 // own drain step — only the drain-ack close decision should. Use this function
 // (and closeSessionBeadIfReachableStoreUnassigned's excludeOwnDrainStep=true form)
 // ONLY from the drain-ack finalize path.
+// The identifier set here stays NARROW ({ID, session_name,
+// configured_named_identity}) deliberately. Widening it to every alias looks
+// attractive — an alias-form claim landing between a drain-ack kill and this
+// close would be stranded in_progress under a dead owner — but it collides with
+// a stronger invariant: a transient pool SLOT alias
+// ("gascity/gc.run-operator-1") is a REBINDING name, not an owner, and
+// TestAssignmentGuardsIgnoreTransientPoolSlotAliases pins that no guard may
+// honor one. Honoring slot-form ownership would let a rebind shield or inherit a
+// dead session's claim (#4981/#5241), which is the worse ambiguity. The upstream
+// fix unaliases transient slots so real claims arrive in session-name form,
+// which this set already sees.
+//
+// The escalation's KILL gate uses the wide set instead
+// (drainAckAssigneeIdentities): over-refusing a kill merely leaves a row wedged,
+// which is the safe direction, whereas under-refusing one ends a live agent's
+// turn.
 func sessionHasOpenAssignedWorkForReachableStoreForCloseGate(
 	cityPath string,
 	cfg *config.City,
@@ -6188,11 +6364,102 @@ func shouldBeginIdleDrainInfo(
 	return lastActivity.IsZero() || !lastActivity.After(probe.completedAt), nil
 }
 
+// idleRespawnDrainReason marks a drain begun on an idle session that is awake
+// only because it owns ready assigned work. The session sleeps (its bead stays
+// open, never closed) so resume-on-ready re-spawns it fresh to run that work.
+// The reason is non-cancelable (drainReasonCancelable) so the persistent
+// assigned-work demand cannot undo the drain before the session sleeps.
+const (
+	idleRespawnDrainReason         = "idle-respawn"
+	maxIdleRespawnAttemptsPerBead  = 1
+	idleRespawnAttemptsMetadataKey = "idle_respawn_attempts"
+	idleRespawnBeadIDMetadataKey   = "idle_respawn_bead_id"
+)
+
+// idleAssignedWorkOnly reports whether a session's sole reason to be awake is
+// owning assigned work — the case eligible to sleep-and-respawn rather than
+// stay pinned awake-but-idle.
+func idleAssignedWorkOnly(eval wakeEvaluation) bool {
+	return eval.Reason == "assigned-work" && len(eval.Reasons) == 1 && containsWakeReason(eval.Reasons, WakeWork)
+}
+
+// idleRespawnEligible applies the non-negotiable safety gates before an idle
+// probe can recycle a session. Only ready open work qualifies: a live claim
+// holder may be waiting on a background tool or subagent even when its prompt
+// looks idle. The same configured duration used by ordinary idle sleep must
+// also have elapsed.
+func idleRespawnEligible(info sessionpkg.Info, eval wakeEvaluation, now time.Time) bool {
+	if !idleAssignedWorkOnly(eval) || eval.AssignedWorkClaimed || strings.TrimSpace(eval.AssignedWorkBeadID) == "" || eval.Policy.Duration <= 0 {
+		return false
+	}
+	idleSince, err := time.Parse(time.RFC3339, strings.TrimSpace(info.DetachedAt))
+	return err == nil && !idleSince.IsZero() && now.Sub(idleSince) >= eval.Policy.Duration
+}
+
+func idleRespawnAttemptAvailable(info sessionpkg.Info, assignedBeadID string) bool {
+	if strings.TrimSpace(info.IdleRespawnBeadID) != strings.TrimSpace(assignedBeadID) {
+		return true
+	}
+	attempts, err := strconv.Atoi(info.IdleRespawnAttempts)
+	return err != nil || attempts < maxIdleRespawnAttemptsPerBead
+}
+
+// beginIdleRespawnDrainIfIdle drains an alive session that is awake only for
+// assigned work to asleep when a completed idle probe proves its agent idle, so
+// resume-on-ready can re-spawn it fresh. It returns true when a drain was begun.
+// The gate consumes the completed idle probe (shouldBeginIdleDrainInfo clears it
+// after reading it), but once the drain is begun it is deliberately never
+// canceled on the wake path for these sessions — that cancel is what previously
+// pinned them awake-but-idle.
+func beginIdleRespawnDrainIfIdle(
+	info sessionpkg.Info,
+	eval wakeEvaluation,
+	dt *drainTracker,
+	sp runtime.Provider,
+	sessFront *sessionpkg.Store,
+	clk clock.Clock,
+) (bool, sessionpkg.MetadataPatch, error) {
+	if !idleRespawnEligible(info, eval, clk.Now()) {
+		return false, nil, nil
+	}
+	// Restrict to pool sessions on the interactive-resume sleep path. Named
+	// sessions are materialized by the named-session loop, not pool respawn, and
+	// non-interactive sessions do not re-spawn from a fresh prompt (and
+	// shouldBeginIdleDrainInfo short-circuits true for them without a probe). Both
+	// keep their existing "stay awake with assigned work" behavior.
+	if isNamedSessionInfo(info) || eval.Policy.Class == config.SessionSleepNonInteractive {
+		return false, nil, nil
+	}
+	if !idleRespawnAttemptAvailable(info, eval.AssignedWorkBeadID) {
+		dt.clearIdleProbe(info.ID)
+		return false, nil, nil
+	}
+	shouldBegin, err := shouldBeginIdleDrainInfo(info, eval, dt, sp)
+	if err != nil {
+		return false, nil, err
+	}
+	if !shouldBegin {
+		return false, nil, nil
+	}
+	patch := sessionpkg.MetadataPatch{
+		idleRespawnAttemptsMetadataKey: "1",
+		idleRespawnBeadIDMetadataKey:   strings.TrimSpace(eval.AssignedWorkBeadID),
+	}
+	if sessFront == nil {
+		return false, nil, errors.New("session store is unavailable")
+	}
+	if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
+		return false, nil, fmt.Errorf("record idle-respawn attempt: %w", err)
+	}
+	return beginSessionDrainInfo(info, sp, dt, idleRespawnDrainReason, clk, defaultDrainTimeout), patch, nil
+}
+
 func selectIdleProbeTargets(
 	wakeTargets []wakeTarget,
 	wakeEvals map[string]wakeEvaluation,
 	dt *drainTracker,
 	infoByID map[string]sessionpkg.Info,
+	now time.Time,
 ) map[string]bool {
 	targets := make(map[string]bool)
 	if dt == nil {
@@ -6227,10 +6494,32 @@ func selectIdleProbeTargets(
 			continue
 		}
 		eval, ok := wakeEvals[target.info.ID]
-		if !ok || len(eval.Reasons) > 0 || !eval.ConfigSuppressed || !eval.Policy.enabled() {
+		if !ok || !eval.Policy.enabled() {
+			continue
+		}
+		// Probe a session that is either idle with no wake demand (the original
+		// case) OR awake solely for assigned work. The latter must be probed so
+		// an idle assigned-work session can sleep-and-respawn (resume-on-ready)
+		// instead of staying pinned awake-but-idle.
+		if (len(eval.Reasons) != 0 || !eval.ConfigSuppressed) && !idleAssignedWorkOnly(eval) {
+			continue
+		}
+		// Named sessions awake solely for assigned work are materialized by the
+		// named-session loop, not pool respawn: beginIdleRespawnDrainIfIdle
+		// refuses to drain them (mirrors this guard exactly). A probe started
+		// for that case is never consumed by any clear site, so the
+		// dt.idleProbes[id] != nil guard above would then block every future
+		// probe for this session ID permanently. Named sessions idle with no
+		// wake demand at all (eval.Reasons empty) are unaffected — they still
+		// need probing for their own ordinary "idle"-reason drain path.
+		if idleAssignedWorkOnly(eval) && isNamedSessionInfo(infoByID[target.info.ID]) {
 			continue
 		}
 		if eval.Policy.Class == config.SessionSleepNonInteractive {
+			continue
+		}
+		if idleAssignedWorkOnly(eval) && (!idleRespawnEligible(infoByID[target.info.ID], eval, now) ||
+			!idleRespawnAttemptAvailable(infoByID[target.info.ID], eval.AssignedWorkBeadID)) {
 			continue
 		}
 		candidates = append(candidates, target.info.ID)

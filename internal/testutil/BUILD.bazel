@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library")
 go_library(
     name = "testutil",
     srcs = [
+        "failure_artifacts.go",
         "git.go",
         "path.go",
         "timeout.go",
@@ -10,4 +11,16 @@ go_library(
     importpath = "github.com/gastownhall/gascity/internal/testutil",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/pathutil"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

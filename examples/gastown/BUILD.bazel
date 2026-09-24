@@ -14,9 +14,21 @@ go_test(
         "testenv_import_test.go",
         "tmux_theme_script_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
         "//internal/builtinpacks",
+        "//internal/config",
         "//internal/formula",
         "//internal/fsys",
         "//internal/molecule",
@@ -27,4 +39,30 @@ go_test(
         "@com_github_burntsushi_toml//:toml",
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
     ],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

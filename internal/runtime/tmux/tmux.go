@@ -3479,9 +3479,19 @@ func (t *Tmux) SelectWindow(session string, index int) error {
 }
 
 // SetEnvironment sets an environment variable in the session.
+//
+// A value that is not argv-safe (see [runtime.ArgvSafeEnvKey]) is set through
+// a private command file rather than as a `set-environment` argument, for the
+// same reason new-session stages its secret env: tmux client argv is
+// world-readable via /proc/<pid>/cmdline. The resulting session environment is
+// identical either way.
 func (t *Tmux) SetEnvironment(session, key, value string) error {
-	_, err := t.run("set-environment", "-t", session, key, value)
-	return err
+	args := []string{"set-environment", "-t", session, key, value}
+	if !runtime.ArgvSecretEnvValue(key, value) {
+		_, err := t.run(args...)
+		return err
+	}
+	return t.runFromCommandFile(args)
 }
 
 // RemoveEnvironment removes an environment variable from the session.

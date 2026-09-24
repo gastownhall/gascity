@@ -10,7 +10,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/webhookmatch",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/orders"],
+    deps = [
+        "//internal/config",
+        "//internal/orders",
+    ],
 )
 
 go_test(
@@ -22,5 +25,20 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":webhookmatch"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

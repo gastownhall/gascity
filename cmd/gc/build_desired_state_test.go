@@ -136,6 +136,20 @@ func (s *readyQueryRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 	return s.MemStore.Ready(query...)
 }
 
+// listCallCountingStore counts calls made through List so a test can assert
+// a lookup's store-read cost stays flat against an unrelated input's size
+// (e.g. the number of configured named sessions), rather than growing one
+// read per item (ga-0t7qjl).
+type listCallCountingStore struct {
+	*beads.MemStore
+	listCalls int
+}
+
+func (s *listCallCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
+}
+
 type blockingPoolCreateStore struct {
 	*beads.MemStore
 	alias               string
@@ -2451,6 +2465,77 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
 	}
+}
+
+// TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount
+// pins ga-0t7qjl: readyAssignedWorkAssignees looked up each on_demand named
+// session's closed-bead phantom one identity at a time
+// (findClosedNamedSessionBead -> one store.List per identity), so its store
+// cost scaled linearly with the number of configured named sessions — 109
+// serial calls, +155s, on this city. A batched lookup must cost the same
+// small constant number of store reads regardless of how many named
+// sessions are configured.
+func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t *testing.T) {
+	newCityWithNamedSessions := func(n int) *config.City {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		for i := 0; i < n; i++ {
+			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+				Dir:      fmt.Sprintf("repo-%d", i),
+				Template: "named-worker",
+				Mode:     "on_demand",
+			})
+		}
+		return cfg
+	}
+
+	countListCalls := func(n int) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil)
+		return store.listCalls
+	}
+
+	small := countListCalls(2)
+	large := countListCalls(200)
+
+	if small != large {
+		t.Fatalf("store.List call count scales with named-session count: 2 sessions -> %d calls, 200 sessions -> %d calls; want equal (one batched lookup regardless of session count)", small, large)
+	}
+	if large > 2 {
+		t.Fatalf("store.List called %d times for 200 named sessions; want a small constant via one batched lookup, not one call per named session", large)
+	}
+}
+
+// TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession
+// pins ga-bequ8d: the closed-session index is built only when at least one
+// on_demand named session exists, so a city with none pays zero store reads.
+// readyAssignedWorkAssignees must not build the index (or issue any
+// store.List) when no configured named session is on_demand.
+func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
+	countListCalls := func(cfg *config.City) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(cfg, store, nil, nil)
+		return store.listCalls
+	}
+
+	t.Run("no named sessions configured", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with zero named sessions configured; want 0 (closed-session index must not be built)", got)
+		}
+	})
+
+	t.Run("only always-mode named sessions configured", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Dir: "repo", Template: "deputy", Mode: "always"},
+			},
+		}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with only always-mode named sessions; want 0 (closed-session index must not be built when no on_demand session needs it)", got)
+		}
+	})
 }
 
 func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {

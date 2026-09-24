@@ -295,10 +295,12 @@ func awakeSetToWakeEvals(decisions map[string]AwakeDecision, sessionBeads []Awak
 			}
 		}
 		evals[bead.ID] = wakeEvaluation{
-			Reasons:          reasons,
-			Reason:           d.Reason,
-			ConfigSuppressed: d.Reason == "idle-sleep",
-			HasAssignedWork:  d.HasAssignedWork,
+			Reasons:             reasons,
+			Reason:              d.Reason,
+			ConfigSuppressed:    d.Reason == "idle-sleep",
+			HasAssignedWork:     d.HasAssignedWork,
+			AssignedWorkBeadID:  d.AssignedWorkBeadID,
+			AssignedWorkClaimed: d.AssignedWorkClaimed,
 		}
 	}
 	return evals

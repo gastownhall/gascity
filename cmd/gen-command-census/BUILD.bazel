@@ -20,9 +20,30 @@ go_test(
         "main_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//cmd/gc:productmetrics_command_census.json",
+    ],
     embed = [":gen-command-census_lib"],
     deps = [
+        "//internal/bazeltest",
         "//internal/commandcensus",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
