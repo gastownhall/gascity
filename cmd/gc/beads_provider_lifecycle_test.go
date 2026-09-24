@@ -13094,9 +13094,19 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				t.Fatal("provider-owned lifecycle did not publish a process identity")
 			}
 			run(ctx, "stop")
+			// bd confirms a stop once each recorded process is gone OR a zombie
+			// (procid treats state Z as exited). The Dolt backend is the killed
+			// proxy's child, so it is reparented to init and reaped moments
+			// later; kill(pid, 0) still succeeds on it until then (#6506). Assert
+			// with the zombie-aware probe and a bounded wait: a process that
+			// really outlives stop is still alive when the deadline passes.
 			for _, pid := range pids {
-				if processStillAlive(pid) {
-					t.Fatalf("provider-owned process %d remained alive after stop", pid)
+				deadline := time.Now().Add(5 * time.Second)
+				for pidAlive(pid) {
+					if time.Now().After(deadline) {
+						t.Fatalf("provider-owned process %d remained alive 5s after stop", pid)
+					}
+					time.Sleep(20 * time.Millisecond)
 				}
 			}
 			// The PID records above prove bd's own children are gone. Sweep the
