@@ -2136,6 +2136,94 @@ func TestFailedNoteWriteReleasesTheBindingItJustOpened(t *testing.T) {
 	}
 }
 
+// TestStorageStatusBypassesThePlanWithoutStorageConfig pins the same
+// compatibility boundary as storageBootGate: a legacy city that never authored
+// [storage] reaches no provider registry or plan resolution.
+func TestStorageStatusBypassesThePlanWithoutStorageConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	registries := 0
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		registries++
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: &config.City{}}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Errorf("status = %d for a legacy city that boot serves; want 0\nstdout: %s\nstderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+	if registries != 0 {
+		t.Errorf("status constructed %d provider registries without [storage]; want none", registries)
+	}
+	if !strings.Contains(stdout.String(), "binding: none") {
+		t.Errorf("status omitted the legacy work-store layout:\n%s", stdout.String())
+	}
+}
+
+// TestStorageStatusCarriesBootPlanRefusalOnConfiguredPaths pins the deploy-gate
+// contract doStorageStatus claims for itself: "a city boot refuses must not
+// report may-serve here". That held only on the born-split path, which was the
+// one path that resolved the plan; configured served and all-work paths
+// returned 0 without ever asking whether boot would refuse.
+//
+// The stdout assertions are the load-bearing half. Carrying the refusal into
+// the exit code is easy to get right by returning early on the plan error, and
+// that suppresses the readout at exactly the moment an operator needs it. These
+// assertions fail such a fix.
+func TestStorageStatusCarriesBootPlanRefusalOnConfiguredPaths(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Storage: &config.StorageConfig{}}
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "city: "+cityPath) {
+		t.Errorf("plan refusal suppressed the status header:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "binding: none") {
+		t.Errorf("plan refusal suppressed the status body:\n%s", stdout.String())
+	}
+}
+
+// TestStorageStatusCarriesBootPlanRefusalAfterCutover pins the served SQLite
+// arm. That arm has its own final return after the convergence census, so the
+// all-work assertion above cannot catch it accidentally dropping exitCode.
+func TestStorageStatusCarriesBootPlanRefusalAfterCutover(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	stubInfraControllerPing(t, 0)
+
+	prev := newStorageRegistryForPlan
+	newStorageRegistryForPlan = func() (*storebinding.ProviderRegistry, error) {
+		return nil, errors.New("no storage provider registry for this build")
+	}
+	t.Cleanup(func() { newStorageRegistryForPlan = prev })
+
+	var stdout, stderr bytes.Buffer
+	code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Errorf("status = 0 after cutover for a city whose boot plan refuses; exit code is the deploy gate\nstdout: %s\nstderr: %s",
+			stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "converged: yes") {
+		t.Errorf("plan refusal suppressed the served binding census:\n%s", stdout.String())
+	}
+}
+
 // TestStorageWorkPinsResolveHQPrefixTheSameWayTheCityMintsIt covers the HQ pin
 // for a city that never declares a workspace prefix, which is the ordinary
 // case: [workspace] prefix is not in the default city.toml.
