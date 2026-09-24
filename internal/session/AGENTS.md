@@ -45,3 +45,24 @@ evidence from tests, source, an issue, or a commit.
   exception.
 - Do not make ordinary config names or `template:<name>` values act like live
   session targets.
+
+## Startup Fencing Pitfalls
+
+- `Store.Tx` groups rollback writes but cannot read, so it does not fence a
+  stale creating snapshot against completion. `WithPendingCreateRollback` and
+  `CommitStartedIfCurrent` share `WithSessionMutationLock` with incarnation
+  allocation. Keep the fresh read and write inside that lock; provider calls
+  and retired-session cleanup stay outside. This is an in-process fence, not
+  protection against arbitrary external bead writers.
+- `testing/synctest.Wait` does not consider `sync.Mutex.Lock` durably blocked.
+  A test that pauses a lock holder on a channel and waits for a competing
+  mutex waiter will hang. `store_start_fence_test.go` checks the shared lock
+  directly at both read and write boundaries instead of relying on timing.
+- `awake` is not proof that creation completed: the reconciler can heal a
+  running, still-claimed creation to awake before provider Start returns
+  (issue #6104 / PR #6105). Rollback must allow that state when its claim and
+  identity remain current; active or a cleared claim still blocks rollback.
+- A final atomic start commit may reject after the async refresh succeeded.
+  Propagate that stale verdict to the provider-aware caller and clean up using
+  the attempted identity outside the mutation lock. Persistence failure alone
+  must not trigger runtime cleanup.
