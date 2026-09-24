@@ -16,8 +16,8 @@ import (
 // nudge content, and persisted-metadata shape; the engine drives only the
 // shared timing decision and the actual runtime.Provider.Nudge delivery.
 //
-// Each backstop lane implements this interface and registers through its own
-// runNudgeBackstop call site; those call sites are the current list of lanes.
+// poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
+// predicates: initial trigger delivery and later graph-v2 successor delivery.
 type backstopPredicate interface {
 	// governs reports whether this predicate applies to the session bead at
 	// all.
@@ -26,7 +26,7 @@ type backstopPredicate interface {
 	// resolve classifies the current evidence for sessName. Definite absence
 	// returns backstopResolutionClear; incomplete or ambiguous evidence returns
 	// backstopResolutionHold so persisted pacing state is not erased.
-	resolve(s beads.Bead, sessName string) (target backstopTarget, resolution backstopResolution)
+	resolve(s beads.Bead, work map[string]beads.Bead, sessName string) (target backstopTarget, resolution backstopResolution)
 
 	// state reads the persisted pacing state for target. same is false when
 	// target is an assignment not yet observed, in which case the engine calls
@@ -175,6 +175,7 @@ func runNudgeBackstop(
 	sp runtime.Provider,
 	store beads.Store,
 	sessionBeads []beads.Bead,
+	work []beads.Bead,
 	now time.Time,
 	stdout io.Writer,
 	label string,
@@ -182,6 +183,10 @@ func runNudgeBackstop(
 ) {
 	if sp == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
+	}
+	workByID := make(map[string]beads.Bead, len(work))
+	for _, w := range work {
+		workByID[w.ID] = w
 	}
 
 	for i := range sessionBeads {
@@ -194,7 +199,7 @@ func runNudgeBackstop(
 			continue
 		}
 
-		target, resolution := pred.resolve(*s, sessName)
+		target, resolution := pred.resolve(*s, workByID, sessName)
 		switch resolution {
 		case backstopResolutionHold:
 			continue
