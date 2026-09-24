@@ -209,8 +209,16 @@ func TestPoolSessionCreate_TerminalProviderErrorTearsDownBeforeRollback(t *testi
 		t.Fatalf("create slot 2: %v", err)
 	}
 	failPoolStartLeavingBoxWith(t, store, sp, second, now, terminalErr)
-	if got, _ := store.Get(second.ID); got.Status != "closed" {
-		t.Fatalf("row %s status %q after a confirmed teardown, want closed", second.ID, got.Status)
+	closed, err := store.Get(second.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("row %s status %q after a confirmed teardown, want closed", second.ID, closed.Status)
+	}
+	if closed.Metadata["state"] != string(sessionpkg.StateFailedCreate) || closed.Metadata[sessionProviderTerminalErrorMetadataKey] != "model_not_found" {
+		t.Fatalf("closed row state/provider_terminal_error = %q/%q, want %q/%q (a failed-create close that keeps the terminal-error record)",
+			closed.Metadata["state"], closed.Metadata[sessionProviderTerminalErrorMetadataKey], sessionpkg.StateFailedCreate, "model_not_found")
 	}
 	if sp.IsRunning(second.SessionNameMetadata) {
 		t.Fatalf("box %q survived the terminal-provider-error rollback", second.SessionNameMetadata)

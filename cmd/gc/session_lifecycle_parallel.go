@@ -2570,8 +2570,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 		// This runs on the async start goroutine, and this failure arm is terminal
 		// (logs + returns), so the write-returns-Info fold is discarded — never assign
 		// it back into infoByID (the tick's map, out of scope here). The persist still
-		// lands via markProviderTerminalError's ApplyPatchInfo.
-		if _, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
+		// lands via the mark's ApplyPatchInfo. A pending create that is rolled back
+		// below keeps its lease: the rollback is fenced on it, and parking the row
+		// asleep with its claim cleared first would make that rollback refuse.
+		mark := markProviderTerminalError
+		if result.rollbackPending {
+			mark = recordProviderTerminalErrorForRollback
+		}
+		if _, markErr := mark(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
 		if trace != nil {

@@ -615,6 +615,21 @@ func recordRateLimitQuarantine(info sessionpkg.Info, sessFront *sessionpkg.Store
 // error-ignoring caller stays consistent with the store exactly when the bead was
 // left untouched (ApplyPatchInfo guarantees the no-fold-on-error contract).
 func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, reason string) (sessionpkg.Info, error) {
+	return applyProviderTerminalErrorPatch(info, sessFront, clk, reason, true)
+}
+
+// recordProviderTerminalErrorForRollback records the same terminal-provider-error
+// health metadata as markProviderTerminalError on a pending create that is about
+// to be rolled back, but leaves its pending-create lease (state,
+// pending_create_claim, pending_create_started_at, last_woke_at) alone. The
+// rollback is fenced on that lease (PendingCreateLease.CanRollback), so parking
+// the row asleep with its claim cleared first would make the rollback refuse and
+// strand the row open; the failed-create close writes those keys itself.
+func recordProviderTerminalErrorForRollback(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, reason string) (sessionpkg.Info, error) {
+	return applyProviderTerminalErrorPatch(info, sessFront, clk, reason, false)
+}
+
+func applyProviderTerminalErrorPatch(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, reason string, parkAsleep bool) (sessionpkg.Info, error) {
 	if sessFront == nil {
 		return info, nil
 	}
@@ -627,16 +642,18 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 		now = clk.Now().UTC()
 	}
 	batch := map[string]string{
-		"state":                                 string(sessionpkg.StateAsleep),
 		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
-		"last_woke_at":                          "",
-		"pending_create_claim":                  "",
-		"pending_create_started_at":             "",
 		sessionHealthStateMetadataKey:           "unhealthy",
 		sessionHealthReasonMetadataKey:          reason,
 		sessionDrainableMetadataKey:             boolMetadata(true),
 		sessionProviderTerminalErrorMetadataKey: reason,
 		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
+	}
+	if parkAsleep {
+		batch["state"] = string(sessionpkg.StateAsleep)
+		batch["last_woke_at"] = ""
+		batch["pending_create_claim"] = ""
+		batch["pending_create_started_at"] = ""
 	}
 	return sessFront.ApplyPatchInfo(info, batch)
 }
