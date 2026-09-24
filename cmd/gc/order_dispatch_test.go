@@ -9658,6 +9658,14 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 			projectedOverridable++
 			continue
 		}
+		// BD_BIN is projected as the workspace bd pin, and since ga-weekw it
+		// is projected even when empty so a stale inherited value is masked.
+		// It has never been in the reserved guard: [order.env] BD_BIN already
+		// overrode a configured pin before ga-weekw, and the fix deliberately
+		// does not change what an order may override.
+		if key == "BD_BIN" {
+			continue
+		}
 		if !isReservedOrderExecEnvKey(key) {
 			unreserved = append(unreserved, key)
 		}
