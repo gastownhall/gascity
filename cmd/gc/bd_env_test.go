@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -5916,5 +5917,147 @@ func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
 	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
 	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
 		t.Fatalf("env = %#v", env)
+	}
+}
+
+// captureAmbientBdBinWarnings redirects the ignored-ambient-BD_BIN warning to
+// a buffer and resets its per-process dedupe so each test sees its own line.
+func captureAmbientBdBinWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := ambientBdBinWarnOut
+	ambientBdBinWarnOut = &buf
+	ambientBdBinWarned.Clear()
+	t.Cleanup(func() {
+		ambientBdBinWarnOut = old
+		ambientBdBinWarned.Clear()
+	})
+	return &buf
+}
+
+// writeAmbientBdBinCity writes a managed city (no bound store) whose
+// city.toml carries extraTOML, and puts a working bd that records its
+// invocation on a PATH containing only that bd. It returns the city dir, the
+// PATH bd, and the marker file the PATH bd writes when run.
+func writeAmbientBdBinCity(t *testing.T, extraTOML string) (cityDir, pathBd, marker string) {
+	t.Helper()
+	cityDir = t.TempDir()
+	binDir := t.TempDir()
+	pathBd = filepath.Join(binDir, "bd")
+	marker = filepath.Join(t.TempDir(), "path-bd-ran")
+	writeExecutable(t, pathBd, "#!/bin/sh\nprintf ran > \""+marker+"\"\n")
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"+extraTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, pathBd, marker
+}
+
+// TestAmbientInvalidBdBinIsIgnoredNotFatal pins ga-weekw: an inherited
+// BD_BIN that is relative, or absolute but stale, is not a declared workspace
+// pin. It must not take the city scope offline; the resolver ignores it with a
+// one-line warning naming the value, the managed child env masks it with an
+// empty BD_BIN, and the exec runner therefore runs the PATH bd instead of
+// exec'ing the stale inherited path.
+func TestAmbientInvalidBdBinIsIgnoredNotFatal(t *testing.T) {
+	for _, ambient := range []string{"bd", "./bin/bd", "/nonexistent/bin/bd"} {
+		t.Run(ambient, func(t *testing.T) {
+			warnings := captureAmbientBdBinWarnings(t)
+			cityDir, pathBd, marker := writeAmbientBdBinCity(t, "")
+			t.Setenv("BD_BIN", ambient)
+
+			got, err := resolveBdBinaryForScope(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want PATH bd", err)
+			}
+			if got != pathBd {
+				t.Fatalf("resolveBdBinaryForScope(city) = %q, want PATH bd %q", got, pathBd)
+			}
+			if err := requireBdBinaryForCity(cityDir); err != nil {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want nil", err)
+			}
+			env := map[string]string{}
+			if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want nil", err)
+			}
+			if v, ok := env["BD_BIN"]; !ok || v != "" {
+				t.Fatalf("env[BD_BIN] = %q (present=%v), want present and empty to mask the inherited value", v, ok)
+			}
+			if _, err := beads.ExecCommandRunnerWithEnv(env)(cityDir, "bd", "version"); err != nil {
+				t.Fatalf("exec bd with composed env: %v (stale ambient BD_BIN must not be exec'd)", err)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("PATH bd did not run: %v", err)
+			}
+
+			msg := warnings.String()
+			if strings.Count(msg, "\n") != 1 {
+				t.Fatalf("warning output = %q, want exactly one line across all resolutions", msg)
+			}
+			if !strings.Contains(msg, strconv.Quote(ambient)) || !strings.Contains(msg, "BD_BIN") {
+				t.Fatalf("warning = %q, want it to name ignored BD_BIN %q", msg, ambient)
+			}
+		})
+	}
+}
+
+// TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin pins that
+// the ga-weekw relaxation is ambient-only: a declared workspace.env PATH that
+// contains no bd stays a configuration error even when a perfectly valid
+// ambient BD_BIN is available, so gc never substitutes a different bd for the
+// declared one.
+func TestWorkspacePathWithoutBdStillFailsClosedWithValidAmbientBdBin(t *testing.T) {
+	warnings := captureAmbientBdBinWarnings(t)
+	emptyDir := t.TempDir()
+	cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nPATH = "+strconv.Quote(emptyDir)+"\n")
+	validAmbient := filepath.Join(t.TempDir(), "bd")
+	writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+	t.Setenv("BD_BIN", validAmbient)
+
+	got, err := resolveBdBinaryForScope(cityDir, cityDir)
+	if err == nil || !strings.Contains(err.Error(), "workspace.env PATH is configured but contains no executable bd") {
+		t.Fatalf("resolveBdBinaryForScope(city) = %q, %v; want workspace.env PATH error", got, err)
+	}
+	if err := requireBdBinaryForCity(cityDir); err == nil {
+		t.Fatal("requireBdBinaryForCity() = nil, want workspace.env PATH error")
+	}
+	if warnings.Len() != 0 {
+		t.Fatalf("unexpected ambient warning %q: the declared workspace PATH wins", warnings.String())
+	}
+}
+
+// TestInvalidWorkspaceBdBinStillFailsClosed pins that a declared
+// workspace.env BD_BIN that is relative or not executable is still an error,
+// even with a valid ambient BD_BIN and a bd on PATH: only the ambient value is
+// relaxed by ga-weekw.
+func TestInvalidWorkspaceBdBinStillFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "relative", value: "./bin/bd", wantErr: "workspace.env BD_BIN must be an absolute executable path"},
+		{name: "missing", value: "/nonexistent/bin/bd", wantErr: "workspace.env BD_BIN \"/nonexistent/bin/bd\" is not executable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captureAmbientBdBinWarnings(t)
+			cityDir, _, _ := writeAmbientBdBinCity(t, "[workspace.env]\nBD_BIN = "+strconv.Quote(tc.value)+"\n")
+			validAmbient := filepath.Join(t.TempDir(), "bd")
+			writeExecutable(t, validAmbient, "#!/bin/sh\nexit 0\n")
+			t.Setenv("BD_BIN", validAmbient)
+
+			if _, err := resolveBdBinaryForScope(cityDir, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("resolveBdBinaryForScope(city) error = %v, want %q", err, tc.wantErr)
+			}
+			if err := requireBdBinaryForCity(cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("requireBdBinaryForCity() error = %v, want %q", err, tc.wantErr)
+			}
+			if err := applyWorkspacePinnedBdBinary(map[string]string{}, cityDir); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("applyWorkspacePinnedBdBinary() error = %v, want %q", err, tc.wantErr)
+			}
+		})
 	}
 }
