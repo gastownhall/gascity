@@ -950,6 +950,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
 	// identity set.
 	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
+	// gc.logical_bead_id mirrors gc.control_for so isRetryAttemptSubject (v1
+	// pattern check via runtime.go) recognizes this attempt root as
+	// retry-managed. Without it, a deliverable attempt that bare-closes with
+	// no flat gc.outcome (its result is carried by the logical retry/iteration
+	// evaluation, not the attempt itself) is misclassified as an
+	// abort_scope-triggering failure by beadOutcomeFailed instead of being
+	// exempted as a retry attempt. See gc-yydp6f.
+	rootMeta[beadmeta.LogicalBeadIDMetadataKey] = control.ID
 	setIterationMetadata(rootMeta, iteration)
 	// Counters are written after gc.iteration so StampRetryAttempt can see it.
 	// A ralph iteration root counts iterations in gc.attempt and has no retry
