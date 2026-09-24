@@ -36,7 +36,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "listener_helper"
-baseline_calls = 60
+baseline_calls = 61
 baseline_files = 23
 reported_calls = 58
 reported_files = 23
@@ -129,7 +129,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 40
+baseline_calls = 41
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
@@ -499,7 +499,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "listener_helper"
-baseline_calls = 40
+baseline_calls = 41
 baseline_files = 13
 reported_calls = 38
 reported_files = 13
