@@ -580,7 +580,9 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
-	store, err := openCityStoreAt(cityPath)
+	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
+	// rather than reloading the whole city config inside the open.
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err)
 	}
