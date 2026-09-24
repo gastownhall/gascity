@@ -334,7 +334,7 @@ func TestOpenTranscriptCapture_PermsAndAppend(t *testing.T) {
 	id := testCaptureIdentity()
 
 	for i := 0; i < 2; i++ {
-		c, err := openTranscriptCapture(root, id, nil)
+		c, err := openTranscriptCapture(root, id)
 		if err != nil {
 			t.Fatalf("openTranscriptCapture #%d: %v", i, err)
 		}
@@ -382,7 +382,7 @@ func TestOpenTranscriptCapture_RejectsUnsafeIdentity(t *testing.T) {
 	root := t.TempDir()
 	id := testCaptureIdentity()
 	id.SessionID = "../escape"
-	if c, err := openTranscriptCapture(root, id, nil); err == nil {
+	if c, err := openTranscriptCapture(root, id); err == nil {
 		c.close(time.Second)
 		t.Fatal("openTranscriptCapture accepted a session id with a path separator")
 	}
@@ -407,16 +407,25 @@ func captureSessionEnv() map[string]string {
 	}
 }
 
-// startPromptStop runs one agent lifetime: Start, one prompt round trip
-// (waiting until the prompt response has been dispatched), then Stop, which
-// flushes and closes the capture before it returns.
+// startPromptStop runs one agent lifetime of the default fake agent: see
+// runPromptStop.
 func startPromptStop(t *testing.T, p *Provider, name string, env map[string]string) {
 	t.Helper()
-	if err := p.Start(context.Background(), name, runtime.Config{
+	runPromptStop(t, p, name, runtime.Config{
 		Command: fakeACPShellCommand(),
 		WorkDir: t.TempDir(),
 		Env:     env,
-	}); err != nil {
+	})
+}
+
+// runPromptStop runs one agent lifetime: Start, one prompt round trip
+// (waiting until the prompt response has been dispatched), then Stop, which
+// flushes and closes the capture before it returns. It asserts the process
+// monitor released the capture (writer finished, file closed) by the time
+// Stop returned.
+func runPromptStop(t *testing.T, p *Provider, name string, cfg runtime.Config) {
+	t.Helper()
+	if err := p.Start(context.Background(), name, cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := p.Nudge(name, runtime.TextContent("hello")); err != nil {
@@ -432,6 +441,13 @@ func startPromptStop(t *testing.T, p *Provider, name string, env map[string]stri
 	}
 	if err := p.Stop(name); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+	if sc.capture != nil {
+		select {
+		case <-sc.capture.done:
+		default:
+			t.Fatal("capture writer still running after Stop: the process monitor did not close the capture")
+		}
 	}
 }
 
@@ -549,5 +565,354 @@ func TestStart_CaptureDisabledWithoutRootOrSessionEnv(t *testing.T) {
 				t.Fatalf("transcript root has %d entries, want none", len(entries))
 			}
 		})
+	}
+}
+
+// TestStart_CaptureRedactsSessionNewMCPCredentials proves MCP server
+// credentials handed to the agent in session/new never reach the durable
+// transcript, and that the redacted record is marked so readers know msg is
+// not the exact wire bytes.
+func TestStart_CaptureRedactsSessionNewMCPCredentials(t *testing.T) {
+	root := t.TempDir()
+	p := newCaptureTestProvider(t, root)
+	runPromptStop(t, p, testName(), runtime.Config{
+		Command: fakeACPShellCommand(),
+		WorkDir: t.TempDir(),
+		Env:     captureSessionEnv(),
+		MCPServers: []runtime.MCPServerConfig{
+			{
+				Name:      "remote",
+				Transport: runtime.MCPTransportHTTP,
+				URL:       "https://probeuser:PROBE-URL-PW@example.invalid/mcp?key=PROBE-QUERY",
+				Headers:   map[string]string{"Authorization": "Bearer PROBE-HEADER-TOKEN"},
+			},
+			{
+				Name:      "local",
+				Transport: runtime.MCPTransportStdio,
+				Command:   "probe-mcp",
+				Args:      []string{"--api-key", "PROBE-ARG-KEY"},
+				Env:       map[string]string{"GITHUB_TOKEN": "PROBE-ENV-TOKEN", "PLAIN": "PROBE-PLAIN-ENV"},
+			},
+		},
+	})
+
+	data, err := os.ReadFile(filepath.Join(root, "s-1", "2.jsonl"))
+	if err != nil {
+		t.Fatalf("reading capture: %v", err)
+	}
+	for _, secret := range []string{
+		"PROBE-URL-PW", "probeuser", "PROBE-QUERY", "PROBE-HEADER-TOKEN",
+		"PROBE-ARG-KEY", "PROBE-ENV-TOKEN", "PROBE-PLAIN-ENV",
+	} {
+		if bytes.Contains(data, []byte(secret)) {
+			t.Errorf("capture contains MCP credential %q", secret)
+		}
+	}
+	var sessionNew map[string]json.RawMessage
+	for _, rec := range parseCaptureLines(t, data) {
+		if strings.Contains(string(rec["msg"]), `"method":"session/new"`) {
+			sessionNew = rec
+		}
+	}
+	if sessionNew == nil {
+		t.Fatal("no session/new record captured")
+	}
+	if string(sessionNew["redacted"]) != "true" {
+		t.Fatalf("session/new record redacted = %s, want true", sessionNew["redacted"])
+	}
+	msg := string(sessionNew["msg"])
+	for _, kept := range []string{`"remote"`, `"local"`, `"probe-mcp"`, `"GITHUB_TOKEN"`, runtime.RedactedMCPValue} {
+		if !strings.Contains(msg, kept) {
+			t.Errorf("redacted session/new msg lost %s: %s", kept, msg)
+		}
+	}
+}
+
+// recordingStdin is an agent stdin stub. When check is set it runs before
+// each write is accepted.
+type recordingStdin struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	check func()
+}
+
+func (w *recordingStdin) Write(p []byte) (int, error) {
+	if w.check != nil {
+		w.check()
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *recordingStdin) Close() error { return nil }
+
+// TestSessionConn_RedactedCaptureKeepsWireBytes proves redaction applies to the
+// capture only: the agent still receives the real MCP credentials.
+func TestSessionConn_RedactedCaptureKeepsWireBytes(t *testing.T) {
+	stdin := &recordingStdin{}
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
+	sink := newCaptureSink()
+	sc.capture = newTranscriptCapture(sink, 16, "worker-1", nil)
+
+	servers := []runtime.MCPServerConfig{{
+		Name:      "local",
+		Transport: runtime.MCPTransportStdio,
+		Command:   "probe-mcp",
+		Env:       map[string]string{"GITHUB_TOKEN": "WIRE-SECRET"},
+	}}
+	req, _ := newSessionNewRequest("/work", servers)
+	redacted, err := redactedSessionNewParams("/work", servers)
+	if err != nil {
+		t.Fatalf("redactedSessionNewParams: %v", err)
+	}
+	if _, err := sc.sendRequestRedacted(req, redacted); err != nil {
+		t.Fatalf("sendRequestRedacted: %v", err)
+	}
+	sc.capture.close(time.Second)
+
+	if !strings.Contains(stdin.buf.String(), "WIRE-SECRET") {
+		t.Fatalf("agent stdin lost the real credential: %s", stdin.buf.String())
+	}
+	lines := sink.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("got %d capture lines, want 1", len(lines))
+	}
+	if strings.Contains(string(lines[0]["msg"]), "WIRE-SECRET") {
+		t.Fatalf("capture holds the credential: %s", lines[0]["msg"])
+	}
+	var wire, captured JSONRPCMessage
+	if err := json.Unmarshal(bytes.TrimSpace(stdin.buf.Bytes()), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(lines[0]["msg"], &captured); err != nil {
+		t.Fatal(err)
+	}
+	if captured.ID == nil || wire.ID == nil || *captured.ID != *wire.ID || captured.Method != wire.Method {
+		t.Fatalf("captured envelope %+v does not match wire envelope %+v", captured, wire)
+	}
+}
+
+// TestSessionConn_OutRecordQueuedBeforeStdinWrite pins the ordering contract:
+// the out record is already queued when the stdin write happens, so it can
+// never land after the agent's reply.
+func TestSessionConn_OutRecordQueuedBeforeStdinWrite(t *testing.T) {
+	sink := newCaptureSink()
+	gate := make(chan struct{})
+	sink.gate = gate
+	sink.entered = make(chan struct{}, 1)
+	capture := newTranscriptCapture(sink, 16, "worker-1", nil)
+	// Park the writer inside Write on a first record so the queue length
+	// observed below counts only records queued after it.
+	capture.record(captureIn, []byte(`{"park":true}`))
+	<-sink.entered
+
+	var writes, queuedAtWrite int
+	stdin := &recordingStdin{check: func() {
+		writes++
+		queuedAtWrite = len(capture.queue)
+	}}
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
+	sc.capture = capture
+	if err := sc.sendNotification(newInitializedNotification()); err != nil {
+		t.Fatalf("sendNotification: %v", err)
+	}
+	close(gate)
+	capture.close(time.Second)
+	if writes == 0 {
+		t.Fatal("stdin was never written")
+	}
+	if queuedAtWrite != 1 {
+		t.Fatalf("queued records at stdin write = %d, want 1 (out record queued before the write)", queuedAtWrite)
+	}
+}
+
+// TestReadLoop_CaptureOwnsLineBytes feeds the read loop far more than the
+// scanner's 64KiB buffer while the capture writer is held, so the scanner must
+// reuse its buffer before any record is written. Every captured msg must still
+// equal the line that was read.
+func TestReadLoop_CaptureOwnsLineBytes(t *testing.T) {
+	const n = 300
+	sink := newCaptureSink()
+	gate := make(chan struct{})
+	sink.gate = gate
+	sink.entered = make(chan struct{}, 1)
+	sc := newSessionConn(nil, nil, nil, 100, nil)
+	sc.capture = newTranscriptCapture(sink, 2*n, "worker-1", nil)
+
+	var input bytes.Buffer
+	want := make([]string, n)
+	for i := 0; i < n; i++ {
+		want[i] = `{"jsonrpc":"2.0","method":"test/fill","params":{"n":` + itoa(i) +
+			`,"pad":"` + strings.Repeat(string(rune('a'+i%26)), 1024) + `"}}`
+		input.WriteString(want[i])
+		input.WriteByte('\n')
+	}
+	if input.Len() <= 2*64*1024 {
+		t.Fatalf("input is %d bytes; must exceed the scanner buffer several times", input.Len())
+	}
+	sc.readLoop(&input)
+	close(gate)
+	sc.capture.close(5 * time.Second)
+
+	lines := sink.lines(t)
+	if len(lines) != n {
+		t.Fatalf("got %d capture lines, want %d", len(lines), n)
+	}
+	for i, rec := range lines {
+		if got := string(rec["msg"]); got != want[i] {
+			t.Fatalf("line %d msg corrupted:\n got  %.120s\n want %.120s", i, got, want[i])
+		}
+	}
+}
+
+// oddLinesFakeCommand answers the handshake, then on session/prompt emits a
+// non-JSON banner, an agent-to-client request with a string id (valid
+// JSON-RPC: ACP RequestId is null, number or string), a JSON array line, a
+// control session/update and the prompt response.
+func oddLinesFakeCommand() string {
+	return `exec python3 -u -c '
+import sys, json
+def out(o):
+    print(json.dumps(o), flush=True)
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    m = msg.get("method", "")
+    i = msg.get("id")
+    if m == "initialize":
+        out({"jsonrpc":"2.0","id":i,"result":{"protocolVersion":1}})
+    elif m == "session/new":
+        out({"jsonrpc":"2.0","id":i,"result":{"sessionId":"sess-1"}})
+    elif m == "session/prompt":
+        print("BANNER this is not json", flush=True)
+        out({"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"t1"},"options":[]}})
+        print("[1,2,3]", flush=True)
+        out({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"CONTROL"}}}})
+        out({"jsonrpc":"2.0","id":i,"result":{"stopReason":"end_turn"}})
+'`
+}
+
+// TestStart_CapturesEveryJSONObjectLine proves the capture records any JSON
+// object the agent prints, including JSON-RPC messages gc's own decoder does
+// not accept (a string id), and skips non-object lines.
+func TestStart_CapturesEveryJSONObjectLine(t *testing.T) {
+	root := t.TempDir()
+	p := newCaptureTestProvider(t, root)
+	runPromptStop(t, p, testName(), runtime.Config{
+		Command: oddLinesFakeCommand(),
+		WorkDir: t.TempDir(),
+		Env:     captureSessionEnv(),
+	})
+	data, err := os.ReadFile(filepath.Join(root, "s-1", "2.jsonl"))
+	if err != nil {
+		t.Fatalf("reading capture: %v", err)
+	}
+	got := strings.Join(captureShape(t, parseCaptureLines(t, data)), " | ")
+	want := strings.Join([]string{
+		"header",
+		"out initialize",
+		"in response",
+		"out initialized",
+		"out session/new",
+		"in response",
+		"out session/prompt",
+		"in session/request_permission",
+		"in session/update",
+		"in response",
+	}, " | ")
+	if got != want {
+		t.Fatalf("capture shape:\n got  %s\n want %s", got, want)
+	}
+	for _, skipped := range []string{"BANNER", "[1,2,3]"} {
+		if bytes.Contains(data, []byte(skipped)) {
+			t.Errorf("capture recorded non-object stdout line %q", skipped)
+		}
+	}
+	if !bytes.Contains(data, []byte(`"id": "perm-1"`)) && !bytes.Contains(data, []byte(`"id":"perm-1"`)) {
+		t.Fatal("string-id request not captured")
+	}
+}
+
+// TestOpenTranscriptCapture_TornTailStartsFreshLine proves a restart appends
+// its header on a new line when an earlier writer died mid-record, so the
+// header (the only boundary between agent starts) still parses.
+func TestOpenTranscriptCapture_TornTailStartsFreshLine(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "transcripts", "acp")
+	id := testCaptureIdentity()
+	c, err := openTranscriptCapture(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.record(captureIn, []byte(`{"jsonrpc":"2.0","id":3,"result":{}}`))
+	c.close(time.Second)
+
+	path := filepath.Join(root, "s-1", "2.jsonl")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const torn = `{"ts":"2026-09-24T00:00:00Z","dir":"in","msg":{"jsonrpc":"2.0","method":"session/upd`
+	if _, err := f.WriteString(torn); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c2, err := openTranscriptCapture(root, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.record(captureOut, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	c2.close(time.Second)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	var shape []string
+	for _, l := range lines {
+		var obj map[string]json.RawMessage
+		switch {
+		case l == torn:
+			shape = append(shape, "torn")
+		case json.Unmarshal([]byte(l), &obj) != nil:
+			shape = append(shape, "garbage")
+		case obj["gc_acp_capture"] != nil:
+			shape = append(shape, "header")
+		default:
+			shape = append(shape, "record")
+		}
+	}
+	if got, want := strings.Join(shape, " "), "header record torn header record"; got != want {
+		t.Fatalf("file shape = %q, want %q", got, want)
+	}
+}
+
+// TestOpenTranscriptCapture_CleanTailAddsNoBlankLine is the control for the
+// torn-tail repair: a file ending in a newline gets no extra line.
+func TestOpenTranscriptCapture_CleanTailAddsNoBlankLine(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "transcripts", "acp")
+	id := testCaptureIdentity()
+	for i := 0; i < 2; i++ {
+		c, err := openTranscriptCapture(root, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.close(time.Second)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "s-1", "2.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("\n\n")) || bytes.HasPrefix(data, []byte("\n")) {
+		t.Fatalf("capture has a blank line: %q", data)
 	}
 }

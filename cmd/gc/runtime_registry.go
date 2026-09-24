@@ -57,8 +57,11 @@ func buildRuntimeRegistry() *registry.Registry {
 		return sessionsubprocess.NewSeamBacked(), nil
 	}))
 	must(r.Register("acp", func(_ string, sc config.SessionConfig, _, cityPath string) (runtime.Provider, error) {
-		cfg := acpConfigFromSession(sc, cityPath)
+		cfg := acpProviderConfig(sc.ACP)
 		if cityPath != "" {
+			// Capture transcripts are city-rooted so they survive a
+			// supervisor restart; a city-less provider captures nothing.
+			cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
 			return sessionacp.NewSeamBackedWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewSeamBacked(cfg), nil
@@ -175,17 +178,12 @@ func packRuntimeDeclarationChanged(oldCfg, newCfg *config.City, name string) boo
 	return oldOK && (oldRT.Command != newRT.Command || oldRT.Protocol != newRT.Protocol)
 }
 
-// acpConfigFromSession builds the ACP provider config for a city. Capture
-// transcripts are city-rooted (citylayout.ACPTranscriptsDir) so they survive a
-// supervisor restart; a city-less provider has no root and captures nothing.
-func acpConfigFromSession(sc config.SessionConfig, cityPath string) sessionacp.Config {
-	cfg := sessionacp.Config{
-		HandshakeTimeout:  sc.ACP.HandshakeTimeoutDuration(),
-		NudgeBusyTimeout:  sc.ACP.NudgeBusyTimeoutDuration(),
-		OutputBufferLines: sc.ACP.OutputBufferLinesOrDefault(),
+// acpProviderConfig maps the [session.acp] city settings onto the ACP
+// provider's resolved configuration.
+func acpProviderConfig(a config.ACPSessionConfig) sessionacp.Config {
+	return sessionacp.Config{
+		HandshakeTimeout:  a.HandshakeTimeoutDuration(),
+		NudgeBusyTimeout:  a.NudgeBusyTimeoutDuration(),
+		OutputBufferLines: a.OutputBufferLinesOrDefault(),
 	}
-	if cityPath != "" {
-		cfg.TranscriptRoot = citylayout.ACPTranscriptsDir(cityPath)
-	}
-	return cfg
 }

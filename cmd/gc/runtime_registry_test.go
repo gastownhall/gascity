@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // assertProviderPkg verifies sp is a provider from the given package (e.g.
@@ -307,17 +309,73 @@ func TestPackRuntimeDeclarationChanged(t *testing.T) {
 	}
 }
 
-// TestRuntimeRegistryACPConfigWiresCityTranscriptRoot proves the acp
-// registration roots capture transcripts at the city (not the ephemeral
-// provider state dir) through the shared citylayout helper, and that a
-// city-less provider leaves capture disabled.
-func TestRuntimeRegistryACPConfigWiresCityTranscriptRoot(t *testing.T) {
+// registryFakeACPAgent is a minimal ACP agent: it answers initialize and
+// session/new, then waits for stdin to close.
+const registryFakeACPAgent = `exec python3 -u -c '
+import sys, json
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    m = msg.get("method", "")
+    if m == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake"}}}), flush=True)
+    elif m == "session/new":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"sessionId": "fake-1"}}), flush=True)
+'`
+
+// TestRuntimeRegistryACPCapturesUnderCityTranscripts drives the real "acp"
+// registration: a session started through the provider the registry builds
+// for a city writes its capture transcript under the city's transcripts dir
+// (citylayout.ACPTranscriptsDir), not the ephemeral provider state dir.
+func TestRuntimeRegistryACPCapturesUnderCityTranscripts(t *testing.T) {
+	// Provider sockets live under the runtime dir; keep it short for the
+	// unix socket path limit and away from the real user runtime dir.
+	runtimeDir := testutil.ShortTempDir(t, "gcr-")
+	t.Setenv("GC_HOME", runtimeDir)
+	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	cityPath := t.TempDir()
-	cfg := acpConfigFromSession(config.SessionConfig{}, cityPath)
-	if want := citylayout.ACPTranscriptsDir(cityPath); cfg.TranscriptRoot != want {
-		t.Fatalf("TranscriptRoot = %q, want %q", cfg.TranscriptRoot, want)
+
+	sp, err := buildRuntimeRegistry().New("acp", config.SessionConfig{}, "city", cityPath)
+	if err != nil {
+		t.Fatalf("building acp provider: %v", err)
 	}
-	if got := acpConfigFromSession(config.SessionConfig{}, "").TranscriptRoot; got != "" {
-		t.Fatalf("city-less TranscriptRoot = %q, want empty (capture disabled)", got)
+	const name = "registry-capture"
+	if err := sp.Start(context.Background(), name, runtime.Config{
+		Command: registryFakeACPAgent,
+		WorkDir: t.TempDir(),
+		Env: map[string]string{
+			"GC_SESSION_ID":         "s-1",
+			"GC_CONTINUATION_EPOCH": "2",
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.Stop(name); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	path, err := citylayout.ACPTranscriptPath(cityPath, "s-1", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading capture transcript: %v", err)
+	}
+	for _, want := range []string{`"gc_acp_capture":1`, `"method":"initialize"`, `"method":"session/new"`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("capture transcript lacks %s:\n%s", want, data)
+		}
+	}
+}
+
+// TestACPProviderConfigLeavesCaptureToTheCaller pins that the [session.acp]
+// mapping never enables capture on its own: the transcript root is a city
+// property the registration adds, so a city-less provider captures nothing.
+func TestACPProviderConfigLeavesCaptureToTheCaller(t *testing.T) {
+	if got := acpProviderConfig(config.ACPSessionConfig{}).TranscriptRoot; got != "" {
+		t.Fatalf("acpProviderConfig TranscriptRoot = %q, want empty", got)
 	}
 }

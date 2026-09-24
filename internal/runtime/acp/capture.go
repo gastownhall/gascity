@@ -38,14 +38,23 @@ import (
 //   - One record per JSON-RPC line: {"ts":…,"dir":"out"|"in","msg":<message>}.
 //     "out" is a message gc wrote to the agent's stdin (recorded immediately
 //     before the write is attempted, so it always precedes the agent's reply);
-//     "in" is a line read from the agent's stdout that parsed as JSON. msg is
-//     the exact JSON-RPC bytes spliced in, never re-marshaled. Non-JSON stdout
-//     lines are not captured.
+//     "in" is a line read from the agent's stdout that is a complete JSON
+//     object, whether or not gc could decode it as a JSON-RPC message it
+//     handles. msg is the exact JSON-RPC bytes spliced in, never re-marshaled.
+//     Other stdout lines (banners, non-object JSON) are not captured.
+//   - Exception: an out message that carries credentials (session/new, whose
+//     MCP server definitions hold env values, headers and URLs) is recorded
+//     as {"ts":…,"dir":"out","redacted":true,"msg":<message>}, where msg is
+//     the message re-encoded with runtime.RedactMCPServerConfigs applied. It
+//     is not the exact wire bytes; the id and method are unchanged.
 //   - After records were dropped because the writer fell behind:
 //     {"ts":…,"dir":"meta","dropped":N}, placed exactly where the gap is (and
 //     once more at close for drops that no later record followed).
 //
 // ts values are RFC 3339 with nanoseconds, taken when the line was queued.
+// Readers must skip lines that do not parse: a crash or a failed write can
+// leave a record cut short. The next writer to open the file starts on a new
+// line, so a torn record never swallows the header that follows it.
 // Capture never blocks the read loop or stdin writers and never fails the
 // session: I/O errors are reported once per session on stderr and capture
 // stops for that agent process.
@@ -100,6 +109,8 @@ type captureRecord struct {
 	raw []byte
 	// droppedBefore counts records dropped immediately before this one.
 	droppedBefore int64
+	// redacted marks raw as a redacted re-encoding rather than wire bytes.
+	redacted bool
 }
 
 // transcriptCapture writes capture records to a file from a single goroutine.
@@ -120,7 +131,7 @@ type transcriptCapture struct {
 // openTranscriptCapture creates the private session directory under root,
 // opens the epoch file for append, and queues the header. The returned
 // capture must be closed.
-func openTranscriptCapture(root string, id captureIdentity, onError func(error)) (*transcriptCapture, error) {
+func openTranscriptCapture(root string, id captureIdentity) (*transcriptCapture, error) {
 	path, err := citylayout.ACPTranscriptPathForDir(root, id.SessionID, id.ContinuationEpoch)
 	if err != nil {
 		return nil, err
@@ -131,7 +142,9 @@ func openTranscriptCapture(root string, id captureIdentity, onError func(error))
 	if err := runtime.EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	// O_RDWR (not O_WRONLY) so the torn-tail check below can read the last
+	// byte; every write still goes through O_APPEND.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening acp transcript %q: %w", path, err)
 	}
@@ -141,9 +154,37 @@ func openTranscriptCapture(root string, id captureIdentity, onError func(error))
 		_ = f.Close()
 		return nil, fmt.Errorf("setting mode on acp transcript %q: %w", path, err)
 	}
-	c := newTranscriptCapture(f, captureQueueLines, id.SessionName, onError)
+	if err := terminateTornTail(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("repairing acp transcript tail %q: %w", path, err)
+	}
+	c := newTranscriptCapture(f, captureQueueLines, id.SessionName, nil)
 	c.recordHeader(id)
 	return c, nil
+}
+
+// terminateTornTail appends a newline when f is non-empty and does not end in
+// one. A previous writer that died partway through a record (a crash between
+// the writes of one flush, a short write on a full disk) leaves such a tail;
+// without the newline this start's header would be glued onto the torn bytes
+// and no longer parse.
+func terminateTornTail(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, info.Size()-1); err != nil {
+		return err
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	_, err = f.Write([]byte{'\n'})
+	return err
 }
 
 // newTranscriptCapture starts a capture writer over w with a queue of
@@ -199,6 +240,15 @@ func (c *transcriptCapture) record(dir captureDirection, raw []byte) {
 		return
 	}
 	c.enqueue(captureRecord{ts: time.Now(), dir: dir, raw: raw})
+}
+
+// recordRedacted queues an out message whose raw bytes are a redacted
+// re-encoding of what was sent; the record is marked "redacted":true.
+func (c *transcriptCapture) recordRedacted(dir captureDirection, raw []byte) {
+	if c == nil {
+		return
+	}
+	c.enqueue(captureRecord{ts: time.Now(), dir: dir, raw: raw, redacted: true})
 }
 
 func (c *transcriptCapture) enqueue(rec captureRecord) {
@@ -311,6 +361,9 @@ func appendCaptureRecord(dst []byte, rec captureRecord) []byte {
 	dst = strconv.AppendQuote(dst, rec.ts.UTC().Format(time.RFC3339Nano))
 	dst = append(dst, `,"dir":`...)
 	dst = strconv.AppendQuote(dst, string(rec.dir))
+	if rec.redacted {
+		dst = append(dst, `,"redacted":true`...)
+	}
 	dst = append(dst, `,"msg":`...)
 	dst = append(dst, rec.raw...)
 	return append(dst, "}\n"...)

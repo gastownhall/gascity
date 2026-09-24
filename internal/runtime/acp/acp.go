@@ -407,7 +407,7 @@ func (p *Provider) openCapture(name string, env map[string]string, pid int) *tra
 		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: session env lacks GC_SESSION_ID or GC_CONTINUATION_EPOCH\n", name)
 		return nil
 	}
-	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id, nil)
+	c, err := openTranscriptCapture(p.cfg.TranscriptRoot, id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "acp: transcript capture for %q disabled: %v\n", name, err)
 		return nil
@@ -455,7 +455,13 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 	// Step 3: Send "session/new" request.
 	newReq, _ := newSessionNewRequest(workDir, mcpServers)
-	ch, err = sc.sendRequest(newReq)
+	// session/new carries MCP server env, headers and URLs; the capture
+	// transcript gets a redacted copy.
+	redactedParams, err := redactedSessionNewParams(workDir, mcpServers)
+	if err != nil {
+		return fmt.Errorf("sending session/new: %w", err)
+	}
+	ch, err = sc.sendRequestRedacted(newReq, redactedParams)
 	if err != nil {
 		return fmt.Errorf("sending session/new: %w", err)
 	}
