@@ -163,16 +163,19 @@ func startLegacyPollersForQueuedNudges(cityPath string, cfg *config.City, sessio
 	for _, item := range state.InFlight {
 		queuedAgents[item.Agent] = true
 	}
+	var firstErr error
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		for _, key := range target.queueKeys() {
 			if queuedAgents[key] {
-				maybeStartNudgePoller(target)
+				if err := startNudgePollerForTarget(target); err != nil && firstErr == nil {
+					firstErr = fmt.Errorf("starting legacy nudge poller for %q: %w", target.sessionName, err)
+				}
 				break
 			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 // deliverPendingQueuedNudges is one dispatcher pass over the queue: collect

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -529,6 +530,42 @@ func TestDispatchAllQueuedNudgesNilCfg(t *testing.T) {
 	}
 	if delivered != 0 {
 		t.Fatalf("delivered = %d, want 0 with nil cfg", delivered)
+	}
+}
+
+func TestStartLegacyPollersForQueuedNudgesReturnsPollerStartError(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := enqueueQueuedNudge(cityPath, newQueuedNudge("worker", "msg", time.Now())); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"provider":     "codex",
+			"session_name": "worker-session",
+			"state":        "active",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+
+	wantErr := errors.New("start poller")
+	previousStartNudgePoller := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return wantErr }
+	t.Cleanup(func() { startNudgePoller = previousStartNudgePoller })
+
+	err = startLegacyPollersForQueuedNudges(cityPath, &config.City{}, snapshot)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("startLegacyPollersForQueuedNudges error = %v, want %v", err, wantErr)
 	}
 }
 

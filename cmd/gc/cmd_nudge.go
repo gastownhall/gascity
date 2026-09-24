@@ -1929,8 +1929,14 @@ func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provid
 }
 
 func maybeStartNudgePoller(target nudgeTarget) {
+	_ = startNudgePollerForTarget(target)
+}
+
+// startNudgePollerForTarget applies the poller eligibility checks and returns
+// any spawn failure to callers that have an error-reporting boundary.
+func startNudgePollerForTarget(target nudgeTarget) error {
 	if target.sessionName == "" {
-		return
+		return nil
 	}
 	// Event-capable providers retire the sidecar class in favor of the
 	// supervisor-hosted nudge event dispatcher, and even a non-event
@@ -1943,7 +1949,7 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// ever fails toward starting a duplicate poller (harmless under the
 	// queue's flock), never toward suppressing the only deliverer.
 	if nudgeDispatcherIsHosting(target.cityPath) {
-		return
+		return nil
 	}
 	// Reap stale poller PID files before deciding whether to spawn. Owning
 	// processes only remove their PID file via the release closure, so any
@@ -1960,11 +1966,9 @@ func maybeStartNudgePoller(target nudgeTarget) {
 	// configure daemon.nudge_dispatcher = "supervisor" for dispatcher-owned
 	// queued delivery.
 	if target.sessionTransport() == "acp" {
-		return
+		return nil
 	}
-	if err := startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName); err != nil {
-		return
-	}
+	return startNudgePoller(target.cityPath, target.pollerKey(), target.sessionName)
 }
 
 func withNudgeTargetFence(store beads.Store, target nudgeTarget) nudgeTarget {
