@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 const testCommit = "abcdef123456abcdef123456abcdef123456abcd"
@@ -85,7 +87,10 @@ func TestGascityBundledSubpathsExistInWorkingTree(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed; cannot locate repo root")
 	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Join(filepath.Dir(thisFile), "..", "..")
+	}
 	for _, pack := range All() {
 		if pack.Subpath == "" {
 			continue
@@ -408,6 +413,9 @@ func writeFile(t *testing.T, path, data string) {
 
 func testRepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")

@@ -9,6 +9,14 @@ go_library(
         "descendants_stub.go",
         "doc.go",
         "guard.go",
+        "identity.go",
+        "identity_darwin.go",
+        "identity_linux.go",
+        "identity_stub.go",
+        "infrastructure_argv.go",
+        "infrastructure_argv_darwin.go",
+        "infrastructure_argv_linux.go",
+        "infrastructure_argv_stub.go",
         "kill_stub.go",
         "kill_unix.go",
         "proctable.go",
@@ -27,9 +35,11 @@ go_library(
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/pidutil",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/pidutil",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:linux": [
             "//internal/pidutil",
@@ -43,11 +53,38 @@ go_test(
     srcs = [
         "descendants_test.go",
         "guard_test.go",
+        "identity_darwin_test.go",
+        "infrastructure_argv_test.go",
         "kill_unix_test.go",
         "scan_darwin_command_test.go",
+        "scan_darwin_test.go",
         "scan_linux_test.go",
+        "supervisor_fork_orphan_repro_test.go",
         "testenv_import_test.go",
     ],
     embed = [":proctable"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/beads/proxyendpoint",
+        "//internal/testenv",
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

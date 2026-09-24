@@ -942,6 +942,14 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	// (buildNestedControlSeed) — both are covered by findLatestAttempt's
 	// identity set.
 	rootMeta[beadmeta.ControlForMetadataKey] = control.ID
+	// gc.logical_bead_id mirrors gc.control_for so isRetryAttemptSubject (v1
+	// pattern check via runtime.go) recognizes this attempt root as
+	// retry-managed. Without it, a deliverable attempt that bare-closes with
+	// no flat gc.outcome (its result is carried by the logical retry/iteration
+	// evaluation, not the attempt itself) is misclassified as an
+	// abort_scope-triggering failure by beadOutcomeFailed instead of being
+	// exempted as a retry attempt. See gc-yydp6f.
+	rootMeta[beadmeta.LogicalBeadIDMetadataKey] = control.ID
 	setIterationMetadata(rootMeta, iteration)
 	if step.OnComplete != nil {
 		rootMeta[beadmeta.OutputJSONRequiredMetadataKey] = "true"
@@ -1330,7 +1338,8 @@ func applyAttemptStepRoute(step *formula.RecipeStep, target string, cfg *config.
 			step.Assignee = ""
 			return
 		}
-		step.Assignee = binding.sessionName
+		// Config-agent work is routed by alias; a concrete session binds on claim.
+		step.Assignee = ""
 		return
 	}
 
@@ -1424,7 +1433,6 @@ type attemptRouteBinding struct {
 	qualifiedName    string
 	metadataOnly     bool
 	independentSteps bool
-	sessionName      string
 	directSessionID  string
 }
 
@@ -1463,7 +1471,6 @@ func resolveAttemptRouteBinding(target string, cfg *config.City, store beads.Sto
 				binding.independentSteps = agentCfg.Lifecycle == config.AgentLifecycleOneShot
 				return binding, true
 			}
-			binding.sessionName = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, agentCfg.QualifiedName())
 			return binding, true
 		}
 	}

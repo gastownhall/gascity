@@ -63,28 +63,31 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the legacy bead-ID-scoped session name for a pool
+// PoolSessionName derives the bead-ID-scoped runtime session name for a pool
 // worker session. Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 //
-// Fresh pool session beads no longer get their runtime name from this
-// derivation — see poolIdentitySessionName. It survives as the recognizer for
-// beads created before the change (beadOwnsPoolSessionName and the slot-recovery
-// fallbacks in build_desired_state.go still read it).
+// It is the runtime name for every unaliased pool session bead (the planner's
+// createPoolSessionBeadWithIdentifiers and the sync lane in session_beads.go),
+// so a live runtime resolves straight back to its bead. Because a failed create
+// is retried under a NEW bead and therefore a new name, the ga-vcjr9 box leak
+// is closed by ordering rather than by name reuse: releaseBeadScopedPoolRuntime
+// tears the failed attempt's runtime down before its row may close, and
+// ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
 }
 
-// poolIdentitySessionName returns the runtime session name for a pool
-// instance. It is a pure function of the resolved pool identity — the
-// qualified instance name the planner derives from config and slot — so every
-// create attempt for the same slot addresses the same runtime box.
+// poolIdentitySessionName returns the tmux-safe encoding of a pool instance's
+// resolved identity — the qualified instance name the planner derives from
+// config and slot. It is a pure function of the identity, so every create
+// attempt for the same slot yields the same value.
 //
-// It deliberately does not embed the session bead ID. A bead-ID-scoped name
-// mints a fresh runtime identity on every attempt, and because the runtime
-// name is the sandbox name (and therefore the pod name), a pool whose start op
-// keeps failing then leaks one box per attempt with nothing left to address the
-// previous one by. That is ga-vcjr9: desired=1, 602 pods.
+// For unaliased pools it is NOT the runtime name (that is PoolSessionName,
+// bead-ID scoped); it is the slot's identity lease and lock identifier
+// (derivePoolSessionIdentifiers, ensurePoolIdentityNotHeldByOpenRow) and the
+// base of the startup-health episode key (startupHealthEpisodeKey). tmux_alias
+// pools and named sessions still use identity-derived runtime names.
 func poolIdentitySessionName(identity, template string) string {
 	base := strings.TrimSpace(identity)
 	if base == "" {

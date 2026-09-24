@@ -1813,6 +1813,23 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 	}
 	if cfg != nil {
 		cityName := config.EffectiveCityName(cfg, "")
+		hasOnDemand := false
+		for i := range cfg.NamedSessions {
+			if cfg.NamedSessions[i].Mode == "on_demand" {
+				hasOnDemand = true
+				break
+			}
+		}
+		// One batched read for every configured named session's closed-phantom
+		// lookup below, instead of the store.List-per-identity loop this
+		// replaced (ga-0t7qjl: 109 serial bd calls, +155s, on this city).
+		// Built only when an on_demand session actually exists to consult it —
+		// a city with zero (or only always-mode) named sessions must not pay
+		// this store read at all (ga-bequ8d).
+		var closedIdx session.ClosedNamedSessionBeadIndex
+		if hasOnDemand {
+			closedIdx = buildClosedNamedSessionBeadIndex(cityStore)
+		}
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
@@ -1824,7 +1841,7 @@ func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, session
 			// its runtime session name (#5231's assignee form), not the
 			// qualified identity above — enumerate that form too, or it is
 			// never queried and the work never re-materializes a session.
-			if _, ok := findClosedNamedSessionBead(cityStore, identity); ok {
+			if _, ok := closedIdx.Find(identity); ok {
 				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
 			}
 		}
@@ -4928,6 +4945,22 @@ func createPoolSessionBeadWithGuardedAliasUsingLock(
 	identifiers, err := derivePoolSessionIdentifiers(bp.city, template, identity, resolvedTmuxAlias)
 	if err != nil {
 		return session.Info{}, err
+	}
+	// A retired bead can leave its runtime occupying the canonical singleton
+	// name. Do not mint a fresh bead on every demand tick while it remains.
+	// Existing-bead reuse happens before this create path; this is not adoption
+	// or permission to stop an unknown owner. Start still fences later races.
+	//
+	// The probe is deliberately outside the withLocks section below, which is
+	// why Start and not this probe is the authoritative fence. A provider
+	// liveness call blocks on I/O — the ACP provider dials the session control
+	// socket and pings it, each with its own sub-second timeout, per candidate
+	// path — while withLocks takes a cross-process city lock file per
+	// identifier spelling. Probing under those locks would stall every other
+	// creator of the same identifiers behind it. Do not close the
+	// probe-to-create window by widening the lock over this call.
+	if cfgAgent != nil && cfgAgent.UsesCanonicalSingletonPoolIdentity() && bp.sp != nil && bp.sp.IsRunning(identifiers.sessionName) {
+		return session.Info{}, fmt.Errorf("%w: runtime %q still occupies singleton template %q", errPoolSessionNameUnavailable, identifiers.sessionName, template)
 	}
 	if bp.beadStore == nil {
 		return createPoolSessionBeadWithIdentifiers(bp.beadStore, template, bp.city, bp.sessionBeads, bp.sessionBeads, poolSessionCreateStartedAt(bp), identity, identifiers)

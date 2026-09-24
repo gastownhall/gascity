@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1780,15 +1781,24 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders pins the rotation: a
+// budget smaller than the due set must hand every order a turn across
+// consecutive ticks rather than replaying the head of the list.
+//
+// The orders are cooldown, not condition. Condition orders no longer consult
+// the budget at all (see TestDispatchFiresDueConditionOrderOutsideTheRotation-
+// Budget), so building the corpus out of them would make this pass on the
+// first tick and stop measuring the cursor. A 1ms interval against ticks a
+// second apart is the always-due shape on the budgeted path.
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order
 	for i := 0; i < 5; i++ {
 		aa = append(aa, orders.Order{
-			Name:    fmt.Sprintf("condition-%d", i),
-			Trigger: "condition",
-			Check:   "true",
-			Exec:    "true",
+			Name:     fmt.Sprintf("cooldown-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1ms",
+			Exec:     "true",
 		})
 	}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
@@ -1800,14 +1810,17 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	m := ad.(*memoryOrderDispatcher)
 	m.maxDispatchesPerTick = 2
 
-	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// fixed fake 'now' in the past would leave every fired order's cooldown
+	// clock reading negative and never due again.
+	now := time.Now()
 	for i := 0; i < 3; i++ {
 		ad.dispatch(context.Background(), t.TempDir(), now.Add(time.Duration(i)*time.Second))
 		ad.drain(context.Background())
 	}
 
 	for i := 0; i < 5; i++ {
-		label := fmt.Sprintf("order-run:condition-%d", i)
+		label := fmt.Sprintf("order-run:cooldown-%d", i)
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}
@@ -9630,20 +9643,32 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
-	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
-	for _, key := range githubTokenExecEnvKeys {
+	// bdPinExecEnvKeys are the other deliberately-overridable keys. BD_BIN
+	// carries the workspace bd pin and, since ga-weekw, is projected even when
+	// empty so a stale inherited value is masked. It has never been reserved:
+	// [order.env] BD_BIN already overrode a configured pin before ga-weekw,
+	// and that fix deliberately does not change what an order may override.
+	bdPinExecEnvKeys := []string{"BD_BIN"}
+	deliberatelyOverridable := append(append([]string{}, githubTokenExecEnvKeys...), bdPinExecEnvKeys...)
+	overridable := make(map[string]bool, len(deliberatelyOverridable))
+	for _, key := range deliberatelyOverridable {
 		overridable[key] = true
 	}
 
 	var unreserved []string
 	projectedOverridable := 0
+	projectedBdPin := false
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		if overridable[key] {
-			projectedOverridable++
+			if slices.Contains(bdPinExecEnvKeys, key) {
+				projectedBdPin = true
+			} else {
+				projectedOverridable++
+			}
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9664,6 +9689,11 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	if projectedOverridable != len(githubTokenExecEnvKeys) {
 		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
 			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
+	}
+	// Same soundness check for the bd pin: with no workspace pin configured
+	// here, BD_BIN must still be projected (empty) to mask an inherited value.
+	if !projectedBdPin {
+		t.Fatalf("BD_BIN not projected into order exec env; the empty pin must mask an inherited BD_BIN (ga-weekw). env=%v", envSlice)
 	}
 }
 

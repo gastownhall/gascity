@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 
 	bdpack "github.com/gastownhall/gascity/examples/bd"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestDoltServerEnv_DoesNotInjectGCSchedulerDefault(t *testing.T) {
@@ -82,6 +84,63 @@ func TestDoltServerEnv_PreservesEmptyUserValue(t *testing.T) {
 	}
 }
 
+// TestDoltServerEnv_ScrubsSessionIdentity pins the fix for a managed Dolt
+// server that died about 15 seconds after the agent session that restarted
+// it exited: the watchdog and server inherited the shell's GC_SESSION_ID, the
+// watchdog reparented to init, and the session reconciler's orphan sweep
+// reaped it as that session's process-table root once the session bead
+// closed. Every session-scoped key must be gone, and keys that are city-scoped
+// or unrelated must survive, so the scrub stays targeted rather than a blanket
+// GC_* strip.
+func TestDoltServerEnv_ScrubsSessionIdentity(t *testing.T) {
+	parent := []string{"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test"}
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		parent = append(parent, key+"=stamped")
+	}
+	out := doltServerEnv("", parent)
+
+	for _, kv := range out {
+		key, value, _ := strings.Cut(kv, "=")
+		if value == "stamped" || containsString(managedDoltSessionScopedEnvKeys, key) {
+			t.Fatalf("managed Dolt env must not carry session identity %s, got %v", key, out)
+		}
+	}
+	for _, want := range []string{"PATH=/usr/bin", "GC_CITY_PATH=/srv/city", "HOME=/home/test"} {
+		if !containsString(out, want) {
+			t.Fatalf("parent entry %q missing from output env %v", want, out)
+		}
+	}
+}
+
+// TestDoltServerEnvScrubCoversSessionRuntimeEnv keeps the scrub list from
+// drifting behind the session lifecycle: a key added to
+// session.RuntimeEnvWithSessionContext reaches every managed server started
+// from an agent shell, so it has to appear in managedDoltSessionScopedEnvKeys
+// too. The Info here populates every optional field so no key is skipped.
+func TestDoltServerEnvScrubCoversSessionRuntimeEnv(t *testing.T) {
+	injected := sessionpkg.RuntimeEnvWithSessionContext(sessionpkg.Info{
+		ID:            "gc-session",
+		SessionName:   "gc__worker-gc-session",
+		Alias:         "worker-1",
+		Template:      "worker",
+		SessionOrigin: "sling",
+	}, 1, 1, "instance-token")
+	if len(injected) == 0 {
+		t.Fatal("session runtime env is empty; the drift guard has nothing to check")
+	}
+
+	var missing []string
+	for key := range injected {
+		if !containsString(managedDoltSessionScopedEnvKeys, key) {
+			missing = append(missing, key)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("session runtime env keys missing from managedDoltSessionScopedEnvKeys: %v", missing)
+	}
+}
+
 func TestDoltServerEnv_UsesDoltConfigObjectOptOut(t *testing.T) {
 	cityPath := t.TempDir()
 	beadsDir := filepath.Join(cityPath, ".beads")
@@ -140,7 +199,7 @@ func TestGCBeadsBDScript_DoesNotDefaultDoltGCScheduler(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -159,7 +218,7 @@ func TestGCBeadsBDScript_UsesPortableSleepMS(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -195,7 +254,7 @@ func TestGCBeadsBDScript_DoesNotMutateDoltInternals(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -236,7 +295,7 @@ func TestGCBeadsBDScript_InitForcesReinitOverPreSeededMetadata(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller(0) failed")
 	}
-	scriptPath := filepath.Join(filepath.Dir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	scriptPath := filepath.Join(gcCallerDir(thisFile), "..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
@@ -1692,5 +1751,57 @@ func TestRegisterManagedDoltTestProcessSnapshotsIdentity(t *testing.T) {
 	}
 	if got.StartIdentity != "Mon Jan 1 12:34:56 2026" {
 		t.Errorf("StartIdentity = %q, want non-empty snapshot", got.StartIdentity)
+	}
+}
+
+// TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity covers the
+// flag-off path (GC_DOLT_SCOPE_WATCHDOG=0): the managed server is spawned
+// directly, Setpgid, and reparents to init once `gc` exits, so it must not
+// carry the spawning agent session's identity either. The live environ of the
+// spawned process is read back from /proc.
+func TestStartManagedDoltSQLServerDirectSpawnScrubsSessionIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/environ")
+	}
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "")
+	t.Setenv(managedDoltScopeWatchdogEnv, "0")
+	if managedDoltScopeWatchdogEnabled() || managedDoltTestWatchdogEnabled() {
+		t.Fatal("fixture did not select the direct-spawn path")
+	}
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	t.Setenv("PATH", fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		t.Setenv(key, "stamped")
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	started, err := startManagedDoltSQLServer("", configPath, logPath, logFile)
+	if err != nil {
+		t.Fatalf("start managed dolt directly: %v", err)
+	}
+	t.Cleanup(func() { cleanupManagedDoltTestPID(t, started.PID) })
+	if started.WatchdogPID != 0 {
+		t.Fatalf("direct spawn reported watchdog pid %d", started.WatchdogPID)
+	}
+
+	env := waitForProcEnviron(t, started.PID)
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		if value, ok := env[key]; ok {
+			t.Errorf("directly spawned dolt sql-server pid %d inherited %s=%q from the spawning session", started.PID, key, value)
+		}
+	}
+	if !strings.HasPrefix(env["PATH"], fakeDoltDir) {
+		t.Errorf("dolt sql-server PATH = %q, want the parent's PATH carried through", env["PATH"])
 	}
 }

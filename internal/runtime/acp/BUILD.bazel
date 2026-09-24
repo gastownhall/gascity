@@ -7,6 +7,7 @@ go_library(
         "activity_publisher.go",
         "conn.go",
         "cutover.go",
+        "lifecycle_lock.go",
         "protocol.go",
         "seams.go",
     ],
@@ -26,6 +27,7 @@ go_test(
         "meta_privacy_test.go",
         "protocol_test.go",
         "seams_test.go",
+        "startup_test.go",
         "testenv_import_test.go",
     ],
     embed = [":acp"],
@@ -34,4 +36,16 @@ go_test(
         "//internal/testenv",
         "//internal/testutil",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
