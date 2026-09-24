@@ -69,7 +69,7 @@ func TestCityConfigLoadersDeclineTheRevisionSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), guarded))
+	src, err := os.ReadFile(filepath.Join(gcCallerDir(currentFile), guarded))
 	if err != nil {
 		t.Fatalf("reading %s: %v", guarded, err)
 	}

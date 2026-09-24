@@ -1,0 +1,170 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+# Non-Go pack files are embedded by the parent //examples/bd package via
+# go:embed; export them so the parent BUILD can reference them as labels.
+exports_files(glob(
+    [
+        "pack.toml",
+        "doctor/**",
+        "commands/**",
+        "formulas/**",
+        "orders/**",
+        "agents/**",
+        "assets/**",
+    ],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "embed_files",
+    srcs = glob(
+        [
+            "pack.toml",
+            "doctor/**",
+            "commands/**",
+            "formulas/**",
+            "orders/**",
+            "agents/**",
+            "assets/**",
+        ],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//examples/bd:__pkg__"],
+)
+
+go_library(
+    name = "dolt",
+    srcs = ["embed.go"],
+    embedsrcs = [
+        "agents/dog/agent.toml",
+        "agents/dog/prompt.template.md",
+        "assets/scripts/_notify.sh",
+        "assets/scripts/advisory_state.sh",
+        "assets/scripts/compact-gain-drift-proof.sh",
+        "assets/scripts/latency.sh",
+        "assets/scripts/mol-dog-backup.sh",
+        "assets/scripts/mol-dog-doctor.sh",
+        "assets/scripts/mol-dog-phantom-db.sh",
+        "assets/scripts/port_resolve.sh",
+        "assets/scripts/runtime.sh",
+        "commands/cleanup/command.toml",
+        "commands/cleanup/run.sh",
+        "commands/compact/command.toml",
+        "commands/compact/help.md",
+        "commands/compact/run.sh",
+        "commands/health-check/command.toml",
+        "commands/health-check/run.sh",
+        "commands/health/command.toml",
+        "commands/health/run.sh",
+        "commands/health/schemas/result.schema.json",
+        "commands/list/command.toml",
+        "commands/list/run.sh",
+        "commands/logs/command.toml",
+        "commands/logs/run.sh",
+        "commands/pull/command.toml",
+        "commands/pull/run.sh",
+        "commands/recover/command.toml",
+        "commands/recover/run.sh",
+        "commands/restart/command.toml",
+        "commands/restart/run.sh",
+        "commands/rollback/command.toml",
+        "commands/rollback/run.sh",
+        "commands/sql/command.toml",
+        "commands/sql/run.sh",
+        "commands/start/command.toml",
+        "commands/start/run.sh",
+        "commands/status/command.toml",
+        "commands/status/run.sh",
+        "commands/sync/command.toml",
+        "commands/sync/run.sh",
+        "doctor/check-dolt/doctor.toml",
+        "doctor/check-dolt/run.sh",
+        "formulas/mol-dog-stale-db.toml",
+        "orders/dolt-health.toml",
+        "orders/dolt-remotes-patrol.toml",
+        "orders/mol-dog-backup.toml",
+        "orders/mol-dog-compactor.toml",
+        "orders/mol-dog-doctor.toml",
+        "orders/mol-dog-phantom-db.toml",
+        "orders/mol-dog-stale-db.toml",
+        "pack.toml",
+        "assets/scripts/proxied_scope.sh",
+    ],
+    importpath = "github.com/gastownhall/gascity/examples/bd/dolt",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "dolt_test",
+    srcs = [
+        "agent_workdir_test.go",
+        "cleanup_test.go",
+        "compact_backup_remotes_test.go",
+        "compact_no_sync_test.go",
+        "compact_notify_cadence_test.go",
+        "doctor_test.go",
+        "dog_exec_scripts_test.go",
+        "dog_prompt_test.go",
+        "health_order_test.go",
+        "health_test.go",
+        "logs_test.go",
+        "main_test.go",
+        "port_resolve_test.go",
+        "proxied_scope_test.go",
+        "pull_remote_selection_test.go",
+        "pull_test.go",
+        "recover_host_test.go",
+        "restart_test.go",
+        "runtime_bounded_test.go",
+        "sql_test.go",
+        "stale_db_formula_test.go",
+        "status_test.go",
+        "sync_ffclassify_test.go",
+        "sync_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/config",
+        "//internal/formula",
+        "//internal/fsys",
+        "//internal/orders",
+        "//internal/testenv",
+        "//internal/workdir",
+    ],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+filegroup(
+    name = "pack_files",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -1128,3 +1128,215 @@ func TestRecyclableDeadConfiguredNamePhantom_NilConfigNeverRecyclable(t *testing
 		t.Fatal("nil cfg should never be recyclable")
 	}
 }
+
+// TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup is the equivalence
+// oracle for ga-0t7qjl: it proves BuildClosedNamedSessionBeadIndex(store).Find
+// agrees with FindClosedNamedSessionBeadForSessionName(store, identity, "")
+// for every identity, on one shared store carrying many identities' worth of
+// candidates at once — the batched shape the index exists to serve, not just
+// one identity in isolation.
+//
+// Every identity below is created in this same store BEFORE the index is
+// built once; the table then only asks each identity's two lookups to agree.
+// A broken index that returned another identity's winner, or that dropped a
+// legitimate candidate via an incidental Type/Label/AllowScan filter the
+// per-identity query doesn't have, would surface as a mismatch here.
+func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
+	store := beads.NewMemStore()
+
+	create := func(status string, metadata map[string]string, typ string, labels []string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{
+			Type:     typ,
+			Labels:   labels,
+			Metadata: metadata,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if status == "closed" {
+			if err := store.Close(b.ID); err != nil {
+				t.Fatalf("Close(%s): %v", b.ID, err)
+			}
+			b.Status = "closed"
+		}
+		return b
+	}
+
+	meta := func(identity string, extra map[string]string) map[string]string {
+		m := map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: identity,
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+
+	const (
+		idNone                  = "idx-none"
+		idSoloNamed             = "idx-solo-named"
+		idSoloFallback          = "idx-solo-fallback"
+		idContinuityFalse       = "idx-continuity-false"
+		idCloseReasonOrphaned   = "idx-close-reason-orphaned"
+		idStateDuplicate        = "idx-state-duplicate"
+		idOpenNotClosed         = "idx-open-not-closed"
+		idLegacyType            = "idx-legacy-type"
+		idRepairable            = "idx-repairable-no-type-with-label"
+		idNonemptyBeatsFallback = "idx-precedence-nonempty-beats-fallback"
+		idEmptyNewerNoPreempt   = "idx-precedence-empty-newer-does-not-preempt-nonempty-older"
+		idTwoNonempty           = "idx-precedence-two-nonempty"
+		idTwoFallback           = "idx-precedence-two-fallback"
+	)
+
+	// idNone: deliberately no beads created.
+
+	create("closed", meta(idSoloNamed, map[string]string{"session_name": "rt-solo-named"}), BeadType, []string{LabelSession})
+
+	create("closed", meta(idSoloFallback, nil), BeadType, []string{LabelSession})
+
+	create("closed", meta(idContinuityFalse, map[string]string{
+		"session_name":        "rt-continuity-false",
+		"continuity_eligible": "false",
+	}), BeadType, []string{LabelSession})
+
+	create("closed", meta(idCloseReasonOrphaned, map[string]string{
+		"session_name": "rt-orphaned",
+		"close_reason": "orphaned",
+	}), BeadType, []string{LabelSession})
+
+	create("closed", meta(idStateDuplicate, map[string]string{
+		"session_name": "rt-duplicate",
+		"state":        "duplicate",
+	}), BeadType, []string{LabelSession})
+
+	create("open", meta(idOpenNotClosed, map[string]string{"session_name": "rt-open"}), BeadType, []string{LabelSession})
+
+	// idLegacyType: the ga-uvwxp8 regression shape — Type is the LABEL
+	// constant's value, not BeadType, but the Label itself is still correct.
+	create("closed", meta(idLegacyType, map[string]string{"session_name": "rt-legacy"}), "gc:session", []string{LabelSession})
+
+	// idRepairable: the "repairable" shape from IsSessionBeadOrRepairable —
+	// Type == "" but LabelSession is present. Both the per-identity query
+	// (no type/label filter) and the index's Label-scoped leg must find it.
+	create("closed", meta(idRepairable, map[string]string{"session_name": "rt-repairable"}), "", []string{LabelSession})
+
+	// idNonemptyBeatsFallback: older bead has no session_name, newer bead
+	// does — the newer, named bead should win.
+	create("closed", meta(idNonemptyBeatsFallback, nil), BeadType, []string{LabelSession})
+	beadNonemptyBeatsFallbackWinner := create("closed", meta(idNonemptyBeatsFallback, map[string]string{"session_name": "rt-newer-named"}), BeadType, []string{LabelSession})
+
+	// idEmptyNewerNoPreempt: older bead IS named; a newer, unnamed bead must
+	// not preempt it as the winner (only a newer NAMED bead could).
+	beadEmptyNewerNoPreemptWinner := create("closed", meta(idEmptyNewerNoPreempt, map[string]string{"session_name": "rt-older-named"}), BeadType, []string{LabelSession})
+	create("closed", meta(idEmptyNewerNoPreempt, nil), BeadType, []string{LabelSession})
+
+	// idTwoNonempty: both named, newest wins.
+	create("closed", meta(idTwoNonempty, map[string]string{"session_name": "rt-old"}), BeadType, []string{LabelSession})
+	beadTwoNonemptyWinner := create("closed", meta(idTwoNonempty, map[string]string{"session_name": "rt-new"}), BeadType, []string{LabelSession})
+
+	// idTwoFallback: neither named, newest still wins as the fallback.
+	create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
+	beadTwoFallbackWinner := create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
+
+	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	if err != nil {
+		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		identity   string
+		wantFound  bool
+		wantBeadID string // only checked when wantFound is true and non-empty
+	}{
+		{name: "no candidates at all", identity: idNone, wantFound: false},
+		{name: "solo eligible bead with session_name", identity: idSoloNamed, wantFound: true},
+		{name: "solo eligible bead without session_name (fallback)", identity: idSoloFallback, wantFound: true},
+		{name: "continuity_eligible=false excluded", identity: idContinuityFalse, wantFound: false},
+		{name: "close_reason=orphaned excluded", identity: idCloseReasonOrphaned, wantFound: false},
+		{name: "state=duplicate excluded", identity: idStateDuplicate, wantFound: false},
+		{name: "open (not closed) bead excluded", identity: idOpenNotClosed, wantFound: false},
+		{name: "legacy Type mismatch still found (ga-uvwxp8 shape)", identity: idLegacyType, wantFound: true},
+		{name: "repairable (no Type, has Label) still found", identity: idRepairable, wantFound: true},
+		{name: "newer named bead beats older unnamed", identity: idNonemptyBeatsFallback, wantFound: true, wantBeadID: beadNonemptyBeatsFallbackWinner.ID},
+		{name: "newer unnamed bead does not preempt older named winner", identity: idEmptyNewerNoPreempt, wantFound: true, wantBeadID: beadEmptyNewerNoPreemptWinner.ID},
+		{name: "two named candidates: newest wins", identity: idTwoNonempty, wantFound: true, wantBeadID: beadTwoNonemptyWinner.ID},
+		{name: "two unnamed candidates: newest wins as fallback", identity: idTwoFallback, wantFound: true, wantBeadID: beadTwoFallbackWinner.ID},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			refBead, refOK, err := FindClosedNamedSessionBeadForSessionName(store, tt.identity, "")
+			if err != nil {
+				t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", tt.identity, err)
+			}
+			if refOK != tt.wantFound {
+				t.Fatalf("reference lookup ok = %v, want %v (identity=%q)", refOK, tt.wantFound, tt.identity)
+			}
+
+			idxBead, idxOK := idx.Find(tt.identity)
+			if idxOK != tt.wantFound {
+				t.Fatalf("index lookup ok = %v, want %v (identity=%q)", idxOK, tt.wantFound, tt.identity)
+			}
+
+			if !tt.wantFound {
+				return
+			}
+
+			if idxBead.ID != refBead.ID {
+				t.Fatalf("index and per-identity lookup disagree: index=%q reference=%q (identity=%q)",
+					idxBead.ID, refBead.ID, tt.identity)
+			}
+			if tt.wantBeadID != "" && idxBead.ID != tt.wantBeadID {
+				t.Fatalf("index returned %q, want %q (identity=%q)", idxBead.ID, tt.wantBeadID, tt.identity)
+			}
+		})
+	}
+}
+
+// TestClosedNamedSessionBeadIndexMissesBeadWithNeitherTypeNorLabel pins the
+// one documented, accepted divergence between the index and
+// FindClosedNamedSessionBeadForSessionName: a closed bead carrying
+// NamedSessionIdentityMetadata under neither Type == BeadType nor
+// LabelSession is found by the per-identity metadata-only query (it has no
+// type/label filter to trip over) but missed by the index, whose two
+// batched legs are scoped to exactly those two selectors. This is the
+// deliberate cost of ga-0t7qjl's two-query fix (see the doc comment on
+// BuildClosedNamedSessionBeadIndex) — it exists to catch either direction of
+// regression: an index that widens to match this shape (defeating the
+// indexed-query performance goal) or one that also starts rejecting the
+// repairable/legacy-Type shapes the equivalence test above requires.
+func TestClosedNamedSessionBeadIndexMissesBeadWithNeitherTypeNorLabel(t *testing.T) {
+	store := beads.NewMemStore()
+
+	const identity = "idx-gap-no-type-no-label"
+	b, err := store.Create(beads.Bead{
+		Metadata: map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: identity,
+			"session_name":               "rt-gap",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(b.ID); err != nil {
+		t.Fatalf("Close(%s): %v", b.ID, err)
+	}
+
+	if _, ok, err := FindClosedNamedSessionBeadForSessionName(store, identity, ""); err != nil {
+		t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", identity, err)
+	} else if !ok {
+		t.Fatalf("reference lookup ok = false, want true (identity=%q) — this fixture must be reachable by the per-identity query for the gap it pins to be meaningful", identity)
+	}
+
+	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	if err != nil {
+		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
+	}
+	if _, ok := idx.Find(identity); ok {
+		t.Fatalf("index lookup ok = true, want false (identity=%q) — a bead with neither Type nor Label should stay outside both batched legs", identity)
+	}
+}

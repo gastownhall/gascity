@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -197,6 +198,20 @@ type buildDoctorChecksOpts struct {
 	RolloutResolveErr error
 }
 
+// doctorOrderFiringCurrentLastRunFunc answers "when did this order last run"
+// for the order-firing check.
+//
+// It stays one labeled read per order per leg, which on a bd-backed store is
+// two subprocesses each. A whole-city index keyed on the `order-tracking`
+// label was tried and withdrawn: the authoritative evidence for a firing is the
+// `order-run:<scoped>` label, and that rides graph-class molecule and wisp roots
+// which carry no tracking label (order_dispatch.go stamps the root; only
+// orders.CreateRun adds both). An index built from tracking beads therefore
+// cannot be trusted about an order it does not mention, and falling back
+// per-order for the ones it misses costs the bulk read on top of every read it
+// was meant to replace — measured as a net +38 forks on a fresh city, where no
+// order has a tracking bead at all. The stores behind it are already shared for
+// the run by cachedOrderHistoryStoresResolver.
 func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stderr io.Writer) doctor.OrderFiringCurrentLastRunFunc {
 	if stderr == nil {
 		stderr = io.Discard
@@ -209,6 +224,24 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		}
 		return orders.LastRunAcross(orderFrontDoorsForTypedStores(stores))(order.ScopedName())
 	}
+}
+
+// doctorScopeBdBinary resolves the bd executable a doctor check must run for
+// one scope, through the same resolver every other gc bd call uses: the
+// city.toml `[workspace.env] BD_BIN` pin first, then PATH.
+//
+// A check that execs bare `bd` talks to a different binary than the one that
+// created the store, and for a proxied scope a different one than owns the
+// proxy — the hazard providerOwnedScopeCustomTypesEnv already spells out for
+// these same two `bd config` calls. Resolution failure degrades to "" rather
+// than refusing: doctor's job is to report, and the check's own error is a
+// better diagnosis than no check at all.
+func doctorScopeBdBinary(cityPath, scopeRoot string) string {
+	bdPath, err := resolveBdBinaryForScope(cityPath, scopeRoot)
+	if err != nil {
+		return ""
+	}
+	return bdPath
 }
 
 func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts buildDoctorChecksOpts) []doctor.Check {
@@ -332,10 +365,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 	}
 
-	storeFactory := openStoreForCity(cityPath)
+	storeFactory := perRunStoreFactory(openStoreForCity(cityPath))
 
 	// One preflight gates all store-dependent checks so outages are not re-probed (#5064).
 	storeOK := true
+	// storePreflightPassed is strictly stronger than storeOK: it means the
+	// probe actually ran and the controller's own read succeeded. storeOK stays
+	// true when the probe is skipped and when it failed in a non-outage shape
+	// (isBeadStoreUnreachable deliberately excludes missing/uninitialized
+	// stores). Only a check that asserts a differential against the controller
+	// needs the stronger signal.
+	storePreflightPassed := false
 	var storePreflightErr error
 	var activeRigs []config.Rig
 	if cfgErr == nil && cfg != nil {
@@ -353,6 +393,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		var probeErr error
 		if !opts.SkipStorePreflight {
 			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
+			storePreflightPassed = probeErr == nil
 		}
 		if isBeadStoreUnreachable(probeErr) {
 			storeOK = false
@@ -383,7 +424,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
-			register(newGateSandboxReadCheck(cityPath))
+			// The check's message asserts that control ("the same read
+			// succeeded for the controller"), so it needs the preflight to
+			// have actually run and passed — storeOK alone also holds when the
+			// probe was skipped or failed in a non-outage shape, and in both
+			// of those the assertion would be false.
+			if storePreflightPassed {
+				register(newGateSandboxReadCheck(cityPath))
+			}
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
@@ -419,6 +467,24 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// looks healthy to every other backup check while its recovery point ages
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
+	// Backup coverage on the proxied default. Every per-scope backup check
+	// goes quiet on a bd-owned proxy root — correctly, since neither gc nor
+	// rc.2's bd can register anything there — which leaves a default-topology
+	// city reading as covered while its store is the only copy. One advisory
+	// line per city says so; registered only when the city actually has a
+	// proxied scope, so nothing changes for a direct or external city.
+	if c := doctor.NewProxiedBackupCoverageCheckForConfig(cityPath, cfg, cfgErr); c != nil {
+		register(c)
+	}
+	// A gc-owned proxied scope whose sidecar does not pin its proxy resident.
+	// bd elides a zero idle_timeout, so an absent key means its provider
+	// substitutes 30s and retires the proxy and its Dolt child after every
+	// quiet period — invisible to every other check, and paid for as a cold
+	// start on the next command against that scope. Registered only when the
+	// city actually has such a scope.
+	if c := doctor.NewProxiedIdleTimeoutCheckForConfig(cityPath, cfg, cfgErr); c != nil {
+		register(c)
+	}
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
@@ -432,7 +498,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types / hold-label conventions — city store (gated with preflight).
 	if storeOK {
-		register(doctor.NewCustomTypesCheck(cityPath, "city"))
+		register(doctor.NewCustomTypesCheck(cityPath, "city", doctorScopeBdBinary(cityPath, cityPath)))
 		register(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 	}
 
@@ -455,7 +521,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			if storeOK {
-				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+				register(doctor.NewCustomTypesCheck(rig.Path, rig.Name, doctorScopeBdBinary(cityPath, rig.Path)))
 				register(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory))
 			}
 			// Dolt-backup registration catches the silent gap left by
@@ -845,6 +911,10 @@ type doctorJSONResult struct {
 	// distinguish an abandoned check (outcome unknown, worth retrying) from a
 	// check that ran and returned an ordinary advisory error.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Payload projects CheckResult.Payload: a check's structured findings, for
+	// consumers that must not parse Message. Absent for the checks that set
+	// none, which is nearly all of them.
+	Payload any `json:"payload,omitempty"`
 }
 
 type doctorJSONReport struct {
@@ -900,6 +970,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 			FixError:     r.FixError,
 			Fixed:        r.Fixed,
 			TimedOut:     r.TimedOut,
+			Payload:      r.Payload,
 		})
 	}
 	return writeCLIJSONLine(w, out)
@@ -933,6 +1004,40 @@ func collectPackDirs(cfg *config.City) []string {
 func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 	return func(dirPath string) (beads.Store, error) {
 		return openStoreAtForCity(dirPath, cityPath)
+	}
+}
+
+// perRunStoreFactory memoizes a store factory for the length of one doctor
+// run, so the dozen-odd store-backed checks share one store per scope instead
+// of each opening its own.
+//
+// A doctor run is a read-only snapshot of a city that is not being mutated
+// underneath it, and no check closes the store it is handed, so reusing the
+// handle is the same object lifetime the checks already assume. What it saves
+// is the open: on a bd-backed scope that is a version probe, a config read and
+// a custom-types read per check, all of them subprocesses.
+//
+// Failures are memoized too. A store that could not be opened will not open on
+// the next check either, and re-attempting it once per check is how one
+// unreachable scope turned into a doctor run that spent its whole budget
+// failing the same way.
+func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+	type opened struct {
+		store beads.Store
+		err   error
+	}
+	var mu sync.Mutex
+	cache := map[string]opened{}
+	return func(dirPath string) (beads.Store, error) {
+		key := normalizePathForCompare(dirPath)
+		mu.Lock()
+		defer mu.Unlock()
+		if got, ok := cache[key]; ok {
+			return got.store, got.err
+		}
+		store, err := open(dirPath)
+		cache[key] = opened{store: store, err: err}
+		return store, err
 	}
 }
 

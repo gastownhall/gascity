@@ -1,0 +1,37 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "reviewquorum",
+    srcs = [
+        "classify.go",
+        "finalize.go",
+        "mutations.go",
+        "types.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/reviewquorum",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "reviewquorum_test",
+    srcs = [
+        "finalize_test.go",
+        "mutations_test.go",
+        "testenv_import_test.go",
+        "types_test.go",
+    ],
+    embed = [":reviewquorum"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

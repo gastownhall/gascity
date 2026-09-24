@@ -14,13 +14,17 @@ import (
 	"testing"
 	"time"
 
+	goruntime "runtime"
+
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -7979,4 +7983,30 @@ func TestDoAgentResumeNotFound(t *testing.T) {
 	if !strings.Contains(stderr.String(), "not found") {
 		t.Errorf("stderr = %q, want 'not found'", stderr.String())
 	}
+}
+
+// gcCallerDir resolves the cmd/gc package directory from a runtime.Caller
+// file path. Under `bazel test` the caller path is runfiles-relative, so the
+// real checkout from GC_TEST_REPO_ROOT stands in for the package directory.
+func gcCallerDir(currentFile string) string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return filepath.Join(root, "cmd", "gc")
+	}
+	return filepath.Dir(currentFile)
+}
+
+// gcRepoRootFromEnv resolves the repository root for source-scanning guards.
+func gcRepoRootFromEnv() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
+	_, file, _, _ := goruntime.Caller(0)
+	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+}
+
+// chdirToRealPackageDir moves the working directory to the cmd/gc package
+// in the real checkout under `bazel test` (see bazeltest.ChdirPackageDir).
+func chdirToRealPackageDir(t *testing.T) {
+	t.Helper()
+	bazeltest.ChdirPackageDir(t, "cmd/gc")
 }

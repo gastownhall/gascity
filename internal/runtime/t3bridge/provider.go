@@ -1778,9 +1778,25 @@ func (p *Provider) removeWorktreeForThread(thread map[string]interface{}) {
 	_ = p.rpcRemoveWorktree(base, worktreePath)
 }
 
+// clearBridgeMeta erases the drain markers this provider left on a session.
+//
+// The acknowledgement's provenance goes with the acknowledgement. Both keys have
+// exactly its lifetime, and Stop reaches here on the isPersistentAgent branch
+// too — where the session is deliberately LEFT RUNNING: same pane, same
+// instance_token. Left behind, a later drain of that still-live incarnation
+// finds an agent source beside a stamp that still matches the row, reads a dead
+// drain's acknowledgement as current, and declines to remind in total silence —
+// the ga-o6uw0 wedge. Removed, the same re-drain finds an unbound source,
+// classifies it unprovable, and asks again.
+//
+// The key names are spelled out rather than shared with cmd/gc's constants
+// because that package is main and cannot be imported; the eraser census in
+// cmd/gc/drain_reminder_ack_binding_test.go is what holds the two in step.
 func (p *Provider) clearBridgeMeta(name string) {
 	_ = removeMetaValue(name, "GC_DRAIN")
 	_ = removeMetaValue(name, "GC_DRAIN_ACK")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_SOURCE")
+	_ = removeMetaValue(name, "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN")
 	_ = removeMetaValue(name, "drained")
 }
 

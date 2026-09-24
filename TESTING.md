@@ -503,9 +503,12 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 480 calls / 172 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | fixed_sleep: 483 calls / 175 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 670 calls / 194 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 698 calls / 200 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-01 |
+| Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-01 |
+| Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-cp3hwi | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestPassthroughEnvWithholdsControllerTokenFromChildProcess: subprocess | ga-cp3hwi | the controller-token withholding proof is a checked Medium subprocess owner; the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map | P0.4b | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-cp3hwi | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
@@ -525,22 +528,22 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | fixed_sleep: 317 calls / 120 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-01 |
-| Small debt ratchet | all untagged test source | net_listen: 94 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
+| Small debt ratchet | all untagged test source | net_listen: 96 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
-| Small debt ratchet | all untagged test source | subprocess: 442 calls / 124 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 453 calls / 126 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | environment: 122 calls / 14 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-01 |
-| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 58 calls / 24 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 59 calls / 24 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | fixed_sleep: 317 calls / 120 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | listener_helper: 38 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-01 |
-| Source debt ratchet | all untagged test source | net_listen: 96 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
+| Source debt ratchet | all untagged test source | net_listen: 98 calls / 38 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 452 calls / 130 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 472 calls / 133 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
 
@@ -927,6 +930,73 @@ runs the four version-sensitive `bd` CLI contracts under the dedicated
 `acceptance_bd_contract` build tag. CI applies that focused manifest to the
 minimum-supported, current, and main-HEAD `bd` versions without repeating the
 unrelated Tier A flows.
+
+#### Beads topology tests (`GC_ACCEPTANCE_BD_BIN`, `GC_ACCEPTANCE_LEGACY_GC_BIN`)
+
+Two Tier A tests drive a real `bd` and a real `dolt` instead of the hermetic
+providers: `TestBeadsProxiedDefault`, which proves the proxied-local default,
+and `TestBeadsInitTopologyMatrix`, which walks every supported way to
+initialise a beads scope. Both skip typed when their tooling is absent, so the
+default `make test-acceptance` run is unaffected.
+
+| variable | selects | who needs it |
+| --- | --- | --- |
+| `GC_ACCEPTANCE_BD_BIN` | the `bd` binary under test; must have `--proxied-server`, so bd >= 1.3.0 | both tests, all shapes |
+| `GC_ACCEPTANCE_LEGACY_GC_BIN` | a `gc` built before the scope-ownership journal | the matrix's legacy GC-managed shape only |
+| `GC_ACCEPTANCE_TOPOLOGY_MATRIX` | opts a run in to the matrix; it is too slow for the Tier A smoke budget and skips without this | `TestBeadsInitTopologyMatrix` only |
+
+`make test-beads-topology-matrix` sets the matrix opt-in and
+`GC_REQUIRE_ACCEPTANCE_TOOLING=1` itself, so a missing `bd` or `dolt` fails the
+target instead of turning it into a green no-op. Through the general
+`make test-acceptance` seam you have to pass `ACCEPTANCE_TOPOLOGY_MATRIX=1`
+yourself — `TEST_ENV` is `env -i`, so exporting the variable in your shell is
+not enough.
+
+The legacy shape needs its own binary because no `gc init` on this tree can
+produce it: every fresh scope is journaled provider-owned. Build one from a
+commit that predates the journal and point the variable at it; without it that
+one shape skips and the rest still run.
+
+`dolt` has to be on `PATH`. The matrix runs eight shapes of real Dolt
+lifecycle back to back, which takes about an hour, so give it a timeout:
+
+```bash
+GC_ACCEPTANCE_BD_BIN=/path/to/bd-1.3.0 \
+GC_ACCEPTANCE_LEGACY_GC_BIN=/path/to/gc-pre-journal \
+TMPDIR=/data/tmp make test-beads-topology-matrix
+```
+
+`make test-beads-topology-matrix` is `make test-acceptance` narrowed to that
+test with a 90m timeout. To narrow further — one shape while iterating — use
+the same seam directly:
+
+```bash
+GC_ACCEPTANCE_BD_BIN=... TMPDIR=/data/tmp make test-acceptance \
+  ACCEPTANCE_TIMEOUT=20m \
+  ACCEPTANCE_TOPOLOGY_MATRIX=1 \
+  ACCEPTANCE_GO_TEST_FLAGS='-count=1 -v -run TestBeadsInitTopologyMatrix/M4'
+```
+
+Never point `TMPDIR` at tmpfs: these tests start real Dolt servers, and their
+data directories have to survive on a real filesystem.
+
+##### The legacy shapes' one init path
+
+Both legacy fixtures — the matrix's M5 shape and AC-X — initialise through one
+helper, `helpers.LegacyInitEnv`, which adds `BD_ALLOW_REMOTE_MIGRATE=1`: bd's
+documented scripted/CI consent for its shared-store schema gate.
+
+Without it the old-way `gc init` does not reliably complete. gc's bd pack
+pre-creates the city's database and pre-seeds a metadata stub, so its `bd init`
+takes the `--force`/`--reinit-local` arm against an existing empty database —
+and **that arm bounds its schema migration at five seconds**. A full migration
+takes about thirty seconds on a loaded box, so it stops partway and the next
+open is refused by bd's own `#5920` gate with "This workspace was NOT created".
+The bound is why the same binaries were green on an idle box: the whole
+migration used to fit inside it. It reproduces without gc — `bd init --server`
+against a fresh database takes ~30s and reaches the current schema,
+`bd init --server --force` against an empty one is pinned at ~5.5s and does
+not.
 
 #### Resource isolation via gascity-test.slice
 
@@ -1451,7 +1521,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBackedWithDir` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessSeamConformance |
 | `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
-| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | waived by ga-80po0c.3 through 2026-09-17: the existing full conformance run skips when the tmux executable is absent |
+| `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 

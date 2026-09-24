@@ -7490,6 +7490,144 @@ exit 0
 	}
 }
 
+// TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable pins the rollback
+// half of the edge trigger. With -eq, a count left sitting AT the threshold
+// never equals it again, so a sweep whose alert could not be delivered has to
+// put the count back where it was or the storm is never reported at all. The
+// failure must also reach the controller log, which takes a non-zero exit.
+func TestSpawnStormDetectRollsBackLedgerWhenAlertUndeliverable(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	// Every mail send fails the way an unreachable backend does.
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "mail" ]; then
+  printf 'mail backend unavailable\n' >&2
+  exit 1
+fi
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "1",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	out, err := runScriptResult(t, coreScriptPath("spawn-storm-detect.sh"), env)
+	if err == nil {
+		t.Fatalf("spawn-storm-detect exited 0 with an undeliverable alert; want non-zero so the controller logs it\n%s", out)
+	}
+
+	ledgerData, readErr := os.ReadFile(filepath.Join(stateDir, "spawn-storm-counts.json"))
+	if readErr != nil {
+		t.Fatalf("ReadFile(ledger): %v", readErr)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	got, ok := counts["ga-loop"]
+	if !ok {
+		t.Fatalf("ledger dropped ga-loop entirely; want the pre-sweep count 0 recorded\nledger: %s", ledgerData)
+	}
+	if got != 0 {
+		t.Fatalf("ledger count for ga-loop = %d, want 0 (rolled back); at %d the -eq trigger never fires again\nledger: %s", got, got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "SPAWN_STORM: bead ga-loop reset 1x") {
+		t.Fatalf("gc log missing the attempted spawn storm notification:\n%s", gcData)
+	}
+}
+
+// TestSpawnStormDetectAlertsOnceAtThresholdCrossing pins the edge trigger
+// itself. A bead already at the threshold whose count moves PAST it is an
+// ongoing storm the operator was told about on the crossing sweep, so it must
+// not mail again every five minutes for as long as the storm lasts. -ge would
+// alert here; -eq does not.
+func TestSpawnStormDetectAlertsOnceAtThresholdCrossing(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	ledger := filepath.Join(stateDir, "spawn-storm-counts.json")
+	// Seeded AT the threshold: the crossing sweep already happened and
+	// already alerted.
+	if err := os.WriteFile(ledger, []byte(`{"ga-loop":2}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+case "$1" in
+  list)
+    printf '[{"id":"ga-loop","status":"open","metadata":{"recovered":"true"}}]\n'
+    ;;
+  show)
+    printf '[{"id":"%s","status":"open","title":"Looping bead"}]\n' "$2"
+    ;;
+esac
+exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_PACK_STATE_DIR":     stateDir,
+		"GC_CALL_LOG":           gcLog,
+		"SPAWN_STORM_THRESHOLD": "2",
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, coreScriptPath("spawn-storm-detect.sh"), env)
+
+	ledgerData, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatalf("ReadFile(ledger): %v", err)
+	}
+	var counts map[string]int
+	if err := json.Unmarshal(ledgerData, &counts); err != nil {
+		t.Fatalf("Unmarshal(ledger): %v\n%s", err, ledgerData)
+	}
+	// The sweep really ran and really counted, so the silence below is the
+	// trigger declining rather than the loop never reaching it.
+	if got := counts["ga-loop"]; got != 3 {
+		t.Fatalf("ledger count for ga-loop = %d, want 3\nledger: %s", got, ledgerData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "SPAWN_STORM:") {
+		t.Fatalf("alerted again at count 3 past threshold 2; the trigger is edge-triggered, not level-triggered\ngc log:\n%s", gcData)
+	}
+}
+
 func runScript(t *testing.T, script string, env map[string]string) {
 	t.Helper()
 	out, err := runScriptResult(t, script, env)

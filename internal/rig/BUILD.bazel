@@ -1,0 +1,63 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "rig",
+    srcs = [
+        "beadsstore.go",
+        "deps.go",
+        "doc.go",
+        "imports.go",
+        "path_durability.go",
+        "provision.go",
+        "rollback.go",
+        "topology.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/rig",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads/contract",
+        "//internal/builtinpacks",
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/packregistry",
+        "//internal/pathdurability",
+        "//internal/remotesource",
+    ],
+)
+
+go_test(
+    name = "rig_test",
+    srcs = [
+        "clone_seam_test.go",
+        "imports_test.go",
+        "path_durability_test.go",
+        "provision_branch_source_test.go",
+        "rig_test.go",
+        "rollback_beads_store_test.go",
+        "rollback_provision_test.go",
+        "rollback_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":rig"],
+    deps = [
+        "//internal/builtinpacks",
+        "//internal/config",
+        "//internal/fsys",
+        "//internal/git",
+        "//internal/pathdurability",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -53,30 +53,96 @@ if [ ! -d "$data_dir" ]; then
   exit 0
 fi
 
-# metadata_files() — discover databases from authoritative rig registry.
-# Uses gc rig list --json when available (all rigs, including external).
-# Falls back to filesystem glob when gc is unavailable (local rigs only).
-# Outputs: pathnames of .beads/metadata.json files (space-safe).
+# compute_allowlist_file — write one non-HQ rig path per line to $1, or fail
+# with exit 1 if the pipeline can't be completed. Both the by-name
+# `referenced` set (via metadata_files, below) and the by-path overlap guard
+# (used at removal time) are sourced from this single, fail-closed
+# enumeration, so a failed or unparseable registry query can no longer leave
+# one guard silently unprotected while the other still holds — previously
+# metadata_files() ran its own independent, fail-open `gc rig list --json`
+# call and quietly fell back to a partial filesystem scan on any failure,
+# which could reclassify a live rig's database as an orphan.
+compute_allowlist_file() {
+  _out=$1
+  if ! command -v gc >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "gc dolt cleanup: jq not found on PATH; cannot evaluate rig overlap allowlist" >&2
+    echo "install jq or remove orphans manually" >&2
+    return 1
+  fi
+  _list=$(gc rig list --json 2>/dev/null) || {
+    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
+    return 1
+  }
+  if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
+    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
+    return 1
+  fi
+  printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1
+}
+
+# overlapping_rig_path — emit the non-HQ rig path from $allowlist_file that
+# overlaps $1, or nothing if no overlap. Strips trailing slashes so
+# `$data_dir/*/` glob output (always ending in `/`) matches against registry
+# paths (no trailing slash).
+overlapping_rig_path() {
+  _db_path=${1%/}
+  while IFS= read -r rig_path; do
+    [ -z "$rig_path" ] && continue
+    rig_path=${rig_path%/}
+    # Exact equality, db under rig, or rig under db.
+    if [ "$_db_path" = "$rig_path" ] \
+      || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
+      || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
+    then
+      printf '%s\n' "$rig_path"
+      return
+    fi
+  done < "$allowlist_file"
+}
+
+# Compute the allowlist once, up front — before metadata_files() runs, since
+# metadata_files() sources its non-HQ rig paths from this same enumeration
+# (see below) instead of re-querying `gc rig list --json` independently.
+# allowlist_ready=false means the registry query could not be verified; the
+# --force abort on that state stays at its original point, immediately after
+# orphan detection, so a clean disk (no orphan-looking directories at all)
+# still short-circuits before any registry requirement.
+allowlist_file=$(mktemp)
+trap 'rm -f "$allowlist_file" "${refused_tmp:-}"' EXIT
+allowlist_ready=true
+if ! compute_allowlist_file "$allowlist_file"; then
+  allowlist_ready=false
+  : > "$allowlist_file"  # empty → no overlap annotations, no referenced names
+fi
+
+# metadata_files() — one metadata.json path per referenced database: HQ
+# always, plus each non-HQ rig from the validated allowlist above. When the
+# allowlist could not be validated (gc missing, registry query failed, or
+# unparseable output) and gc IS on PATH, fail closed here too instead of
+# silently substituting a local filesystem scan that would look complete
+# while missing every external (or HQ-data-dir-colocated) rig — exactly the
+# false-orphan bug this guards against. Only when gc itself is unavailable
+# do we fall back to scanning local rigs/ (cannot discover external rigs
+# either way; the caller must still treat the result as unverified — see the
+# STATUS column below).
 metadata_files() {
   printf '%s\n' "$GC_CITY_PATH/.beads/metadata.json"
 
-  if command -v gc >/dev/null 2>&1; then
-    rig_paths=$(gc rig list --json 2>/dev/null \
-      | if command -v jq >/dev/null 2>&1; then
-          jq -r '.rigs[].path' 2>/dev/null
-        else
-          grep '"path"' | sed 's/.*"path": *"//;s/".*//'
-        fi) || true
-    if [ -n "$rig_paths" ]; then
-      printf '%s\n' "$rig_paths" | while IFS= read -r p; do
-        [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
-      done
-      return
-    fi
+  if [ "$allowlist_ready" = true ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] && printf '%s\n' "$p/.beads/metadata.json"
+    done < "$allowlist_file"
+    return
   fi
 
-  # Fallback: scan local rigs/ directory only. Cannot discover external rigs
-  # when gc is unavailable — acceptable degradation.
+  if command -v gc >/dev/null 2>&1; then
+    return
+  fi
+
   find "$GC_CITY_PATH/rigs" -path '*/.beads/metadata.json' 2>/dev/null || true
 }
 
@@ -125,79 +191,30 @@ if [ "$orphan_count" -eq 0 ]; then
   exit 0
 fi
 
-# Precompute the non-HQ allowlist once from `gc rig list --json`. This lets us
-# fail closed if the registry query or jq parse fails at runtime (not just if
-# the binaries are missing), and avoids spawning N subprocess pairs for N
-# orphans. The allowlist file is empty iff no non-HQ rigs are registered —
-# distinguished from a *failed* query, which exits before any delete runs.
-#
-# compute_allowlist_file — write one non-HQ rig path per line to $1, or fail
-# with exit 1 if the pipeline can't be completed.
-compute_allowlist_file() {
-  _out=$1
-  if ! command -v gc >/dev/null 2>&1; then
-    echo "gc dolt cleanup: gc not found on PATH; cannot evaluate rig overlap allowlist" >&2
-    return 1
-  fi
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "gc dolt cleanup: jq not found on PATH; cannot evaluate rig overlap allowlist" >&2
-    echo "install jq or remove orphans manually" >&2
-    return 1
-  fi
-  _list=$(gc rig list --json 2>/dev/null) || {
-    echo "gc dolt cleanup: gc rig list --json failed; refusing to run overlap allowlist unverified" >&2
-    return 1
-  }
-  if ! printf '%s\n' "$_list" | jq -e '.rigs' >/dev/null 2>&1; then
-    echo "gc dolt cleanup: gc rig list --json produced unparseable output; refusing to run overlap allowlist unverified" >&2
-    return 1
-  fi
-  printf '%s\n' "$_list" | jq -r '.rigs[] | select(.hq != true) | .path' > "$_out" || return 1
-}
-
-# overlapping_rig_path — emit the non-HQ rig path from $allowlist_file that
-# overlaps $1, or nothing if no overlap. Strips trailing slashes so
-# `$data_dir/*/` glob output (always ending in `/`) matches against registry
-# paths (no trailing slash).
-overlapping_rig_path() {
-  _db_path=${1%/}
-  while IFS= read -r rig_path; do
-    [ -z "$rig_path" ] && continue
-    rig_path=${rig_path%/}
-    # Exact equality, db under rig, or rig under db.
-    if [ "$_db_path" = "$rig_path" ] \
-      || case "$_db_path" in "$rig_path/"*) true ;; *) false ;; esac \
-      || case "$rig_path" in "$_db_path/"*) true ;; *) false ;; esac
-    then
-      printf '%s\n' "$rig_path"
-      return
-    fi
-  done < "$allowlist_file"
-}
-
-# Build the allowlist. Under --force, failure aborts before any rm -rf.
-# Under dry-run, failure degrades to "no annotations" — we still print the
-# table so operators can see what exists.
-allowlist_file=$(mktemp)
-trap 'rm -f "$allowlist_file" "${refused_tmp:-}"' EXIT
-allowlist_ready=true
-if ! compute_allowlist_file "$allowlist_file"; then
-  allowlist_ready=false
-  if [ "$force" = true ]; then
-    exit 1
-  fi
-  : > "$allowlist_file"  # empty → no overlap annotations in dry-run
+# Under --force, abort before any rm -rf if the allowlist could not be
+# verified — the same fail-closed contract compute_allowlist_file has always
+# had, checked here (after the clean-disk short-circuit above, before the
+# destructive path below).
+if [ "$allowlist_ready" != true ] && [ "$force" = true ]; then
+  exit 1
 fi
 
-# Print orphan table. Under dry-run, annotate entries that --force would refuse
-# so users can preview refusals without running the destructive command.
+# Print orphan table. Under dry-run, annotate entries that --force would
+# refuse, or that could not be confirmed as real orphans at all because the
+# rig registry enumeration failed (referenced is then incomplete by
+# construction — see metadata_files above), so users can preview both kinds
+# of refusal without running the destructive command.
 printf "%-30s  %-12s  %s\n" "NAME" "SIZE" "STATUS"
 echo "$orphans" | while IFS='|' read -r name size path; do
   [ -z "$name" ] && continue
   status=""
-  if [ "$force" != true ] && [ "$allowlist_ready" = true ]; then
-    overlap=$(overlapping_rig_path "$path")
-    [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+  if [ "$force" != true ]; then
+    if [ "$allowlist_ready" = true ]; then
+      overlap=$(overlapping_rig_path "$path")
+      [ -n "$overlap" ] && status="refused: overlaps rig at $overlap"
+    else
+      status="unverified: rig registry query failed; not confirmed orphan"
+    fi
   fi
   printf "%-30s  %-12s  %s\n" "$name" "$size" "$status"
 done
