@@ -164,24 +164,27 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 		lastErr error
 	)
 	for time.Now().Before(deadline) {
+		probeEnv := filterEnvMany(env,
+			"GC_CITY",
+			"GC_CITY_PATH",
+			"GC_CITY_ROOT",
+			"GC_CITY_RUNTIME_DIR",
+			"GC_DOLT_PORT",
+		)
+		probeEnv = append(probeEnv,
+			"GC_CITY="+cityDir,
+			"GC_CITY_PATH="+cityDir,
+			"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
+		)
+		// A gc-launched Dolt publishes its port under the city; a bd-owned
+		// proxied-local server (the default since #6273) does not, and bd
+		// resolves that endpoint itself, so probe without a pinned port then.
 		if port, ok := currentManagedDoltPortForTest(cityDir); ok {
-			probeEnv := filterEnvMany(env,
-				"GC_CITY",
-				"GC_CITY_PATH",
-				"GC_CITY_ROOT",
-				"GC_CITY_RUNTIME_DIR",
-				"GC_DOLT_PORT",
-			)
-			probeEnv = append(probeEnv,
-				"GC_CITY="+cityDir,
-				"GC_CITY_PATH="+cityDir,
-				"GC_CITY_RUNTIME_DIR="+filepath.Join(cityDir, ".gc", "runtime"),
-			)
 			probeEnv = appendManagedDoltEndpointEnv(probeEnv, port)
-			lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
-			if lastErr == nil {
-				return lastOut, nil
-			}
+		}
+		lastOut, lastErr = runCommand(cityDir, probeEnv, integrationBDCommandTimeout, bdBinary, "list", "--all", "--json", "--limit=0")
+		if lastErr == nil {
+			return lastOut, nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
