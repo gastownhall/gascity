@@ -17,10 +17,21 @@ var (
 	commit                   = "unknown"
 	date                     = "unknown"
 	goPseudoVersionSuffixRes = []*regexp.Regexp{
-		regexp.MustCompile(`^(.*)\.0\.\d{14}-[0-9a-f]{12,}$`),
-		regexp.MustCompile(`^(.*)-0\.\d{14}-[0-9a-f]{12,}$`),
-		regexp.MustCompile(`^(.*)-\d{14}-[0-9a-f]{12,}$`),
+		regexp.MustCompile(`^(.*)\.0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
+		regexp.MustCompile(`^(.*)-0\.\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
+		regexp.MustCompile(`^(.*)-\d{14}-[0-9a-f]{12,}(?:\+\S*)?$`),
 	}
+)
+
+const (
+	// dirtySuffix marks a commit built from a modified working tree. It is
+	// part of the build identity consumers compare: the supervisor reports it
+	// as /health build_id and binary-drift detection matches on it verbatim.
+	dirtySuffix = "-dirty"
+	// minAbbrevCommitLen is the shortest abbreviation trusted to identify a
+	// commit, matching git's own default abbreviation floor. Anything shorter
+	// collides too easily to prove two stamps describe the same revision.
+	minAbbrevCommitLen = 7
 )
 
 func init() {
@@ -43,9 +54,11 @@ func resolveBuildMetadata(
 		currentVersion = normalizeVersion(info.Main.Version)
 	}
 	var dirty bool
+	var revision string
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
+			revision = s.Value
 			if currentCommit == "unknown" && s.Value != "" {
 				currentCommit = s.Value
 			}
@@ -57,10 +70,53 @@ func resolveBuildMetadata(
 			dirty = s.Value == "true"
 		}
 	}
-	if dirty && currentCommit != "unknown" {
-		currentCommit += "-dirty"
+	if dirty && currentCommit != "unknown" &&
+		!strings.HasSuffix(currentCommit, dirtySuffix) &&
+		vcsDescribesCommit(revision, currentCommit) {
+		currentCommit += dirtySuffix
 	}
 	return currentVersion, currentCommit, currentDate
+}
+
+// vcsDescribesCommit reports whether the Go toolchain's embedded vcs.revision
+// describes the same commit this binary was linked against, and so whether its
+// companion vcs.modified flag says anything about *our* working tree.
+//
+// The toolchain locates a repository by looking for a `.git` directory. Inside
+// a git worktree `.git` is a gitdir file, which it does not recognize, so it
+// walks up the filesystem and stamps whichever repository encloses the
+// worktree. Where worktrees are nested inside another checkout — a polecat
+// worktree under the city directory, for instance — the embedded revision and
+// dirtiness belong to that unrelated repository, and a pristine tree gets
+// reported as `<our-commit>-dirty` (ga-u7fb). Comparing the two stamps catches
+// exactly that case: an ldflags-injected commit that the embedded revision
+// does not describe means the VCS metadata came from somewhere else.
+//
+// The stamps legitimately differ in length — the build injects an abbreviated
+// hash while the toolchain records the full one — so either being a prefix of
+// the other counts as a match.
+func vcsDescribesCommit(revision, injectedCommit string) bool {
+	if revision == "" {
+		// No revision recorded to contradict the flag. Nothing to check
+		// against, so the toolchain keeps the benefit of the doubt.
+		return true
+	}
+	shorter := strings.ToLower(strings.TrimSuffix(injectedCommit, dirtySuffix))
+	longer := strings.ToLower(revision)
+	if shorter == longer {
+		// Identical stamps, including the case where the commit was adopted
+		// from this very revision. No independent claims to reconcile.
+		return true
+	}
+	if len(shorter) > len(longer) {
+		shorter, longer = longer, shorter
+	}
+	// Two independent stamps: the shorter must be a long enough abbreviation
+	// to actually identify the commit before a prefix match proves anything.
+	if len(shorter) < minAbbrevCommitLen {
+		return false
+	}
+	return strings.HasPrefix(longer, shorter)
 }
 
 func normalizeVersion(v string) string {
@@ -69,9 +125,9 @@ func normalizeVersion(v string) string {
 	if v == "" || v == "(devel)" {
 		return "dev"
 	}
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i]
-	}
+	// Strip +incompatible only (Go v2+ module compat sentinel for repos without a /vN import path).
+	// Preserve all other build metadata (e.g. +ra.1 marks a locally-patched release).
+	v = strings.TrimSuffix(v, "+incompatible")
 	for _, re := range goPseudoVersionSuffixRes {
 		if m := re.FindStringSubmatch(v); len(m) == 2 {
 			v = m[1]

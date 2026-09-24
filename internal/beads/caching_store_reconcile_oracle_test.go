@@ -218,7 +218,36 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// deliberately introduces so a recency-keep can no longer serve stale cached
 	// deps under depsComplete=true.
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
+	exp.readyLost = expectedReadyLost(st, exp.beads)
 	return exp
+}
+
+// expectedReadyLost re-derives the rows whose projected verdict the merge
+// dropped (ga-cfhgr), from the input state and the independently built end
+// beads map alone — never from the seam.
+//
+// A row lost its verdict exactly when this cache HELD one and the merge's end
+// state no longer has one. That covers absorbed rows whose fresh payload
+// carried no verdict and whose cached verdict the preserve pass refused to
+// keep; it excludes rows the merge kept verbatim (a recency-keep or fence-skip
+// retains the cached verdict, so nothing was lost) and rows the merge evicted
+// (no row, no readiness question). Rows that never had a verdict keep answering
+// from the dependency-derived predicate, which is all the cache ever had for
+// them.
+//
+// Whether a lost verdict actually costs the row its readiness answer is a
+// read-time question (readyProjectionUnknownLocked), deliberately not a merge
+// one: making the mark depend on which rows were resident mid-merge would make
+// it depend on map-iteration order.
+func expectedReadyLost(st storeState, endBeads map[string]Bead) map[string]struct{} {
+	lost := map[string]struct{}{}
+	for id, end := range endBeads {
+		cached, existed := st.beads[id]
+		if existed && cached.IsBlocked != nil && end.IsBlocked == nil {
+			lost[id] = struct{}{}
+		}
+	}
+	return lost
 }
 
 // expectedNextDepsComplete independently reproduces the seam's nextDepsComplete

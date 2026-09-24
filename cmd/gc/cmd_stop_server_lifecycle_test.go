@@ -20,12 +20,17 @@ type lifecycleOrderProvider struct {
 	mu          sync.Mutex
 	events      []string
 	teardownErr error
+	listErr     error // when set, ListRunning returns it (empty slice), modeling a failed enumeration
 }
 
 func (p *lifecycleOrderProvider) ListRunning(prefix string) ([]string, error) {
 	p.mu.Lock()
 	p.events = append(p.events, "ListRunning")
+	listErr := p.listErr
 	p.mu.Unlock()
+	if listErr != nil {
+		return nil, listErr
+	}
 	return p.Fake.ListRunning(prefix)
 }
 

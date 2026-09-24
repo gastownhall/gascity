@@ -117,7 +117,7 @@ But from `repo-a`, `bd` only sees its own:
 ```shell
 $ cd repo-a
 $ bd list
-○ riga-gne ● P2 work in repo-a
+○ riga-gne P2 work in repo-a
 
 $ bd show rigb-h2t
 no issue found: rigb-h2t

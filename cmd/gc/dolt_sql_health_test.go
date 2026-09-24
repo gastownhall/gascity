@@ -31,8 +31,10 @@ func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
 			assertNoManagedDoltProbeDrop(t, "probe stmts for "+db, q)
 		}
 		wantTable := "`" + db + "`.`" + managedDoltProbeTable + "`"
+		wantIgnoreTable := "`" + db + "`.`dolt_ignore`"
+		wantUse := "USE `" + db + "`"
 		for _, q := range stmts {
-			if !strings.Contains(q, wantTable) {
+			if !strings.Contains(q, wantTable) && !strings.Contains(q, wantIgnoreTable) && q != wantUse {
 				t.Fatalf("probe stmt for %s missing %q: %s", db, wantTable, q)
 			}
 			if strings.Contains(q, "`.`__probe`") {
@@ -41,6 +43,52 @@ func TestManagedDoltReadOnlyProbeNeverTargetsLegacyDatabase(t *testing.T) {
 		}
 		if !strings.Contains(joined, "REPLACE INTO "+wantTable+" VALUES (1)") {
 			t.Fatalf("probe SQL for %s must write to %s: %s", db, wantTable, joined)
+		}
+	}
+}
+
+// TestManagedDoltReadOnlyProbeRegistersIgnoreRuleLast pins the fix for the daa
+// 2026-08-04 incident class: an unregistered probe table gets first-committed by
+// the compaction flatten's `DOLT_COMMIT -Am`, which drifts the database hash and
+// quarantines GC for the database. The rule registration must stay LAST so a
+// read-only server still fails on CREATE/REPLACE, which is what the read-only
+// classification keys on.
+func TestManagedDoltReadOnlyProbeRegistersIgnoreRuleLast(t *testing.T) {
+	for _, db := range []string{"gascity", "003", "name-with-hyphen", "with`backtick"} {
+		stmts := managedDoltReadOnlyProbeStatementsFor(db)
+		if len(stmts) != 4 {
+			t.Fatalf("probe stmts for %s = %v, want 4 statements", db, stmts)
+		}
+		wantIgnore := "INSERT IGNORE INTO " + managedDoltQuoteIdent(db) + ".`dolt_ignore` (pattern, ignored) VALUES ('" + managedDoltProbeTable + "', 1)"
+		if stmts[3] != wantIgnore {
+			t.Fatalf("probe stmts for %s last statement = %q, want %q", db, stmts[3], wantIgnore)
+		}
+		// dolt_ignore is a session-root-backed system table: without a current
+		// database on the session, a qualified write to it fails with "no root
+		// value found in session" on both probe paths (dolt CLI over --host and
+		// the direct driver connect with no default schema). USE must come first
+		// and must be the only statement before the CREATE — it is read-only, so
+		// a read-only server still fails first on the CREATE/REPLACE the
+		// classification keys on.
+		if stmts[0] != "USE "+managedDoltQuoteIdent(db) {
+			t.Fatalf("probe stmts for %s must select the database first: %q", db, stmts[0])
+		}
+		// Prefix pins alone would accept a CREATE/REPLACE aimed at dolt_ignore,
+		// which the relaxed legacy-target loop above also lets through; pin the
+		// quoted probe-table target the same way the ignore rule is pinned.
+		wantTarget := managedDoltQuoteIdent(db) + "." + managedDoltQuoteIdent(managedDoltProbeTable)
+		if !strings.HasPrefix(stmts[1], "CREATE TABLE IF NOT EXISTS ") || !strings.Contains(stmts[1], wantTarget) {
+			t.Fatalf("probe stmts for %s must create %s after USE: %q", db, wantTarget, stmts[1])
+		}
+		if !strings.HasPrefix(stmts[2], "REPLACE INTO ") || !strings.Contains(stmts[2], wantTarget) {
+			t.Fatalf("probe stmts for %s must write the probe row into %s third: %q", db, wantTarget, stmts[2])
+		}
+		if strings.Contains(stmts[3], "REPLACE INTO") {
+			t.Fatalf("probe stmts for %s must not REPLACE the ignore rule (an operator ignored=0 override has to survive): %q", db, stmts[3])
+		}
+		joined := managedDoltReadOnlyProbeSQLFor(db)
+		if !strings.HasSuffix(joined, wantIgnore+";") {
+			t.Fatalf("probe SQL for %s = %q, want it to end with %q", db, joined, wantIgnore+";")
 		}
 	}
 }

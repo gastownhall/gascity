@@ -61,6 +61,17 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 		return config.Rig{}, result, err
 	}
 
+	// Step 2.1: refuse a rig path that cannot outlive the process registering
+	// it. This runs before the clone so a doomed path is rejected before any
+	// content is fetched into it.
+	durabilityWarning, err := checkRigPathDurability(cityPath, rigPath, req.AllowEphemeralPath)
+	if err != nil {
+		return config.Rig{}, result, err
+	}
+	if durabilityWarning != "" {
+		emit(ProvisionStep{Name: "rig-path-durability", Detail: durabilityWarning, Warn: true})
+	}
+
 	// Step 2.5: clone from --git-url when the caller supports it.
 	rigPathExists, err = maybeCloneRig(deps, req, rigPath, rigPathExists)
 	if err != nil {
@@ -68,11 +79,18 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 
 	// Step 3: detect git and resolve the default branch.
-	hasGit, defaultBranchOverride, resolvedDefaultBranch := resolveGitDefaultBranch(deps, req, rigPath)
+	hasGit, defaultBranchOverride, resolvedDefaultBranch, defaultBranchRemote := resolveGitDefaultBranch(deps, req, rigPath)
 
 	// Step 4: canonicalize --include tokens that name a pack (builtin or
-	// registry) rather than a path.
-	includes = canonicalizePackIncludes(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
+	// registry) rather than a path, and reject any token that resolves to no
+	// pack at all. Validation runs after the registry rewrite so a valid
+	// registry pack name is not rejected before it becomes a remote source.
+	// This runs before every mutation so an unresolvable include leaves the
+	// city untouched instead of bricking pack expansion citywide.
+	includes, err = resolveIncludeSources(fs, cityPath, includes, cfg.Packs, deps.ResolveRegistryPack)
+	if err != nil {
+		return config.Rig{}, result, err
+	}
 
 	// Steps 5-9: resolve imports, detect re-add, derive the prefix, build the next
 	// config, and validate it before any filesystem mutation.
@@ -94,12 +112,18 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	// --- Phase 1: Infrastructure (all fallible, before touching city.toml) ---
 
 	// Step 12: banner + warn lines.
-	emitRigBannerAndWarnings(deps, req, plan, includes, hasGit, rigPath, resolvedDefaultBranch, defaultBranchOverride, emit)
+	emitRigBannerAndWarnings(deps, req, plan, includes, hasGit, rigPath, resolvedDefaultBranch, defaultBranchOverride, defaultBranchRemote, emit)
 
-	// Step 13: beads-store init.
-	deferred, err := initRigBeadsStore(deps, req, rigPath, plan.prefix, emit)
+	// Step 13: beads-store init. Record whether the rig already had a .beads/
+	// first: init is the step that writes into the rig directory, and a failure
+	// partway through must not leave the store it created behind.
+	beadsStorePreexisting, err := rigBeadsStoreExists(fs, rigPath)
 	if err != nil {
 		return config.Rig{}, result, err
+	}
+	deferred, err := initRigBeadsStore(deps, req, rigPath, plan.prefix, emit)
+	if err != nil {
+		return config.Rig{}, result, removePartialBeadsStore(fs, rigPath, beadsStorePreexisting, err)
 	}
 	result.Deferred = deferred
 
@@ -380,17 +404,18 @@ func maybeCloneRig(deps Deps, req ProvisionRequest, rigPath string, rigPathExist
 // resolveGitDefaultBranch reports whether the rig path is a git repo and resolves
 // the default branch: the explicit --default-branch override wins, otherwise a
 // probe of the repo (when one is present and a prober is injected). It returns
-// hasGit, the trimmed override, and the resolved branch (which equals the
-// override when no probe runs).
-func resolveGitDefaultBranch(deps Deps, req ProvisionRequest, rigPath string) (hasGit bool, override, resolved string) {
+// hasGit, the trimmed override, the resolved branch (which equals the override
+// when no probe runs), and the remote the probe read it from ("" when the
+// branch came from the override or was inferred from the checked-out branch).
+func resolveGitDefaultBranch(deps Deps, req ProvisionRequest, rigPath string) (hasGit bool, override, resolved, remote string) {
 	_, gitErr := deps.FS.Stat(filepath.Join(rigPath, ".git"))
 	hasGit = gitErr == nil
 	override = strings.TrimSpace(req.DefaultBranch)
 	resolved = override
 	if resolved == "" && hasGit && deps.ProbeBranch != nil {
-		resolved = deps.ProbeBranch(rigPath)
+		resolved, remote = deps.ProbeBranch(rigPath)
 	}
-	return hasGit, override, resolved
+	return hasGit, override, resolved, remote
 }
 
 // createRigDirIfMissing creates the rig directory when the earlier stat (or a
@@ -478,12 +503,30 @@ func validateAdoptAndBeadsStore(deps Deps, req ProvisionRequest, rigPath string,
 	return nil
 }
 
+// defaultBranchSourceSuffix annotates the banner's default-branch line with
+// where the branch came from. An explicit --default-branch needs no note. A
+// probe that read a remote HEAD names the remote, so a repo whose remote is
+// not "origin" shows which one answered. A probe that fell back to the
+// checked-out branch says so: that is the case where a rig silently gets a
+// feature branch as its mainline (gas-4cu), and the operator is the only one
+// who can tell whether that is right.
+func defaultBranchSourceSuffix(override, remote string) string {
+	switch {
+	case override != "":
+		return ""
+	case remote != "":
+		return fmt.Sprintf(" (from %s/HEAD)", remote)
+	default:
+		return " (inferred from the checked-out branch; no remote HEAD is set — pass --default-branch if this is wrong)"
+	}
+}
+
 // emitRigBannerAndWarnings emits step 12's banner and the re-add warning lines:
 // on a re-add it warns that --start-suspended, --include, --prefix, and
 // --default-branch overrides are ignored in favor of the existing rig; on a
 // fresh add it announces the prefix, default branch, and resolved imports. It is
 // pure progress emission — every branch ends in an emit, never an error.
-func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationPlan, includes []string, hasGit bool, rigPath, resolvedDefaultBranch, defaultBranchOverride string, emit func(ProvisionStep)) {
+func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationPlan, includes []string, hasGit bool, rigPath, resolvedDefaultBranch, defaultBranchOverride, defaultBranchRemote string, emit func(ProvisionStep)) {
 	name := req.Name
 	if plan.reAdd {
 		emit(ProvisionStep{Name: "banner", Detail: fmt.Sprintf("Re-initializing rig '%s'...", name)})
@@ -514,7 +557,7 @@ func emitRigBannerAndWarnings(deps Deps, req ProvisionRequest, plan rigMutationP
 	}
 	emit(ProvisionStep{Name: "prefix", Detail: fmt.Sprintf("  Prefix: %s", plan.prefix)})
 	if !plan.reAdd && resolvedDefaultBranch != "" {
-		emit(ProvisionStep{Name: "default-branch", Detail: fmt.Sprintf("  Default branch: %s", resolvedDefaultBranch)})
+		emit(ProvisionStep{Name: "default-branch", Detail: fmt.Sprintf("  Default branch: %s%s", resolvedDefaultBranch, defaultBranchSourceSuffix(defaultBranchOverride, defaultBranchRemote))})
 	}
 	if !plan.reAdd {
 		switch {
@@ -686,6 +729,40 @@ func StatRigPath(fs fsys.FS, rigPath string, adopt bool) (exists bool, err error
 		return false, fmt.Errorf("%s is not a directory", rigPath)
 	}
 	return true, nil
+}
+
+// rigBeadsStoreExists reports whether <rigPath>/.beads is already on disk,
+// sampled before the store init so a later cleanup can tell debris it created
+// from a store that was already there.
+func rigBeadsStoreExists(fs fsys.FS, rigPath string) (bool, error) {
+	beadsPath := filepath.Join(rigPath, ".beads")
+	if _, err := fs.Stat(beadsPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking %s: %w", beadsPath, err)
+	}
+	return true, nil
+}
+
+// removePartialBeadsStore deletes the .beads/ a failed store init created and
+// returns the init error for the caller to surface. A store that predates this
+// add is never touched, and neither is the rig directory itself — that is the
+// user's repo, not ours to delete.
+//
+// Without this, an init that wrote metadata.json before failing left a
+// directory that the next `gc rig add` reads as an initialized store and
+// refuses with "already contains a beads store", so the only way forward was
+// to hand-remove or hand-edit it (gas-4cu).
+func removePartialBeadsStore(fs fsys.FS, rigPath string, preexisting bool, cause error) error {
+	if preexisting {
+		return cause
+	}
+	beadsPath := filepath.Join(rigPath, ".beads")
+	if err := fsys.RemoveAll(fs, beadsPath); err != nil {
+		return fmt.Errorf("%w (removing partial bead store %s: %w)", cause, beadsPath, err)
+	}
+	return cause
 }
 
 // rollbackError restores the topology snapshot and returns the fatal error the

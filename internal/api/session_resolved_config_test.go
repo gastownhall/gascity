@@ -135,19 +135,25 @@ func TestResolvedSessionConfigForProviderBuildsNormalizedConfig(t *testing.T) {
 	}
 }
 
-// TestResolvedSessionConfigForProviderScrubsControllerToken is the regression
-// for the PR #4577 review (security major): cityAnchoredSessionEnv expands
-// workspace and provider env against the controller process, so a configured
-// `GC_CONTROLLER_TOKEN = "$GC_CONTROLLER_TOKEN"` (or a literal) would otherwise
-// leak the controller-only token into a managed session. The final API env must
-// scrub convergence.TokenEnvVar — matching cmd/gc/template_resolve.go — so it
-// reaches neither Runtime.SessionEnv nor Runtime.Hints.Env, regardless of which
-// layer supplied it.
-func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
-	t.Setenv(convergence.TokenEnvVar, "super-secret-controller-token")
+// TestResolvedSessionConfigForProviderPinsControllerTokenEmpty is the
+// regression for the PR #4577 review (security major): cityAnchoredSessionEnv
+// expands workspace and provider env against the controller process, so a
+// configured `GC_CONTROLLER_TOKEN = "$GC_CONTROLLER_TOKEN"` (or a literal)
+// would otherwise leak the controller-only token into a managed session.
+//
+// Withheld means PRESENT AND EMPTY, not absent. This env is an overlay on an
+// environment the managed session already inherits — the tmux server's global
+// env, or os.Environ() on the subprocess/ACP paths — so an absent key is an
+// inherited key, and asserting absence asserts the symptom of the bug. The
+// copy-under-another-name shape is driven too: no key-level guard can catch
+// `WORKSPACE_COPY = "$GC_CONTROLLER_TOKEN"`, only the masked expansion can.
+func TestResolvedSessionConfigForProviderPinsControllerTokenEmpty(t *testing.T) {
+	const token = "super-secret-controller-token"
+	t.Setenv(convergence.TokenEnvVar, token)
 	workspaceEnv := map[string]string{
 		// Expands from the controller process env — the exact leak vector.
 		convergence.TokenEnvVar: "$" + convergence.TokenEnvVar,
+		"WORKSPACE_COPY":        "$" + convergence.TokenEnvVar,
 	}
 	cfg, err := resolvedSessionConfigForProvider(
 		"/tmp/test-city",
@@ -163,6 +169,7 @@ func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
 			Command: "/bin/echo",
 			Env: map[string]string{
 				convergence.TokenEnvVar: "literal-token-value",
+				"PROVIDER_COPY":         "${" + convergence.TokenEnvVar + "}",
 			},
 		},
 		"",
@@ -172,11 +179,26 @@ func TestResolvedSessionConfigForProviderScrubsControllerToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolvedSessionConfigForProvider: %v", err)
 	}
-	if got, present := cfg.Runtime.SessionEnv[convergence.TokenEnvVar]; present {
-		t.Errorf("Runtime.SessionEnv[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
-	}
-	if got, present := cfg.Runtime.Hints.Env[convergence.TokenEnvVar]; present {
-		t.Errorf("Runtime.Hints.Env[%s] = %q present, want scrubbed", convergence.TokenEnvVar, got)
+	for name, env := range map[string]map[string]string{
+		"Runtime.SessionEnv": cfg.Runtime.SessionEnv,
+		"Runtime.Hints.Env":  cfg.Runtime.Hints.Env,
+	} {
+		val, present := env[convergence.TokenEnvVar]
+		if !present {
+			t.Errorf("%s omits %s; want present and empty so the session cannot inherit the controller's value", name, convergence.TokenEnvVar)
+		} else if val != "" {
+			t.Errorf("%s[%s] = %q, want empty (a config-authored literal must not overwrite the pin)", name, convergence.TokenEnvVar, val)
+		}
+		for _, key := range []string{"WORKSPACE_COPY", "PROVIDER_COPY"} {
+			if got := env[key]; got != "" {
+				t.Errorf("%s[%s] = %q, want empty ($VAR expansion must not copy the controller token into another name)", name, key, got)
+			}
+		}
+		for key, val := range env {
+			if strings.Contains(val, token) {
+				t.Errorf("%s[%s] = %q carries the controller token", name, key, val)
+			}
+		}
 	}
 }
 
@@ -411,6 +433,80 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 	if got["PROVIDER_TOKEN"] != "ok" {
 		t.Fatalf("result env aliases provider env: PROVIDER_TOKEN = %q, want ok", got["PROVIDER_TOKEN"])
 	}
+}
+
+// TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted is the
+// RED/GREEN regression for cr-vddb9.1: a nomad-routed remote session whose
+// provider env carries GC_CITY_URL or GC_CITY_CONTEXT must never also
+// receive the local city identity anchors (GC_CITY, GC_CITY_PATH,
+// GC_CITY_ROOT, GC_CITY_RUNTIME_DIR). Seeding both makes the nested gc binary
+// in that session fail closed at cmd/gc/remote_target.go's local-vs-remote
+// conflict guard with "conflicting targets" (matches the D2 failure in wisp
+// gcg--9223372036854774627 / session gcg--9223372036854774630 gating
+// cr-u4plc.1).
+//
+// Withheld means PRESENT AND EMPTY, not absent — the same encoding asserted by
+// TestResolvedSessionConfigForProviderPinsControllerTokenEmpty above. This env
+// is an overlay on an environment the managed session already inherits, so an
+// omitted key is an inherited key: a GC_CITY exported by the controller or
+// living in the tmux server's global env would still reach the nested gc and
+// still trip the guard. Only an explicit empty value is honored as
+// withholding (tmux `env -u`, subprocess entry drop). GC_CITY_ROOT is covered
+// because the guard trips on it and citylayout.CityIdentityEnvMap never seeds
+// it, so nothing else clears an inherited value.
+func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T) {
+	cityPath := t.TempDir()
+
+	t.Run("remote via GC_CITY_URL", func(t *testing.T) {
+		providerEnv := map[string]string{
+			"GC_CITY_URL":    "https://remote.example.test",
+			"PROVIDER_TOKEN": "ok",
+		}
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
+			v, ok := got[key]
+			if !ok {
+				t.Errorf("%s absent; want present and empty when GC_CITY_URL targets a remote city (an omitted key is an inherited key)", key)
+			} else if v != "" {
+				t.Errorf("%s = %q, want empty", key, v)
+			}
+		}
+		if got["GC_CITY_URL"] != "https://remote.example.test" {
+			t.Errorf("GC_CITY_URL = %q, want preserved", got["GC_CITY_URL"])
+		}
+		if got["PROVIDER_TOKEN"] != "ok" {
+			t.Errorf("PROVIDER_TOKEN = %q, want ok", got["PROVIDER_TOKEN"])
+		}
+	})
+
+	t.Run("remote via GC_CITY_CONTEXT", func(t *testing.T) {
+		providerEnv := map[string]string{
+			"GC_CITY_CONTEXT": "remote-context",
+		}
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
+			v, ok := got[key]
+			if !ok {
+				t.Errorf("%s absent; want present and empty when GC_CITY_CONTEXT targets a remote city (an omitted key is an inherited key)", key)
+			} else if v != "" {
+				t.Errorf("%s = %q, want empty", key, v)
+			}
+		}
+	})
+
+	t.Run("local — no remote keys present", func(t *testing.T) {
+		got := cityAnchoredSessionEnv(cityPath, nil, map[string]string{"PROVIDER_TOKEN": "ok"})
+		if got["GC_CITY"] != cityPath {
+			t.Errorf("GC_CITY = %q, want %q (anchors still seeded when no remote target present)", got["GC_CITY"], cityPath)
+		}
+		if got["GC_CITY_PATH"] != cityPath {
+			t.Errorf("GC_CITY_PATH = %q, want %q", got["GC_CITY_PATH"], cityPath)
+		}
+		wantRuntimeDir := filepath.Join(cityPath, ".gc", "runtime")
+		if got["GC_CITY_RUNTIME_DIR"] != wantRuntimeDir {
+			t.Errorf("GC_CITY_RUNTIME_DIR = %q, want %q", got["GC_CITY_RUNTIME_DIR"], wantRuntimeDir)
+		}
+	})
 }
 
 func TestResolvedSessionConfigForProviderSkipsStoredMCPMetadataForTmuxTransport(t *testing.T) {

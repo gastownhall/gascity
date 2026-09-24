@@ -6,4 +6,4 @@
 description = "Close stale order-tracking beads and prune expired tracking history"
 trigger = "cooldown"
 interval = "1m"
-exec = "gc order sweep-tracking --stale-after 10m --quiet"
+exec = "gc order sweep-tracking --stale-after 10m --quiet --confirm"

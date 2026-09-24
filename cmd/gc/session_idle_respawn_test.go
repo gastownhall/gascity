@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,14 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
+
+type unavailableIdleActivityProvider struct {
+	*runtime.Fake
+}
+
+func (p *unavailableIdleActivityProvider) GetLastActivity(string) (time.Time, error) {
+	return time.Time{}, runtime.ErrRuntimeUnavailable
+}
 
 // A session that is awake ONLY because it owns ready assigned work is the
 // sleep-and-respawn case; anything with another (or no) wake reason is not.
@@ -109,7 +118,11 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 	dt := newDrainTracker()
 	probe := dt.startIdleProbe(info.ID)
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
-	if !beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk) {
+	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	if err != nil {
+		t.Fatalf("begin idle-respawn drain: %v", err)
+	}
+	if !began {
 		t.Fatal("idle assigned-work session with a completed idle probe should begin an idle-respawn drain")
 	}
 	if ds := dt.get(info.ID); ds == nil || ds.reason != idleRespawnDrainReason {
@@ -121,14 +134,51 @@ func TestBeginIdleRespawnDrainIfIdle(t *testing.T) {
 	p2 := dt2.startIdleProbe(info.ID)
 	dt2.finishIdleProbe(info.ID, p2, true, clk.Now().Add(-time.Second))
 	other := wakeEvaluation{Reason: "min-active", Reasons: []WakeReason{WakeConfig}, Policy: policy}
-	if beginIdleRespawnDrainIfIdle(info, other, dt2, sp, clk) {
+	began, err = beginIdleRespawnDrainIfIdle(info, other, dt2, sp, clk)
+	if err != nil {
+		t.Fatalf("evaluate other wake reason: %v", err)
+	}
+	if began {
 		t.Fatal("non-assigned-work session must not begin an idle-respawn drain")
 	}
 
 	// Negative: no completed idle probe → no drain (guards against false sleep).
 	dt3 := newDrainTracker()
-	if beginIdleRespawnDrainIfIdle(info, eval, dt3, sp, clk) {
+	began, err = beginIdleRespawnDrainIfIdle(info, eval, dt3, sp, clk)
+	if err != nil {
+		t.Fatalf("evaluate incomplete probe: %v", err)
+	}
+	if began {
 		t.Fatal("without a completed idle probe, no idle-respawn drain should begin")
+	}
+}
+
+func TestBeginIdleRespawnDrainIfIdle_PropagatesUnavailableActivity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Now().UTC()}
+	sp := &unavailableIdleActivityProvider{Fake: runtime.NewFake()}
+	name := "worker-1"
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info := sessionpkg.Info{ID: "s1", SessionNameMetadata: name, Generation: "1"}
+	eval := wakeEvaluation{
+		Reason:  "assigned-work",
+		Reasons: []WakeReason{WakeWork},
+		Policy: resolvedSessionSleepPolicy{
+			Class:      config.SessionSleepInteractiveResume,
+			Capability: runtime.SessionSleepCapabilityFull,
+		},
+	}
+	dt := newDrainTracker()
+	probe := dt.startIdleProbe(info.ID)
+	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
+
+	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	if began {
+		t.Fatal("activity observation failure must not begin an idle-respawn drain")
+	}
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("error = %v, want runtime unavailable", err)
 	}
 }
 
@@ -151,7 +201,11 @@ func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
 	dt := newDrainTracker()
 	probe := dt.startIdleProbe(info.ID)
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
-	if beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk) {
+	began, err := beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk)
+	if err != nil {
+		t.Fatalf("evaluate non-interactive session: %v", err)
+	}
+	if began {
 		t.Fatal("a non-interactive assigned-work session must not be idle-respawn-drained")
 	}
 }

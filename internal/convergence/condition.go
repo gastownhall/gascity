@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/gchome"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -23,6 +25,13 @@ const (
 	textFileBusyRetryAttempts = 5
 	textFileBusyRetryDelay    = 25 * time.Millisecond
 )
+
+// conditionGCHome resolves the gc state directory for gate subprocesses. Gate
+// HOME is intentionally sandboxed to the city, so it cannot also be used for
+// gc's machine-level cache and registry state.
+func conditionGCHome() string {
+	return gchome.ResolveReadOnly().Path()
+}
 
 // conditionPATH resolves the tool directories gate scripts actually need.
 // This keeps the env narrow while ensuring gate scripts use the same bd/gc
@@ -72,10 +81,41 @@ type ConditionEnv struct {
 	AgentModel           string // may be empty
 }
 
+// conditionBeadsCredentialsFile resolves the beads credentials file gate
+// commands must read.
+//
+// Gate commands run with HOME=<CityPath> so they cannot see the controller's
+// home directory. bd resolves its credentials file from HOME, so under the
+// sandbox its own default lands on <CityPath>/.config/beads/credentials — a
+// path that never exists — and every bd read inside a gate fails to
+// authenticate (gastownhall/gascity ga-pqlgh).
+//
+// The fix threads one explicit file path across the sandbox boundary instead of
+// widening HOME: the whitelist stays enumerable, .ssh/.gnupg stay invisible, and
+// no secret material is copied into the city directory (which is listable and
+// backed up). An ambient BEADS_CREDENTIALS_FILE wins, because operators already
+// use it to select scoped stores. Otherwise the OS default resolved against the
+// controller's real home is used, and only when it exists — exporting a path
+// that does not resolve would mask bd's own fallback for no gain.
+func conditionBeadsCredentialsFile() string {
+	if path := strings.TrimSpace(os.Getenv("BEADS_CREDENTIALS_FILE")); path != "" {
+		return path
+	}
+	path := doltauth.DefaultCredentialsPath()
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
 // Environ returns the environment variable slice for exec.Cmd.
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
-// vars, Dolt/Beads connection env, and GC_INTEGRATION_REAL_BD when present for
-// integration-test bd shims.
+// vars, Dolt/Beads connection env, the resolved beads credentials file, and
+// GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
 func (ce ConditionEnv) Environ() []string {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
@@ -90,6 +130,7 @@ func (ce ConditionEnv) Environ() []string {
 	env := []string{
 		"PATH=" + conditionPATH(),
 		"HOME=" + home,
+		"GC_HOME=" + conditionGCHome(),
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
 		"GC_BEAD_ID=" + ce.BeadID,
@@ -128,6 +169,9 @@ func (ce ConditionEnv) Environ() []string {
 	}
 	if realBD := os.Getenv("GC_INTEGRATION_REAL_BD"); realBD != "" {
 		env = append(env, "GC_INTEGRATION_REAL_BD="+realBD)
+	}
+	if credentials := conditionBeadsCredentialsFile(); credentials != "" {
+		env = append(env, "BEADS_CREDENTIALS_FILE="+credentials)
 	}
 	for _, key := range []string{
 		"BEADS_DOLT_AUTO_START",

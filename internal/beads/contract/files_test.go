@@ -65,6 +65,51 @@ dolt.auto-start: false
 	}
 }
 
+func TestReadConfigStatePreservesDoltMode(t *testing.T) {
+	fs := fsys.OSFS{}
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "yaml parser path",
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: proxied-server\n",
+			want: "proxied-server",
+		},
+		{
+			name: "line scanner fallback path",
+			// Keep the mode in a top-level dotted key while making the
+			// document invalid YAML so ReadConfigState uses its repair scanner.
+			config: "issue_prefix: gc\n" +
+				"gc.endpoint_origin: managed_city\n" +
+				"dolt.mode: server\n" +
+				"broken: [\n",
+			want: "server",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := fs.WriteFile(path, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			state, ok, err := ReadConfigState(fs, path)
+			if err != nil {
+				t.Fatalf("ReadConfigState() error = %v", err)
+			}
+			if !ok {
+				t.Fatal("ReadConfigState() ok = false, want true")
+			}
+			if state.DoltMode != tc.want {
+				t.Fatalf("ReadConfigState().DoltMode = %q, want %q", state.DoltMode, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsLegacyMinimalEndpointConfig(t *testing.T) {
 	if !IsLegacyMinimalEndpointConfig(ConfigState{}) {
 		t.Fatal("IsLegacyMinimalEndpointConfig(empty) = false, want true")
@@ -1493,27 +1538,13 @@ func TestLoadMetadataStateValidFixtures(t *testing.T) {
 			},
 		},
 		{
-			name:    "postgres round-trip",
-			fixture: "valid_postgres.json",
+			name:    "a backend gc does not implement leaves its own keys alone",
+			fixture: "dolt_with_foreign_backend_residue.json",
 			want: MetadataState{
-				Database:         "beads",
-				Backend:          "postgres",
-				PostgresHost:     "db.example.com",
-				PostgresPort:     "5432",
-				PostgresUser:     "bd",
-				PostgresDatabase: "beads_pwu",
-			},
-		},
-		{
-			name:    "postgres round-trip with unknown key",
-			fixture: "valid_postgres_with_unknown.json",
-			want: MetadataState{
-				Database:         "beads",
-				Backend:          "postgres",
-				PostgresHost:     "db.example.com",
-				PostgresPort:     "5432",
-				PostgresUser:     "bd",
-				PostgresDatabase: "beads_pwu",
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
 			},
 		},
 		{
@@ -1556,57 +1587,7 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 		{
 			name:            "E2 unknown backend",
 			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres)`,
-		},
-		{
-			name:            "E3 mixed backends fires before required-fields",
-			fixture:         "reject_mixed_backends.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit dolt with postgres fields",
-			fixture:         "reject_dolt_with_postgres_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_host is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field when backend=postgres",
-			fixture:         "reject_mixed_pg_backend_with_dolt.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit postgres with dolt fields",
-			fixture:         "reject_postgres_with_dolt_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field first when backend is empty",
-			fixture:         "reject_mixed_empty_backend.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend= but dolt_database is also set)",
-		},
-		{
-			name:            "E4 postgres missing host",
-			fixture:         "reject_pg_missing_host.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-		},
-		{
-			name:            "E4 postgres missing all fields",
-			fixture:         "reject_pg_missing_all.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-		},
-		{
-			name:            "E5 postgres_port non-numeric",
-			fixture:         "reject_pg_port_nonnumeric.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "abc"`,
-		},
-		{
-			name:            "E5 postgres_port zero",
-			fixture:         "reject_pg_port_zero.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "0"`,
-		},
-		{
-			name:            "E5 postgres_port too high",
-			fixture:         "reject_pg_port_too_high.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "99999"`,
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite)`,
 		},
 	}
 	for _, tc := range cases {
@@ -1639,6 +1620,113 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 				t.Fatalf("MetadataParseError.Error() = %q, want %q", err.Error(), wantWrapped)
 			}
 		})
+	}
+}
+
+// TestLoadMetadataStateRejectionOrderIsPinned holds the documented E1 → E2
+// ladder in place.
+//
+// The order is a contract, not an accident: an operator whose metadata is wrong
+// in several ways must see the same top-most message on every gc invocation, or
+// the fix they are told to make changes between two runs of the same command.
+// Each case below violates both rungs at once and asserts which one speaks, so
+// swapping the checks in LoadMetadataState fails here.
+//
+// The ladder is two rungs long because the rungs that once followed E2 all
+// validated a connection shape for a backend gc no longer implements. E2 is now
+// the last question the loader asks, and the fields of a backend it does not
+// register are none of its business — a scope bound to one is recognized, and
+// served, before metadata parsing is reached at all.
+func TestLoadMetadataStateRejectionOrderIsPinned(t *testing.T) {
+	fs := fsys.OSFS{}
+	cases := []struct {
+		name     string
+		metadata string
+		want     string
+		loses    string
+	}{
+		{
+			name:     "E1 parse beats E2 unknown backend",
+			metadata: `{"backend":"postgress","dolt_database":"hq"`,
+			want:     "invalid metadata.json:",
+			loses:    "unsupported backend",
+		},
+		{
+			name:     "E2 unknown backend speaks once the file parses",
+			metadata: `{"backend":"postgress","database":"beads"}`,
+			want:     `unsupported backend "postgress"`,
+			loses:    "invalid metadata.json:",
+		},
+		{
+			name:     "E2 refuses a backend whose own keys are complete",
+			metadata: `{"backend":"postgres","postgres_host":"h","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads"}`,
+			want:     `unsupported backend "postgres"`,
+			loses:    "invalid metadata.json:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			if err := fs.WriteFile(path, []byte(tc.metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, ok, err := LoadMetadataState(fs, path)
+			if err == nil || ok {
+				t.Fatalf("LoadMetadataState() = ok %v, err %v, want a rejection", ok, err)
+			}
+			var parseErr *MetadataParseError
+			if !errors.As(err, &parseErr) {
+				t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+			}
+			if !strings.Contains(parseErr.Reason, tc.want) {
+				t.Fatalf("top-most rejection = %q, want substring %q", parseErr.Reason, tc.want)
+			}
+			if strings.Contains(parseErr.Reason, tc.loses) {
+				t.Fatalf("rejection %q reports the later check %q — the ladder was reordered", parseErr.Reason, tc.loses)
+			}
+		})
+	}
+}
+
+// TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet asserts the
+// content of the E2 refusal, not just that one happened.
+//
+// The message is the deliverable. gc is assembled in more than one shape, and a
+// refusal that recites a list some other assembly's author typed sends the
+// operator to debug a build they do not have. Reading the enumeration back out
+// of the registry is what keeps the sentence true wherever it is printed.
+func TestLoadMetadataStateUnknownBackendEnumeratesTheRegisteredSet(t *testing.T) {
+	fs := fsys.OSFS{}
+	path, _ := copyMetadataFixture(t, fs, "reject_unknown_backend.json")
+
+	_, _, err := LoadMetadataState(fs, path)
+	if err == nil {
+		t.Fatal("LoadMetadataState() accepted an unregistered backend")
+	}
+	if !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("LoadMetadataState() error = %v, want ErrUnknownBackend", err)
+	}
+
+	registered, regErr := RegisteredBackends()
+	if regErr != nil {
+		t.Fatal(regErr)
+	}
+	var parseErr *MetadataParseError
+	if !errors.As(err, &parseErr) {
+		t.Fatalf("LoadMetadataState() error %T = %v, want *MetadataParseError", err, err)
+	}
+	want := `unsupported backend "postgress" (supported: ` + strings.Join(registered, ", ") + `); ` + BackendNotOpenedGuarantee
+	if parseErr.Reason != want {
+		t.Fatalf("E2 reason = %q, want %q", parseErr.Reason, want)
+	}
+	for _, name := range registered {
+		if !strings.Contains(parseErr.Reason, name) {
+			t.Fatalf("E2 reason %q omits registered backend %q", parseErr.Reason, name)
+		}
+	}
+	if !strings.Contains(parseErr.Reason, BackendNotOpenedGuarantee) {
+		t.Fatalf("E2 reason %q drops the data-safety guarantee", parseErr.Reason)
 	}
 }
 
@@ -1685,27 +1773,13 @@ func TestEnsureCanonicalMetadataIsByteIdempotentOnValidFixtures(t *testing.T) {
 			},
 		},
 		{
-			name:    "postgres",
-			fixture: "valid_postgres.json",
+			name:    "dolt carrying the keys of a backend gc does not implement",
+			fixture: "dolt_with_foreign_backend_residue.json",
 			state: MetadataState{
-				Database:         "beads",
-				Backend:          "postgres",
-				PostgresHost:     "db.example.com",
-				PostgresPort:     "5432",
-				PostgresUser:     "bd",
-				PostgresDatabase: "beads_pwu",
-			},
-		},
-		{
-			name:    "postgres with unknown key",
-			fixture: "valid_postgres_with_unknown.json",
-			state: MetadataState{
-				Database:         "beads",
-				Backend:          "postgres",
-				PostgresHost:     "db.example.com",
-				PostgresPort:     "5432",
-				PostgresUser:     "bd",
-				PostgresDatabase: "beads_pwu",
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hq",
 			},
 		},
 		{
@@ -1743,50 +1817,19 @@ func TestEnsureCanonicalMetadataIsByteIdempotentOnValidFixtures(t *testing.T) {
 	}
 }
 
-func TestEnsureCanonicalMetadataPreservesExistingPostgresHostWhenStateOmitsIt(t *testing.T) {
+// TestEnsureCanonicalMetadataPreservesKeysGCDoesNotOwn holds the round-trip
+// promise: a key gc does not write is a key gc does not touch.
+//
+// The keys under test belong to a backend served by the linked beads library,
+// which is the case that matters — gc cannot tell an inert leftover from live
+// configuration for a backend it does not implement, and hand-converting a
+// shape bd itself writes is not something an operator should ever be asked to
+// do. Idempotence is asserted alongside preservation because a canonicalise
+// that rewrites bytes on every pass is a preservation bug with a slow fuse.
+func TestEnsureCanonicalMetadataPreservesKeysGCDoesNotOwn(t *testing.T) {
 	fs := fsys.OSFS{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.json")
-	input := `{"backend":"postgres","database":"beads","postgres_host":"db.example.com","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pwu","custom":"keep"}`
-	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
-		Database:         "beads",
-		Backend:          "postgres",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads_pwu",
-	})
-	if err != nil {
-		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
-	}
-	if changed {
-		t.Fatal("EnsureCanonicalMetadata() should preserve existing postgres_host when state omits it")
-	}
-
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatalf("unmarshal metadata: %v", err)
-	}
-	if got := trimmedString(meta["postgres_host"]); got != "db.example.com" {
-		t.Fatalf("postgres_host = %q, want %q", got, "db.example.com")
-	}
-	if got := trimmedString(meta["custom"]); got != "keep" {
-		t.Fatalf("custom = %q, want %q", got, "keep")
-	}
-}
-
-func TestEnsureCanonicalMetadataScrubsPostgresKeysOnDoltCanonicalise(t *testing.T) {
-	fs := fsys.OSFS{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.json")
-	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","postgres_host":"stale.example.com","postgres_port":"5432","postgres_user":"stale","postgres_database":"stale","custom":"keep"}`
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","postgres_dsn":"postgres://bd@db.example.test:5432/beads","postgres_schema":"city_x","custom":"keep"}`
 	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1800,8 +1843,9 @@ func TestEnsureCanonicalMetadataScrubsPostgresKeysOnDoltCanonicalise(t *testing.
 	if err != nil {
 		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
 	}
-	if !changed {
-		t.Fatal("EnsureCanonicalMetadata() should scrub postgres_* keys when canonicalising for backend=dolt")
+	if changed {
+		after, _ := fs.ReadFile(path)
+		t.Fatalf("EnsureCanonicalMetadata() rewrote metadata carrying only keys it does not own\nbefore: %s\nafter:  %s", input, after)
 	}
 
 	data, err := fs.ReadFile(path)
@@ -1812,58 +1856,57 @@ func TestEnsureCanonicalMetadataScrubsPostgresKeysOnDoltCanonicalise(t *testing.
 	if err := json.Unmarshal(data, &meta); err != nil {
 		t.Fatalf("unmarshal metadata: %v", err)
 	}
-	for _, key := range []string{"postgres_host", "postgres_port", "postgres_user", "postgres_database"} {
-		if _, ok := meta[key]; ok {
-			t.Fatalf("metadata should scrub %q on backend=dolt: %s", key, data)
+	for key, want := range map[string]string{
+		"postgres_dsn":    "postgres://bd@db.example.test:5432/beads",
+		"postgres_schema": "city_x",
+		"custom":          "keep",
+		"dolt_database":   "hq",
+	} {
+		if got := trimmedString(meta[key]); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// TestEnsureCanonicalMetadataScrubsDoltModeOnDoltliteCanonicalise pins the one
+// key gc does scrub: dolt_mode on a doltlite scope is gc's own key, written by
+// gc for a backend gc implements, and meaningless on the embedded engine.
+func TestEnsureCanonicalMetadataScrubsDoltModeOnDoltliteCanonicalise(t *testing.T) {
+	fs := fsys.OSFS{}
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	input := `{"backend":"doltlite","database":"doltlite","dolt_mode":"server","dolt_database":"hq","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "doltlite",
+		Backend:      "doltlite",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should scrub dolt_mode when canonicalising for backend=doltlite")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if _, ok := meta["dolt_mode"]; ok {
+		t.Fatalf("metadata should scrub dolt_mode on backend=doltlite: %s", data)
 	}
 	if got := trimmedString(meta["custom"]); got != "keep" {
 		t.Fatalf("custom = %q, want %q", got, "keep")
 	}
 	if got := trimmedString(meta["dolt_database"]); got != "hq" {
 		t.Fatalf("dolt_database = %q, want %q", got, "hq")
-	}
-}
-
-func TestEnsureCanonicalMetadataScrubsDoltKeysOnPostgresCanonicalise(t *testing.T) {
-	fs := fsys.OSFS{}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "metadata.json")
-	input := `{"backend":"postgres","database":"beads","dolt_mode":"server","dolt_database":"stale","postgres_host":"db.example.com","postgres_port":"5432","postgres_user":"bd","postgres_database":"beads_pwu"}`
-	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
-		Database:         "beads",
-		Backend:          "postgres",
-		PostgresHost:     "db.example.com",
-		PostgresPort:     "5432",
-		PostgresUser:     "bd",
-		PostgresDatabase: "beads_pwu",
-	})
-	if err != nil {
-		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("EnsureCanonicalMetadata() should scrub dolt_* keys when canonicalising for backend=postgres")
-	}
-
-	data, err := fs.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatalf("unmarshal metadata: %v", err)
-	}
-	for _, key := range []string{"dolt_mode", "dolt_database"} {
-		if _, ok := meta[key]; ok {
-			t.Fatalf("metadata should scrub %q on backend=postgres: %s", key, data)
-		}
-	}
-	if got := trimmedString(meta["postgres_host"]); got != "db.example.com" {
-		t.Fatalf("postgres_host = %q, want %q", got, "db.example.com")
 	}
 }
 
@@ -1914,47 +1957,60 @@ func TestEnsureCanonicalConfigDoltModeIdempotent(t *testing.T) {
 	}
 }
 
-// TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt verifies
-// that a pre-existing dolt.mode: server in config is not removed or changed
-// when ConfigState.DoltMode is empty ("caller doesn't know the mode").
-func TestEnsureCanonicalConfigPreservesExistingDoltModeWhenStateOmitsIt(t *testing.T) {
+// TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt pins the
+// own-it-or-drop-it rule dolt.mode now shares with dolt.host/port/socket/user.
+// It replaces an earlier test that asserted the opposite (preserve on empty):
+// preserving made the key unclearable, so a scope bd migrated to
+// proxied-server kept gc's pre-migration `dolt.mode: server` and every
+// endpoint resolution read the stale value instead of metadata.json (D1).
+func TestEnsureCanonicalConfigDropsExistingDoltModeWhenStateOmitsIt(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 
-	// Pre-write a config that already has dolt.mode: server.
 	if _, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: "server"}); err != nil {
 		t.Fatalf("setup EnsureCanonicalConfig() error = %v", err)
 	}
 
-	// Now call with DoltMode:"" — existing dolt.mode must be preserved unchanged.
 	changed, err := EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
 	if err != nil {
 		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) error = %v", err)
 	}
-	if changed {
-		data, _ := fs.ReadFile(path)
-		t.Fatalf("EnsureCanonicalConfig(DoltMode empty) changed = true, want false:\n%s", data)
+	if !changed {
+		t.Fatal("EnsureCanonicalConfig(DoltMode empty) changed = false, want the stale key dropped")
 	}
 
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "dolt.mode: server") {
-		t.Fatalf("config should preserve existing dolt.mode: server when DoltMode is empty:\n%s", data)
+	if strings.Contains(string(data), "dolt.mode") {
+		t.Fatalf("dolt.mode survived a canonical write that does not set it:\n%s", data)
+	}
+
+	// And the drop is idempotent — a second pass must report no change.
+	changed, err = EnsureCanonicalConfig(fs, path, ConfigState{DoltMode: ""})
+	if err != nil {
+		t.Fatalf("second EnsureCanonicalConfig() error = %v", err)
+	}
+	if changed {
+		t.Fatal("second EnsureCanonicalConfig(DoltMode empty) changed = true, want idempotent")
 	}
 }
 
-// TestCrossBackendKeysToScrubDoesNotIncludeConfigDotModeKey guards that the
-// config key "dolt.mode" (dot-separated, used in config.yaml) is never added
-// to the metadata scrub list for the dolt backend. The metadata key "dolt_mode"
-// (underscore) is expected and correct; only the config key would be wrong.
-func TestCrossBackendKeysToScrubDoesNotIncludeConfigDotModeKey(t *testing.T) {
-	scrub := crossBackendKeysToScrub("dolt")
-	for _, k := range scrub {
-		if k == "dolt.mode" {
-			t.Fatalf("crossBackendKeysToScrub(dolt) must not include config key %q (only metadata key %q is expected)", "dolt.mode", "dolt_mode")
+// TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites pins both halves of the
+// scrub rule: it removes the metadata key "dolt_mode" (underscore) from a
+// doltlite scope and never the config key "dolt.mode" (dot-separated, which
+// lives in config.yaml), and it removes nothing at all for every other backend
+// — a key gc does not write is not gc's to delete.
+func TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites(t *testing.T) {
+	scrub := crossBackendKeysToScrub("doltlite")
+	if len(scrub) != 1 || scrub[0] != "dolt_mode" {
+		t.Fatalf("crossBackendKeysToScrub(doltlite) = %v, want exactly [dolt_mode]", scrub)
+	}
+	for _, backend := range []string{"", "dolt", "postgres", "anything-else"} {
+		if got := crossBackendKeysToScrub(backend); len(got) != 0 {
+			t.Fatalf("crossBackendKeysToScrub(%q) = %v, want no keys scrubbed", backend, got)
 		}
 	}
 }
@@ -1990,5 +2046,159 @@ func TestEnsureCanonicalMetadataPreservesAllKeysOnEmptyBackend(t *testing.T) {
 		if _, ok := meta[key]; !ok {
 			t.Fatalf("metadata should preserve %q when backend is empty: %s", key, data)
 		}
+	}
+}
+
+// TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding pins the boundary
+// between the endpoint keys gc writes and the one bd writes. dolt_server_host
+// and dolt_server_port are `bd init --server --external`'s record of the
+// upstream and nothing else on disk carries it, so canonicalisation scrubbing
+// them re-homes a bd-owned direct-external scope onto a gc-managed server with
+// no way back — see ReadPersistedServerBinding, whose doc calls metadata "the
+// only place the endpoint lives".
+func TestEnsureCanonicalMetadataKeepsBdsPersistedServerBinding(t *testing.T) {
+	for name, input := range map[string]string{
+		"tcp":    bdExternalTCPMetadata,
+		"socket": `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/var/run/dolt.sock","dolt_server_user":"beads","dolt_database":"hosted"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".beads", "metadata.json")
+			writeRawMetadata(t, fs, dir, input)
+
+			if _, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+				Database:     "dolt",
+				Backend:      "dolt",
+				DoltMode:     "server",
+				DoltDatabase: "hosted",
+			}); err != nil {
+				t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+			}
+
+			binding, ok, err := ReadPersistedServerBinding(fs, path)
+			if err != nil {
+				t.Fatalf("ReadPersistedServerBinding() error = %v", err)
+			}
+			if !ok {
+				data, _ := fs.ReadFile(path)
+				t.Fatalf("canonicalisation erased bd's persisted server binding: %s", data)
+			}
+			want, _ := persistedServerBinding([]byte(input))
+			if binding.DoltHost != want.DoltHost || binding.DoltPort != want.DoltPort || binding.DoltSocket != want.DoltSocket {
+				t.Fatalf("binding = %+v, want %+v", binding, want)
+			}
+			// Every key of the binding survives, not only the ones the reader
+			// happens to need: dolt_server_user is bd's too, and a canonicalise
+			// that keeps the host while dropping the user still loses part of an
+			// endpoint gc cannot reconstruct.
+			var before, after map[string]any
+			if err := json.Unmarshal([]byte(input), &before); err != nil {
+				t.Fatal(err)
+			}
+			data, err := fs.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &after); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range persistedServerBindingKeys {
+				if _, ok := before[key]; !ok {
+					continue
+				}
+				if _, ok := after[key]; !ok {
+					t.Fatalf("canonicalisation dropped %q from bd's binding: %s", key, data)
+				}
+			}
+		})
+	}
+}
+
+// A fragment that names no server is not a binding, and canonicalisation still
+// clears it: the preservation above must not become a way for stale keys to
+// outlive the endpoint they half-describe.
+func TestEnsureCanonicalMetadataScrubsAnUnusableServerBindingFragment(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".beads", "metadata.json")
+	writeRawMetadata(t, fs, dir, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_port":0,"dolt_server_user":"legacy","dolt_database":"hq"}`)
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report the fragment scrub")
+	}
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range persistedServerBindingKeys {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain %q: %s", key, data)
+		}
+	}
+}
+
+// TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps pins the difference between
+// the two readers of one key.
+//
+// metadata.json IS bd's config file (configfile.ConfigFileName), and
+// Config.GetDoltDataDir hands DatabasePath the value JSON decoded, untrimmed. A
+// reader resolving the directory bd serves from must therefore not trim; a
+// reader comparing the value against a path gc itself wrote may, because
+// SetMetadataDoltDataDir trims on the way in.
+func TestReadMetadataDoltDataDirRawKeepsWhatBeadsKeeps(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    string
+		wantRaw  string
+		wantTidy string
+		wantOK   bool
+	}{
+		{name: "no padding: the readers agree", value: `"elsewhere/dolt"`, wantRaw: "elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a leading space is a directory name", value: `" elsewhere/dolt"`, wantRaw: " elsewhere/dolt", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "a trailing space too", value: `"elsewhere/dolt "`, wantRaw: "elsewhere/dolt ", wantTidy: "elsewhere/dolt", wantOK: true},
+		{name: "whitespace only is no claim either way", value: `"  "`, wantRaw: "  ", wantTidy: "", wantOK: false},
+		{name: "absent", value: "", wantRaw: "", wantTidy: "", wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			body := `{"dolt_mode":"proxied-server"}`
+			if tc.value != "" {
+				body = `{"dolt_mode":"proxied-server","dolt_data_dir":` + tc.value + `}`
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			raw, rawOK, err := ReadMetadataDoltDataDirRaw(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDirRaw: %v", err)
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("ReadMetadataDoltDataDirRaw = %q, want %q (beads resolves the value as decoded)", raw, tc.wantRaw)
+			}
+			if rawOK != (tc.wantRaw != "") {
+				t.Errorf("ReadMetadataDoltDataDirRaw ok = %v, want %v", rawOK, tc.wantRaw != "")
+			}
+			tidy, tidyOK, err := ReadMetadataDoltDataDir(fsys.OSFS{}, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataDoltDataDir: %v", err)
+			}
+			if tidy != tc.wantTidy || tidyOK != tc.wantOK {
+				t.Errorf("ReadMetadataDoltDataDir = %q/%v, want %q/%v", tidy, tidyOK, tc.wantTidy, tc.wantOK)
+			}
+		})
 	}
 }

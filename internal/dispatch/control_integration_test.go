@@ -3,6 +3,7 @@ package dispatch
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,6 +66,108 @@ func makeAttemptBead(t *testing.T, store beads.Store, rootID, stepRef string, at
 	})
 	mustClose(t, store, b.ID)
 	return b
+}
+
+// TestSpawnNextAttemptPreservesTopLevelStepContract guards the frozen-spec to
+// molecule.Attach boundary used by both retry and Ralph controls. A regenerated
+// top-level attempt must carry the same worker task and formula-owned contract
+// metadata as the source step; otherwise the worker is launched with no task.
+func TestSpawnNextAttemptPreservesTopLevelStepContract(t *testing.T) {
+	t.Parallel()
+
+	const (
+		description = "Read the prior failure, repair the canonical artifact, and report the result."
+		resultPath  = ".gc/artifacts/run/delivery/requirements.md"
+	)
+
+	tests := []struct {
+		name      string
+		kind      string
+		stepRef   string
+		attemptID func(int) string
+		configure func(*formula.Step)
+	}{
+		{
+			name:    "retry",
+			kind:    beadmeta.KindRetry,
+			stepRef: "mol-test.requirements",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements.attempt." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Retry = &formula.RetrySpec{MaxAttempts: 3}
+			},
+		},
+		{
+			name:    "ralph",
+			kind:    beadmeta.KindRalph,
+			stepRef: "mol-test.requirements-loop",
+			attemptID: func(attempt int) string {
+				return "mol-test.requirements-loop.iteration." + strconv.Itoa(attempt)
+			},
+			configure: func(step *formula.Step) {
+				step.Ralph = &formula.RalphSpec{MaxAttempts: 3}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, attempt := range []int{2, 3} {
+				t.Run("attempt_"+strconv.Itoa(attempt), func(t *testing.T) {
+					t.Parallel()
+					store := beads.NewMemStore()
+					step := &formula.Step{
+						ID:          "requirements",
+						Title:       "Write requirements",
+						Description: description,
+						Type:        "task",
+						Metadata: map[string]string{
+							"gc.result_contract":   "gc.build.requirements.v1",
+							"gc.requirements_path": resultPath,
+						},
+					}
+					tc.configure(step)
+
+					specJSON, err := json.Marshal(step)
+					if err != nil {
+						t.Fatalf("marshal frozen step spec: %v", err)
+					}
+					root := mustCreate(t, store, beads.Bead{
+						Title:    "workflow",
+						Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+					})
+					control := mustCreate(t, store, beads.Bead{
+						Title: "requirements control",
+						Metadata: map[string]string{
+							beadmeta.KindMetadataKey:           tc.kind,
+							beadmeta.RootBeadIDMetadataKey:     root.ID,
+							beadmeta.StepRefMetadataKey:        tc.stepRef,
+							beadmeta.StepIDMetadataKey:         step.ID,
+							beadmeta.SourceStepSpecMetadataKey: string(specJSON),
+							beadmeta.ControlEpochMetadataKey:   "1",
+						},
+					})
+
+					if err := spawnNextAttempt(t.Context(), store, control, attempt, ProcessOptions{}); err != nil {
+						t.Fatalf("spawnNextAttempt: %v", err)
+					}
+
+					got := findAttemptByRef(t, store, root.ID, tc.attemptID(attempt))
+					if got.Description != description {
+						t.Fatalf("description = %q, want frozen task %q", got.Description, description)
+					}
+					if got.Metadata["gc.result_contract"] != "gc.build.requirements.v1" {
+						t.Fatalf("gc.result_contract = %q, want preserved", got.Metadata["gc.result_contract"])
+					}
+					if got.Metadata["gc.requirements_path"] != resultPath {
+						t.Fatalf("gc.requirements_path = %q, want %q", got.Metadata["gc.requirements_path"], resultPath)
+					}
+				})
+			}
+		})
+	}
 }
 
 // TestRetryLifecycleTransientThenPass exercises the full lifecycle:
@@ -164,6 +267,164 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 	if log[1]["outcome"] != "pass" || log[1]["action"] != "close" {
 		t.Errorf("log[1] = %v, want pass/close", log[1])
+	}
+}
+
+// TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort reproduces
+// gc-yydp6f end to end: an Attach-spawned retry attempt that bare-closes with
+// a typed deliverable disposition (no flat gc.outcome) must carry
+// gc.logical_bead_id so isRetryAttemptSubject recognizes it, both at the
+// scope-check that blocks directly on the attempt bead and at
+// workflow-finalize's root-wide terminal-abort-scope scan. Without the fix,
+// buildAttemptRecipe stamped gc.control_for but not gc.logical_bead_id, so a
+// passing attempt with an abort_scope step and no flat outcome was
+// misclassified as a terminal failure and falsely aborted the scope /
+// failed the workflow despite the logical retry closing pass.
+func TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+
+	spec := &formula.Step{
+		ID:    "review",
+		Title: "Review",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Metadata: map[string]string{
+			"gc.on_fail": "abort_scope",
+		},
+	}
+	root, control := makeRetryControl(t, store, "mol-scoped-work.review", spec, 3)
+
+	// --- Attempt 1: transient failure, spawns attempt 2 via Attach ---
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-scoped-work.review.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "rate_limited",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	result1, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 1: %v", err)
+	}
+	if result1.Action != "retry" {
+		t.Fatalf("attempt 1 action = %q, want retry", result1.Action)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-scoped-work.review.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 was not created by Attach")
+	}
+	if attempt2.Metadata["gc.on_fail"] != "abort_scope" {
+		t.Fatalf("attempt 2 gc.on_fail = %q, want abort_scope propagated from frozen step spec", attempt2.Metadata["gc.on_fail"])
+	}
+	// This is the regression guard: buildAttemptRecipe must stamp
+	// gc.logical_bead_id alongside gc.control_for so isRetryAttemptSubject
+	// recognizes this attempt root as retry-managed.
+	if attempt2.Metadata["gc.logical_bead_id"] != control.ID {
+		t.Fatalf("attempt 2 gc.logical_bead_id = %q, want %q (control ID)", attempt2.Metadata["gc.logical_bead_id"], control.ID)
+	}
+
+	// --- Attempt 2: deliverable pass, bare-closed (no flat gc.outcome) ---
+	// gc-outcome-close records work_id = the closed bead's own ID and does
+	// not set a flat gc.outcome; the disposition envelope is the only
+	// record of the passing verdict.
+	disposition := fmt.Sprintf(`{"contract_version":1,"disposition":"deliverable","work_id":%q,"recorded_by":"formula-step","reason":"done","producer":"formula-step"}`, attempt2.ID)
+	if err := store.SetMetadata(attempt2.ID, "gc.coordinator_outcome.producer_disposition", disposition); err != nil {
+		t.Fatalf("set producer_disposition: %v", err)
+	}
+	mustClose(t, store, attempt2.ID)
+
+	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processRetryControl attempt 2: %v", err)
+	}
+	if result2.Action != "pass" {
+		t.Fatalf("attempt 2 action = %q, want pass", result2.Action)
+	}
+	controlFinal := mustGet(t, store, control.ID)
+	if controlFinal.Status != "closed" || controlFinal.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("control = status %q outcome %q, want closed/pass", controlFinal.Status, controlFinal.Metadata["gc.outcome"])
+	}
+
+	// --- Scope check blocks directly on the attempt bead, mirroring the
+	// bug's exact wiring (scope-check -> attempt root, not the logical
+	// retry control). A downstream "submission" sibling remains open. ---
+	const scopeRef = "mol-scoped-work"
+	scopeBody := mustCreate(t, store, beads.Bead{
+		Title: "scoped work body",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    scopeRef,
+		},
+	})
+	submission := mustCreate(t, store, beads.Bead{
+		Title: "submission",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    scopeRef,
+			"gc.step_ref":     scopeRef + ".submission",
+		},
+	})
+	scopeCheck := mustCreate(t, store, beads.Bead{
+		Title: "scope check",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": root.ID,
+			"gc.scope_ref":    scopeRef,
+		},
+	})
+	mustDep(t, store, scopeCheck.ID, attempt2.ID, "blocks")
+
+	scResult, err := processScopeCheck(store, mustGet(t, store, scopeCheck.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("processScopeCheck: %v", err)
+	}
+	if !scResult.Processed || scResult.Action != "continue" {
+		t.Fatalf("scope-check result = %+v, want processed continue (no false abort)", scResult)
+	}
+	if scResult.Skipped != 0 {
+		t.Fatalf("scope-check skipped = %d, want 0 (no siblings skipped)", scResult.Skipped)
+	}
+	submissionAfterScopeCheck := mustGet(t, store, submission.ID)
+	if submissionAfterScopeCheck.Status != "open" {
+		t.Fatalf("submission status = %q after scope-check, want open (not skipped)", submissionAfterScopeCheck.Status)
+	}
+	scopeBodyAfterScopeCheck := mustGet(t, store, scopeBody.ID)
+	if scopeBodyAfterScopeCheck.Status != "open" {
+		t.Fatalf("scope body status = %q after scope-check, want open (scope not aborted or prematurely closed)", scopeBodyAfterScopeCheck.Status)
+	}
+
+	// --- Submission completes normally, then workflow-finalize must pass,
+	// proving the fix also prevents workflowRootHasTerminalAbortScopeFailure
+	// from downgrading the workflow outcome due to attempt 2's bare close. ---
+	if err := store.SetMetadata(submission.ID, "gc.outcome", "pass"); err != nil {
+		t.Fatalf("set submission outcome: %v", err)
+	}
+	mustClose(t, store, submission.ID)
+
+	finalizer := mustCreate(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": root.ID,
+		},
+	})
+	mustDep(t, store, finalizer.ID, control.ID, "blocks")
+	mustDep(t, store, finalizer.ID, submission.ID, "blocks")
+
+	finalResult, err := ProcessControl(store, mustGet(t, store, finalizer.ID), ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	if !finalResult.Processed || finalResult.Action != "workflow-pass" {
+		t.Fatalf("workflow-finalize result = %+v, want processed workflow-pass", finalResult)
+	}
+	rootAfter := mustGet(t, store, root.ID)
+	if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+		t.Fatalf("workflow root = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
 	}
 }
 
@@ -633,6 +894,121 @@ func TestSpawnNextAttemptPropagatesRoutingMetadata(t *testing.T) {
 	}
 }
 
+// TestSpawnNextAttemptRigScopedOneShotRetryPreservesRouteAndIndependence
+// reproduces the production defect where a graphv2 retry-controlled step's
+// re-attempt loses its rig qualifier and stays pinned to session affinity.
+//
+// A nested/runtime-created retry control bead (unlike a top-level control
+// decorated at compile time by graphroute) never gets gc.execution_routed_to
+// stamped — only gc.execution_rig_context is backfilled onto it. When such a
+// control spawns a re-attempt for a step whose gc.run_target is a bare
+// (unscoped) rig-template agent name, applyAttemptStepRoute has no execution
+// route to qualify against and never falls back to the rig context it does
+// have, so the re-attempt's gc.routed_to is stamped unscoped — invisible to
+// the rig-scoped pool. The same re-attempt also carries stale
+// gc.session_affinity/gc.continuation_group from the frozen step spec, which
+// pins it to a session that a one-shot runtime already exited.
+func TestSpawnNextAttemptRigScopedOneShotRetryPreservesRouteAndIndependence(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[[rigs]]
+name = "fable-nomad"
+path = "/tmp/fable-nomad"
+
+[[agent]]
+name = "claude-sonnet-one-shot"
+dir = "fable-nomad"
+lifecycle = "one_shot"
+max_active_sessions = 2
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+
+[[agent]]
+name = "control-dispatcher"
+dir = "fable-nomad"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Metadata: map[string]string{
+			// A one-shot runtime does not survive between attempts, so any
+			// prior session-pinning metadata baked into the frozen spec is
+			// stale by the time a re-attempt is minted.
+			"gc.session_affinity":   "require",
+			"gc.continuation_group": "main",
+			"gc.run_target":         "claude-sonnet-one-shot",
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+			// No gc.execution_routed_to: this models a nested retry control
+			// minted at runtime by buildAttemptRecipe, which never stamps
+			// this key (only compile-time graphroute decoration does).
+			"gc.execution_rig_context": "fable-nomad",
+		},
+	})
+
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath}); err != nil {
+		t.Fatalf("processRetryControl: %v", err)
+	}
+
+	attempt2 := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2")
+	if attempt2.ID == "" {
+		t.Fatal("attempt 2 not created")
+	}
+
+	if got, want := attempt2.Metadata["gc.routed_to"], "fable-nomad/claude-sonnet-one-shot"; got != want {
+		t.Errorf("attempt 2 gc.routed_to = %q, want %q (rig qualifier lost)", got, want)
+	}
+	if got := attempt2.Metadata["gc.session_affinity"]; got != "" {
+		t.Errorf("attempt 2 gc.session_affinity = %q, want unset for one_shot lifecycle target", got)
+	}
+	if got := attempt2.Metadata["gc.continuation_group"]; got != "" {
+		t.Errorf("attempt 2 gc.continuation_group = %q, want unset for one_shot lifecycle target", got)
+	}
+}
+
 func TestSpawnNextAttemptPreservesExplicitChildPoolRoutes(t *testing.T) {
 	t.Parallel()
 
@@ -1095,7 +1471,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	if binding.directSessionID != named.ID {
 		t.Fatalf("directSessionID = %q, want canonical named bead ID %q", binding.directSessionID, named.ID)
 	}
-	if binding.qualifiedName != "" || binding.sessionName != "" {
+	if binding.qualifiedName != "" {
 		t.Fatalf("binding = %+v, want direct named session only", binding)
 	}
 	// Per-resolution List calls must stay bounded so the per-attempt cost
@@ -1143,11 +1519,45 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 	if binding.directSessionID != "" {
 		t.Fatalf("directSessionID = %q, want empty without canonical bead", binding.directSessionID)
 	}
-	if binding.sessionName != "" {
-		t.Fatalf("sessionName = %q, want empty so future runtime names are not assigned", binding.sessionName)
-	}
 	if binding.qualifiedName != "worker" || !binding.metadataOnly {
 		t.Fatalf("binding = %+v, want metadata-only worker route", binding)
+	}
+}
+
+// Regression for the "munged pre-assignment" bug: a single-session config
+// agent's attempt/fanout steps must be delivered by gc.routed_to (the alias)
+// with an EMPTY Assignee, not pre-stamped with the munged runtime session name
+// (e.g. "gascity-packs/gc.run-operator" -> "gascity-packs--gc__run-operator").
+// A pre-stamped agent-shaped Assignee matched no claim/wake/reaper identity and
+// hid the bead from --unassigned routed demand, leaving it unclaimable.
+func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity-packs"},
+		Agents: []config.Agent{{
+			Name:              "gc.run-operator",
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+
+	binding, ok := resolveAttemptRouteBinding("gc.run-operator", cfg, store)
+	if !ok {
+		t.Fatal("resolveAttemptRouteBinding did not resolve config-agent target")
+	}
+	if binding.directSessionID != "" || binding.qualifiedName == "" {
+		t.Fatalf("binding = %+v, want a routed config-agent binding", binding)
+	}
+
+	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
+	applyAttemptStepRoute(step, "gc.run-operator", cfg, store)
+	if step.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
+	}
+	if step.Metadata[beadmeta.RoutedToMetadataKey] != binding.qualifiedName {
+		t.Fatalf("gc.routed_to = %q, want the config alias %q", step.Metadata[beadmeta.RoutedToMetadataKey], binding.qualifiedName)
 	}
 }
 

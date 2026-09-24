@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "commandcensus",
+    srcs = [
+        "generate.go",
+        "manifest.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/commandcensus",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "commandcensus_test",
+    srcs = [
+        "generate_test.go",
+        "manifest_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":commandcensus"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

@@ -130,19 +130,19 @@ func TestAssigneeIdentifier(t *testing.T) {
 		want string
 	}{
 		{
-			name: "session_name wins",
+			name: "alias wins",
 			info: Info{ID: "s1", SessionNameMetadata: "sn", Alias: "al", ConfiguredNamedIdentity: "ni"},
-			want: "sn",
-		},
-		{
-			name: "alias when no session_name",
-			info: Info{ID: "s1", Alias: "al", ConfiguredNamedIdentity: "ni"},
 			want: "al",
 		},
 		{
-			name: "configured named identity when no session_name or alias",
-			info: Info{ID: "s1", ConfiguredNamedIdentity: "ni"},
+			name: "configured named identity when no alias",
+			info: Info{ID: "s1", SessionNameMetadata: "sn", ConfiguredNamedIdentity: "ni"},
 			want: "ni",
+		},
+		{
+			name: "session_name when no public identity",
+			info: Info{ID: "s1", SessionNameMetadata: "sn"},
+			want: "sn",
 		},
 		{
 			name: "bead id fallback when no name metadata",
@@ -156,8 +156,8 @@ func TestAssigneeIdentifier(t *testing.T) {
 		},
 		{
 			name: "values trimmed",
-			info: Info{ID: "s1", SessionNameMetadata: "  sn  "},
-			want: "sn",
+			info: Info{ID: "s1", Alias: "  al  ", SessionNameMetadata: "  sn  "},
+			want: "al",
 		},
 	}
 	for _, tt := range tests {

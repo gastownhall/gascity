@@ -420,9 +420,10 @@ func assertTypedEventEnvelopeUnion(t *testing.T, spec map[string]any, schemaName
 		if gotPayloadRef != wantPayloadRef {
 			t.Fatalf("%s variant %s payload ref = %q, want %q", schemaName, eventType, gotPayloadRef, wantPayloadRef)
 		}
+		assertOptionalStepDependenciesSchema(t, schemaName, eventType, properties)
 
 		wantRequired := []string{"seq", "type", "ts", "actor", "payload"}
-		wantProperties := []string{"seq", "type", "ts", "actor", "subject", "message", "workflow", "payload"}
+		wantProperties := []string{"seq", "type", "ts", "actor", "subject", "message", "workflow", "payload", "depends_on_step_ids"}
 		if cityField {
 			wantRequired = append(wantRequired, "city")
 			wantProperties = append(wantProperties, "city")
@@ -504,15 +505,34 @@ func assertCustomEventEnvelopeVariant(
 	if len(payloadProperty) != 0 {
 		t.Fatalf("%s custom variant %s payload schema = %#v, want unconstrained custom JSON", schemaName, ref, payloadProperty)
 	}
+	assertOptionalStepDependenciesSchema(t, schemaName, "custom", properties)
 
 	wantRequired := []string{"seq", "type", "ts", "actor", "payload"}
-	wantProperties := []string{"seq", "type", "ts", "actor", "subject", "message", "workflow", "payload"}
+	wantProperties := []string{"seq", "type", "ts", "actor", "subject", "message", "workflow", "payload", "depends_on_step_ids"}
 	if cityField {
 		wantRequired = append(wantRequired, "city")
 		wantProperties = append(wantProperties, "city")
 	}
 	assertProperties(t, schemaName, "custom", properties, wantProperties)
 	assertRequiredFields(t, schemaName, "custom", variant, wantRequired)
+}
+
+func assertOptionalStepDependenciesSchema(t *testing.T, schemaName, variant string, properties map[string]any) {
+	t.Helper()
+	dependencies, ok := properties["depends_on_step_ids"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s depends_on_step_ids property missing", schemaName, variant)
+	}
+	if got, _ := dependencies["type"].(string); got != "array" {
+		t.Fatalf("%s %s depends_on_step_ids type = %q, want array", schemaName, variant, got)
+	}
+	items, ok := dependencies["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s %s depends_on_step_ids items missing", schemaName, variant)
+	}
+	if got, _ := items["type"].(string); got != "string" {
+		t.Fatalf("%s %s depends_on_step_ids item type = %q, want string", schemaName, variant, got)
+	}
 }
 
 func typedEventDiscriminatorMapping(t *testing.T, union map[string]any, schemaName string) map[string]string {

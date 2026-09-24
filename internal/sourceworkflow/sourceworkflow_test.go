@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -974,10 +975,11 @@ func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	missing := filepath.Join(aliasDir, "missing-leaf")
 	got := canonicalScopeRef(missing)
 
-	resolvedAlias, err := filepath.EvalSymlinks(aliasDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
-	}
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: the two pick different spellings of the macOS
+	// temp root (/var/... vs /private/var/...). The comparison stays exact,
+	// so an unresolved alias still fails.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	if got != want {
 		t.Errorf("canonicalScopeRef(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
@@ -1019,10 +1021,8 @@ func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 		t.Fatalf("canonicalCityPath(%q): %v", missing, err)
 	}
 
-	resolvedAlias, evalErr := filepath.EvalSymlinks(aliasDir)
-	if evalErr != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", evalErr)
-	}
+	// Same canonical-form alignment as canonicalScopeRef above.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	if got != want {
 		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
@@ -1041,5 +1041,29 @@ func TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs(t *testing.T
 		if a != ref || b != ref {
 			t.Errorf("canonicalScopeRef(%q) = %q / %q, want %q verbatim from both dirs", ref, a, b, ref)
 		}
+	}
+}
+
+// TestGraphStoreRefIsAStoreSentinelNotAScopeKind pins the graph binding's store
+// ref. It has to survive canonicalScopeRef intact for the same reason
+// "rig:alpha" does — a ref that absolutized would derive a different lock key
+// per working directory — and it must never collapse to the bare prefix, which
+// isStoreScopeSentinel reads as a path.
+func TestGraphStoreRefIsAStoreSentinelNotAScopeKind(t *testing.T) {
+	ref := GraphStoreRef("bright-lights")
+	if ref != GraphStoreRefPrefix+":bright-lights" {
+		t.Fatalf("GraphStoreRef(bright-lights) = %q, want %q", ref, GraphStoreRefPrefix+":bright-lights")
+	}
+	if got := GraphStoreRef("  "); got != GraphStoreRefPrefix+":city" {
+		t.Errorf("GraphStoreRef(blank) = %q, want the %q fallback", got, GraphStoreRefPrefix+":city")
+	}
+	if !isStoreScopeSentinel(ref) {
+		t.Errorf("%q does not read as a store sentinel; a lock keyed on it would depend on the caller's cwd", ref)
+	}
+	if got := canonicalScopeRef(ref); got != ref {
+		t.Errorf("canonicalScopeRef(%q) = %q, want it verbatim", ref, got)
+	}
+	if NormalizeSourceStoreRef(ref) == NormalizeSourceStoreRef("city:bright-lights") {
+		t.Error("the graph leg's ref compares equal to the city store's; the two legs would be conflated")
 	}
 }

@@ -412,6 +412,17 @@ func NormalizeInputConvoy(store beads.Store, targetID string) (string, error) {
 
 // CreateSingleItemInputConvoy creates a system-created one-item convoy for a
 // graph.v2 invocation target.
+//
+// store is the store the TARGET was resolved from, and that is the only store
+// this convoy can be minted in. A synthetic input convoy is a WORK bead
+// (coordclass.Classify) for the same reason the mechanics require it: its whole
+// content is one `tracks` edge to the target, and convoycore.TrackItemIn refuses
+// an edge whose member is owned by another class store, because a dep row cannot
+// reference an id its own store cannot resolve. Every caller reaches this through
+// NormalizeInputConvoy, which Gets the target from the same handle it passes
+// here, so co-residence is structural rather than a convention a caller has to
+// remember: routing this at a graph binding would fail to find the target long
+// before it could mint a convoy in the wrong ledger.
 func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Bead, error) {
 	if store == nil {
 		return beads.Bead{}, fmt.Errorf("formulas v2 invocation requires a bead store")

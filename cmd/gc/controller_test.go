@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -232,7 +233,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, controllerHostingStandalone, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -247,6 +248,17 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	}
 	if pid := controllerAlive(cityPath); pid == 0 {
 		t.Fatal("controllerAlive = 0, want live controller via fallback socket")
+	}
+	legacyPing, err := sendControllerCommand(cityPath, "ping")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(ping): %v", err)
+	}
+	if got, want := string(legacyPing), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("legacy ping response = %q, want numeric PID %q", got, want)
+	}
+	identity := probeControllerIdentity(cityPath)
+	if identity.PID != os.Getpid() || identity.HostingMode != controllerHostingStandalone {
+		t.Fatalf("probeControllerIdentity = %+v, want PID %d hosted standalone", identity, os.Getpid())
 	}
 	resp, err := sendControllerCommand(cityPath, "reload")
 	if err != nil {
@@ -267,6 +279,32 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")
 	}
 	awaitClose(t, ctx.Done(), "stop invoking cancel via fallback socket")
+}
+
+func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+	cityPath := t.TempDir()
+
+	done := make(chan struct{})
+	go func() {
+		handleControllerConn(server, cityPath, controllerHostingSupervisor, func() {}, nil, nil, nil, nil, nil, nil)
+		close(done)
+	}()
+
+	if _, err := client.Write([]byte("identify\n")); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	var got controllerIdentityReply
+	if err := json.NewDecoder(client).Decode(&got); err != nil {
+		t.Fatalf("decode identity: %v", err)
+	}
+	if got.PID != os.Getpid() || got.HostingMode != controllerHostingSupervisor {
+		t.Fatalf("identity = %+v, want PID %d hosted by supervisor", got, os.Getpid())
+	}
+
+	client.Close() //nolint:errcheck
+	awaitClose(t, done, "handleControllerConn to exit")
 }
 
 func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
@@ -633,7 +671,7 @@ func TestBuildIdleTracker_SkipsAlwaysNamedSessionIdleTimeout(t *testing.T) {
 	if !tracker.templateFallbackExemptions["mayor"] {
 		t.Fatalf("templateFallbackExemptions = %v, want mayor exempt", tracker.templateFallbackExemptions)
 	}
-	if tracker.checkIdle("mayor", "mayor", sp, now) {
+	if tracker.checkIdle("mayor", "mayor", "", "", sp, now) {
 		t.Fatalf("always-named session inherited template idle timeout")
 	}
 }
@@ -1211,7 +1249,7 @@ func TestControllerReloadsNamedSessionModeAndAppliesIdleTimeout(t *testing.T) {
 	if !ok || tracker == nil {
 		t.Fatal("buildIdleTracker(parsedCfg) = nil, want tracker")
 	}
-	if !tracker.checkIdle("mayor", "", sp, time.Now()) {
+	if !tracker.checkIdle("mayor", "", "", "", sp, time.Now()) {
 		t.Fatalf("fresh idle tracker did not consider mayor idle; activity=%v timeouts=%v", sp.Activity["mayor"], tracker.timeouts)
 	}
 
@@ -1242,7 +1280,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 

@@ -265,7 +265,7 @@ dispatched it to the `claude` agent. You can watch it progress:
 ```shell
 ~/my-city
 $ bd show mp-ff9 --watch
-✓ mp-ff9 · Write hello world in python to the file hello.py   [● P2 · CLOSED]
+✓ mp-ff9 · Write hello world in python to the file hello.py   [P2 · CLOSED]
 Owner: Chris Sells · Assignee: claude-mp-208 · Type: task
 Created: 2026-04-07 · Updated: 2026-04-07
 
@@ -273,7 +273,7 @@ NOTES
 Done: created project README.md
 
 PARENT
-  ↑ ○ mp-6yh: sling-mp-ff9 ● P2
+  ↑ ○ mp-6yh: sling-mp-ff9 P2
 
 Watching for changes... (Press Ctrl+C to exit)
 ```

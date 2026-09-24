@@ -580,15 +580,7 @@ func TestSendReloadControlRequestNoChange(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	reply, err := sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "1s"})
 	if err != nil {
@@ -645,7 +637,7 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 		cfg:                cfg,
 		sp:                 runtime.NewFake(),
 		dops:               newDrainOps(runtime.NewFake()),
-		od:                 buildOrderDispatcherFromOrderSet(dir, cfg, initialOrders.Orders, events.Discard, &stderr),
+		od:                 buildOrderDispatcherFromOrderSet(nil, dir, cfg, initialOrders.Orders, events.Discard, &stderr),
 		orderSet:           initialOrders.Orders,
 		orderSetSignature:  initialOrders.Signature,
 		orderRescanEnabled: true,
@@ -790,15 +782,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 	})
 
 	waitForController(t, dir)
-	deadline := time.After(5 * time.Second)
-	for reconcileCount.Load() < 1 {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for initial reconcile")
-		default:
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	awaitCond(t, func() bool { return reconcileCount.Load() >= 1 }, "initial reconcile")
 
 	oldDebounce := debounceDelay
 	debounceDelay = 30 * time.Second
@@ -811,7 +795,7 @@ func TestSendReloadControlRequestInvalidConfig(t *testing.T) {
 
 	stdoutBeforeInvalid := stdout.String()
 	var reply reloadControlReply
-	deadline = time.After(45 * time.Second)
+	deadline := time.After(45 * time.Second)
 	for {
 		reply, err = sendReloadControlRequest(dir, reloadControlRequest{Wait: true, Timeout: "30s"})
 		if err != nil {

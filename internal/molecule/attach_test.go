@@ -182,7 +182,7 @@ func TestAttachToWorkflowRoot(t *testing.T) {
 // gc.root_bead_id. The old Attach fallback checked only gc.root_bead_id and
 // then defaulted to the parent's own id, stamping the whole sub-DAG (attempt
 // container, scope-check, every child) with the WRONG root. Downstream
-// reconciliation then enumerated siblings via listByWorkflowRoot(<wrong root>),
+// reconciliation then enumerated siblings via beads.DirectMembers(<wrong root>),
 // found the wrong set, and burned ralph attempts until abort_scope fired on
 // green work. Attach must resolve the root through the canonical run chain
 // (beadmeta.ResolveRunID), never the parent's own id.
@@ -219,6 +219,63 @@ func TestAttachResolvesRootFromRunChainNotOwnID(t *testing.T) {
 		t.Errorf("WorkflowRootID = %q, want %q (true root from run chain, not the wisp's own id %q)", result.WorkflowRootID, root.ID, wisp.ID)
 	}
 	assertAllBeadsHaveRootID(t, store, result.IDMapping, root.ID)
+}
+
+// TestAttachFallsBackToSelfWhenRunChainRootIsClosed is the regression for
+// ga-yov1rr: the common "polecat resume" case where a content bead is
+// re-attached to a fresh formula after its PRIOR molecule fully closed (the
+// ordinary REQUEST_CHANGES round-trip through a review bead). The content
+// bead's run-chain metadata (workflow_id / molecule_id / gc.root_bead_id)
+// still points at that now-closed prior molecule -- a dead pointer, not a
+// live upstream workflow to honor. Unlike
+// TestAttachResolvesRootFromRunChainNotOwnID (gcg-wisp-y785sz), where the
+// chain points at a workflow that is still open and must be honored, a
+// chain pointing at something CLOSED must be treated as stale and the new
+// sub-DAG must self-root at the content bead, exactly like a bead with no
+// chain at all.
+func TestAttachFallsBackToSelfWhenRunChainRootIsClosed(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// A prior molecule wrapper that has since fully closed. Its id is still
+	// recorded in the content bead's run-chain metadata below -- exactly
+	// the shape left behind by an ordinary attach-complete-close cycle.
+	staleRoot, err := store.Create(beads.Bead{
+		Title: "prior molecule (now closed)",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("create stale root: %v", err)
+	}
+	if err := store.Close(staleRoot.ID); err != nil {
+		t.Fatalf("close stale root: %v", err)
+	}
+
+	// The content bead being re-attached: its molecule_id still points at
+	// the now-closed prior molecule.
+	content, err := store.Create(beads.Bead{
+		Title: "content bead being re-attached",
+		Type:  "bug",
+		Metadata: map[string]string{
+			"molecule_id": staleRoot.ID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create content bead: %v", err)
+	}
+
+	recipe := makeWorkflowRecipe("sub-work", "run", "eval")
+
+	result, err := Attach(context.Background(), store, recipe, content.ID, AttachOptions{})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// A closed/dead chain must not be honored -- the new sub-DAG must
+	// self-root at the content bead, not the stale closed molecule.
+	if result.WorkflowRootID != content.ID {
+		t.Errorf("WorkflowRootID = %q, want %q (self-root; %q is a closed prior molecule, not a live chain)", result.WorkflowRootID, content.ID, staleRoot.ID)
+	}
+	assertAllBeadsHaveRootID(t, store, result.IDMapping, content.ID)
 }
 
 // Test 3: Blocking dep prevents premature unblock

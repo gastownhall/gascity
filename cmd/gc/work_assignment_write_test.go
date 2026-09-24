@@ -54,6 +54,50 @@ func (s *recordingWriteWorkStore) SetMetadata(id, key, value string) error {
 	return nil
 }
 
+// The assertion is the enforcement of the comment below: on a signature drift
+// the override stops satisfying the interface, MemStore's implementation is
+// promoted in its place, and every assert here silently reroutes onto tier 1
+// while still reporting green.
+var _ beads.ConditionalAssignmentReleaser = (*recordingWriteWorkStore)(nil)
+
+// ReleaseIfCurrent reports the conditional verb as unsupported so these tests
+// pin the UNCONDITIONAL fallback write — the shape that must stay byte-identical
+// to the raw release ops. The conditional fast path emits a different (metadata-
+// only) write by design and is covered in work_assignment_release_race_test.go.
+// Without this override the embedded MemStore would promote its own
+// implementation and silently move every assert onto the other path.
+func (s *recordingWriteWorkStore) ReleaseIfCurrent(_, _ string) (bool, error) {
+	return false, beads.ErrConditionalReleaseUnsupported
+}
+
+// seedWriteWorkBead puts the bead the façade is about to release into the
+// backing store with live state matching the caller's snapshot. The release path
+// re-reads the bead immediately before writing (the dr-huhn no-clobber guard), so
+// a snapshot with no bead behind it is correctly refused. Seeding goes straight to
+// the MemStore because the recorder's own Update deliberately does not delegate.
+func seedWriteWorkBead(t *testing.T, rec *recordingWriteWorkStore, item beads.Bead) {
+	t.Helper()
+	rec.HonorExplicitIDs = true
+	if _, err := rec.Create(beads.Bead{ID: item.ID, Title: "work", Metadata: item.Metadata}); err != nil {
+		t.Fatalf("seed Create(%s): %v", item.ID, err)
+	}
+	status, assignee := item.Status, item.Assignee
+	// Qualified on MemStore deliberately: the recorder's own Update records
+	// without delegating, so seeding through it would leave the store empty and
+	// pollute the recorded ops the asserts read.
+	if err := rec.MemStore.Update(item.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("seed Update(%s): %v", item.ID, err)
+	}
+	got, err := rec.Get(item.ID)
+	if err != nil {
+		t.Fatalf("seed Get(%s): %v", item.ID, err)
+	}
+	if got.Status != item.Status || got.Assignee != item.Assignee {
+		t.Fatalf("seed(%s) failed: status=%q assignee=%q, want %q/%q",
+			item.ID, got.Status, got.Assignee, item.Status, item.Assignee)
+	}
+}
+
 func derefStr(p *string) string {
 	if p == nil {
 		return "<nil>"
@@ -86,6 +130,7 @@ func TestWorkAssignmentReleaseWorkBead_OpenStaysOpen(t *testing.T) {
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-open", Status: "open", Assignee: "agent-1"}
+	seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, ""); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
@@ -115,6 +160,7 @@ func TestWorkAssignmentReleaseWorkBead_InProgressResetsToOpen(t *testing.T) {
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-ip", Status: "in_progress", Assignee: "agent-1"}
+	seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, ""); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
@@ -135,6 +181,7 @@ func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackApplied(t *testing.T) {
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
 	item := beads.Bead{ID: "w-route", Status: "in_progress", Assignee: "agent-1"}
+	seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, "worker"); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
@@ -156,6 +203,7 @@ func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackSkippedWhenRouted(t *tes
 		Assignee: "agent-1",
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "existing"},
 	}
+	seedWriteWorkBead(t, rec, item)
 	if err := wa.ReleaseWorkBead(item, "worker"); err != nil {
 		t.Fatalf("ReleaseWorkBead: %v", err)
 	}
@@ -166,12 +214,16 @@ func TestWorkAssignmentReleaseWorkBead_RunTargetFallbackSkippedWhenRouted(t *tes
 }
 
 // TestWorkAssignmentReassignWorkBead_ByteIdentical asserts reassign emits only
-// Update{Assignee:&new}, byte-identical to the raw retire-reassign op.
+// Update{Assignee:&new}, byte-identical to the raw retire-reassign op. The bead
+// is seeded live because the reassign is conditional on the snapshot: an
+// unseeded fixture verifies as stale and emits no write at all.
 func TestWorkAssignmentReassignWorkBead_ByteIdentical(t *testing.T) {
 	rec := newRecordingWriteWorkStore()
+	item := beads.Bead{ID: "w-1", Status: "in_progress", Assignee: "retired-session"}
+	seedWriteWorkBead(t, rec, item)
 	wa := workAssignmentForStore(beads.WorkStore{Store: rec})
 
-	if err := wa.ReassignWorkBead("w-1", "new-session"); err != nil {
+	if err := wa.ReassignWorkBead(item, "new-session"); err != nil {
 		t.Fatalf("ReassignWorkBead: %v", err)
 	}
 	if len(rec.updates) != 1 {
@@ -208,7 +260,7 @@ func TestWorkAssignmentWrite_NilStoreSafe(t *testing.T) {
 	if err := wa.ReleaseWorkBead(beads.Bead{ID: "x"}, ""); err != nil {
 		t.Fatalf("nil store ReleaseWorkBead: %v", err)
 	}
-	if err := wa.ReassignWorkBead("x", "y"); err != nil {
+	if err := wa.ReassignWorkBead(beads.Bead{ID: "x"}, "y"); err != nil {
 		t.Fatalf("nil store ReassignWorkBead: %v", err)
 	}
 	if err := wa.ClearDetachedProbe("x"); err != nil { // must not panic

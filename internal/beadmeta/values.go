@@ -57,6 +57,16 @@ const (
 	OutcomeMissingRoot = "missing_root"
 )
 
+// Values of the CoordinatorOutcomeProducerDispositionMetadataKey typed-close
+// envelope. Producer values remain open-world configuration.
+const (
+	CoordinatorOutcomeContractVersion    = 1
+	CoordinatorDispositionDeliverable    = "deliverable"
+	CoordinatorDispositionNonDeliverable = "non-deliverable"
+	CoordinatorPassingVerdictReview      = "review_verdict"
+	CoordinatorPassingVerdictEvidence    = "evidence.reviewer_verdict"
+)
+
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
 // close disposition (ADR-0009). Deliberately disjoint from the control-plane
 // OutcomeMetadataKey vocabulary above so the two never collide on one key. Only

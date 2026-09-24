@@ -19,8 +19,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
+	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -491,14 +493,21 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		}
 	}
 	sourceWorkflowScanWarnings := make(map[string]struct{})
+	var eventRecorder events.Recorder
+	if !dryRun {
+		eventRecorder = openCityRecorderAt(cityPath, stderr)
+	}
 	deps := slingDeps{
-		CityName: cityName,
-		CityPath: cityPath,
-		Cfg:      cfg,
-		SP:       sp,
-		Runner:   runner,
-		Store:    store,
-		StoreRef: storeRef,
+		CityName:           cityName,
+		CityPath:           cityPath,
+		Cfg:                cfg,
+		SP:                 sp,
+		Runner:             runner,
+		Store:              store,
+		GraphStore:         resolveGraphStore(cliStorageRoutes(cityPath), store, cfg, cityPath, eventRecorder),
+		Events:             eventRecorder,
+		ExecutionWorkStore: executionEmitStore(store, cityPath),
+		StoreRef:           storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
 			stores, skips, err := openSourceWorkflowStoresWithProvider(cfg, cityPath, "", func(scopeRoot string) string {
 				return authoritativeBeadsProviderForScope(scopeRoot, cityPath)
@@ -516,14 +525,7 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 				// degrade without any breadcrumb.
 				fmt.Fprintln(stderr, "warning:", formatSourceWorkflowStoreSkips(unscannedSkips)) //nolint:errcheck
 			}
-			out := make([]sling.SourceWorkflowStore, 0, len(stores))
-			for _, storeView := range stores {
-				out = append(out, sling.SourceWorkflowStore{
-					Store:    storeView.store,
-					StoreRef: workflowStoreRefForDir(storeView.path, cityPath, cityName, cfg),
-				})
-			}
-			return out, nil
+			return sourceWorkflowStoresFromViews(cfg, cityPath, cityName, stores)
 		},
 		SourceWorkflowStoreScanWarning: func(storeRef string, scanErr error) {
 			key := strings.TrimSpace(storeRef)
@@ -1287,6 +1289,54 @@ func printCrossRigSection(w func(string), beadID string, a config.Agent, cfg *co
 	}
 }
 
+// sourceWorkflowStoresFromViews projects the source-workflow store scan onto
+// the list the sling's singleton guard walks, federating the city's relocated
+// class binding in as the FIRST leg.
+//
+// The scan that produced these views enumerates DIRECTORIES, and a relocated
+// binding is not one of them — so on a converged city it hands the guard the
+// frozen copies the storage migration retained while the live workflow roots,
+// which are graph class and resident in the binding, stay invisible. The guard
+// then reports "no conflict" from stores that structurally cannot hold the
+// answer and the sling admits a second live workflow beside the first
+// (ga-nqdff). convoyStoreViewsWithBinding is the one place the CLI gets the
+// binding from, so this reuses it rather than adding a second enumerator.
+//
+// The binding leg leads and is STRICT: it is where the answer lives, so a fault
+// there must refuse the sling rather than let an outage read as absence. A
+// REFUSED binding is returned as an error for the same reason — this is the
+// launch boundary of a mutation, not a listing that can print what it has.
+//
+// A city that relocates nothing gets its views back untouched, so the
+// single-store enumeration stays byte-identical.
+func sourceWorkflowStoresFromViews(cfg *config.City, cityPath, cityName string, views []convoyStoreView) ([]sling.SourceWorkflowStore, error) {
+	federated, err := convoyStoreViewsWithBinding(cityPath, views)
+	if err != nil {
+		return nil, fmt.Errorf("federating the source-workflow singleton scan with %s: %w", convoyBindingViewPath, err)
+	}
+	out := make([]sling.SourceWorkflowStore, 0, len(federated))
+	for _, view := range federated {
+		if !view.isClassBinding() {
+			continue
+		}
+		out = append(out, sling.SourceWorkflowStore{
+			Store:    view.store,
+			StoreRef: sourceworkflow.GraphStoreRef(cityName),
+			Strict:   true,
+		})
+	}
+	for _, view := range federated {
+		if view.isClassBinding() {
+			continue
+		}
+		out = append(out, sling.SourceWorkflowStore{
+			Store:    view.store,
+			StoreRef: workflowStoreRefForDir(view.path, cityPath, cityName, cfg),
+		})
+	}
+	return out, nil
+}
+
 func workflowStoreRefForDir(storeDir, cityPath, cityName string, cfg *config.City) string {
 	if strings.TrimSpace(storeDir) == "" || strings.TrimSpace(cityPath) == "" {
 		return ""
@@ -1440,9 +1490,8 @@ func resolveGraphStepBindingWithVars(stepID string, stepByID map[string]*formula
 	if !ok {
 		return graphRouteBinding{}, fmt.Errorf("step %s: unknown formulas v2 target %q", stepID, target.value)
 	}
-	binding := graphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
-	if agentCfg.SupportsInstanceExpansion() {
-		binding.MetadataOnly = true
+	binding := graphroute.GraphRouteBindingForAgent(agentCfg)
+	if binding.MetadataOnly {
 		cache[stepID] = binding
 		return binding, nil
 	}
@@ -1499,7 +1548,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	st := cfg.Workspace.SessionTemplate
 
 	if a.Suspended {
-		fmt.Fprintf(stderr, "cannot nudge: agent %q is suspended\n", a.QualifiedName()) //nolint:errcheck // best-effort
+		fmt.Fprintf(stderr, "warning: cannot nudge %q: agent is suspended — bead routed but not nudged\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1518,11 +1567,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				if err != nil || !running {
 					continue
 				}
-				member, ok := resolveAgentIdentity(cfg, ref.qualifiedInstance, currentRigContext(cfg))
-				if !ok {
-					fmt.Fprintf(stderr, "gc sling: agent %q not found in config\n", ref.qualifiedInstance) //nolint:errcheck // best-effort
-					return true
-				}
+				member := resolvePoolNudgeMember(cfg, a, ref.qualifiedInstance)
 				target := buildSlingNudgeTarget(member, cityName, cityPath, cfg, sessStore, ref.sessionName)
 				deliverSlingNudge(target, sp, rawStore, cityPath, stdout, stderr)
 				return true
@@ -1555,6 +1600,25 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
 	target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
 	deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+}
+
+// resolvePoolNudgeMember resolves the config identity to nudge for a live pool
+// member. Live members are addressed by their instance identity, which is not
+// itself a config entry: numeric slots expand to "pool-N", and namepool slots
+// expand to the namepool name (e.g. "rig/binding.furiosa"). resolveAgentIdentity
+// synthesizes the numeric shape but has no namepool knowledge, so a config
+// lookup alone strands every namepool pool member.
+//
+// The pool agent the bead was routed to is always in config, so its instance
+// projection is the correct fallback: pool members inherit the pool's provider
+// and workspace settings, and only the identity differs.
+func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInstance string) config.Agent {
+	if member, ok := resolveAgentIdentity(cfg, qualifiedInstance, currentRigContext(cfg)); ok {
+		return member
+	}
+	// sessionBeadConfigAgent returns the pool agent itself when the identity is
+	// not an expanded instance, so a non-nil pool always yields a usable agent.
+	return *sessionBeadConfigAgent(pool, qualifiedInstance)
 }
 
 // pokeController sends a "poke" command to the controller socket to
@@ -1647,9 +1711,9 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, cliNudgesStore(store, target.cfg, target.cityPath), newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
-		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
+		fmt.Fprintf(stderr, "warning: bead routed but nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return
 	}
 	if running {
@@ -1739,10 +1803,13 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			previewBeadID = "<new-bead-id>"
 		}
 		if opts.OnFormula != "" {
+			preCheckConclusive := true
 			if preCheck {
-				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
+				rc, conclusive := dryRunReportBlockingMolecule(opts, deps, querier, opts.OnFormula, stderr)
+				if rc != 0 {
 					return rc
 				}
+				preCheckConclusive = conclusive
 			}
 			w("Attach formula:")
 			w("  Formula: " + opts.OnFormula)
@@ -1755,28 +1822,46 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
 			w("  Would run: " + cookCmd)
-			if preCheck {
-				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+			if preCheck && preCheckConclusive {
+				w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, opts.OnFormula))
 			}
 			w("")
 		} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+			defaultFormula := a.EffectiveDefaultSlingFormula()
+			// Report-only pre-check: unlike explicit --on, an implicit
+			// default formula no longer hard-fails on a pre-existing
+			// molecule/wisp -- the live path skips the attach and routes
+			// the bead plainly -- so the preview must not predict an
+			// error the real run will not produce. A live convoy-tracked
+			// formulas-v2 workflow is a distinct error class that
+			// attachFormulaToBead still hard-fails on regardless of that
+			// fallback, so the preview keeps predicting that one failure.
+			var blockingLabel, blockingID string
+			preCheckConclusive := true
 			if preCheck {
-				if rc := dryRunReportBlockingMolecule(opts, deps, querier, stderr); rc != 0 {
+				rc, conclusive := dryRunReportBlockingWorkflow(opts, deps, defaultFormula, stderr)
+				if rc != 0 {
 					return rc
 				}
+				preCheckConclusive = conclusive
+				blockingLabel, blockingID = sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
 			}
 			w("Default formula:")
-			w("  Formula: " + a.EffectiveDefaultSlingFormula())
+			w("  Formula: " + defaultFormula)
 			w("  Target " + a.QualifiedName() + " has a default_sling_formula configured.")
 			w("  A wisp will be attached automatically (use --no-formula to suppress).")
 			w("")
-			cookCmd := fmt.Sprintf("gc formula cook %s --attach %s", a.EffectiveDefaultSlingFormula(), previewBeadID)
+			cookCmd := fmt.Sprintf("gc formula cook %s --attach %s", defaultFormula, previewBeadID)
 			if opts.Title != "" {
 				cookCmd += fmt.Sprintf(" --title=%s", opts.Title)
 			}
 			w("  Would run: " + cookCmd)
 			if preCheck {
-				w("  Pre-check: " + opts.BeadOrFormula + " has no existing molecule/wisp children ✓")
+				if blockingLabel != "" {
+					w(fmt.Sprintf("  Pre-check: %s already has attached %s %s — the default formula will be skipped and the bead routed plainly.", opts.BeadOrFormula, blockingLabel, blockingID))
+				} else if preCheckConclusive {
+					w("  Pre-check: " + opts.BeadOrFormula + preCheckClaim(opts, defaultFormula))
+				}
 			}
 			w("")
 		}
@@ -1790,6 +1875,17 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 			} else {
 				w("  This assigns the bead to \"" + a.QualifiedName() + "\".")
 			}
+			// A graph.v2 formula attach routes more than the work bead: the
+			// cooked workflow root is also routed to the same agent. Without
+			// this line the preview shows only the plain-routing effect, so a
+			// reader cannot anticipate the second routed bead. Legacy (non-
+			// graph.v2) attach deliberately leaves the wisp root unrouted --
+			// see the design-intent comment on the finalize() call in
+			// slingFormula (internal/sling/sling_core.go, citing #2848 and
+			// TestOnFormulaAttachesAndRoutes) -- so this must not fire there.
+			if dryRunFormulaAttachIsGraphV2(opts, deps, a) {
+				w("  A wisp/workflow root is also cooked and routed to the agent.")
+			}
 		}
 		w("")
 	}
@@ -1801,6 +1897,28 @@ func dryRunSingle(opts slingOpts, deps slingDeps, querier BeadQuerier, stdout, s
 
 	w("No side effects executed (--dry-run).")
 	return 0
+}
+
+// dryRunFormulaAttachIsGraphV2 reports whether the formula this sling would
+// attach (an explicit --on, or the target's default_sling_formula) is a
+// graph.v2 formula. Resolution failures (unknown formula, parse error) report
+// false rather than surfacing an error here -- a dry-run preview must not
+// fail on a formula-name typo the live attach path will report clearly on
+// its own, and understating the preview is the safe direction: it never
+// claims a second routed bead that legacy attach will not create.
+func dryRunFormulaAttachIsGraphV2(opts slingOpts, deps slingDeps, a config.Agent) bool {
+	formulaName := opts.OnFormula
+	if formulaName == "" {
+		if opts.NoFormula {
+			return false
+		}
+		formulaName = a.EffectiveDefaultSlingFormula()
+	}
+	if formulaName == "" {
+		return false
+	}
+	isGraph, _, err := graphv2.IsGraphV2Formula(formulaName, sling.SlingFormulaSearchPaths(deps, a))
+	return err == nil && isGraph
 }
 
 // dryRunBatch prints a step-by-step preview of what gc sling would do for a
@@ -1946,15 +2064,80 @@ func printBeadInfo(w func(string), q BeadQuerier, beadID string) {
 }
 
 // dryRunReportBlockingMolecule returns 1 (and emits a stderr diagnostic)
-// when the bead already has an attached molecule that would block
-// formula attachment, otherwise 0.
-func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, stderr io.Writer) int {
-	label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store)
-	if label == "" {
-		return 0
+// when the bead already has an attached molecule/workflow that would block
+// formula attachment, otherwise 0. The second return reports whether the
+// pre-check actually reached a conclusion; a false value means the caller
+// must not print a passing "✓" line (see dryRunReportBlockingWorkflow).
+//
+// Beyond FindBlockingMolecule's three routes (molecule_id, workflow_id, a
+// direct DB child), it also checks the convoy-tracking route a convoy-first
+// `--on` launch of formulaName leaves behind (sling.LiveConvoyTrackedWorkflowRoots),
+// scoped to formulaName -- the same check checkLegacySourceWorkflowConflict
+// runs at launch time. Before #5420 this preview only ever checked the first
+// three routes, so it printed a misleading "no existing molecule/wisp
+// children" pass even when a live convoy-first workflow from the same
+// formula would have blocked the real launch.
+func dryRunReportBlockingMolecule(opts slingOpts, deps slingDeps, querier BeadQuerier, formulaName string, stderr io.Writer) (int, bool) {
+	if label, id := sling.FindBlockingMolecule(querier, opts.BeadOrFormula, deps.Store); label != "" {
+		fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
+		return 1, true
 	}
-	fmt.Fprintf(stderr, "gc sling: bead %s already has attached %s %s\n", opts.BeadOrFormula, label, id) //nolint:errcheck // best-effort stderr
-	return 1
+	return dryRunReportBlockingWorkflow(opts, deps, formulaName, stderr)
+}
+
+// preCheckClaim returns the tail of the dry-run "Pre-check:" line, claiming
+// only what the pre-check actually verified. Under --force the
+// convoy-tracked workflow half is skipped (see dryRunReportBlockingWorkflow),
+// so the line reverts to its pre-#5420 wording rather than asserting an
+// absence that was never checked.
+func preCheckClaim(opts slingOpts, formulaName string) string {
+	if opts.Force {
+		return " has no existing molecule/wisp children ✓"
+	}
+	return " has no existing molecule/wisp children or live formulas-v2 workflow for " + formulaName + " ✓"
+}
+
+// dryRunReportBlockingWorkflow returns 1 (and emits a stderr diagnostic)
+// when the bead already has a live convoy-tracked formulas-v2 workflow for
+// formulaName, otherwise 0. Split out from dryRunReportBlockingMolecule so
+// the default-formula preview can predict this one failure class without
+// also predicting a plain molecule/wisp conflict, which
+// attachFormulaToBead's fallbackToPlainOnMoleculeConflict now routes
+// around instead of failing on (see sling_core.go).
+//
+// The second return reports whether the lookup reached a conclusion. A
+// failed lookup is not a pass: it emits a "pre-check inconclusive"
+// diagnostic and returns false so the caller suppresses its "✓" line,
+// rather than advertising a clean pre-check that was never obtained. The
+// exit code stays 0 in that case -- a read error is not the launch-time
+// conflict this predicts, and a preview should not hard-fail on one.
+func dryRunReportBlockingWorkflow(opts slingOpts, deps slingDeps, formulaName string, stderr io.Writer) (int, bool) {
+	// --force skips this guard at launch time
+	// (checkLegacySourceWorkflowConflict), so predicting it here would
+	// forecast a failure the real run will not produce. The pass line the
+	// caller prints reverts to its pre-#5420 wording in that case, since
+	// this half of the pre-check was never performed.
+	if opts.Force {
+		return 0, true
+	}
+	formulaName = strings.TrimSpace(formulaName)
+	if formulaName == "" {
+		return 0, true
+	}
+	graphStore := deps.GraphStore
+	if graphStore == nil {
+		graphStore = deps.Store
+	}
+	roots, err := sling.LiveConvoyTrackedWorkflowRoots(deps.Store, graphStore, opts.BeadOrFormula, formulaName)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc sling: pre-check inconclusive: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 0, false
+	}
+	if len(roots) > 0 {
+		fmt.Fprintf(stderr, "gc sling: bead %s already has attached workflow %s\n", opts.BeadOrFormula, roots[0].ID) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	return 0, true
 }
 
 // printNudgePreview prints the Nudge section for dry-run output.
@@ -2100,18 +2283,8 @@ func rigPrefixForAgent(a config.Agent, cfg *config.City) string {
 // checkCrossRig returns a non-empty error message if a bead's rig prefix
 // doesn't match the target agent's rig prefix. Returns "" when the check
 // passes or can't be performed (missing prefix, city-wide agent, no rig).
+// Delegates to sling.CheckCrossRig so the dry-run preview and the real
+// enforcement path can never disagree on the wording again.
 func checkCrossRig(beadID string, a config.Agent, cfg *config.City) string {
-	bp := sling.BeadPrefixForCity(cfg, beadID)
-	if bp == "" {
-		return ""
-	}
-	rp := rigPrefixForAgent(a, cfg)
-	if rp == "" {
-		return ""
-	}
-	if bp == rp {
-		return ""
-	}
-	return fmt.Sprintf("gc sling: cross-rig routing blocked — bead %s (prefix %q) targets %s (rig prefix %q); use --force to override",
-		beadID, bp, a.QualifiedName(), rp)
+	return sling.CheckCrossRig(beadID, a, cfg)
 }

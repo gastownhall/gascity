@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -892,9 +893,11 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 	}
 	// The no-refresh cfg loader matches the other hot CLI roots (cmd_prime,
 	// completion): loadCityConfig's builtin-pack refresh is inappropriate here. A
-	// failed load yields nil cfg, which the class resolvers treat as identity.
+	// failed load yields nil cfg, which the class resolvers treat as identity —
+	// where a relocated class is SERVED from does not depend on it, because the
+	// routes come from cliStorageRoutes, which reads the city's own [storage].
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	msgStore := resolveMailMessagesStore(store, cfg, cityPath, nil)
+	msgStore := resolveMailMessagesStore(cliStorageRoutes(cityPath), store, cfg, cityPath, nil)
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	return newMailProviderWithSessionStore(msgStore, sessStore), 0
 }
@@ -949,6 +952,11 @@ func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Pr
 	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
 }
 
+// newEventsProviderForNameWithConfig builds the events provider for an
+// already-resolved provider name. On failure it returns a nil provider and an
+// error: the file-backed branch must not hand back the *events.FileRecorder
+// directly, because a failed open boxes a typed nil into the events.Provider
+// interface, where it reads as non-nil to every caller's nil guard.
 func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
 		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
@@ -959,8 +967,100 @@ func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, 
 	case "fail":
 		return events.NewFailFake(), nil
 	default:
-		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		recorder, err := newFileEventsRecorder(eventsPath, eventsCfg, stderr)
+		if err != nil {
+			return nil, err
+		}
+		return recorder, nil
 	}
+}
+
+var (
+	cliFactoryRecordersMu sync.Mutex
+	cliFactoryRecorders   = map[string]events.Recorder{}
+)
+
+// cliFactoryEventsRecorder resolves a live events.Recorder for cityPath,
+// memoized per city path for the process lifetime. worker.Factory is built
+// on every session-reconciliation tick (cmd/gc/session_reconciler.go) as
+// well as per CLI invocation, so opening a fresh events.FileRecorder on
+// every call would leak a file handle and spawn a rotation goroutine each
+// tick; memoizing keeps that a one-time cost per city. This gives the CLI
+// factory path the live recorder the API server already gets for free from
+// its long-lived controllerState.EventProvider() (internal/api/worker_factory.go:21).
+// Falls back to events.Discard when cityPath is empty or the provider
+// cannot be opened — telemetry must never block session lifecycle.
+//
+// A failed open is deliberately NOT memoized: a transient ENOSPC or a
+// mid-rotation rename would otherwise pin this city to events.Discard for the
+// rest of the process, silently disabling the very telemetry this path exists
+// to carry. The next factory construction retries.
+//
+// Wiring this recorder live has one visible side effect on the CLI path:
+// worker's operation telemetry re-enriches session identity after a runtime
+// mutation, so EnrichInfo now issues a trailing IsRunning probe that callers
+// (and tests) see after Start/Stop.
+func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return events.Discard
+	}
+	cliFactoryRecordersMu.Lock()
+	defer cliFactoryRecordersMu.Unlock()
+	if r, ok := cliFactoryRecorders[cityPath]; ok {
+		return r
+	}
+	eventsCfg := config.EventsConfig{}
+	if cfg != nil {
+		eventsCfg = cfg.Events
+	}
+	// The memo key is cityPath alone, but resolution also reads GC_EVENTS and
+	// cfg.Events: a controller hot-reload of [events].provider is not picked
+	// up by an already-memoized city.
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		eventsCfg.Provider = v
+	}
+	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
+	recorder, err := newCLIFactoryRecorder(eventsCfg, eventsPath)
+	if err != nil || recorder == nil {
+		return events.Discard
+	}
+	cliFactoryRecorders[cityPath] = recorder
+	return recorder
+}
+
+// newCLIFactoryRecorder opens the recorder behind cliFactoryEventsRecorder.
+//
+// The file-backed branch deliberately bypasses newFileEventsRecorder's rotation
+// options: the controller already holds one long-lived rotating recorder on
+// <city>/.gc/events.jsonl (cmd_start.go), and a city must keep exactly one.
+// FileRecorder.rotateLocked is close + rename + reopen on its own handle, so a
+// second rotating writer leaves the first appending into a rotating-* file that
+// gets gzipped away. events.WithMaxSize(0) makes this a secondary writer that
+// never rotates, and events.WithoutStartupSweep keeps it from racing the
+// long-lived recorder mid-rotation — a concurrent sweep can double-gzip the
+// same in-flight rotating-* file through a shared .tmp path. Neither option
+// makes the open free: NewFileRecorder reads the log directory either way, to
+// continue the sequence past the archives.
+//
+// The exec:/fake/fail branches carry no file handle at all, so they stay on the
+// shared newEventsProviderForNameWithConfig resolution.
+func newCLIFactoryRecorder(eventsCfg config.EventsConfig, eventsPath string) (events.Recorder, error) {
+	v := eventsCfg.Provider
+	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
+		return newEventsProviderForNameWithConfig(v, eventsPath, io.Discard, eventsCfg)
+	}
+	recorder, err := events.NewFileRecorder(
+		eventsPath,
+		io.Discard,
+		events.WithMaxSize(0),
+		events.WithoutStartupSweep(),
+	)
+	if err != nil {
+		// Never box a typed-nil *events.FileRecorder into events.Recorder.
+		return nil, err
+	}
+	return recorder, nil
 }
 
 // newUsageSinkByName returns a usage.Sink for the resolved provider name.

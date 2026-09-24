@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -47,7 +48,12 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 
 		callStart := time.Now()
-		if err := tm.NudgeSession(sess, "# gc-nudge-neverbusy"); err != nil {
+		// A never-busy claude pane cannot confirm the submit, so
+		// ErrNudgeSubmitUnconfirmed is the correct, expected outcome (ra-3x46cy
+		// finding 1: this must no longer collapse to a false "delivered" nil).
+		// The keystrokes still reached tmux (delivered=true is set before this
+		// return), so the poke below must still be recorded.
+		if err := tm.NudgeSession(sess, "# gc-nudge-neverbusy"); err != nil && !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 			t.Fatalf("NudgeSession: %v", err)
 		}
 		callEnd := time.Now()
@@ -100,8 +106,9 @@ func TestNudgePokeRealTmux(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 
 		// No GC_PROVIDER set and a plain shell pane: submitVerifyEligible is
-		// false, so this exercises the fallback best-effort delivery path
-		// (the "forgot the second return" footgun the bead calls out).
+		// false, so this exercises the fallback best-effort delivery path.
+		// This family can never confirm delivery, so a successful send still
+		// reports nil (see recordUnconfirmedSubmit for the diagnostic record).
 		if err := tm.NudgeSession(sess, "# gc-nudge-plain"); err != nil {
 			t.Fatalf("NudgeSession: %v", err)
 		}

@@ -9,6 +9,15 @@ import (
 	"syscall"
 )
 
+// getpgid and killProcessGroup are indirection seams over the corresponding
+// syscalls so tests can force the fallback branches below deterministically —
+// a real process group cannot be made to fail Getpgid or a group kill on
+// demand.
+var (
+	getpgid          = syscall.Getpgid
+	killProcessGroup = syscall.Kill
+)
+
 // setProcessGroup puts the command in its own process group so a cooperative
 // cancellation can be delivered to the whole group — reaching any foreground
 // child (for example a long-running git checkout under a setup shell) that
@@ -22,23 +31,28 @@ func setProcessGroup(cmd *exec.Cmd) {
 }
 
 // interruptProcessGroup sends os.Interrupt to the command's process group so a
-// foreground child receives it alongside the shell leader. It preserves the
-// os.ErrProcessDone signal the caller special-cases: an already-exited target
-// reports ErrProcessDone rather than a spurious failure. If the group id cannot
-// be resolved it falls back to signaling the leader directly.
-func interruptProcessGroup(cmd *exec.Cmd) error {
+// foreground child receives it alongside the shell leader, reporting which
+// path delivered the signal. It preserves the os.ErrProcessDone signal the
+// caller special-cases: an already-exited target reports ErrProcessDone
+// rather than a spurious failure. If the group id cannot be resolved it falls
+// back to signaling the leader directly. The returned CancelOutcome is only
+// meaningful when the error is nil.
+func interruptProcessGroup(cmd *exec.Cmd) (CancelOutcome, error) {
 	if cmd.Process == nil {
-		return os.ErrProcessDone
+		return CancelNotDelivered, os.ErrProcessDone
 	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	pgid, err := getpgid(cmd.Process.Pid)
 	if err != nil {
-		return cmd.Process.Signal(os.Interrupt)
-	}
-	if killErr := syscall.Kill(-pgid, syscall.SIGINT); killErr != nil {
-		if errors.Is(killErr, syscall.ESRCH) {
-			return os.ErrProcessDone
+		if sigErr := cmd.Process.Signal(os.Interrupt); sigErr != nil {
+			return CancelNotDelivered, sigErr
 		}
-		return killErr
+		return CancelLeaderSignaledOnly, nil
 	}
-	return nil
+	if killErr := killProcessGroup(-pgid, syscall.SIGINT); killErr != nil {
+		if errors.Is(killErr, syscall.ESRCH) {
+			return CancelNotDelivered, os.ErrProcessDone
+		}
+		return CancelNotDelivered, killErr
+	}
+	return CancelGroupSignaled, nil
 }

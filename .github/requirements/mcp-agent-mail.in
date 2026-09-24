@@ -2,12 +2,24 @@
 # publishes current wheel/sdist assets.
 mcp-agent-mail @ https://github.com/Dicklesworthstone/mcp_agent_mail/archive/32783f6848bd63c425c4b5004cee3350016635fb.tar.gz
 
-# Security floor: GitPython < 3.1.52 has multiple HIGH-severity command
-# injection and path traversal advisories reported by the image gate.
-# Pinning the floor ensures the resolver picks the patched version even if
-# mcp-agent-mail's transitive constraint allows older. Drop this line once
-# mcp-agent-mail upstream pins GitPython>=3.1.52 itself.
-gitpython>=3.1.52
+# Security floor: GitPython < 3.1.59 has multiple HIGH-severity command
+# injection and path traversal advisories reported by the image gate, plus
+# CVE-2026-78676 (CRITICAL, remote code execution). Pinning the floor ensures
+# the resolver picks the patched version even if mcp-agent-mail's transitive
+# constraint allows older. Drop this line once mcp-agent-mail upstream pins
+# GitPython>=3.1.59 itself.
+gitpython>=3.1.59
+
+# Security floor: CVE-2026-69244 affects aiohttp < 3.14.3. Keep this explicit
+# until mcp-agent-mail's transitive requirements carry the fixed release.
+aiohttp>=3.14.3
+
+# Security floor: CVE-2026-63374 (CRITICAL, TLSStream IDNA 2003 host name
+# encoding enables host name confusion) in anyio < 4.14.2. anyio arrives
+# transitively via httpx, mcp, openai, py-key-value-aio, sse-starlette,
+# starlette and watchfiles; pin the floor until one of them carries the
+# patched release itself.
+anyio>=4.14.2
 
 # Security floor: Pillow < 12.3.0 has multiple HIGH-severity image parsing
 # vulnerabilities reported by the image gate. Drop this line once transitive

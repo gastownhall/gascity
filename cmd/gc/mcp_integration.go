@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
 var managedMCPGitignoreEntries = []string{
@@ -61,7 +62,7 @@ func loadEffectiveMCPForAgent(
 	agent *config.Agent,
 	qualifiedName, workDir string,
 ) (materialize.MCPCatalog, error) {
-	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir)
+	catalog, err := materialize.EffectiveMCPForSession(cfg, cityPath, agent, qualifiedName, workDir, config.QueryTopology{})
 	if err != nil {
 		return materialize.MCPCatalog{}, fmt.Errorf("loading effective MCP: %w", err)
 	}
@@ -314,6 +315,23 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 	return nil
 }
 
+// agentMayHaveSessionSpecificMCPTargets reports whether an agent's MCP
+// projection can legitimately differ between concurrent session identities,
+// so resolveDeterministicAgentMCPProjection's alt-identity probe is a
+// meaningful check rather than a false positive. This must match
+// internal/workdir.RequiresPoolWorkDirIsolationCheck exactly: that is the
+// same "does this agent carry an explicit pool signal" question
+// ResolveWorkDirPathStrict answers when deciding whether a dir-less agent's
+// alt identity gets its own isolated working directory. Using the broader
+// config.Agent.SupportsMultipleSessions() here (true for any agent with a
+// merely-unset max_active_sessions) would false-positive on ordinary
+// dir-less, non-pooled agents, since ResolveWorkDirPathStrict's isolation
+// fallback now gives such an agent's alt identity a genuinely different
+// (but not "session-specific") working directory.
+func agentMayHaveSessionSpecificMCPTargets(a config.Agent) bool {
+	return workdirutil.RequiresPoolWorkDirIsolationCheck(a)
+}
+
 func resolveDeterministicAgentMCPProjection(
 	cityPath string,
 	cfg *config.City,
@@ -321,7 +339,7 @@ func resolveDeterministicAgentMCPProjection(
 	lookPath config.LookPathFunc,
 ) (resolvedMCPProjection, error) {
 	view, err := resolveConfiguredAgentMCPProjection(cityPath, cfg, agent, lookPath)
-	if err != nil || agent == nil || !agent.SupportsMultipleSessions() || len(view.Catalog.Servers) == 0 {
+	if err != nil || agent == nil || !agentMayHaveSessionSpecificMCPTargets(*agent) || len(view.Catalog.Servers) == 0 {
 		return view, err
 	}
 

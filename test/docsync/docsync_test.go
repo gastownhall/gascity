@@ -16,10 +16,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/docgen"
 )
 
 func repoRoot() string {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
 }
@@ -39,7 +43,22 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "seat", "test", "tmp", "worktrees"}
+
+// beadScratchPrefixes are the bead-id prefixes agents name their top-level
+// scratch directories after. An explicit list, not a shape match: a doc tree
+// may legitimately be hyphenated (release-gates), and silently exempting one
+// would defeat the coverage this file exists to enforce.
+var beadScratchPrefixes = []string{"ga-", "gcg-", "mc-"}
+
+func isBeadScratchRoot(name string) bool {
+	for _, p := range beadScratchPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // isNestedWorktreeRoot reports whether path is the root of a linked git
 // worktree checked out inside this tree. Linked worktrees have a .git FILE
@@ -487,6 +506,18 @@ func TestSchemaFreshness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The schema reflector walks the module tree for doc comments;
+			// under `bazel test` point it at the real checkout.
+			if root := bazeltest.OverrideRoot(); root != "" {
+				orig, err0 := os.Getwd()
+				if err0 != nil {
+					t.Fatal(err0)
+				}
+				if err := os.Chdir(root); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chdir(orig) })
+			}
 			generated, err := tt.generate()
 			if err != nil {
 				t.Fatalf("generating %s: %v", tt.name, err)
@@ -819,7 +850,7 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" {
+		if strings.HasPrefix(name, ".") || isBeadScratchRoot(name) || name == "vendor" || name == "node_modules" {
 			continue
 		}
 		if known[name] {

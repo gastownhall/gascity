@@ -289,7 +289,7 @@ func TestCheckInstalledAcceptsBundledSyntheticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 
@@ -361,7 +361,7 @@ func TestCheckInstalledReportsInvalidSyntheticCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RepoCachePath: %v", err)
 	}
-	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, commit); err != nil {
+	if err := builtinpacks.MaterializeSyntheticRepo(cachePath, builtinpacks.Repository, commit); err != nil {
 		t.Fatalf("MaterializeSyntheticRepo: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cachePath, "examples", "gastown", "packs", "gastown", "pack.toml"), []byte("tampered"), 0o644); err != nil {

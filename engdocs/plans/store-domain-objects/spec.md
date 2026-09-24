@@ -38,7 +38,11 @@ logic's hands at all.
 | **ClassOrders** | `orders.OrderRun` | Typed. `orders.Store` returns `OrderRun` but has **no `Get(handle)`** yet. |
 | **ClassNudges** | `nudgequeue.NudgeShadow` (partial read-only view; authority for the full `Item` is the flock'd `state.json`, not the bead) | Typed. Handle for this class is the **durable nudge ID**, not the bead ID. |
 
-Convoy is not its own class; it resolves to Work (user/sling) or Graph (synthetic).
+Convoy is not its own class; it resolves to Work — every convoy, including the
+synthetic ones the system mints as glue (graph.v2 input convoys, drain-unit
+convoys). A convoy holds `tracks` edges to work members and `convoy.TrackItemIn`
+refuses an edge across a class boundary, so a convoy owned by any other class
+could never track the members it exists for.
 
 ## 3. Read model
 

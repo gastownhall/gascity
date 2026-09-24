@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,28 @@ const muxRebuildInterval = 60 * time.Second
 // salt makes the actor hash brute-forceable, so eventexport.ProjectEvent drops
 // every event. Used only to warn loudly at startup.
 const minActorSaltLen = 16
+
+const supervisorTranscriptMetaEnv = "GC_TRANSCRIPT_META_ENABLED"
+
+// armSupervisorTranscriptMetaFromEnv enables transcript correlation for a
+// supervisor whose events are shipped by an external forwarder. Such a
+// deployment intentionally has no [events.export], so startEventExport cannot
+// arm the gate. The environment is scoped to the long-lived supervisor unit;
+// one-shot gc processes remain disabled by default.
+func armSupervisorTranscriptMetaFromEnv(stderr io.Writer) {
+	raw, configured := os.LookupEnv(supervisorTranscriptMetaEnv)
+	if !configured {
+		return
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: ignoring invalid %s=%q: %v\n", supervisorTranscriptMetaEnv, raw, err) //nolint:errcheck
+		return
+	}
+	if enabled {
+		transcriptmeta.SetEnabled(true)
+	}
+}
 
 // startEventExport launches the redacted event exporter when [events.export] is
 // configured. It is opt-in: with no endpoint the supervisor ships nothing.

@@ -225,6 +225,13 @@ func TestPrintSupervisorIdentity_EmptyBuildID(t *testing.T) {
 	}
 }
 
+func TestPIDGoneReturnsFalseForCurrentProcess(t *testing.T) {
+	pid := os.Getpid()
+	if pidGone(pid) {
+		t.Fatalf("pidGone(%d) = true for current live process", pid)
+	}
+}
+
 // driftCheckEnv stands up the shared seams runStartDriftCheck needs:
 // an httptest server serving /health with the chosen build_id, a
 // GC_HOME pointed at a temp dir, and stubbed supervisorAliveHook /

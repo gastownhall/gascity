@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "docgen",
+    srcs = [
+        "cli.go",
+        "markdown.go",
+        "schema.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/docgen",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/config",
+        "//internal/git",
+        "@com_github_invopop_jsonschema//:jsonschema",
+        "@com_github_spf13_cobra//:cobra",
+        "@com_github_spf13_pflag//:pflag",
+    ],
+)
+
+go_test(
+    name = "docgen_test",
+    srcs = [
+        "cli_test.go",
+        "markdown_test.go",
+        "schema_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+    ],
+    embed = [":docgen"],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+        "@com_github_invopop_jsonschema//:jsonschema",
+        "@com_github_spf13_cobra//:cobra",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

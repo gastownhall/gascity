@@ -546,8 +546,13 @@ func (c *ZombieSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — zombie sessions can be killed.
 func (c *ZombieSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all zombie sessions.
-func (c *ZombieSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all zombie sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles zombie
+// sessions, and an uncoordinated Stop here would race it.
+func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	for _, a := range c.cfg.Agents {
 		if a.Suspended || len(a.ProcessNames) == 0 {
 			continue
@@ -627,8 +632,13 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // CanFix returns true — orphan sessions can be killed.
 func (c *OrphanSessionsCheck) CanFix() bool { return true }
 
-// Fix kills all orphaned sessions.
-func (c *OrphanSessionsCheck) Fix(_ *CheckContext) error {
+// Fix kills all orphaned sessions. It refuses while a controller is running
+// (GH#5742): the controller's own health patrol already reconciles orphan
+// sessions, and an uncoordinated Stop here would race it.
+func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
+	if IsControllerRunning(ctx.CityPath) {
+		return errControllerRunningFixSkipped
+	}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
 	running, err := c.sp.ListRunning(prefix)
 	if runtime.IsPartialListError(err) {
@@ -679,6 +689,9 @@ func (c *BeadsStoreCheck) Name() string { return "beads-store" }
 // native-store city.
 func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, c.cityPath)
 	if err != nil {
 		r.Status = StatusError
@@ -689,15 +702,16 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err != nil {
-			r.Status = StatusError
-			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
-			r.FixHint = doltServerFixHint(target)
-			return r
+		if !strings.EqualFold(target.DoltMode, "proxied-server") || target.External {
+			addr, conn, err := dialDoltTarget(target)
+			if err != nil {
+				r.Status = StatusError
+				r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+				r.FixHint = doltServerFixHint(target)
+				return r
+			}
+			conn.Close() //nolint:errcheck // best-effort close
 		}
-		conn.Close() //nolint:errcheck // best-effort close
 	}
 	result, err := c.newStore(c.cityPath)
 	if err != nil {
@@ -708,6 +722,23 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 	if err := result.Store.Ping(); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("store ping failed: %v", err)
+		return r
+	}
+	// The structured half of the answer, for the consumers that must not parse
+	// the message below. On a proxied scope it carries gc's read-only account
+	// of bd's proxy — the record, the liveness verdict and its evidence, the
+	// idle policy and both schema cursors — which is what the native-over-proxy
+	// work has to be able to observe before it may use any of it.
+	r.Payload = newBeadsStorePayload(c.cityPath, target, beadsStoreDiagnostic{
+		Store:           result.Diagnostic.Store,
+		PreflightGate:   result.Diagnostic.PreflightGate,
+		PreflightReason: result.Diagnostic.PreflightReason,
+	})
+	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore && result.Diagnostic.PreflightGate == beads.BeadsGateProxiedProvider {
+		// Not a degraded fallback: bd owns the Dolt topology for proxied
+		// scopes and the CLI front door is the only supported store.
+		r.Status = StatusOK
+		r.Message = proxiedProviderStoreMessage
 		return r
 	}
 	if result.Diagnostic.Store == beads.BeadsStoreNameBdStore {
@@ -728,6 +759,18 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+// dialDoltTarget probes the transport selected by the canonical connection
+// contract. A Unix socket is authoritative when present; otherwise host/port
+// identifies the TCP endpoint. Callers own the returned connection.
+func dialDoltTarget(target contract.DoltConnectionTarget) (string, net.Conn, error) {
+	network, addr := "tcp", net.JoinHostPort(target.Host, target.Port)
+	if target.Socket != "" {
+		network, addr = "unix", target.Socket
+	}
+	conn, err := net.DialTimeout(network, addr, 2*time.Second)
+	return addr, conn, err
+}
 
 // BDSplitStoreCheck warns when legacy bd embedded/server store directories
 // coexist and the inactive store still contains Dolt data.
@@ -760,6 +803,9 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	serverExists := splitStoreDirExists(serverDir)
 	embeddedExists := splitStoreDirExists(embeddedDir)
 	if !serverExists || !embeddedExists {
+		if unread := c.unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir); unread != nil {
+			return unread
+		}
 		r.Status = StatusOK
 		r.Message = "no legacy split store detected"
 		return r
@@ -811,6 +857,58 @@ func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
 	r.Details = splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos)
 	r.FixHint = splitStoreFixHint(activeStore)
 	return r
+}
+
+// unreadStoreBesideTheActiveOne reports a bead database sitting in the mode
+// directory the scope's metadata does NOT point at, when the mode it does point
+// at has no directory of its own yet.
+//
+// That shape is the one gc's own storage-mode change produces, and it is the
+// one the announcement steers here for: canonicalizing an embedded workspace to
+// server mode re-points the ledger before any .beads/dolt exists, so the
+// both-directories test above answers "no legacy split store detected" for
+// exactly the scope that has one. A diagnostic an operator is told to run and
+// which reports OK on the state they were warned about is worse than no
+// diagnostic — it converts a real warning into a false all-clear.
+//
+// The evidential standard is the one this check already applies: a `.dolt`
+// repository under the inactive mode's directory, without opening it. A
+// repository `bd init` created and never wrote to reports the same as a
+// populated one, which is why this is a WARNING that names both paths and never
+// an error — see splitStoreDetails for the recovery it prescribes.
+//
+// It answers nothing when the active store is unidentifiable, when the inactive
+// directory is absent, or when it holds no repository: each of those is a scope
+// with one ledger, which is the ordinary case.
+func (c *BDSplitStoreCheck) unreadStoreBesideTheActiveOne(beadsDir, serverDir, embeddedDir string) *CheckResult {
+	activeSource, activeStore := c.activeBDStore(beadsDir)
+	inactiveStore, inactiveDir := "embeddeddolt", embeddedDir
+	switch activeStore {
+	case "dolt":
+	case "embeddeddolt":
+		inactiveStore, inactiveDir = "dolt", serverDir
+	default:
+		return nil
+	}
+	if !splitStoreDirExists(inactiveDir) {
+		return nil
+	}
+	inactiveRepos, err := doltReposUnder(inactiveDir)
+	if err != nil || len(inactiveRepos) == 0 {
+		return nil
+	}
+	serverRepos, embeddedRepos := inactiveRepos, []string(nil)
+	if inactiveStore == "embeddeddolt" {
+		serverRepos, embeddedRepos = nil, inactiveRepos
+	}
+	return &CheckResult{
+		Name:   c.Name(),
+		Status: StatusWarning,
+		Message: fmt.Sprintf("unread bead database beside the active store: active .beads/%s (%s), unread .beads/%s contains %d Dolt repo(s)",
+			activeStore, activeSource, inactiveStore, len(inactiveRepos)),
+		Details: splitStoreDetails(activeStore, activeSource, serverRepos, embeddedRepos),
+		FixHint: splitStoreFixHint(activeStore),
+	}
 }
 
 // CanFix returns false; reconciliation requires explicit user review.
@@ -936,11 +1034,27 @@ func splitStoreDetails(activeStore, activeSource string, serverRepos, embeddedRe
 	return details
 }
 
+// splitStoreFixHint prescribes the reconciliation, and names what the operator
+// will see while they are in the middle of it.
+//
+// "Keep both directories until reconciled" parks a scope in the exact shape
+// BdStore's read-time guard notices (internal/beads/unread_store_notice.go): an
+// active store with no rows beside a second bead database. That guard is a
+// notice and never a refusal precisely so this advice stays safe to follow —
+// but an operator who takes it and then sees an unexplained line on every empty
+// `gc ready` has been sent into a state the diagnostic did not warn them about.
+// Naming the override here is what keeps the two from contradicting each other.
+//
+// The bound stated here is the one the guard actually holds: once per scope per
+// process. A `gc` command is one process, so an operator sees it once per
+// command; a supervisor sees it once for the life of the daemon.
 func splitStoreFixHint(activeStore string) string {
+	silence := "; keep both directories until reconciled — while both exist, an empty whole-ledger read from this scope prints one notice per gc process, which " +
+		beads.AllowUnreadStoreReadEnvVar + "=1 silences"
 	if activeStore == "" || activeStore == "unknown" {
-		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store; keep both directories until reconciled"
+		return "export from each legacy store into backup JSONL, review with bd import --dry-run, then import into the current or intended active store" + silence
 	}
-	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store" + silence
 }
 
 func describeRepoList(repos []string) string {
@@ -1151,6 +1265,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, c.cityPath); pending != nil {
+		return pending
+	}
 
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, c.cityPath)
 	if err != nil {
@@ -1159,10 +1276,12 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = resolveDoltServerFixHint(fsys.OSFS{}, c.cityPath)
 		return r
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-
-	// Check TCP reachability.
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if target.DoltMode == "proxied-server" && target.Host == "" && target.Port == "" && target.Socket == "" {
+		r.Status = StatusOK
+		r.Message = "managed by beads proxied-server provider"
+		return r
+	}
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1215,6 +1334,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "not required (bd backend=doltlite)"
 		return r
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("inherited city endpoint drift: %v", err)
@@ -1228,20 +1350,42 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	if !explicit {
-		r.Status = StatusOK
-		r.Message = "inherits city dolt endpoint"
-		return r
-	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
 	if err != nil {
+		if !explicit && contract.IsManagedRuntimeUnavailable(err) {
+			r.Status = StatusOK
+			r.Message = "inherits city dolt endpoint"
+			return r
+		}
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("resolve dolt target: %v", err)
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
 		return r
 	}
-	addr := net.JoinHostPort(target.Host, target.Port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if strings.EqualFold(target.DoltMode, "proxied-server") && target.External {
+		addr, conn, dialErr := dialDoltTarget(target)
+		if dialErr != nil {
+			r.Status = StatusError
+			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
+			r.FixHint = doltServerFixHint(target)
+			return r
+		}
+		conn.Close() //nolint:errcheck // best-effort close
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("reachable on %s (proxied-server external)", addr)
+		return r
+	}
+	if strings.EqualFold(target.DoltMode, "proxied-server") && !target.External {
+		r.Status = StatusOK
+		r.Message = "not required (bd backend=dolt proxied-server)"
+		return r
+	}
+	if !explicit {
+		r.Status = StatusOK
+		r.Message = "inherits city dolt endpoint"
+		return r
+	}
+	addr, conn, err := dialDoltTarget(target)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1443,6 +1587,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
 	}
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
 	target, fixHint, active, err := validateBDStoreTarget(c.cityPath, rigPath)
 	if err != nil {
 		r.Status = StatusError
@@ -1452,9 +1599,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 		}
 		return r
 	}
-	if active {
-		addr := net.JoinHostPort(target.Host, target.Port)
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	proxied := active && targetIsProviderOwnedProxied(target)
+	if active && !proxied {
+		addr, conn, err := dialDoltTarget(target)
 		if err != nil {
 			r.Status = StatusError
 			r.Message = fmt.Sprintf("dolt server not reachable at %s", addr)
@@ -1476,6 +1623,9 @@ func (c *RigBeadsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 	r.Status = StatusOK
 	r.Message = "store accessible"
+	if proxied {
+		r.Message = proxiedProviderStoreMessage
+	}
 	return r
 }
 
@@ -1542,7 +1692,9 @@ type WorktreeCheck struct {
 // Name returns the check identifier.
 func (c *WorktreeCheck) Name() string { return "worktrees" }
 
-// Run walks .gc/worktrees/ and verifies each .git pointer.
+// Run walks .gc/worktrees/ and verifies each .git pointer. Per-bead
+// worktrees at <rig>/worktrees/ are a separate population and are
+// covered by RigWorktreesCheck.
 func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.broken = nil
@@ -1552,7 +1704,11 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no worktrees directory"
+			// Name the directory. The bare "no worktrees directory"
+			// read as a claim about every worktree on the box, and was
+			// reported green against a rig whose own worktrees/ held
+			// tens of gigabytes. Sibling checks already say ".gc/".
+			r.Message = "no .gc/worktrees directory"
 			return r
 		}
 		r.Status = StatusError
@@ -1584,7 +1740,7 @@ func (c *WorktreeCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(c.broken) == 0 {
 		r.Status = StatusOK
 		if total == 0 {
-			r.Message = "no worktrees"
+			r.Message = "no agent worktrees under .gc/worktrees"
 		} else {
 			r.Message = fmt.Sprintf("all %d worktree(s) valid", total)
 		}
@@ -2136,6 +2292,20 @@ func managedLocalDoltChecksApplicableForScopeRoots(cityPath string, scopeRoots [
 		if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 			continue
 		}
+		// Three arms, not two: managed-local, bd-owned proxied, external. A city
+		// migrated with `gc beads city migrate-proxied` keeps
+		// gc.endpoint_origin: managed_city in its canonical config — the managed
+		// city is still where its rigs inherit from — but its Dolt is bd's
+		// proxied server now and migrate-proxied retired gc's dolt-config.yaml on
+		// purpose. Classifying it as managed-local produced a permanent
+		// 'dolt-config — managed dolt-config.yaml not found' warning whose fix
+		// hint (gc start / gc dolt restart) is a typed no-op on a proxied scope:
+		// a doctor line no operator can ever clear, on the documented migration
+		// path. Ask bd's own binding, which is the authority for who runs the
+		// process.
+		if doctorScopeIsBdOwnedProxied(cityPath, scopeRoot) {
+			continue
+		}
 
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 		if err != nil {
@@ -2159,6 +2329,25 @@ func managedLocalDoltChecksApplicableForScopeRoots(cityPath string, scopeRoots [
 		}
 	}
 	return false
+}
+
+// doctorScopeIsBdOwnedProxied reports whether the scope's Dolt is bd's proxied
+// server rather than a server gc would start.
+//
+// bd's committed metadata.json answers first: it is the durable binding, and a
+// scope carries it whether gc journaled the initialization or `bd migrate` wrote
+// it in place. The resolved authoritative state is the fallback for a scope
+// whose metadata is unreadable but whose canonical config still records the
+// mode.
+func doctorScopeIsBdOwnedProxied(cityPath, scopeRoot string) bool {
+	if scopeBindingIsProviderOwnedProxied(scopeRoot) {
+		return true
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
+	if err != nil || resolved.Kind != contract.ScopeConfigAuthoritative {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(resolved.State.DoltMode), "proxied-server")
 }
 
 func inheritedDoctorScopeUsesManagedCity(cityPath string) bool {
@@ -2474,13 +2663,27 @@ func DoltConfigExpectedValuesForConfig(doltConfig config.DoltConfig) []DoltConfi
 		{"listener.back_log", 50},
 		{"listener.max_connections_timeout_millis", 5000},
 	}
-	if waitTimeout := managedDoltConfigExpectedWaitTimeout(); waitTimeout > 0 {
+	if waitTimeout := managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig); waitTimeout > 0 {
 		values = append(values, DoltConfigExpectedValue{
 			Path:  "system_variables.wait_timeout",
 			Value: strconv.Itoa(waitTimeout),
 		})
 	}
 	return values
+}
+
+// managedDoltConfigExpectedWaitTimeoutForConfig mirrors the renderer's
+// resolution order so the drift check compares against what a start would
+// actually write. Reading only the env made the check report drift on any city
+// that configures wait_timeout while doctor runs from a shell that does not
+// export GC_DOLT_WAIT_TIMEOUT — and its remediation hint ("stop dolt and
+// restart to regenerate managed config") then pointed at the one action that
+// would really have introduced drift.
+func managedDoltConfigExpectedWaitTimeoutForConfig(doltConfig config.DoltConfig) int {
+	if doltConfig.WaitTimeoutSeconds > 0 {
+		return doltConfig.WaitTimeoutSeconds
+	}
+	return managedDoltConfigExpectedWaitTimeout()
 }
 
 func managedDoltConfigExpectedWaitTimeout() int {
@@ -2802,6 +3005,13 @@ func (c *DoltVersionCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *DoltVersionCheck) Fix(_ *CheckContext) error { return nil }
+
+// errControllerRunningFixSkipped is returned by ZombieSessionsCheck.Fix and
+// OrphanSessionsCheck.Fix when a controller is running (GH#5742). The
+// controller's own health patrol already owns session remediation while it
+// runs; stopping sessions here too would race that reconciliation, so Fix
+// refuses instead of running — a documented no-op, not a silent skip.
+var errControllerRunningFixSkipped = errors.New("controller is running; skipping fix to avoid racing its own session reconciliation")
 
 // IsControllerRunning probes the controller lock file to determine if a
 // controller is currently running. It tries to acquire the flock — if it

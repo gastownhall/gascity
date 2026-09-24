@@ -40,7 +40,16 @@ gc bd list --rig <rigname>                # List beads in a specific rig
 gc bd ready                               # List beads available for claiming
 gc bd ready --label role:worker           # Filter by label
 gc bd show <id>                           # Show bead details
+gc ready                                  # Same frontier, federated over every store the city uses
 ```
+
+On a city that serves a coordination class from its own `[storage]` binding,
+`gc bd ready` (and `gc bd list --ready`) is refused with exit 1: it reads one
+ledger and the city's ready set spans more than one. Use `gc ready` there. It
+takes `--assignee`, `--unassigned`, `--metadata-field`, `--exclude-type`,
+`--exclude-label`, `--sort`, `--limit`, `--include-ephemeral`, `--status` and
+`--json` — not the label, parent, type or priority selectors `gc bd ready`
+forwards.
 
 ## Claiming and updating
 
