@@ -275,7 +275,7 @@ func TestAcceptWorkspaceTrustDialogClosedLoop(t *testing.T) {
 // on the polling path: a Down still in flight when the pane is re-read gets
 // followed by a second Down, and the wrapping cursor ends back on "No, exit"
 // after briefly showing the trust row. Requiring the trust row on two
-// consecutive frames once more than one move was needed keeps Enter off it.
+// consecutive frames before Enter keeps Enter off it.
 func TestAcceptWorkspaceTrustDialogLateKeys(t *testing.T) {
 	for _, keyLag := range []time.Duration{5, 15, 25, 35, 45, 60} {
 		keyLag *= time.Millisecond
@@ -296,6 +296,35 @@ func TestAcceptWorkspaceTrustDialogLateKeys(t *testing.T) {
 				t.Fatalf("err = %v confirmed = %q sent = %v; want trust, or unconfirmed with ErrWorkspaceTrustUnconfirmed", err, confirmed, sent)
 			}
 		})
+	}
+}
+
+// TestAcceptWorkspaceTrustDialogLaterPassWithKeysInFlight covers a second
+// pass (the tmux post-readiness pass, or a deferred dismiss) starting while
+// the first pass's movement keys are still in flight. The second pass sent
+// no move itself, so it must still require the trust row on two consecutive
+// frames, or it Enters on a "Yes" frame that a queued Down is about to move
+// back to "No, exit".
+func TestAcceptWorkspaceTrustDialogLaterPassWithKeysInFlight(t *testing.T) {
+	withZeroDialogTimings(t)
+	startupDialogAcceptDelay = 20 * time.Millisecond
+	dialogPollInterval = 5 * time.Millisecond
+	pane := newFakeClaudeTrustPane(t, fakePaneOpts{dropDowns: 1, keyLag: 45 * time.Millisecond})
+
+	err1 := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
+	if !errors.Is(err1, ErrWorkspaceTrustUnconfirmed) {
+		t.Fatalf("pass 1 error = %v, want ErrWorkspaceTrustUnconfirmed (keys still in flight)", err1)
+	}
+	time.Sleep(10 * time.Millisecond)
+	err2 := acceptWorkspaceTrustDialog(context.Background(), newStartupDialogBudget(2*time.Second), pane.peek, pane.sendKeys)
+
+	assertNeverConfirmedNoExit(t, pane)
+	sent, confirmed := pane.result()
+	switch {
+	case err2 == nil && confirmed == "trust":
+	case errors.Is(err2, ErrWorkspaceTrustUnconfirmed) && confirmed == "":
+	default:
+		t.Fatalf("pass 2 err = %v confirmed = %q sent = %v; want trust, or unconfirmed with ErrWorkspaceTrustUnconfirmed", err2, confirmed, sent)
 	}
 }
 

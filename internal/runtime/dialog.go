@@ -631,10 +631,12 @@ var errStartupDialogStreamInconclusive = errors.New("startup dialog needs a sele
 // cursor is on the trust row. Claude drops keys for a moment after the
 // dialog first renders and its cursor wraps, so a blind Enter, or a blind
 // extra move, can land on "No, exit". Moves are bounded by
-// maxTrustDialogMoveAttempts. After any move, the trust row must show on
-// two consecutive frames before Enter, so a late move, or the re-render
-// that resets Claude's cursor shortly after first paint, cannot slip in
-// between the frame and the Enter.
+// maxTrustDialogMoveAttempts. The trust row must show on two consecutive
+// frames before Enter, so a late move, or the re-render that resets
+// Claude's cursor shortly after first paint, cannot slip in between the
+// frame and the Enter. This holds even when this call sent no move: an
+// earlier pass (the tmux post-readiness pass, or a deferred dismiss) may
+// still have movement keys in flight.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
@@ -674,11 +676,12 @@ func acceptWorkspaceTrustDialog(
 					continue
 				}
 				trustFrames++
-				if moves > 0 && trustFrames < 2 {
-					// After a move, confirm only once the trust row holds on
-					// two consecutive frames: a move Claude applies late, or
-					// the re-render that resets its cursor shortly after
-					// first paint, must not land between frame and Enter.
+				if trustFrames < 2 {
+					// Confirm only once the trust row holds on two
+					// consecutive frames: a move Claude applies late (this
+					// pass's or an earlier pass's), or the re-render that
+					// resets its cursor shortly after first paint, must not
+					// land between frame and Enter.
 					sleep(ctx, startupDialogAcceptDelay)
 					continue
 				}
