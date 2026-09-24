@@ -1092,18 +1092,42 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	fallbackRoute string,
 	stderr io.Writer,
 ) {
+	unclaimWorkAssignedToRetiredSessionBeadVia(cityPath, cfg, store, store, rigStores, sessionBead, fallbackRoute, stderr)
+}
+
+// unclaimWorkAssignedToRetiredSessionBeadVia is unclaimWorkAssignedToRetiredSessionBead
+// for a caller whose leading WORK store is not the store holding the session
+// bead. `gc session close` leads its sweep with the work store but resolves the
+// session through the sessions-class store; clearing the claim back-channel
+// through the work store looked the session bead up where it does not live, so
+// the close logged "clearing current claim on retired session ...: getting bead
+// ...: bead not found" and left current_claim_bead_id stamped on the closed
+// session. sessionStore nil means the session bead lives in store.
+func unclaimWorkAssignedToRetiredSessionBeadVia(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	sessionStore beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBead beads.Bead,
+	fallbackRoute string,
+	stderr io.Writer,
+) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
 		return
 	}
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	if sessionStore == nil {
+		sessionStore = store
+	}
 	// The retired session is losing every bead it owns, so its claim
 	// back-channel must stop naming one. Cleared BEFORE the releases: a stale
 	// stamp is only dangerous once the work is detached, and clearing first
 	// means a release that fails mid-fan-out still leaves no session pointing at
 	// a bead it may no longer own.
-	if err := clearSessionCurrentClaim(store, sessionBead.ID); err != nil {
+	if err := clearSessionCurrentClaim(sessionStore, sessionBead.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
