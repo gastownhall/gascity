@@ -3,7 +3,6 @@
 package dolt_test
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // Real-Dolt regressions for #5958: the scheduled compactor must never flatten
@@ -57,20 +55,7 @@ func (c *historyProtectionCity) start() {
 // without the header.
 func (c *historyProtectionCity) sql(q string) []string {
 	c.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, c.dolt, "--host", "127.0.0.1", "--port", strconv.Itoa(c.port),
-		"--user", "root", "--no-tls", "--use-db", "beads", "sql", "-r", "csv", "-q", q)
-	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		c.t.Fatalf("sql %q: %v\n%s", q, err, out)
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) <= 1 {
-		return nil
-	}
-	return lines[1:]
+	return doltServerQueryForCompactTest(c.t, c.dolt, c.port, q)
 }
 
 func (c *historyProtectionCity) cell(q string) string {
@@ -108,24 +93,15 @@ func (c *historyProtectionCity) addCommits(from, n int) {
 
 func (c *historyProtectionCity) compactCommand(extraEnv ...string) (string, error) {
 	c.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", filepath.Join(c.root, "commands", "compact", "run.sh"))
-	cmd.Env = append(filteredEnv("PATH", "GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_PORT",
-		"GC_DOLT_HOST", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_DOLT_MANAGED_LOCAL",
-		"GC_DOLT_COMPACT_THRESHOLD_COMMITS", "GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
-		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS", "GC_DOLT_COMPACT_ALLOW_FEDERATED",
-		"GC_DOLT_COMPACT_DRY_RUN", "GC_DOLT_COMPACT_BARE_GC"),
-		"PATH="+filepath.Dir(c.dolt)+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+c.city, "GC_PACK_DIR="+c.root, "GC_DOLT_DATA_DIR="+c.dataDir,
-		"GC_DOLT_PORT="+strconv.Itoa(c.port), "GC_DOLT_HOST=127.0.0.1", "GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=", "GC_DOLT_MANAGED_LOCAL=1",
-		"GC_DOLT_COMPACT_THRESHOLD_COMMITS="+strconv.Itoa(historyProtectionThreshold),
-		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=30", "GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=30")
-	cmd.Env = append(cmd.Env, extraEnv...)
-	out, err := cmd.CombinedOutput()
-	c.t.Logf("compact (err=%v):\n%s", err, out)
-	return string(out), err
+	return c.compactCommandWithArgs(nil, extraEnv...)
+}
+
+func (c *historyProtectionCity) compactCommandWithArgs(args []string, extraEnv ...string) (string, error) {
+	c.t.Helper()
+	env := append([]string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=" + strconv.Itoa(historyProtectionThreshold)}, extraEnv...)
+	out, err := runCompactScriptForRealDoltTest(c.t, c.dolt, c.root, c.city, c.dataDir, c.port, args, env...)
+	c.t.Logf("compact %v (err=%v):\n%s", args, err, out)
+	return out, err
 }
 
 func (c *historyProtectionCity) compact(extraEnv ...string) string {
@@ -215,18 +191,7 @@ func TestCompactHistoryRealDoltAdoptedCloneOfSharedRemoteIsNeverRewritten(t *tes
 	if err := os.WriteFile(filepath.Join(c.dbDir(), ".no-sync"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", filepath.Join(c.root, "commands", "compact", "run.sh"), "--skip-fetch")
-	cmd.Env = append(filteredEnv("PATH", "GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_PORT",
-		"GC_DOLT_HOST", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_DOLT_MANAGED_LOCAL",
-		"GC_DOLT_COMPACT_THRESHOLD_COMMITS", "GC_DOLT_COMPACT_ALLOW_FEDERATED"),
-		"PATH="+filepath.Dir(c.dolt)+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+c.city, "GC_PACK_DIR="+c.root, "GC_DOLT_DATA_DIR="+c.dataDir,
-		"GC_DOLT_PORT="+strconv.Itoa(c.port), "GC_DOLT_HOST=127.0.0.1", "GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=", "GC_DOLT_MANAGED_LOCAL=1",
-		"GC_DOLT_COMPACT_THRESHOLD_COMMITS="+strconv.Itoa(historyProtectionThreshold))
-	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "skipping flatten") {
+	if out, err := c.compactCommandWithArgs([]string{"--skip-fetch"}); err != nil || !strings.Contains(out, "skipping flatten") {
 		t.Fatalf("--skip-fetch/.no-sync bypassed the guard: %v\n%s", err, out)
 	}
 	if got := c.commits(); got != 42+historyProtectionThreshold+5 {

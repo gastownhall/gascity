@@ -52,43 +52,16 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, pid)
 	waitForDoltServerQueryForCompactTest(t, doltPath, port)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", filepath.Join(root, "commands", "compact", "run.sh"))
-	cmd.Env = append(filteredEnv(
-		"PATH",
-		"GC_CITY_PATH",
-		"GC_PACK_DIR",
-		"GC_DOLT_DATA_DIR",
-		"GC_DOLT_PORT",
-		"GC_DOLT_HOST",
-		"GC_DOLT_USER",
-		"GC_DOLT_PASSWORD",
-		"GC_DOLT_MANAGED_LOCAL",
-		"GC_DOLT_COMPACT_THRESHOLD_COMMITS",
-		"GC_DOLT_COMPACT_ALLOW_FEDERATED",
-		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
-		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
-	),
-		"PATH="+filepath.Dir(doltPath)+":"+os.Getenv("PATH"),
-		"GC_CITY_PATH="+cityPath,
-		"GC_PACK_DIR="+root,
-		"GC_DOLT_DATA_DIR="+dataDir,
-		fmt.Sprintf("GC_DOLT_PORT=%d", port),
-		"GC_DOLT_HOST=127.0.0.1",
-		"GC_DOLT_USER=root",
-		"GC_DOLT_PASSWORD=",
-		"GC_DOLT_MANAGED_LOCAL=1",
+	out, err := runCompactScriptForRealDoltTest(t, doltPath, root, cityPath, dataDir, port, nil,
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=1",
 		"GC_DOLT_COMPACT_ALLOW_FEDERATED=1",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=20",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=20",
 	)
-	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("compact script failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "remote=origin pushed compacted main") {
+	if !strings.Contains(out, "remote=origin pushed compacted main") {
 		t.Fatalf("compact output missing remote push success:\n%s", out)
 	}
 
@@ -204,7 +177,18 @@ func doltHeadForCompactTest(t *testing.T, doltPath, dir string) string {
 
 func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	rows := doltServerQueryForCompactTest(t, doltPath, port, "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1")
+	if len(rows) == 0 || strings.TrimSpace(rows[0]) == "" {
+		t.Fatalf("unexpected server HEAD output: %q", rows)
+	}
+	return strings.TrimSpace(rows[0])
+}
+
+// doltServerQueryForCompactTest runs query against the beads database on the
+// test sql-server and returns the CSV rows without the header.
+func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, query string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath,
 		"--host", "127.0.0.1",
@@ -212,16 +196,58 @@ func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) strin
 		"--user", "root",
 		"--no-tls",
 		"--use-db", "beads",
-		"sql", "-r", "csv", "-q", "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1",
+		"sql", "-r", "csv", "-q", query,
 	)
-	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
+	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("query server HEAD: %v\n%s", err, out)
+		t.Fatalf("query server %q: %v\n%s", query, err, out)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[1]) == "" {
-		t.Fatalf("unexpected server HEAD output:\n%s", out)
+	if len(lines) <= 1 {
+		return nil
 	}
-	return strings.TrimSpace(lines[1])
+	return lines[1:]
+}
+
+// runCompactScriptForRealDoltTest runs commands/compact/run.sh against a real
+// managed-looking Dolt sql-server. extraEnv entries override the defaults.
+func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dataDir string, port int, args []string, extraEnv ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", append([]string{filepath.Join(root, "commands", "compact", "run.sh")}, args...)...)
+	cmd.Env = append(filteredEnv(
+		"PATH",
+		"GC_CITY_PATH",
+		"GC_PACK_DIR",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_PORT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"GC_DOLT_MANAGED_LOCAL",
+		"GC_DOLT_COMPACT_THRESHOLD_COMMITS",
+		"GC_DOLT_COMPACT_ALLOW_FEDERATED",
+		"GC_DOLT_COMPACT_DRY_RUN",
+		"GC_DOLT_COMPACT_BARE_GC",
+		"GC_DOLT_COMPACT_SKIP_FETCH",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
+		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
+	),
+		"PATH="+filepath.Dir(doltPath)+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_DOLT_MANAGED_LOCAL=1",
+		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=30",
+		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=30",
+	)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
