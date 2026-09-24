@@ -189,6 +189,12 @@ func TestRestampHookAdoption(t *testing.T) {
 			if adopt && got.Assignee != tc.wantAssignee {
 				t.Fatalf("assignee = %q, want %q", got.Assignee, tc.wantAssignee)
 			}
+			if tc.err != nil {
+				want := fmt.Sprintf("bd update %s --if-assignee %q --if-status in_progress --assignee %q", bead.ID, legacy, sessionID)
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("warning does not name the manual recovery %q; stderr: %s", want, stderr.String())
+				}
+			}
 		})
 	}
 }

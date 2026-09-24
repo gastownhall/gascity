@@ -1075,7 +1075,7 @@ func restampHookAdoption(bead beads.Bead, canonicalAssignee string, opts hookCla
 	defer cancel()
 	moved, err := ops.RestampAdopted(ctx, dir, opts.Env, bead.ID, current, target)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q; re-stamping it to %q failed: %v\n", bead.ID, current, target, err) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s under legacy assignee %q; re-stamping it to %q failed: %v (bd will reject this worker's close/update until it is moved; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", bead.ID, current, target, err, bead.ID, current, target) //nolint:errcheck
 		return bead, true
 	}
 	if !moved {
