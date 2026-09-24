@@ -1,0 +1,44 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+go_test(
+    name = "packlint_test",
+    srcs = [
+        "bd_raw_mutation_actor_test.go",
+        "bd_show_jq_test.go",
+        "gc_nudge_form_test.go",
+        "gc_session_peek_form_test.go",
+        "managed_prompt_hook_timeout_test.go",
+        "no_dolt_3307_fallback_test.go",
+        "testenv_import_test.go",
+    ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_source_tree",
+        "//examples/bd:pack_files",
+        "//examples/bd/dolt:pack_files",
+        "//examples/gastown:pack_files",
+        "//examples/hyperscale:pack_files",
+        "//examples/lifecycle:pack_files",
+        "//examples/swarm:pack_files",
+        "//internal/bootstrap/packs/core:pack_files",
+    ],
+    deps = [
+        "//internal/bazeltest",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

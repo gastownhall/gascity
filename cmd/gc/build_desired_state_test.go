@@ -136,6 +136,20 @@ func (s *readyQueryRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bea
 	return s.MemStore.Ready(query...)
 }
 
+// listCallCountingStore counts calls made through List so a test can assert
+// a lookup's store-read cost stays flat against an unrelated input's size
+// (e.g. the number of configured named sessions), rather than growing one
+// read per item (ga-0t7qjl).
+type listCallCountingStore struct {
+	*beads.MemStore
+	listCalls int
+}
+
+func (s *listCallCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls++
+	return s.MemStore.List(query)
+}
+
 type blockingPoolCreateStore struct {
 	*beads.MemStore
 	alias               string
@@ -2433,7 +2447,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil)
+	}, nil, nil, nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2451,6 +2465,77 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 	if !foundNamed {
 		t.Fatalf("ready assignees = %#v, want on-demand named-session identity", got)
 	}
+}
+
+// TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount
+// pins ga-0t7qjl: readyAssignedWorkAssignees looked up each on_demand named
+// session's closed-bead phantom one identity at a time
+// (findClosedNamedSessionBead -> one store.List per identity), so its store
+// cost scaled linearly with the number of configured named sessions — 109
+// serial calls, +155s, on this city. A batched lookup must cost the same
+// small constant number of store reads regardless of how many named
+// sessions are configured.
+func TestReadyAssignedWorkAssigneesStoreReadsAreIndependentOfNamedSessionCount(t *testing.T) {
+	newCityWithNamedSessions := func(n int) *config.City {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		for i := 0; i < n; i++ {
+			cfg.NamedSessions = append(cfg.NamedSessions, config.NamedSession{
+				Dir:      fmt.Sprintf("repo-%d", i),
+				Template: "named-worker",
+				Mode:     "on_demand",
+			})
+		}
+		return cfg
+	}
+
+	countListCalls := func(n int) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(newCityWithNamedSessions(n), store, nil, nil)
+		return store.listCalls
+	}
+
+	small := countListCalls(2)
+	large := countListCalls(200)
+
+	if small != large {
+		t.Fatalf("store.List call count scales with named-session count: 2 sessions -> %d calls, 200 sessions -> %d calls; want equal (one batched lookup regardless of session count)", small, large)
+	}
+	if large > 2 {
+		t.Fatalf("store.List called %d times for 200 named sessions; want a small constant via one batched lookup, not one call per named session", large)
+	}
+}
+
+// TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession
+// pins ga-bequ8d: the closed-session index is built only when at least one
+// on_demand named session exists, so a city with none pays zero store reads.
+// readyAssignedWorkAssignees must not build the index (or issue any
+// store.List) when no configured named session is on_demand.
+func TestReadyAssignedWorkAssigneesSkipsClosedIndexWithoutOnDemandNamedSession(t *testing.T) {
+	countListCalls := func(cfg *config.City) int {
+		store := &listCallCountingStore{MemStore: beads.NewMemStore()}
+		readyAssignedWorkAssignees(cfg, store, nil, nil)
+		return store.listCalls
+	}
+
+	t.Run("no named sessions configured", func(t *testing.T) {
+		cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with zero named sessions configured; want 0 (closed-session index must not be built)", got)
+		}
+	})
+
+	t.Run("only always-mode named sessions configured", func(t *testing.T) {
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			NamedSessions: []config.NamedSession{
+				{Template: "mayor", Mode: "always"},
+				{Dir: "repo", Template: "deputy", Mode: "always"},
+			},
+		}
+		if got := countListCalls(cfg); got != 0 {
+			t.Fatalf("store.List called %d times with only always-mode named sessions; want 0 (closed-session index must not be built when no on_demand session needs it)", got)
+		}
+	})
 }
 
 func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAssignee(t *testing.T) {
@@ -3805,7 +3890,9 @@ func TestBuildDesiredState_MaxOneAgentSkipsCanonicalDuplicateWhenStaleAssignedWo
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePriority := 10
+	// bd priorities are ascending-urgent: P0 outranks P1, so the stale slot's
+	// work is the one that wins the singleton cap.
+	stalePriority := 0
 	if _, err := store.Create(beads.Bead{
 		Title:    "stale assigned work",
 		Type:     "task",
@@ -12522,17 +12609,7 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 		t.Fatalf("create control: %v", err)
 	}
 
-	maxActive := 1
-	cfg := &config.City{
-		Workspace: config.Workspace{Name: "test-city"},
-		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
-		Agents: []config.Agent{{
-			Name:              config.ControlDispatcherAgentName,
-			BindingName:       "core",
-			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
-			MaxActiveSessions: &maxActive,
-		}},
-	}
+	cfg := cityOnlyDispatcherFixtureConfig(t)
 	var stderr bytes.Buffer
 	result := buildDesiredStateWithSessionBeads(
 		"test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), binding,
@@ -12561,6 +12638,159 @@ func TestBuildDesiredState_ClassBoundRigRootedControlWorkWithoutRigDispatcherIsN
 	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
 	if !strings.Contains(diag, bindingRef) || !strings.Contains(diag, `rig "fixture"`) {
 		t.Fatalf("stderr = %q, want the diagnostic to name the class binding %s and the owning rig", diag, bindingRef)
+	}
+}
+
+// TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork is the
+// counted-signal half of the missing-dispatcher arm above: the same rig-rooted
+// row the binding serves, in a city that configures only a city dispatcher,
+// must also leave a machine-readable summary on the result so the reconciler
+// can turn it into ONE event per scope instead of one stderr line per scope per
+// tick that nobody reads (ga-oytw9 took 26h and 600+ identical lines to find by
+// hand). SuppressedCount is what the stderr line cannot say: it names one bead,
+// so a single stuck row and a hundred read identically.
+func TestBuildDesiredState_ReportsControlDispatcherScopeGapForRigRootedWork(t *testing.T) {
+	cityPath := t.TempDir()
+	work := beads.NewMemStore()
+	binding := beads.NewMemStore()
+	routes := splitRoutes(binding)
+	registerResidencyRoutes(cityPath, routes, func() beads.Store { return work })
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+
+	control, err := binding.Create(beads.Bead{
+		Title:  "Finalize rig workflow",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control: %v", err)
+	}
+
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", cityPath, time.Now().UTC(), cityOnlyDispatcherFixtureConfig(t), runtime.NewFake(), binding,
+		map[string]beads.Store{"fixture": beads.NewMemStore()}, newSessionBeadSnapshot(nil), nil, io.Discard,
+	)
+
+	if len(result.ControlDispatcherScopeGaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want exactly one for the rig with no dispatcher", result.ControlDispatcherScopeGaps)
+	}
+	gap := result.ControlDispatcherScopeGaps[0]
+	if gap.RigContext != "fixture" {
+		t.Fatalf("gap rig context = %q, want fixture (the scope that owns the row, not the leg it was read through)", gap.RigContext)
+	}
+	if gap.SuppressedCount != 1 {
+		t.Fatalf("gap suppressed count = %d, want 1", gap.SuppressedCount)
+	}
+	if gap.SampleBeadID != control.ID {
+		t.Fatalf("gap sample bead = %q, want %q", gap.SampleBeadID, control.ID)
+	}
+	bindingRef := string(storeref.ClassRef(wholeSplitClasses()))
+	if gap.StoreRef != bindingRef {
+		t.Fatalf("gap store ref = %q, want the binding leg %q", gap.StoreRef, bindingRef)
+	}
+	if !strings.Contains(gap.ScopeLabel, bindingRef) || !strings.Contains(gap.ScopeLabel, `rig "fixture"`) {
+		t.Fatalf("gap scope label = %q, want it to name the class binding %s and the owning rig", gap.ScopeLabel, bindingRef)
+	}
+}
+
+// One scope with many suppressed rows is ONE gap carrying the count — the
+// per-row emission this replaces is exactly what made the condition invisible.
+func TestRepairControlDispatcherRoutesCountsSuppressedRowsPerScope(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	newControl := func(id string) beads.Bead {
+		return beads.Bead{
+			ID: id, Type: "task", Status: "open", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+				beadmeta.RoutedToMetadataKey:     "fixture/core.control-dispatcher",
+				beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+			},
+		}
+	}
+	work := []beads.Bead{newControl("control-1"), newControl("control-2")}
+	store := beads.NewMemStore()
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(),
+		cfg,
+		work,
+		[]beads.Store{store, store},
+		[]string{"rig:fixture", "rig:fixture"},
+		io.Discard,
+	)
+
+	if len(gaps) != 1 {
+		t.Fatalf("scope gaps = %+v, want one entry for the one scope with no dispatcher", gaps)
+	}
+	if gaps[0].SuppressedCount != 2 {
+		t.Fatalf("suppressed count = %d, want 2 (both rows of the same scope)", gaps[0].SuppressedCount)
+	}
+	if gaps[0].ScopeLabel != `rig store "fixture"` {
+		t.Fatalf("scope label = %q, want the same text the stderr diagnostic prints", gaps[0].ScopeLabel)
+	}
+}
+
+// A scope whose dispatcher IS configured is not a gap: nothing was suppressed,
+// so an alert on this event stays quiet on a healthy city.
+func TestRepairControlDispatcherRoutesReportsNoScopeGapWhenDispatcherIsConfigured(t *testing.T) {
+	maxActive := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			Dir:               "fixture",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
+	}
+	work := []beads.Bead{{
+		ID: "control-1", Type: "task", Status: "open", Metadata: map[string]string{
+			beadmeta.KindMetadataKey:         beadmeta.KindWorkflowFinalize,
+			beadmeta.RoutedToMetadataKey:     "core.control-dispatcher",
+			beadmeta.RootStoreRefMetadataKey: "rig:fixture",
+		},
+	}}
+
+	gaps := repairControlDispatcherRoutesForStoreScope(
+		t.Name(), cfg, work, []beads.Store{beads.NewMemStore()}, []string{"rig:fixture"}, io.Discard,
+	)
+
+	if len(gaps) != 0 {
+		t.Fatalf("scope gaps = %+v, want none when the owning scope has a dispatcher", gaps)
+	}
+}
+
+// cityOnlyDispatcherFixtureConfig is the one-dispatcher city the
+// missing-dispatcher class-binding tests share: a city dispatcher and a rig
+// "fixture" that configures none.
+func cityOnlyDispatcherFixtureConfig(t *testing.T) *config.City {
+	t.Helper()
+	maxActive := 1
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "fixture", Path: t.TempDir()}},
+		Agents: []config.Agent{{
+			Name:              config.ControlDispatcherAgentName,
+			BindingName:       "core",
+			StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+			MaxActiveSessions: &maxActive,
+		}},
 	}
 }
 

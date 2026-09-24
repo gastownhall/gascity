@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // newKillPokeSession stands up a city, store, and fake runtime for an awake
@@ -118,5 +121,39 @@ func TestCmdSessionKill_PokeFailureIsNonFatal(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := cmdSessionKill([]string{identity}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionKill = %d, want 0 (poke failure is best-effort); stderr=%s", code, stderr.String())
+	}
+}
+
+func TestCmdSessionKillRefusesLiveSubagentsUnlessForced(t *testing.T) {
+	const identity = "session-a"
+	const sessionName = "s-gc-kill-guard"
+	_, _, _ = newKillPokeSession(t, identity, sessionName)
+
+	old := liveSubagentsForKill
+	calls := 0
+	liveSubagentsForKill = func(context.Context, worker.Handle) ([]worker.InFlightSubagent, error) {
+		calls++
+		return []worker.InFlightSubagent{{AgentID: "helper", Description: "Investigate make check slowness", StartedAt: time.Now().Add(-time.Minute)}}, nil
+	}
+	t.Cleanup(func() { liveSubagentsForKill = old })
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, false); code != 1 {
+		t.Fatalf("cmdSessionKillWithForce() = %d, want refusal", code)
+	}
+	if !strings.Contains(stderr.String(), "helper") || !strings.Contains(stderr.String(), "--force") {
+		t.Fatalf("refusal output = %q", stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("guard calls = %d, want 1", calls)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, true); code != 0 {
+		t.Fatalf("forced cmdSessionKillWithForce() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("forced kill ran guard %d times, want force bypass", calls)
 	}
 }

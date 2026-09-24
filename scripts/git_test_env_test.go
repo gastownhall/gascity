@@ -37,6 +37,11 @@ print-test-env-git:
 		"USER=" + os.Getenv("USER"),
 		"SHELL=/bin/sh",
 		"GIT_DIR=/poison/.git",
+		// Makefile-internal `go env` probes must not download a toolchain
+		// into the isolated HOME: the module cache's read-only files would
+		// defeat t.TempDir cleanup.
+		"GOTOOLCHAIN=local",
+		"GOMODCACHE=" + filepath.Join(os.TempDir(), "gc-makefile-git-gomodcache"),
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

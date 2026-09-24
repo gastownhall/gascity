@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -15,6 +16,9 @@ func coreFormulaSearchPaths(t *testing.T) []string {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return []string{filepath.Join(root, "internal", "bootstrap", "packs", "core", "formulas")}
 	}
 	return []string{filepath.Join(filepath.Dir(filename), "packs", "core", "formulas")}
 }

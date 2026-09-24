@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"strings"
 	"testing"
@@ -12,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -358,8 +356,8 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 	drainAckReleaseHeldClaims = func(string, string, io.Writer) { released = true }
 
 	var stdout, stderr bytes.Buffer
-	doRuntimeRequestRestart(context.Background(), newFakeDrainOps(), runtime.NewFake(), nil, false,
-		events.Discard, "worker-1", "worker-1", time.Millisecond, 50*time.Millisecond, &stdout, &stderr)
+	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,
+		events.Discard, "worker-1", "worker-1", "", &stdout, &stderr)
 
 	if released {
 		t.Fatal("gc runtime request-restart released the session's claims; only drain-ack may")

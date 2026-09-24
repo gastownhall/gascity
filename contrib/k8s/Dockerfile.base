@@ -19,10 +19,12 @@ ARG GH_SOURCE_DATE_EPOCH=1783026608
 ARG DOLT_VERSION=2.1.7
 ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
 ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.2
 # Patched module versions forced into the gh and Dolt rebuilds below, matching
-# the versions this repo's own go.mod carries. The rebuilt bd takes only the
-# grpc override, so it does not track these.
+# the versions this repo's own go.mod carries. The rebuilt bd tracks its own
+# GRPC_VERSION and THRIFT_VERSION in contrib/k8s/Dockerfile.agent; both files
+# now carry the same thrift floor, 0.24.0, which is where CVE-2026-43871 is
+# fixed. The other overrides here are gh/Dolt only.
 # Each build applies these in ascending-constraint order: a later `go get` can
 # roll an earlier one back, and only the rolled-back module's own assertion
 # would catch it. XMOD_VERSION is the newest constraint, so it goes last.
@@ -30,7 +32,7 @@ ARG XCRYPTO_VERSION=0.55.0
 ARG XNET_VERSION=0.58.0
 ARG XTEXT_VERSION=0.41.0
 ARG XMOD_VERSION=0.40.0
-ARG THRIFT_VERSION=0.23.0
+ARG THRIFT_VERSION=0.24.0
 ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
 ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
 ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce

@@ -72,6 +72,27 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("go.mod pins github.com/steveyegge/beads to the tag %q but deps.env BD_CURRENT_VERSION = %q; a tag pin must name the same release the current matrix cell builds",
 			goModPin, bdCurrent)
 	}
+	// The integration suite installs bd from whatever go.mod names and pins the
+	// expected version in its own literal, so a bump that misses that literal
+	// leaves the suite asserting a version nobody ships. It lives in the
+	// `rest-full` shard, which is gated on `push` — so on a PR nothing catches
+	// the drift and the failure lands after merge, which is exactly how
+	// v1.3.0-rc.2 stayed stale there (tracker ga-rnwg5u). Assert it here,
+	// against the same go.mod pin the block above ties to deps.env. This test
+	// reaches PR-time CI through `make test-ci-policy` (preflight-static); the
+	// ./scripts unit-cover jobs are push-only, so that recipe line is what
+	// makes this fail before merge rather than after —
+	// TestMakeTestCIPolicyRunsVersionPinContracts pins it.
+	const integrationPinFile = "test/integration/integration_test.go"
+	integrationPin := extractGoStringConst(t, root, integrationPinFile, "wantPinnedBeadsModuleVersion")
+	if integrationPin == "" {
+		t.Fatalf("%s missing the wantPinnedBeadsModuleVersion const; it is the integration suite's beads pin anchor", integrationPinFile)
+	}
+	if integrationPin != goModPin {
+		t.Fatalf("%s pins wantPinnedBeadsModuleVersion = %q but go.mod pins github.com/steveyegge/beads to %q; the integration suite installs bd from go.mod, so the two must name the same version",
+			integrationPinFile, integrationPin, goModPin)
+	}
+
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
 	if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
 		t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
@@ -114,6 +135,27 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("bdReadyProjectionMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", readyFloor, bdMin)
 	}
 
+	// The fresh provider-owned floor is the third anchor: a scope initialized
+	// through bd's persisted ownership/transport contract needs a bd that has
+	// it. Like the ready-projection floor it must be strictly newer than the
+	// init floor (otherwise it gates nothing), and unlike it, it must also be
+	// reachable -- no supported bd could satisfy a floor above the newest
+	// matrix cell, so a fresh `gc init` would refuse on every cell.
+	// The current cell is the v1.3.0 tag, which compares equal to the 1.3.0
+	// floor. deps.CompareVersions strips prerelease identifiers, so a
+	// v1.3.0-rc.N cell compares equal too rather than below it.
+	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
+	if freshProviderFloor == "" {
+		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")
+	}
+	if deps.CompareVersions(freshProviderFloor, bdMin) <= 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", freshProviderFloor, bdMin)
+	}
+	if deps.CompareVersions(freshProviderFloor, bdCurrent) > 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could initialize a fresh provider-owned scope",
+			freshProviderFloor, bdCurrent)
+	}
+
 	// The bd_compatibility config enum is the operator-facing mirror of the two
 	// floors; both floor values must appear as enum members so they cannot diverge.
 	cfg := readFile(t, root, "internal/config/config.go")
@@ -153,6 +195,23 @@ func TestBDVersionPins(t *testing.T) {
 	// so it sat at v1.0.4 through the promotion to v1.1.0. A doc anchor nothing
 	// asserts is how the next bump goes half-applied.
 	assertDocPinAnchor(t, root, ".devcontainer/README.md", "BD_VERSION", bdVersion)
+
+	// The fresh-init floor is the one an operator meets as a typed refusal from
+	// `gc init`, so the design note that explains it is an anchor too. It went
+	// stale once already -- the note said proxied was the default "on bd >=
+	// 1.3.0" while the code refused outright below it.
+	assertDocStatesVersion(t, root, "engdocs/design/beads-proxied-local-default.md",
+		"bd ≥ "+freshProviderFloor, "the fresh provider-owned init floor")
+}
+
+// assertDocStatesVersion fails when a doc no longer restates a version floor in
+// prose. Unlike assertDocPinAnchor it matches a literal phrase rather than a
+// deps.env restatement, because this floor is a Go const, not a deps.env key.
+func assertDocStatesVersion(t *testing.T, root, rel, phrase, what string) {
+	t.Helper()
+	if !strings.Contains(readFile(t, root, rel), phrase) {
+		t.Errorf("%s no longer states %s as %q; update the doc or move this assertion with it", rel, what, phrase)
+	}
 }
 
 // assertDocPinAnchor fails when a doc restates a deps.env pin as

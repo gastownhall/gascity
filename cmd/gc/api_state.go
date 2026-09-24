@@ -2263,6 +2263,14 @@ func (cs *controllerState) assertDroppableManagedDoltDatabase(rigName, dbName st
 	return nil
 }
 
+// controllerLiveDoltPortResolve is the live-resolution seam for the
+// controller's DROP path. It is nil in production, which makes
+// ResolveDoltPort wire newLiveDoltPortResolverForExplicitCity — the strict,
+// cityPath-derived resolver that ambient GC_DOLT_* cannot redirect. Tests
+// inject a fake process table so the most destructive consumer of the chain
+// can be exercised without a live Dolt server.
+var controllerLiveDoltPortResolve func(cityPath string) (liveDoltPortResolution, error)
+
 // controllerDropManagedDoltDatabase drops a managed Dolt database for the city.
 // It is a package var so the G14 rollback tests can inject a recorder without a
 // live Dolt server; production resolves the city's Dolt endpoint and issues the
@@ -2279,12 +2287,18 @@ var controllerDropManagedDoltDatabase = func(cs *controllerState, ctx context.Co
 		host = "127.0.0.1"
 	}
 	resolution := ResolveDoltPort(PortResolverInput{
-		CityPort: cityPort,
-		Rigs:     loadResolverRigs(cs.cityPath, cfg),
-		FS:       fsys.OSFS{},
+		CityPort:    cityPort,
+		CityPath:    cs.cityPath,
+		LiveResolve: controllerLiveDoltPortResolve,
 	})
 	if err := fatalPortResolutionError(resolution); err != nil {
 		return fmt.Errorf("resolving dolt port: %w", err)
+	}
+	// This is a DROP DATABASE. With the port file out of the chain, a stopped
+	// managed dolt is a clean miss that lands on the legacy default — refuse
+	// rather than drop against whatever happens to be listening on 3307.
+	if resolution.Fallback {
+		return fmt.Errorf("refusing to drop dolt database %q: no live managed dolt endpoint for %s (resolution fell back to legacy port %d)", dbName, cs.cityPath, resolution.Port)
 	}
 	client, err := newSQLCleanupDoltClient(cs.cityPath, host, strconv.Itoa(resolution.Port))
 	if err != nil {
@@ -2626,18 +2640,60 @@ func ensurePublicGitHost(gitURL string) (resolveOverride string, err error) {
 // UpdateRig partially updates a rig in city.toml.
 func (cs *controllerState) UpdateRig(name string, patch api.RigUpdate) error {
 	return cs.mutateAndPoke(func() error {
-		return cs.editor.UpdateRig(name, configedit.RigUpdate{
+		var updatedBindings []config.Rig
+		if strings.TrimSpace(patch.Path) != "" {
+			cfg, err := loadCityConfig(cs.cityPath, io.Discard)
+			if err != nil {
+				return fmt.Errorf("load rig before updating its path: %w", err)
+			}
+			resolveRigPaths(cs.cityPath, cfg.Rigs)
+			for i := range cfg.Rigs {
+				if cfg.Rigs[i].Name != name {
+					continue
+				}
+				newPath := strings.TrimSpace(patch.Path)
+				if !filepath.IsAbs(newPath) {
+					newPath = filepath.Join(cs.cityPath, newPath)
+				}
+				if !samePath(cfg.Rigs[i].Path, newPath) {
+					// Detach before city.toml changes. A failed write leaves the old
+					// configured path resolvable through its physical record so retry
+					// remains safe; the new root receives its own admission later.
+					if err := removeProviderScopeOwnershipRecord(cs.cityPath, "rig:"+name); err != nil {
+						return fmt.Errorf("retiring provider scope ownership: %w", err)
+					}
+				}
+				cfg.Rigs[i].Path = newPath
+				updatedBindings = append([]config.Rig(nil), cfg.Rigs...)
+				break
+			}
+		}
+		if err := cs.editor.UpdateRig(name, configedit.RigUpdate{
 			Path:          patch.Path,
 			Prefix:        patch.Prefix,
 			DefaultBranch: patch.DefaultBranch,
 			Suspended:     patch.Suspended,
-		})
+		}); err != nil {
+			return err
+		}
+		if len(updatedBindings) != 0 {
+			if err := config.PersistRigSiteBindings(fsys.OSFS{}, cs.cityPath, updatedBindings); err != nil {
+				return fmt.Errorf("persist updated rig site binding: %w", err)
+			}
+		}
+		return nil
 	})
 }
 
 // DeleteRig removes a rig from city.toml.
 func (cs *controllerState) DeleteRig(name string) error {
 	return cs.mutateAndPoke(func() error {
+		// Retire the configured label before editing city.toml. If the config
+		// write fails, the still-configured rig resolves through its detached
+		// path record and a retry can finish the removal.
+		if err := removeProviderScopeOwnershipRecord(cs.cityPath, "rig:"+name); err != nil {
+			return fmt.Errorf("retiring provider scope ownership: %w", err)
+		}
 		return cs.editor.DeleteRig(name)
 	})
 }

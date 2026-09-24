@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 type goTestShardFixture struct {
@@ -737,7 +739,9 @@ func TestGoTestShardTimingArtifactFailureIsAdvisory(t *testing.T) {
 
 func TestGoTestShardPreservesAcceptanceAuthEnv(t *testing.T) {
 	repoRoot := filepath.Dir(t.TempDir())
-	if wd, err := os.Getwd(); err == nil {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		repoRoot = root // bazel runfiles trees are partial; the shard needs the module graph
+	} else if wd, err := os.Getwd(); err == nil {
 		repoRoot = filepath.Dir(wd)
 	}
 
@@ -753,6 +757,10 @@ func TestGoTestShardPreservesAcceptanceAuthEnv(t *testing.T) {
 		"HOME=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
 		"ANTHROPIC_AUTH_TOKEN=synthetic-token",
+		// Isolated HOME redirects GOMODCACHE into t.TempDir(); a toolchain
+		// download there defeats TempDir cleanup (read-only module files).
+		// Keep it in a shared cache instead.
+		"GOMODCACHE=" + filepath.Join(os.TempDir(), "gc-shard-test-gomodcache"),
 	}
 
 	out, err := cmd.CombinedOutput()
@@ -763,7 +771,9 @@ func TestGoTestShardPreservesAcceptanceAuthEnv(t *testing.T) {
 
 func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	repoRoot := filepath.Dir(t.TempDir())
-	if wd, err := os.Getwd(); err == nil {
+	if root := bazeltest.OverrideRoot(); root != "" {
+		repoRoot = root // bazel runfiles trees are partial; the shard needs the module graph
+	} else if wd, err := os.Getwd(); err == nil {
 		repoRoot = filepath.Dir(wd)
 	}
 
@@ -778,6 +788,9 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
+		// Keep toolchain downloads out of the isolated HOME; its read-only
+		// module files would defeat t.TempDir cleanup.
+		"GOMODCACHE=" + filepath.Join(os.TempDir(), "gc-shard-test-gomodcache"),
 	}
 
 	out, err := cmd.CombinedOutput()

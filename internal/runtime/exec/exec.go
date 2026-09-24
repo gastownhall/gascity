@@ -109,7 +109,7 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	// observed winner, while os.ErrProcessDone leaves the flag false and
 	// preserves the ordinary exit result because completion was observed first.
 	// Neither result claims physical signal-delivery ordering.
-	if cancellationAccepted.Load() {
+	if cancellationAccepted.Delivered() {
 		return "", p.cancellationError(ctx.Err(), stderr.String(), args)
 	}
 	return "", p.runError(err, stderr.String(), args)

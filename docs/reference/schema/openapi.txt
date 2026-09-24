@@ -181,6 +181,15 @@
               "null"
             ]
           },
+          "AutoReclaimStaleClaims": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "ContextAdvisory": {
+            "$ref": "#/components/schemas/ContextAdvisory"
+          },
           "DefaultSlingFormula": {
             "type": [
               "string",
@@ -523,6 +532,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "ContextAdvisory",
           "Upstream",
           "Args",
           "StartCommand",
@@ -533,6 +543,7 @@
           "MaxSessionAgeJitter",
           "AssignedWorkDeferLimit",
           "SleepAfterIdle",
+          "AutoReclaimStaleClaims",
           "InstallAgentHooks",
           "Skills",
           "MCP",
@@ -1797,6 +1808,95 @@
         ],
         "type": "object"
       },
+      "ContextAdvisory": {
+        "additionalProperties": false,
+        "properties": {
+          "Enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "Tiers": {
+            "items": {
+              "$ref": "#/components/schemas/ContextAdvisoryTier"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "WindowTokens": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Enabled",
+          "WindowTokens",
+          "Tiers"
+        ],
+        "type": "object"
+      },
+      "ContextAdvisoryTier": {
+        "additionalProperties": false,
+        "properties": {
+          "Enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "Message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Threshold": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "Threshold",
+          "Message",
+          "Enabled"
+        ],
+        "type": "object"
+      },
+      "ControlDispatcherScopeGapPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "rig_context": {
+            "type": "string"
+          },
+          "sample_bead_id": {
+            "type": "string"
+          },
+          "scope_label": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "suppressed_count": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope_label",
+          "suppressed_count"
+        ],
+        "type": "object"
+      },
       "ControlRootSettleFailedPayload": {
         "additionalProperties": false,
         "properties": {
@@ -2527,10 +2627,16 @@
             "$ref": "#/components/schemas/ConditionalWritesDegradedPayload"
           },
           {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
+          },
+          {
             "$ref": "#/components/schemas/ControlRootSettleFailedPayload"
           },
           {
             "$ref": "#/components/schemas/ControlStalledPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
           },
           {
             "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
@@ -2540,6 +2646,9 @@
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
           },
           {
             "$ref": "#/components/schemas/InboundEventPayload"
@@ -2594,6 +2703,9 @@
           },
           {
             "$ref": "#/components/schemas/SessionMessageSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
           },
           {
             "$ref": "#/components/schemas/SessionResetStalledPayload"
@@ -2792,6 +2904,30 @@
           "type",
           "ts",
           "actor"
+        ],
+        "type": "object"
+      },
+      "ExecutionClaimStalledPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "root_bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "session_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -3830,6 +3966,26 @@
         },
         "required": [
           "timestamp"
+        ],
+        "type": "object"
+      },
+      "HookClaimReclaimedStalePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "new_assignee": {
+            "type": "string"
+          },
+          "previous_owner": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bead_id",
+          "previous_owner",
+          "new_assignee"
         ],
         "type": "object"
       },
@@ -7607,6 +7763,37 @@
         },
         "required": [
           "permission_mode"
+        ],
+        "type": "object"
+      },
+      "SessionPoolSlotRetiredAtDrainDeadlinePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "drain_age_seconds": {
+            "description": "Whole seconds the seat spent in drain before the deadline retired it. Always at least the retire deadline.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "drain_at": {
+            "description": "RFC3339 instant the seat entered drain (the drain_at metadata). Empty only if the marker was unreadable, in which case no retirement occurs.",
+            "type": "string"
+          },
+          "session_id": {
+            "description": "Canonical session bead ID for the retired pool seat.",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name the seat held. This is the name the pool could not route around until the retirement freed it.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Pool template name when known at the emission site.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "drain_age_seconds"
         ],
         "type": "object"
       },
@@ -12206,6 +12393,7 @@
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
+            "control.dispatcher_scope_gap": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.root_settle_failed": "#/components/schemas/TypedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
@@ -12215,6 +12403,7 @@
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedEventStreamEnvelopeExecutionStepCompleted",
@@ -12234,6 +12423,7 @@
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed",
+            "hook.claim.reclaimed_stale": "#/components/schemas/TypedEventStreamEnvelopeHookClaimReclaimedStale",
             "mail.archived": "#/components/schemas/TypedEventStreamEnvelopeMailArchived",
             "mail.deleted": "#/components/schemas/TypedEventStreamEnvelopeMailDeleted",
             "mail.marked_read": "#/components/schemas/TypedEventStreamEnvelopeMailMarkedRead",
@@ -12261,9 +12451,11 @@
             "session.demand_claim_divergence": "#/components/schemas/TypedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.drain_fence_unavailable": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable",
+            "session.drain_stop_escalated": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainStopEscalated",
             "session.draining": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedEventStreamEnvelopeSessionStopped",
@@ -12337,6 +12529,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlDispatcherScopeGap"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControlRootSettleFailed"
           },
           {
@@ -12362,6 +12557,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimStalled"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExecutionClaimWindowExpired"
@@ -12419,6 +12617,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeHookClaimReclaimedStale"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMailArchived"
@@ -12502,6 +12703,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainFenceUnavailable"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDrainStopEscalated"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionDraining"
           },
           {
@@ -12509,6 +12713,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionQuarantined"
@@ -13440,6 +13647,63 @@
         "title": "TypedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControlDispatcherScopeGap": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.dispatcher_scope_gap",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope control.dispatcher_scope_gap",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeControlRootSettleFailed": {
         "additionalProperties": false,
         "properties": {
@@ -13833,7 +14097,9 @@
                 "session.suspended",
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
+                "session.drain_stop_escalated",
                 "session.stranded",
+                "session.pool_slot_retired_at_drain_deadline",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -13849,6 +14115,7 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.claim_released",
+                "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.run_anchored",
@@ -13857,6 +14124,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -13870,6 +14138,7 @@
                 "controller.stopped",
                 "control.stalled",
                 "control.root_settle_failed",
+                "control.dispatcher_scope_gap",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -14105,6 +14374,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExecutionClaimWindowExpired": {
@@ -15188,6 +15514,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope gc.store.maintenance.failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeHookClaimReclaimedStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "hook.claim.reclaimed_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope hook.claim.reclaimed_stale",
         "type": "object"
       },
       "TypedEventStreamEnvelopeMailArchived": {
@@ -16729,6 +17112,63 @@
         "title": "TypedEventStreamEnvelope session.drain_fence_unavailable",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSessionDrainStopEscalated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_stop_escalated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.drain_stop_escalated",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSessionDraining": {
         "additionalProperties": false,
         "properties": {
@@ -16898,6 +17338,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_slot_retired_at_drain_deadline",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
         "type": "object"
       },
       "TypedEventStreamEnvelopeSessionQuarantined": {
@@ -18230,6 +18727,7 @@
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
+            "control.dispatcher_scope_gap": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap",
             "control.root_settle_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlRootSettleFailed",
             "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
@@ -18239,6 +18737,7 @@
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
+            "execution.claim_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled",
             "execution.claim_window_expired": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired",
             "execution.run_anchored": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionRunAnchored",
             "execution.step_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionStepCompleted",
@@ -18258,6 +18757,7 @@
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
             "gc.store.maintenance.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed",
+            "hook.claim.reclaimed_stale": "#/components/schemas/TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale",
             "mail.archived": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived",
             "mail.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailDeleted",
             "mail.marked_read": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailMarkedRead",
@@ -18285,9 +18785,11 @@
             "session.demand_claim_divergence": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence",
             "session.drain_acked_with_assigned_work": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork",
             "session.drain_fence_unavailable": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable",
+            "session.drain_stop_escalated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated",
             "session.draining": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining",
             "session.idle_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionIdleKilled",
             "session.max_age_killed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled",
+            "session.pool_slot_retired_at_drain_deadline": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline",
             "session.quarantined": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined",
             "session.reset_stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionResetStalled",
             "session.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionStopped",
@@ -18361,6 +18863,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlRootSettleFailed"
           },
           {
@@ -18386,6 +18891,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimStalled"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired"
@@ -18443,6 +18951,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailArchived"
@@ -18526,6 +19037,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainFenceUnavailable"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionDraining"
           },
           {
@@ -18533,6 +19047,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionMaxAgeKilled"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionQuarantined"
@@ -19524,6 +20041,67 @@
         "title": "TypedTaggedEventStreamEnvelope city.unregister_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControlDispatcherScopeGapPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "control.dispatcher_scope_gap",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope control.dispatcher_scope_gap",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeControlRootSettleFailed": {
         "additionalProperties": false,
         "properties": {
@@ -19944,7 +20522,9 @@
                 "session.suspended",
                 "session.updated",
                 "session.drain_acked_with_assigned_work",
+                "session.drain_stop_escalated",
                 "session.stranded",
+                "session.pool_slot_retired_at_drain_deadline",
                 "session.unknown_state",
                 "session.wake_refused",
                 "session.reset_stalled",
@@ -19960,6 +20540,7 @@
                 "bead.worktree.reap_skipped",
                 "bead.claim_rejected",
                 "bead.claim_released",
+                "hook.claim.reclaimed_stale",
                 "bead.dead_assignee_reopened",
                 "execution.work_associated",
                 "execution.run_anchored",
@@ -19968,6 +20549,7 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "execution.claim_stalled",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -19981,6 +20563,7 @@
                 "controller.stopped",
                 "control.stalled",
                 "control.root_settle_failed",
+                "control.dispatcher_scope_gap",
                 "city.suspended",
                 "city.resumed",
                 "request.result.city.create",
@@ -20229,6 +20812,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope events.rotated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeExecutionClaimStalled": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExecutionClaimStalledPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "execution.claim_stalled",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope execution.claim_stalled",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired": {
@@ -21388,6 +22032,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope gc.store.maintenance.failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeHookClaimReclaimedStale": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HookClaimReclaimedStalePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "hook.claim.reclaimed_stale",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope hook.claim.reclaimed_stale",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeMailArchived": {
@@ -23037,6 +23742,67 @@
         "title": "TypedTaggedEventStreamEnvelope session.drain_fence_unavailable",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeSessionDrainStopEscalated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.drain_stop_escalated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.drain_stop_escalated",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSessionDraining": {
         "additionalProperties": false,
         "properties": {
@@ -23218,6 +23984,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope session.max_age_killed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionPoolSlotRetiredAtDrainDeadline": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionPoolSlotRetiredAtDrainDeadlinePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.pool_slot_retired_at_drain_deadline",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.pool_slot_retired_at_drain_deadline",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionQuarantined": {
