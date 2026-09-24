@@ -7837,6 +7837,46 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 	}
 }
 
+// A wake_request=explicit recorded while the session was already RUNNING is
+// satisfied the moment it is observed running; nothing else clears it
+// (PreWakePatch runs only at a start). It must not exempt the running session
+// from its idle sleep forever.
+func TestReconcileSessionBeads_StaleExplicitWakeOnRunningSessionStillIdleDrains(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep: config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:    config.Workspace{Name: "test-city"},
+		Agents:       []config.Agent{{Name: "worker", StartCommand: "true"}},
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	now := env.clk.Now().UTC()
+	env.setSessionMetadata(&session, map[string]string{
+		"last_woke_at": now.Add(-30 * time.Minute).Format(time.RFC3339),
+		"detached_at":  now.Add(-6 * time.Minute).Format(time.RFC3339),
+		// `gc session wake` on the already-running session, after its start.
+		"wake_request":      string(sessionpkg.WakeCauseExplicit),
+		"wake_requested_at": now.Add(-10 * time.Minute).Format(time.RFC3339),
+	})
+	env.addDesired("worker", "worker", true)
+	env.sp.WaitForIdleErrors["worker"] = nil
+	idleGate := make(chan struct{}) // see waitForIdleProbeReady godoc
+	env.sp.WaitForIdleGates["worker"] = idleGate
+
+	env.reconcile([]beads.Bead{session})
+	close(idleGate)
+	waitForIdleProbeReady(t, env.dt, session.ID)
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("a running session with a stale explicit wake request was never idle-drained")
+	}
+	if ds.reason != "idle" {
+		t.Fatalf("drain reason = %q, want idle", ds.reason)
+	}
+}
+
 func TestFreshRestartSessionKey(t *testing.T) {
 	cases := []struct {
 		name        string

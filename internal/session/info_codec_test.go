@@ -143,6 +143,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		UnknownStateEscalatedAt:        b.Metadata["unknown_state_escalated_at"],
 		SessionNameExplicit:            b.Metadata["session_name_explicit"],
 		WakeRequest:                    b.Metadata["wake_request"],
+		WakeRequestedAt:                b.Metadata["wake_requested_at"],
 		RestartRequested:               b.Metadata["restart_requested"],
 		SessionIDFlag:                  b.Metadata["session_id_flag"],
 		TemplateOverrides:              b.Metadata["template_overrides"],

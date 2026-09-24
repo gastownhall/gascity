@@ -442,6 +442,11 @@ type Info struct {
 	// explicit-wake cause. Mirror keeps the raw value so a typed LifecycleInput can
 	// be populated from Info without touching the bead.
 	WakeRequest string // wake_request (raw)
+	// WakeRequestedAt is the RAW wake_requested_at metadata (RFC3339 or empty),
+	// stamped with wake_request. The reconciler compares it against SleptAt to
+	// tell a still-pending explicit wake from one an earlier awake interval
+	// already served (PreWakePatch clears the pair only at a start).
+	WakeRequestedAt string // wake_requested_at (raw)
 	// RestartRequested is the RAW restart_requested metadata, the §5.2 intra-tick
 	// restart marker compute_awake_bridge reads (trimmed == "true") to surface a
 	// pending restart on the awake scan. Under raw-refresh coexistence the mirror

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestReconcilerWakeDemandOverridesSleepSuppressionForExplicitAndInteractiveRoutedDemand(t *testing.T) {
@@ -35,5 +36,35 @@ func TestReconcilerWakeDemandOverridesSleepSuppressionForExplicitAndInteractiveR
 	scaled := AwakeDecision{ShouldWake: true, Reason: "scaled:demand"}
 	if wakeDemandOverridesSleepSuppression(scaled, eval, interactive, map[string]int{"olivia": 1}, "olivia", false, false) {
 		t.Fatal("ordinary interactive pool demand should still honor sleep suppression")
+	}
+}
+
+// explicitWakePendingInfo bounds the explicit-wake override: a wake request is
+// served once the session is up, or once it has slept since the request.
+func TestExplicitWakePendingInfo(t *testing.T) {
+	const (
+		before = "2026-09-22T20:00:00Z"
+		after  = "2026-09-22T22:00:00Z"
+	)
+	for _, tc := range []struct {
+		name string
+		info sessionpkg.Info
+		want bool
+	}{
+		{name: "no request", info: sessionpkg.Info{MetadataState: "asleep"}, want: false},
+		{name: "non-explicit request", info: sessionpkg.Info{MetadataState: "asleep", WakeRequest: "work"}, want: false},
+		{name: "asleep, requested after sleep", info: sessionpkg.Info{MetadataState: "asleep", WakeRequest: "explicit", WakeRequestedAt: after, SleptAt: before}, want: true},
+		{name: "asleep, requested before sleep", info: sessionpkg.Info{MetadataState: "asleep", WakeRequest: "explicit", WakeRequestedAt: before, SleptAt: after}, want: false},
+		{name: "asleep, requested same second as sleep", info: sessionpkg.Info{MetadataState: "asleep", WakeRequest: "explicit", WakeRequestedAt: after, SleptAt: after}, want: true},
+		{name: "asleep, no timestamps", info: sessionpkg.Info{MetadataState: "asleep", WakeRequest: "explicit"}, want: true},
+		{name: "running active", info: sessionpkg.Info{MetadataState: "active", WakeRequest: "explicit", WakeRequestedAt: after, SleptAt: before}, want: false},
+		{name: "running awake", info: sessionpkg.Info{MetadataState: "awake", WakeRequest: " explicit ", WakeRequestedAt: after}, want: false},
+		{name: "drained", info: sessionpkg.Info{MetadataState: "drained", WakeRequest: "explicit", WakeRequestedAt: after, SleptAt: before}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := explicitWakePendingInfo(tc.info); got != tc.want {
+				t.Fatalf("explicitWakePendingInfo(%+v) = %v, want %v", tc.info, got, tc.want)
+			}
+		})
 	}
 }

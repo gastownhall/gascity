@@ -214,3 +214,19 @@ func TestReconcileSessionBeads_IdleLatchedInteractiveNamedHolderStaysAsleepWitho
 		t.Fatalf("idle-latched holder woke with no demand: woken=%d running=%v starts=%v", res.woken, res.running, res.starts)
 	}
 }
+
+// A wake_request=explicit left over from before the holder's latest sleep was
+// already served by that awake interval (PreWakePatch only clears it at a
+// start, so a `gc session wake` on a RUNNING session survives the later idle
+// sleep). It must not re-wake the idle-latched holder, or a stale flag would
+// keep bouncing it out of every idle sleep.
+func TestReconcileSessionBeads_IdleLatchedNamedHolderIgnoresExplicitWakeOlderThanItsSleep(t *testing.T) {
+	res := reconcileIdleLatchedInteractiveNamedHolder(t, false, map[string]string{
+		"wake_request":      string(sessionpkg.WakeCauseExplicit),
+		"wake_requested_at": "2026-09-21T22:00:00Z", // slept_at is 2026-09-21T23:52:00Z
+	})
+	if res.woken != 0 || res.running || len(res.starts) != 0 {
+		t.Fatalf("stale explicit wake (requested before the holder's last sleep) re-woke the idle-latched holder: woken=%d running=%v starts=%v",
+			res.woken, res.running, res.starts)
+	}
+}
