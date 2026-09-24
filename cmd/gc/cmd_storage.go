@@ -403,6 +403,30 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "  %-9s -> %s\n", class, storage.Classes.BindingFor(class)) //nolint:errcheck // best-effort stdout
 	}
 
+	// Resolve the boot plan once on every configured path. This command's exit
+	// code is a deploy gate — "a city boot refuses must not report may-serve
+	// here" — and that contract used to hold only on the born-split path below,
+	// the one path that resolved the plan. The configured served and all-work
+	// paths returned 0 without ever asking.
+	//
+	// The no-[storage] compatibility path deliberately reaches no registry or
+	// plan, matching storageBootGate. A legacy city must not acquire a new boot
+	// refusal merely because the compiled provider registry cannot be built.
+	//
+	// A refusal is reported and carried into the exit code rather than
+	// returned on, because it is the moment an operator most needs the rest of
+	// the readout.
+	var plan *storebinding.StoragePlan
+	var planErr error
+	exitCode := 0
+	if request.Cfg.Storage != nil {
+		plan, planErr = resolveCityStoragePlan(request.CityPath, request.Cfg)
+		if planErr != nil {
+			fmt.Fprintf(stdout, "boot plan: REFUSED — a city boot would not serve this configuration: %v\n", planErr) //nolint:errcheck // best-effort stdout
+			exitCode = 1
+		}
+	}
+
 	target, ok, err := resolveInfraBindingTarget(request.CityPath, request.Cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -417,10 +441,9 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			// serves classes it does not.
 			provider := storage.Bindings[binding].Provider
 			fmt.Fprintf(stdout, "binding: %s\n  provider: %s (not this build's engine; serves under the born-split discipline)\n", binding, provider) //nolint:errcheck // best-effort stdout
-			// The same resolution and seam check boot performs, so this
-			// command's exit code keeps its deploy-gate contract: a city boot
-			// refuses must not report may-serve here.
-			plan, planErr := resolveCityStoragePlan(request.CityPath, request.Cfg)
+			// The seam check boot performs, against the plan resolved above.
+			// A refusal has already been reported in the body; there is no
+			// plan to check the seam against, so the readout stops here.
 			if planErr != nil {
 				fmt.Fprintf(stderr, "%s: %v\n", logPrefix, planErr) //nolint:errcheck // best-effort stderr
 				return 1
@@ -442,7 +465,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			switch report.Outcome {
 			case infraMigrationConverged:
 				fmt.Fprintln(stdout, "born-split: clean — the work store holds no infrastructure bead, so the binding may serve.") //nolint:errcheck // best-effort stdout
-				return 0
+				return exitCode
 			case infraMigrationBornSplitBlocked:
 				fmt.Fprintf(stdout, "born-split: BLOCKED — the work store holds %d infrastructure bead(s) the binding cannot read: %s\n", //nolint:errcheck // best-effort stdout
 					len(report.Stranded), strings.Join(report.Stranded, ", "))
@@ -453,7 +476,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 			}
 		}
 		fmt.Fprintln(stdout, "binding: none — every class is served by the work store, and nothing migrates.") //nolint:errcheck // best-effort stdout
-		return 0
+		return exitCode
 	}
 	fmt.Fprintf(stdout, "binding: %s\n  database: %s\n  marker:   %s\n  manifest: %s\n", //nolint:errcheck // best-effort stdout
 		target.Binding, target.Database, target.MarkerPath(), target.ManifestPath())
@@ -510,7 +533,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 	}
 	if !recorded {
 		fmt.Fprintln(stdout, "converged: yes (no proven-copy manifest, so stranded-write detection is off for this city)") //nolint:errcheck // best-effort stdout
-		return 0
+		return exitCode
 	}
 	gap, err := classifyInfraContainmentGap(request.CityPath, target, proven)
 	if err != nil {
@@ -528,7 +551,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "blocking invariant: the binding cannot read these beads. Stop every writer and copy them in with `%s`\n", storageRecoveryInstruction()) //nolint:errcheck // best-effort stdout
 		return 1
 	}
-	return 0
+	return exitCode
 }
 
 // reportBindingRelics prints how many beads the binding still holds under ids
