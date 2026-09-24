@@ -5,6 +5,7 @@ package acp
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -68,9 +69,11 @@ func scanSnapshot(t *testing.T, fn func(), pids ...int) {
 // starts a tool child in its own session (setsid) — the shape of an agent tool
 // subprocess that escapes the agent's process group and outlives it. The tool
 // child's pid is written to pidFile. Its stdio is detached so it cannot hold
-// the agent's pipes open.
+// the agent's pipes open. Its duration differs from the proctable package's
+// setsid repro, which finds its own child with pgrep -f 'sleep 300' and would
+// pick up this one when the packages' tests run concurrently.
 func orphaningACPCommand(pidFile string) string {
-	return fmt.Sprintf("setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > %q; %s", pidFile, fakeACPShellCommand())
+	return fmt.Sprintf("setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > %q; %s", pidFile, fakeACPShellCommand())
 }
 
 func readPIDFile(t *testing.T, path string) int {
@@ -160,16 +163,17 @@ func TestFindRuntimesBySessionIDIgnoresOtherSessions(t *testing.T) {
 	}
 }
 
-// A supervisor death loses the in-process conn table: a fresh Provider on the
-// same state directory must report the surviving agent and, once the agent is
-// terminated, its escaped tool child as untracked roots, and TerminateRuntime
-// must kill both.
+// A supervisor death loses the in-process conn table and the control-socket
+// listener: a fresh Provider on the same state directory must report the
+// surviving agent and, once the agent is terminated, its escaped tool child as
+// untracked roots, and TerminateRuntime must kill both.
 func TestProviderRestartReportsAndReapsOrphanedRuntimes(t *testing.T) {
 	p1 := newTestProvider(t)
 	name := testName()
 	sessionID := "sid-" + name
 	city := t.TempDir()
 	agentPID, toolPID := startOrphaningSession(t, p1, name, sessionID, city)
+	simulateOwnerDeath(t, p1, name)
 
 	p2 := NewProviderWithDir(p1.dir, p1.cfg)
 
@@ -262,8 +266,9 @@ func TestFindRuntimesBySessionIDIgnoresDeadConn(t *testing.T) {
 }
 
 // During the startup handshake the conn table holds a cmd-less reservation.
-// A concurrent scan (a controller tick) must neither panic on it nor count the
-// half-started agent as tracked.
+// A concurrent scan (a controller tick) must not panic on it, and must count
+// the half-started agent as tracked: its Start is in flight in this process,
+// so reaping it would kill a session being started.
 func TestFindRuntimesBySessionIDDuringHandshake(t *testing.T) {
 	p := newTestProvider(t)
 	name := testName()
@@ -283,7 +288,7 @@ func TestFindRuntimesBySessionIDDuringHandshake(t *testing.T) {
 			// The trailing no-op keeps the shell from exec'ing sleep, so the
 			// reported pid keeps a stable identity (an exec in flight can hide
 			// the process from a scan).
-			Command: fmt.Sprintf("echo $$ > %q; sleep 300; :", pidFIFO),
+			Command: fmt.Sprintf("echo $$ > %q; sleep 600; :", pidFIFO),
 			WorkDir: t.TempDir(),
 			Env:     map[string]string{"GC_SESSION_ID": sessionID},
 		})
@@ -320,8 +325,8 @@ func TestFindRuntimesBySessionIDDuringHandshake(t *testing.T) {
 
 	var found []runtime.LiveRuntime
 	scanSnapshot(t, func() { found = findOnly(t, p, sessionID) }, agentPID)
-	if len(found) != 1 || found[0].PID != agentPID || found[0].IsTracked {
-		t.Fatalf("found = %+v, want untracked handshaking agent root pid %d", found, agentPID)
+	if len(found) != 1 || found[0].PID != agentPID || !found[0].IsTracked || found[0].ProviderName != name {
+		t.Fatalf("found = %+v, want handshaking agent root pid %d tracked as %q", found, agentPID, name)
 	}
 
 	if err := p.Stop(name); err != nil {
@@ -334,5 +339,132 @@ func TestFindRuntimesBySessionIDDuringHandshake(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after Stop canceled the handshake")
+	}
+}
+
+// simulateOwnerDeath makes name's control socket look the way a dead owner
+// leaves it — the socket file present but nothing listening — without killing
+// the agent, which in production survives its supervisor.
+func simulateOwnerDeath(t *testing.T, p *Provider, name string) {
+	t.Helper()
+	p.mu.Lock()
+	sc := p.conns[name]
+	p.mu.Unlock()
+	lis, ok := sc.listener.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("control listener is %T, want *net.UnixListener", sc.listener)
+	}
+	lis.SetUnlinkOnClose(false)
+	if err := lis.Close(); err != nil {
+		t.Fatalf("close control listener: %v", err)
+	}
+	if _, err := os.Stat(p.sockPath(name)); err != nil {
+		t.Fatalf("stale control socket file missing: %v", err)
+	}
+}
+
+// A gc process that does not own a session (a CLI command next to the
+// controller) builds its own Provider with an empty connection table, possibly
+// on a different state directory. It must see the owner's live agent as
+// tracked through the control-socket marker, or its pre-start orphan kill
+// would terminate the controller's live agent whenever its own IsRunning check
+// misses the socket.
+func TestFindRuntimesBySessionIDTracksForeignOwnedSession(t *testing.T) {
+	owner := newTestProvider(t)
+	name := testName()
+	sessionID := "sid-" + name
+	agentPID, toolPID := startOrphaningSession(t, owner, name, sessionID, t.TempDir())
+
+	nonOwner := newTestProvider(t)
+	if nonOwner.dir == owner.dir {
+		t.Fatal("non-owner shares the owner's state directory; the test needs them apart")
+	}
+	if nonOwner.IsRunning(name) {
+		t.Fatal("non-owner reaches the owner's socket by name; the test no longer models the miss")
+	}
+
+	var found []runtime.LiveRuntime
+	scanSnapshot(t, func() { found = findOnly(t, nonOwner, sessionID) }, agentPID, toolPID)
+	if len(found) != 1 || found[0].PID != agentPID || !found[0].IsTracked {
+		t.Fatalf("non-owner found = %+v, want the owner's live agent root pid %d tracked", found, agentPID)
+	}
+
+	// Once the owner is gone its listener is too, and the same agent is an
+	// orphan to everyone.
+	simulateOwnerDeath(t, owner, name)
+	scanSnapshot(t, func() { found = findOnly(t, nonOwner, sessionID) }, agentPID, toolPID)
+	if len(found) != 1 || found[0].PID != agentPID || found[0].IsTracked {
+		t.Fatalf("after owner death found = %+v, want untracked agent root pid %d", found, agentPID)
+	}
+}
+
+// The controller holds many ACP sessions at once and the per-tick sweep scans
+// with an empty id. One live session must not mark another session's roots
+// tracked: the crashed session's escaped tool child is an orphan while the
+// live session's agent is not.
+func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
+	p := newTestProvider(t)
+	city := t.TempDir()
+	liveName, deadName := testName()+"-live", testName()+"-dead"
+	liveAgent, liveTool := startOrphaningSession(t, p, liveName, "sid-"+liveName, city)
+	deadAgent, deadTool := startOrphaningSession(t, p, deadName, "sid-"+deadName, city)
+
+	p.mu.Lock()
+	deadConn := p.conns[deadName]
+	p.mu.Unlock()
+	if err := syscall.Kill(deadAgent, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill agent: %v", err)
+	}
+	select {
+	case <-deadConn.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent conn did not observe the process exit")
+	}
+
+	var found []runtime.LiveRuntime
+	scanSnapshot(t, func() { found = findOnly(t, p, "") }, liveAgent, liveTool, deadAgent, deadTool)
+	byPID := make(map[int]runtime.LiveRuntime, len(found))
+	for _, r := range found {
+		byPID[r.PID] = r
+	}
+	if len(found) != 2 {
+		t.Fatalf("found = %+v, want the live agent root and the dead session's tool root", found)
+	}
+	if r, ok := byPID[liveAgent]; !ok || !r.IsTracked || r.ProviderName != liveName {
+		t.Fatalf("live agent = %+v (present %v), want tracked as %q", r, ok, liveName)
+	}
+	if r, ok := byPID[deadTool]; !ok || r.IsTracked || r.ProviderName != "" {
+		t.Fatalf("dead session tool = %+v (present %v), want untracked", r, ok)
+	}
+}
+
+// The reservation is in the table before the agent's control socket is bound.
+// A root carrying this Provider's marker for a handshaking session is tracked
+// from its own Start, not from a socket that may not exist yet.
+func TestFindRuntimesBySessionIDTracksOwnedHandshakeBeforeSocketBind(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	sessionID := "sid-" + name
+	p.mu.Lock()
+	p.conns[name] = &sessionConn{done: make(chan struct{}), pending: make(map[int64]chan JSONRPCMessage)}
+	p.mu.Unlock()
+	if _, err := os.Stat(p.sockPath(name)); !os.IsNotExist(err) {
+		t.Fatalf("control socket stat = %v, want not bound", err)
+	}
+
+	// Stand the test process in for the agent: its real stat keeps the scan's
+	// root rules honest, and its snapshot environ carries what Start sets.
+	agentPID := os.Getpid()
+	root := snapshotProcRoot(t, agentPID)
+	environ := "GC_SESSION_ID=" + sessionID + "\x00" + controlSocketEnv + "=" + p.controlSocketMarker(name) + "\x00"
+	if err := os.WriteFile(filepath.Join(root, strconv.Itoa(agentPID), "environ"), []byte(environ), 0o644); err != nil {
+		t.Fatalf("write environ: %v", err)
+	}
+	restore := proctable.SetScanRootForTesting(root)
+	found := findOnly(t, p, sessionID)
+	restore()
+
+	if len(found) != 1 || !found[0].IsTracked || found[0].ProviderName != name {
+		t.Fatalf("found = %+v, want the handshaking agent tracked as %q", found, name)
 	}
 }

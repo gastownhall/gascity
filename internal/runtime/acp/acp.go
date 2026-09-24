@@ -235,6 +235,10 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 			env = append(env, k+"="+cfg.Env[k])
 		}
 	}
+	// The control-socket marker lets any gc process attribute this agent, and
+	// the tool children that inherit its environment, to a live owner; see
+	// [Provider.FindRuntimesBySessionID].
+	env = append(envWithoutKey(env, controlSocketEnv), controlSocketEnv+"="+p.controlSocketMarker(name))
 	cmd.Env = env
 
 	// Set up stdio pipes for JSON-RPC.

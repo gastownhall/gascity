@@ -189,3 +189,24 @@ func TestTerminateRuntimeWithoutScannerBackendsErrors(t *testing.T) {
 		t.Fatal("TerminateRuntime = nil, want an error when no backend can terminate")
 	}
 }
+
+// Callers that check the capability through runtime.AsProcessTableScanner see
+// a composite over a scannerless default as lacking it, as they did before the
+// composite forwarded the scanner.
+func TestCanScanProcessTableFollowsDefaultBackend(t *testing.T) {
+	scanning := New(runtime.NewFake(), runtime.NewFake())
+	if !scanning.CanScanProcessTable() {
+		t.Error("CanScanProcessTable = false over a scanning default")
+	}
+	if _, ok := runtime.AsProcessTableScanner(scanning); !ok {
+		t.Error("AsProcessTableScanner = false over a scanning default")
+	}
+
+	scannerless := New(&scannerlessProvider{Provider: runtime.NewFake()}, runtime.NewFake())
+	if scannerless.CanScanProcessTable() {
+		t.Error("CanScanProcessTable = true over a scannerless default")
+	}
+	if _, ok := runtime.AsProcessTableScanner(scannerless); ok {
+		t.Error("AsProcessTableScanner = true over a scannerless default")
+	}
+}

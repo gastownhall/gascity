@@ -33,7 +33,7 @@ func childPIDs(t *testing.T, pid int) []int {
 
 // TestACPOrphanReapedAfterProviderRestart runs the real fakeacp agent through
 // the production (seam-backed) provider, drops the provider's in-process state
-// the way a supervisor death does, and proves a fresh provider on the same
+// and control-socket listener the way a supervisor death does, and proves a fresh provider on the same
 // state directory reports the surviving runtime as an untracked orphan and
 // terminates its whole process group.
 func TestACPOrphanReapedAfterProviderRestart(t *testing.T) {
@@ -65,6 +65,7 @@ func TestACPOrphanReapedAfterProviderRestart(t *testing.T) {
 		t.Fatalf("live session found = %+v, want tracked root pid %d in city %s", found, agentPID, city)
 	}
 
+	simulateOwnerDeath(t, raw, name)
 	restarted := NewSeamBackedWithDir(fixture.dir, Config{}).(runtime.ProcessTableScanner)
 	scanSnapshot(t, func() { found = findOnly(t, restarted, sessionID) }, pids...)
 	if len(found) != 1 || found[0].PID != agentPID || found[0].IsTracked {

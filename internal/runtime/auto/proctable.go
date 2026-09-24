@@ -8,7 +8,18 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-var _ runtime.ProcessTableScanner = (*Provider)(nil)
+var (
+	_ runtime.ProcessTableScanner            = (*Provider)(nil)
+	_ runtime.ConditionalProcessTableScanner = (*Provider)(nil)
+)
+
+// CanScanProcessTable implements [runtime.ConditionalProcessTableScanner]: the
+// composite scans only when its default backend does. Callers using
+// [runtime.AsProcessTableScanner] therefore see a composite over a
+// scannerless default exactly as they saw it before it forwarded the scanner.
+func (p *Provider) CanScanProcessTable() bool {
+	return len(p.scanningBackends()) > 0
+}
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] by querying
 // every backend that can scan a process table and merging the results by PID.
@@ -24,8 +35,8 @@ var _ runtime.ProcessTableScanner = (*Provider)(nil)
 // ACP-hosted sessions, so behind a scannerless default (hybrid, herdr,
 // t3bridge, exec, k8s) it would report every live default-hosted runtime
 // carrying GC_SESSION_ID as an untracked orphan, and orphan reaping would kill
-// it. With a scannerless default this therefore finds nothing, as before the
-// composite forwarded the scanner.
+// it. With a scannerless default this therefore finds nothing, and
+// [Provider.CanScanProcessTable] reports false.
 //
 // Without this forwarding, routing any session in a city to ACP would hide the
 // default backend's scanner behind the composite and silently turn orphan
@@ -75,12 +86,12 @@ type scanningBackend struct {
 // [runtime.ProcessTableScanner], default first. It returns none when the
 // default backend cannot scan; see [Provider.FindRuntimesBySessionID].
 func (p *Provider) scanningBackends() []scanningBackend {
-	s, ok := p.defaultSP.(runtime.ProcessTableScanner)
+	s, ok := runtime.AsProcessTableScanner(p.defaultSP)
 	if !ok {
 		return nil
 	}
 	out := []scanningBackend{{label: "default", scanner: s}}
-	if s, ok := p.acpSP.(runtime.ProcessTableScanner); ok {
+	if s, ok := runtime.AsProcessTableScanner(p.acpSP); ok {
 		out = append(out, scanningBackend{label: "acp", scanner: s})
 	}
 	return out

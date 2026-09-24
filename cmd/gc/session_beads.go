@@ -3286,7 +3286,7 @@ func sweepProcessTableOrphans(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	scanner, ok := sp.(runtime.ProcessTableScanner)
+	scanner, ok := runtime.AsProcessTableScanner(sp)
 	if !ok {
 		return 0
 	}
