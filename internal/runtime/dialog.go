@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -581,6 +582,19 @@ func containsPostUpdateStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+// maxTrustDialogMoveAttempts bounds how many times the workspace-trust
+// handlers move the selection and re-read the dialog before giving up. Each
+// attempt derives the movement from the frame actually on screen, so a dropped
+// keystroke is corrected by the next attempt; running out means the cursor
+// never reached the trust row and the dialog is left unconfirmed.
+const maxTrustDialogMoveAttempts = 3
+
+// errWorkspaceTrustUnconfirmed reports that a workspace-trust dialog was left
+// on screen because no frame ever showed the cursor on the trust row. The
+// handlers return it rather than pressing Enter on whatever is selected,
+// which could be "No, exit".
+var errWorkspaceTrustUnconfirmed = errors.New("cursor never reached the trust option; left the dialog unconfirmed")
+
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
@@ -588,7 +602,9 @@ func containsPostUpdateStartupDialog(content string) bool {
 // stale Claude Code build can default the cursor to "No, exit" — so the
 // handler locates the cursor and the trust option in the rendered content
 // and moves the selection before confirming; it never blind-sends a fixed
-// key sequence. When it can't locate both rows it sends no keys, and the
+// key sequence. Selection and confirmation are a closed loop: movement keys
+// are sent alone, the pane is re-read, and Enter is sent only from a frame
+// whose cursor is on the trust row (bounded by maxTrustDialogMoveAttempts). When it can't locate both rows it sends no keys, and the
 // snapshot falls through to the existing readiness check, which hands the
 // phase off. Holding the phase open instead is tracked separately.
 func acceptWorkspaceTrustDialog(
@@ -597,6 +613,7 @@ func acceptWorkspaceTrustDialog(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	moves := 0
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -610,6 +627,22 @@ func acceptWorkspaceTrustDialog(
 		if containsWorkspaceTrustDialog(content) {
 			if keys, ok := workspaceTrustConfirmKeys(content); ok {
 				budget.observe()
+				if len(keys) > 1 {
+					// Closed loop: move the selection, then re-read the pane
+					// on the next iteration. Enter is only ever sent from a
+					// frame that shows the cursor on the trust row, so a
+					// movement key Claude drops right after first render
+					// leads to another move, never to confirming "No, exit".
+					moves++
+					if moves > maxTrustDialogMoveAttempts {
+						return fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+					}
+					if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+						return err
+					}
+					sleep(ctx, startupDialogAcceptDelay)
+					continue
+				}
 				if err := sendKeys(keys...); err != nil {
 					return err
 				}
@@ -650,6 +683,9 @@ func acceptWorkspaceTrustDialogFromStream(
 		matchDelay:   startupDialogAcceptDelay,
 		ready:        containsPromptIndicator,
 		readyOrNext:  containsPostTrustStartupDialog,
+		// See acceptWorkspaceTrustDialog: move, re-read, and confirm only
+		// from a frame with the cursor on the trust row.
+		confirmOnlyFromSelectedFrame: true,
 	})
 }
 
@@ -1350,6 +1386,13 @@ type streamDialogSpec struct {
 	// readiness checks like any unmatched snapshot.
 	matchKeysFor func(string) ([]string, bool)
 	matchDelay   time.Duration
+	// confirmOnlyFromSelectedFrame makes a multi-key match a closed loop:
+	// only the movement keys (all but the final confirm key) are sent, the
+	// snapshots captured before the move are discarded, and the newest
+	// frame is re-evaluated. The confirm key goes out only when a frame
+	// derives to exactly that one key, i.e. the cursor is already on the
+	// target row. Moves are bounded by maxTrustDialogMoveAttempts.
+	confirmOnlyFromSelectedFrame bool
 }
 
 type replayableSnapshotStream struct {
@@ -1429,6 +1472,29 @@ func (c *replayableSnapshotCursor) nextBatch() ([]string, bool, <-chan struct{})
 	return batch, closed, updated
 }
 
+// rereadAfterSend returns the current frame after keys were sent. Snapshots
+// already queued may predate the keys, so only the newest one counts. If none
+// has arrived, it waits up to settle for one; a stream that stays quiet means
+// the screen did not change (e.g. the key was dropped), so the last frame seen,
+// prev, is still current.
+func (c *replayableSnapshotCursor) rereadAfterSend(ctx context.Context, prev string, settle time.Duration) string {
+	batch, closed, updated := c.nextBatch()
+	if len(batch) == 0 && !closed && settle > 0 {
+		timer := time.NewTimer(settle)
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		case <-updated:
+		}
+		timer.Stop()
+		batch, _, _ = c.nextBatch()
+	}
+	if len(batch) == 0 {
+		return prev
+	}
+	return batch[len(batch)-1]
+}
+
 func (c *replayableSnapshotCursor) replay(history []string) {
 	if len(history) == 0 {
 		return
@@ -1481,6 +1547,8 @@ func acceptDialogFromStream(
 	defer stopTimer(readyTimer)
 	defer stopTimer(idleTimer)
 
+	moves := 0
+scan:
 	for {
 		history, closed, updated := snapshots.nextBatch()
 		if len(history) > 0 {
@@ -1489,6 +1557,21 @@ func acceptDialogFromStream(
 					keys, ok := spec.matchKeys, true
 					if spec.matchKeysFor != nil {
 						keys, ok = spec.matchKeysFor(content)
+					}
+					if ok && spec.confirmOnlyFromSelectedFrame && len(keys) > 1 {
+						moves++
+						if moves > maxTrustDialogMoveAttempts {
+							return true, fmt.Errorf("%w after %d selection moves", errWorkspaceTrustUnconfirmed, maxTrustDialogMoveAttempts)
+						}
+						if err := ctx.Err(); err != nil {
+							return true, err
+						}
+						if err := sendKeys(keys[:len(keys)-1]...); err != nil {
+							return true, err
+						}
+						sleep(ctx, spec.matchDelay)
+						snapshots.replay([]string{snapshots.rereadAfterSend(ctx, content, spec.matchDelay)})
+						continue scan
 					}
 					if ok {
 						snapshots.replay(history[idx+1:])
