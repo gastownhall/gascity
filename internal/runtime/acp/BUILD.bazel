@@ -26,6 +26,7 @@ go_test(
         "meta_privacy_test.go",
         "protocol_test.go",
         "seams_test.go",
+        "stop_grace_test.go",
         "testenv_import_test.go",
     ],
     embed = [":acp"],

@@ -19,6 +19,11 @@
           "type": "integer",
           "description": "OutputBufferLines is the number of output lines to keep in the\ncircular buffer for Peek. Defaults to 1000.",
           "default": 1000
+        },
+        "stop_grace": {
+          "type": "string",
+          "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"30s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default.",
+          "default": "5s"
         }
       },
       "additionalProperties": false,

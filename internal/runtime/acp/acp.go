@@ -23,17 +23,19 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// nudgePostWriteDrainTimeout caps the wait for sc.done after a Nudge stdin
-// write fails. Sized to match terminateProcess's SIGTERM grace period so a
-// Nudge racing with Stop still converges to the best-effort nil contract
-// rather than surfacing a spurious error before SIGKILL lands.
-const nudgePostWriteDrainTimeout = 5 * time.Second
+// stopSocketReplyMargin is how much longer a cross-process stop waits for the
+// owner's "ok" than the stop grace itself, covering the SIGKILL and reap that
+// follow an expired grace.
+const stopSocketReplyMargin = 2 * time.Second
 
 // Config holds ACP provider settings.
 type Config struct {
 	HandshakeTimeout  time.Duration // default 30s
 	NudgeBusyTimeout  time.Duration // default 60s
 	OutputBufferLines int           // default 1000
+	// StopGrace is how long Stop waits after SIGTERM before escalating to
+	// SIGKILL. Default runtime.ManagedProcessStopGrace.
+	StopGrace time.Duration
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -48,6 +50,23 @@ func (c *Config) nudgeBusyTimeout() time.Duration {
 		return 60 * time.Second
 	}
 	return c.NudgeBusyTimeout
+}
+
+// stopGrace returns the SIGTERM-to-SIGKILL grace. A Nudge whose stdin write
+// fails waits the same bound for the exiting agent, so a Nudge racing with
+// Stop still converges to the best-effort nil contract rather than surfacing
+// a spurious error before SIGKILL lands.
+func (c *Config) stopGrace() time.Duration {
+	if c.StopGrace <= 0 {
+		return runtime.ManagedProcessStopGrace
+	}
+	return c.StopGrace
+}
+
+// stopSocketTimeout bounds a cross-process stop request: the owner replies
+// only after its grace has run out and the process is gone.
+func (c *Config) stopSocketTimeout() time.Duration {
+	return c.stopGrace() + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {
@@ -473,7 +492,7 @@ func (p *Provider) Stop(name string) error {
 			return nil
 		}
 		_ = sc.stdin.Close()
-		err := terminateProcess(sc)
+		err := terminateProcess(sc, p.cfg.stopGrace())
 		if err == nil || runtime.IsSessionGone(err) {
 			p.cleanupMeta(name)
 			return nil
@@ -608,7 +627,7 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 			// from "agent died mid-write."
 			fmt.Fprintf(os.Stderr, "acp: nudge to %q skipped (agent exiting): %v\n", name, err)
 			return nil
-		case <-time.After(nudgePostWriteDrainTimeout):
+		case <-time.After(p.cfg.stopGrace()):
 			return fmt.Errorf("sending prompt to %q: %w", name, err)
 		}
 	}
@@ -897,14 +916,15 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 			if err != nil {
 				return
 			}
-			go handleControlConn(conn, cmd, done)
+			go handleControlConn(conn, cmd, done, p.cfg.stopGrace())
 		}
 	}()
 	return lis, nil
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace.
+func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopGrace time.Duration) {
 	defer conn.Close()                                     //nolint:errcheck
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	scanner := bufio.NewScanner(conn)
@@ -913,7 +933,7 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}) {
 	}
 	switch scanner.Text() {
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, runtime.ManagedProcessStopGrace)
+		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
 		_ = runtime.SignalProcessGroup(cmd, syscall.SIGINT)
@@ -983,7 +1003,7 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 
 // stopBySocket connects to a session's control socket and asks it to stop.
 func (p *Provider) stopBySocket(name string) error {
-	err := p.sendSocketCommand(name, "stop", 7*time.Second)
+	err := p.sendSocketCommand(name, "stop", p.cfg.stopSocketTimeout())
 	if err != nil {
 		if isUnavailableSocketError(err) {
 			os.Remove(p.sockPath(name)) //nolint:errcheck
@@ -1026,7 +1046,8 @@ func isPipeWriteError(err error) bool {
 	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE)
 }
 
-// terminateProcess sends SIGTERM then SIGKILL to a tracked process group.
-func terminateProcess(sc *sessionConn) error {
-	return runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+// terminateProcess sends SIGTERM then, after grace, SIGKILL to a tracked
+// process group.
+func terminateProcess(sc *sessionConn, grace time.Duration) error {
+	return runtime.TerminateManagedProcess(sc.cmd, sc.done, grace)
 }
