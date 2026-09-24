@@ -3001,16 +3001,14 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ListAllSessionBeads(sessFront.Store().Store, beads.ListQuery{
-		Metadata:      map[string]string{"session_name": legacy},
-		IncludeClosed: true,
-	})
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+		map[string]string{"session_name": legacy})
 	if err != nil {
 		return
 	}
-	for _, b := range holders {
-		if b.Status != "closed" || !isPoolManagedSessionBead(b) ||
-			!storedTemplateMatchesPoolTemplate(strings.TrimSpace(b.Metadata["template"]), info.Template, nil) {
+	for _, h := range holders {
+		if !h.Closed || !isPoolManagedSessionInfo(h) ||
+			!storedTemplateMatchesPoolTemplate(strings.TrimSpace(h.Template), info.Template, nil) {
 			return
 		}
 	}
