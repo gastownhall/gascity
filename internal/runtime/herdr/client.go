@@ -32,15 +32,17 @@ import (
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
 // response envelope ({"id":…,"result":…} | {"id":…,"error":{code,message}}).
 type client struct {
-	session     string        // herdr named session (shared per city)
-	bin         string        // herdr binary (default "herdr")
-	cityRoot    string        // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
-	settleDelay time.Duration // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
-	serverMu    sync.Mutex    // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	session     string                                                   // herdr named session (shared per city)
+	bin         string                                                   // herdr binary (default "herdr")
+	cityRoot    string                                                   // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	settleDelay time.Duration                                            // paste-fallback settle before the submit Enter (submitSettleDelay; shortened by tests against a fake herdr)
+	serverMu    sync.Mutex                                               // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
+	sockPath    string                                                   // test override for socketPath (unit tests point it at a fake server)
+	dialUnix    func(ctx context.Context, path string) (net.Conn, error) // test override for the socket connect (unit tests observe the context the dial runs under)
 }
 
 func newClient(session, cityRoot string) *client {
-	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay}
+	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay, dialUnix: dialUnix}
 }
 
 type herdrError struct {
@@ -64,6 +66,130 @@ func herdrErrorCode(err error) string {
 	return ""
 }
 
+// disqualifyingCode returns a herdr error code that rules the paste fallback out,
+// or "" if none does. It is the only use this change makes of a failure's text, and
+// the direction is the whole point: see targetHasNoNamedAgent for why text cannot
+// be trusted to GRANT anything.
+//
+// Two sources, both herdr's own. The typed envelope is herdr's structured answer to
+// an invocation that reached the server. The other is herdr's stderr from an
+// invocation that exited non-zero, which is a type here (herdrStderr) precisely so
+// this scan cannot reach the argv rendered beside it: the argv holds the nudge, and
+// a nudge that could put a code in front of herdr's would be able to DISPLACE
+// herdr's real rejection rather than merely add to it.
+//
+// Within herdr's own stderr, every envelope is considered and any refusing code
+// wins. That keeps the one property this rests on: caller text can only ever ADD a
+// refusal, never remove one. A refusal is a visible error the caller retries on, so
+// the worst a nudge can do to itself is decline its own fallback; the reverse,
+// granting a fallback, would paste into a pane whose real failure was something
+// else. Do not introduce a bound on this scan, or a long echo becomes a way to
+// push herdr's rejection out of view.
+func disqualifyingCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	if code := herdrErrorCode(err); code != "" && !agentlessCapableCode(code) {
+		return code
+	}
+	var hs *herdrStderr
+	if !errors.As(err, &hs) {
+		return ""
+	}
+	for i := strings.Index(hs.Text, "{"); i >= 0; {
+		var env envelope
+		// A decoder rather than Unmarshal: it stops at the end of the first
+		// complete value, so an envelope with text after it still parses.
+		if derr := json.NewDecoder(strings.NewReader(hs.Text[i:])).Decode(&env); derr == nil && env.Error != nil {
+			if code := env.Error.Code; code != "" && !agentlessCapableCode(code) {
+				return code
+			}
+		}
+		next := strings.Index(hs.Text[i+1:], "{")
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	return ""
+}
+
+// agentlessCapableCode reports whether a herdr error code leaves open that the
+// target carries no named agent. agent_not_found says so outright; 0.8.0's
+// agent_not_ready covers both that and an agent still booting, which is why the
+// code cannot settle the question on its own. Every other code is herdr naming a
+// different problem (a busy pane, a bad flag), and naming one rules the fallback
+// out: pasting then would type into whatever the real failure was about and
+// swallow it.
+func agentlessCapableCode(code string) bool {
+	return code == "" || code == "agent_not_found" || code == "agent_not_ready"
+}
+
+// agentStateRejection reports whether herdr declined THIS invocation over the
+// target's agent, rather than failing for some unrelated reason. It is the
+// positive half of the gate: disqualifyingCode rules the paste fallback out when
+// herdr names a different problem, and this rules it out when herdr named no
+// problem at all. The registry can establish that a pane carries no named agent;
+// only herdr can establish that this is why the call failed, and a failure herdr
+// never coded (a malformed argv of ours, a binary that did not run) means it never
+// reached the question. Without this, such a failure plus an empty registry pasted
+// into a pane herdr had not checked for a foreground process.
+//
+// The two channels are asymmetric on purpose. A refusal may be found anywhere in
+// herdr's stderr, because adding one only declines a fallback. A GRANT has to come
+// from a channel a caller cannot write: either the typed envelope parsed off
+// stdout, or a stderr stream that is NOTHING BUT one error envelope. That second
+// shape is herdr 0.8.0's rejection as verified against the installed binary (the
+// bare envelope, no prefix and nothing after it), and an echo cannot reach it,
+// because when herdr rejects our argv it prints its own words alongside whatever it
+// quotes back. Loosen it to "an envelope somewhere in the stream" and a nudge
+// carrying one grants itself a paste.
+//
+// The cost is the direction this fails in. herdr respelling its agent-state code a
+// third time would leave the fallback refused rather than wrongly granted: the
+// caller sees herdr's error instead of a paste into a pane nothing was checked on.
+func agentStateRejection(err error) bool {
+	code := herdrAnswerCode(err)
+	return code != "" && agentlessCapableCode(code)
+}
+
+// herdrAnswerCode returns the code herdr answered THIS invocation with, read only
+// from the two channels a caller's text cannot write. The first is the envelope this
+// client parsed off stdout. The second is a stderr stream that is nothing but one
+// error envelope, which is how the CLI reports a rejection when it exits non-zero
+// (verified against the installed herdr 0.8.0: the bare envelope, no prefix and
+// nothing after it) and is the shape most rejections actually arrive in, since
+// nothing reaches the stdout decode on a non-zero exit.
+//
+// An echo cannot reach either. When herdr rejects our argv it prints its own words
+// alongside whatever it quotes back, so a forged envelope inside that text is never
+// the whole stream. That is what makes this answer usable to GRANT the paste
+// fallback, where disqualifyingCode's permissive scan of the same text is only ever
+// usable to refuse it.
+func herdrAnswerCode(err error) string {
+	if code := herdrErrorCode(err); code != "" {
+		return code
+	}
+	var hs *herdrStderr
+	if !errors.As(err, &hs) {
+		return ""
+	}
+	var env envelope
+	if derr := json.Unmarshal([]byte(strings.TrimSpace(hs.Text)), &env); derr != nil || env.Error == nil {
+		return ""
+	}
+	return env.Error.Code
+}
+
+// herdrStderr carries what herdr wrote to stderr on an invocation that exited
+// non-zero without a parseable envelope on stdout. It is a type rather than text
+// spliced into the error message so that a reader can reach herdr's half of the
+// failure without reaching the argv this client also renders there: the argv holds
+// the nudge body, and the nudge is free text. See disqualifyingCode.
+type herdrStderr struct{ Text string }
+
+func (e *herdrStderr) Error() string { return e.Text }
+
 type envelope struct {
 	Result json.RawMessage `json:"result"`
 	Error  *herdrError     `json:"error"`
@@ -71,38 +197,64 @@ type envelope struct {
 
 // run executes `herdr --session <session> <args…>` and returns the result
 // payload, or an error (transport failure or herdr-reported error).
+//
+// Its errors are scrubbed of anything this client's flag grammar can identify;
+// see redaction.go. An argv carrying a credential anywhere else needs
+// [client.runWithSecrets].
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
+	return c.runWithSecrets(ctx, nil, args...)
+}
+
+// runWithSecrets is run for an argv carrying a credential the grammar cannot
+// find. declared comes from whoever built the argv; see redaction.go.
+func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, declared)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return nil, fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
 		}
-		return nil, fmt.Errorf("herdr %v: %w", args, err)
+		// err here is exec's own (*exec.Error, *exec.ExitError): it carries the
+		// binary name and a status, never anything from args.
+		return nil, fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
 	}
 	var env envelope
 	if err := json.Unmarshal(out, &env); err != nil {
-		return nil, fmt.Errorf("herdr %v: decode response: %w", args, err)
+		// The secrets are dropped deliberately: a json.SyntaxError carries an
+		// offset and at most one byte of herdr's stdout, and an
+		// UnmarshalTypeError carries type names, so there is nothing here to
+		// scrub. Do not "fix" this either direction without changing that.
+		safe, _ := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: decode response: %w", safe, err)
 	}
 	if env.Error != nil {
-		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
+		safe, secrets := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 	}
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object.
+// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
+// the per-entry name field is emitted under the JSON key "agent", not "name"
+// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
 type agentInfo struct {
-	Name        string `json:"name"`
+	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
 	WorkspaceID string `json:"workspace_id"`
 	TabID       string `json:"tab_id"`
 	TerminalID  string `json:"terminal_id"`
 	AgentStatus string `json:"agent_status"`
 	Cwd         string `json:"cwd"`
+	// Revision is the pane's output revision counter. The activity tracker
+	// diffs it for sessions herdr cannot classify (agent_status "unknown").
+	// Verified live on 0.7.3: it moves only while a client renders the pane;
+	// a headless server holds it at 0.
+	Revision uint64 `json:"revision"`
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's
@@ -195,21 +347,28 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // JSON envelope (0.7.5 `pane read`). Failures still arrive as an envelope on
 // stdout or as stderr text, so an output that decodes to an envelope carrying
 // an error is surfaced as that error; anything else is returned verbatim.
+//
+// It takes no declared secrets: no raw verb carries one outside an `--env`
+// pair, which redaction.go finds on its own. Give it one and this needs the
+// [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
+		safe, secrets := redactedArgv(args, nil)
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return "", fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
 		}
-		return "", fmt.Errorf("herdr %v: %w", args, err)
+		// See run: exec's own error carries the binary name and a status only.
+		return "", fmt.Errorf("herdr %v: %w", safe, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
 		var env envelope
 		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", args, env.Error)
+			safe, secrets := redactedArgv(args, nil)
+			return "", fmt.Errorf("herdr %v: %w", safe, env.Error.redacted(secrets))
 		}
 	}
 	return string(out), nil
@@ -250,8 +409,29 @@ func (c *client) sendKeys(ctx context.Context, paneID string, keys ...string) er
 }
 
 // paneRun → `herdr pane run <paneID> <command>` (pastes text into the pane).
+//
+// The operand is not necessarily a command: pasteAndSubmit delivers an agent's
+// prompt or nudge through this same verb. Text pasted here is treated as
+// carrying no credentials, so it is rendered verbatim in errors — a raw launch
+// uses [client.paneRunCommand] instead. The wider exposure of prompt text in
+// argv is ga-mxj2a.
 func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 	_, err := c.run(ctx, "pane", "run", paneID, command)
+	return err
+}
+
+// paneRunCommand is paneRun for a session's configured launch command, which
+// is opaque to us: it is a user-authored shell string, so any credential in it
+// sits somewhere only a shell parser could find — after an `env` wrapper, past
+// a `&&`, inside a nested `sh -c`, spelled with quotes that keep the value from
+// matching its own rendering. Rather than guess at that structure, the whole
+// operand is declared and so withheld from error text — down to the floor
+// [runtime.RedactSecrets] substitutes above, below which a shell command is too
+// short to hold a credential. The error still names the verb, the pane and
+// herdr's own complaint; the command it was asked to run is in the session's
+// config.
+func (c *client) paneRunCommand(ctx context.Context, paneID, command string) error {
+	_, err := c.runWithSecrets(ctx, []string{command}, "pane", "run", paneID, command)
 	return err
 }
 
@@ -274,7 +454,7 @@ func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	if err == nil {
 		return nil
 	}
-	if !isAgentNotFound(err) {
+	if !c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return err
 	}
 	return c.pasteAndSubmit(ctx, paneID, text)
@@ -297,6 +477,17 @@ const (
 // which is why it qualifies the stall recovery below and is deliberately
 // absent from startupConfirmStates.
 const agentStateIdle = "idle"
+
+// normalizeAgentState folds one reported agent_status to the spelling the
+// package's classifying readers compare against. It is deliberately shared:
+// two readers normalizing the same field differently classify the same payload
+// differently, and the disagreement is invisible at both sites. Note the
+// keystroke guard below does NOT use it, on purpose — it withholds a real
+// keystroke unless herdr reported exactly the idle state, and widening that is
+// a behavior change, not a cleanup.
+func normalizeAgentState(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
 
 // startupConfirmStates are the post-submission states that prove the submit
 // CR took: the turn is running (working), already finished (done — an
@@ -351,7 +542,7 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) er
 	if err == nil {
 		return nil
 	}
-	if isAgentNotFound(err) {
+	if c.targetHasNoNamedAgent(ctx, paneID, err) {
 		return c.pasteAndSubmit(ctx, paneID, text)
 	}
 	switch herdrErrorCode(err) {
@@ -394,17 +585,82 @@ func (c *client) pasteAndSubmit(ctx context.Context, paneID, text string) error 
 	return c.sendKeys(ctx, paneID, "Enter")
 }
 
-// isAgentNotFound reports whether err is herdr's missing-agent rejection
-// (typed agent_not_found, or the message-text forms the pre-typed-error
-// callers matched on).
-func isAgentNotFound(err error) bool {
+// targetHasNoNamedAgent reports whether a failed herdr verb failed because the
+// target carries no named agent to act on: a raw `exec /bin/sh -c` pane, a bare
+// shell, a pane holding only a reported agent state. Those have no prompt
+// machinery, so callers degrade to typing into the pane directly, or treat an
+// idle wait as nothing to wait on.
+//
+// The question is answered by asking herdr's agent registry, not by reading the
+// failure's text. Text cannot answer it. The error this client returns renders the
+// argv next to herdr's complaint, and for `agent prompt` that argv is the nudge
+// body, so matching the rendered error asks what the nudge said as much as what
+// herdr said: a nudge quoting herdr's own wording made deliverNudge treat an
+// unrelated busy-pane rejection as agentless, swallow it, and paste into a pane
+// with a foreground process. Narrowing to herdr's own stderr does not fix it,
+// because herdr quotes the offending operand back on its ordinary failure paths
+// (see redaction.go), and subtracting our operands from its text deletes a phrase
+// herdr wrote whenever a nudge repeats it. One text stream carrying both voices
+// cannot be attributed. The registry can: nothing a caller passes in changes what
+// `agent list` reports.
+//
+// It is also the distinction itself, not a proxy for it. A kind-launched agent is
+// registered from the moment it starts, so an agent that is merely still booting
+// is present and this returns false, which is what keeps a startup turn from
+// being typed into a TUI that is not accepting input yet. 0.7.x and 0.8.0 spell
+// the rejection differently (agent_not_found became agent_not_ready plus "is not
+// an active named agent"), and that respelling is exactly what silently killed
+// this fallback before; the registry answer does not move when herdr renames a
+// code.
+//
+// The registry answers what the pane carries, though, never why this call failed,
+// so herdr still has to have declined over the agent: see agentStateRejection for
+// why an uncoded failure is not evidence, and why a grant is read from a narrower
+// channel than a refusal. When herdr names a different problem that rules the
+// fallback out; see disqualifyingCode. And when herdr answers agent_not_found, it
+// has answered THIS question about THIS invocation, so that is taken directly and
+// no query is made. A registry lookup that itself fails rules the fallback out too,
+// so the caller sees the original failure rather than a guess.
+//
+// The query is a present-time snapshot, which leaves a window: between the
+// rejection and the lookup, a booting agent can exit (the lookup then reports an
+// agentless pane and the turn is pasted into whatever is left of it) or a new one
+// can register (the lookup reports an agent and a raw pane loses its fallback,
+// which surfaces as an error the caller retries). The window is not closable from
+// here. Answering from the failure itself would mean reading its text, and the
+// text is not attributable; herdr offers no way to ask "was there an agent when
+// that call failed". agent_not_found above is the one case where herdr does answer
+// exactly that, which is why it bypasses the query rather than confirming it.
+func (c *client) targetHasNoNamedAgent(ctx context.Context, target string, err error) bool {
 	if err == nil {
 		return false
 	}
-	if herdrErrorCode(err) == "agent_not_found" {
+	if disqualifyingCode(err) != "" {
+		return false
+	}
+	// The registry answers what the pane carries, never why this call failed.
+	// Without herdr having declined over the agent, an empty registry would turn
+	// any failure at all into a paste. See agentStateRejection.
+	if !agentStateRejection(err) {
+		return false
+	}
+	// agent_not_found is herdr answering the question itself, about the
+	// invocation that just failed, so take it and skip the query: that answer
+	// cannot be stale, and the query's answer can. It counts from either channel
+	// herdr answers in, and on a non-zero exit that is the stderr one.
+	if herdrAnswerCode(err) == "agent_not_found" {
 		return true
 	}
-	return strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found")
+	agents, lerr := c.listAgents(ctx)
+	if lerr != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.PaneID == target || a.Name == target {
+			return false
+		}
+	}
+	return true
 }
 
 // submitSettleDelay is how long the unregistered-pane fallback waits for a
@@ -419,23 +675,36 @@ func (c *client) closePane(ctx context.Context, paneID string) error {
 }
 
 // getAgent fetches one agent by target — an agent name or the pane id hosting
-// it, both of which herdr resolves: (info, true, nil) if present, (zero,
-// false, nil) if herdr reports it absent, (_, false, err) on failure.
-func (c *client) getAgent(ctx context.Context, name string) (agentInfo, bool, error) {
-	res, err := c.run(ctx, "agent", "get", name)
-	if err != nil {
-		if strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found") {
-			return agentInfo{}, false, nil
+// it: (info, true, nil) if present, (zero, false, nil) if herdr reports it
+// absent, (_, false, err) on failure. Verified live on herdr 0.7.3: `agent
+// get <target>` only resolves a pane id — passing an agent name returns
+// agent_not_found even though `agent list` lists that same agent under that
+// name — so a name-shaped target that `agent get` rejects as not-found falls
+// back to a listAgents scan, which does resolve by name.
+func (c *client) getAgent(ctx context.Context, target string) (agentInfo, bool, error) {
+	res, err := c.run(ctx, "agent", "get", target)
+	if err == nil {
+		var wrap struct {
+			Agent agentInfo `json:"agent"`
 		}
+		if err := json.Unmarshal(res, &wrap); err != nil {
+			return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+		}
+		return wrap.Agent, true, nil
+	}
+	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
 		return agentInfo{}, false, err
 	}
-	var wrap struct {
-		Agent agentInfo `json:"agent"`
+	agents, lerr := c.listAgents(ctx)
+	if lerr != nil {
+		return agentInfo{}, false, fmt.Errorf("herdr agent get %q: list fallback: %w", target, lerr)
 	}
-	if err := json.Unmarshal(res, &wrap); err != nil {
-		return agentInfo{}, false, fmt.Errorf("herdr agent get: decode: %w", err)
+	for _, a := range agents {
+		if a.Name == target {
+			return a, true, nil
+		}
 	}
-	return wrap.Agent, true, nil
+	return agentInfo{}, false, nil
 }
 
 // ── workspace / tab placement ────────────────────────────────────────────────
@@ -479,9 +748,11 @@ func (c *client) findWorkspace(ctx context.Context, label string) (string, error
 }
 
 // workspaceCreate makes a workspace labeled label whose root shell pane is
-// created with the given cwd and env, and returns the workspace id plus the
-// default tab and root pane (the agent's pane) herdr auto-spawns inside it.
-func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (wsID, tabID, paneID string, err error) {
+// created with the given cwd and env, and returns the default tab and root pane
+// (the agent's pane) herdr auto-spawns inside it. The workspace id itself is not
+// returned: callers address the agent by tab and pane, and resolveWorkspace
+// looks the id up by label when it needs one.
+func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map[string]string) (tabID, paneID string, err error) {
 	args := []string{"workspace", "create", "--label", label, "--no-focus"}
 	if cwd != "" {
 		args = append(args, "--cwd", cwd)
@@ -491,12 +762,9 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 	}
 	res, err := c.run(ctx, args...)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	var wrap struct {
-		Workspace struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"workspace"`
 		Tab struct {
 			TabID string `json:"tab_id"`
 		} `json:"tab"`
@@ -505,9 +773,9 @@ func (c *client) workspaceCreate(ctx context.Context, label, cwd string, env map
 		} `json:"root_pane"`
 	}
 	if err := json.Unmarshal(res, &wrap); err != nil {
-		return "", "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
+		return "", "", fmt.Errorf("herdr workspace create: decode: %w", err)
 	}
-	return wrap.Workspace.WorkspaceID, wrap.Tab.TabID, wrap.RootPane.PaneID, nil
+	return wrap.Tab.TabID, wrap.RootPane.PaneID, nil
 }
 
 // listTabs returns the tabs in wsID.
@@ -582,7 +850,7 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 	}
 	if wsID == "" {
 		// New workspace: repurpose the default tab herdr spawns for this agent.
-		_, tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
+		tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
 		if err != nil {
 			return "", "", err
 		}
@@ -603,13 +871,29 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
 
-// socketPath is the unix socket for this client's herdr session.
+// socketPath is the unix socket for this client's herdr session. Must match
+// wherever the herdr binary itself resolves its config/state directory —
+// confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
+// "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
+// unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
+// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
+// plain os.UserHomeDir()+".config" join (the prior implementation) silently
+// ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
+// environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
+// this fleet's agent sandboxes do exactly that. The result: this client
+// dials a socket no herdr process ever binds, so serverAlive() reads false
+// against a perfectly healthy server ("did not become ready"), and every
+// retry launches a redundant herdr server contending for the same pane
+// ("agent_pane_busy") — ga-nqlb8q.
 func (c *client) socketPath() string {
-	home, _ := os.UserHomeDir()
-	if c.session == "" || c.session == "default" {
-		return filepath.Join(home, ".config", "herdr", "herdr.sock")
+	if c.sockPath != "" {
+		return c.sockPath
 	}
-	return filepath.Join(home, ".config", "herdr", "sessions", c.session, "herdr.sock")
+	configDir, _ := os.UserConfigDir()
+	if c.session == "" || c.session == "default" {
+		return filepath.Join(configDir, "herdr", "herdr.sock")
+	}
+	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
 }
 
 // serverAlive reports whether the session-server is actually accepting

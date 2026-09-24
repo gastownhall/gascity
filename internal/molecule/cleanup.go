@@ -101,6 +101,53 @@ func CloseSubtree(store beads.Store, rootID string) (int, error) {
 // descendant-first, blocker-first ordering and is idempotent for an already
 // closed subtree.
 func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[string]string) (int, error) {
+	return CloseSubtreeWithMetadataExcept(store, rootID, metadata, nil)
+}
+
+// TeardownTailExclusion builds the predicate that keeps a workflow's teardown
+// tail out of a terminal sweep over its subtree. Teardown work runs after the
+// root settles by contract (its pass condition may branch on the run
+// outcome), so force-closing it at settlement, or at cancellation, would skip
+// the very step that releases the workflow's resources.
+//
+// The tail is the teardown-scoped members plus every attempt of the same step:
+// retry expansion strips gc.scope_role from the first attempt, leaving
+// gc.step_id as the only durable link back to the teardown step.
+func TeardownTailExclusion(store beads.Store, rootID string) (func(beads.Bead) bool, error) {
+	members, err := ListSubtree(store, rootID)
+	if err != nil {
+		return nil, err
+	}
+	teardownStepIDs := make(map[string]struct{})
+	for _, member := range members {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleTeardown {
+			continue
+		}
+		if stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey]); stepID != "" {
+			teardownStepIDs[stepID] = struct{}{}
+		}
+	}
+	return func(member beads.Bead) bool {
+		if member.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
+			return true
+		}
+		stepID := strings.TrimSpace(member.Metadata[beadmeta.StepIDMetadataKey])
+		if stepID == "" {
+			return false
+		}
+		_, ok := teardownStepIDs[stepID]
+		return ok
+	}, nil
+}
+
+// CloseSubtreeWithMetadataExcept is CloseSubtreeWithMetadata with an exclusion
+// predicate: any member for which exclude reports true is left untouched. A nil
+// predicate closes the whole subtree.
+//
+// The exclusion exists for members that stay executable after their molecule
+// reaches a terminal state — teardown work, which by contract runs after the
+// root settles. Callers own the policy; this function only skips.
+func CloseSubtreeWithMetadataExcept(store beads.Store, rootID string, metadata map[string]string, exclude func(beads.Bead) bool) (int, error) {
 	matched, err := ListSubtree(store, rootID)
 	if err != nil {
 		return 0, err
@@ -148,6 +195,9 @@ func CloseSubtreeWithMetadata(store beads.Store, rootID string, metadata map[str
 	ids := make([]string, 0, len(matched))
 	for _, bead := range matched {
 		if bead.ID == "" || bead.Status == "closed" {
+			continue
+		}
+		if exclude != nil && exclude(bead) {
 			continue
 		}
 		ids = append(ids, bead.ID)

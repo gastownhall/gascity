@@ -24,12 +24,15 @@ func fiveRigHookStores() []hookStore {
 	return stores
 }
 
-// TestFederatedHookStoresIssueTheCityWideReaderOnce is the cost measurement.
+// TestFederatedHookStoresIssueTheCityWideReaderOnce is the cost measurement, and
+// after S3 it is a leg-count measurement too.
+//
 // `gc ready` federates the city store, every bound rig store and the relocated
-// graph leg in ONE call, so asking it once per hookStore multiplies the leg
-// fan-out by the store count for an answer that cannot differ between
-// iterations. The whole query must carry the city-wide reader exactly once
-// across the store list.
+// binding in ONE call — the legs are Plan(RoutedWork)'s — so its answer is a
+// SUPERSET of every extra leg's, for every tier of the generated query. Running
+// the extras therefore cannot change the selection; it only re-opens every store
+// and pays the federated legs again. The fan-out collapses to the one leg that
+// answers for the plan.
 func TestFederatedHookStoresIssueTheCityWideReaderOnce(t *testing.T) {
 	a := &config.Agent{Name: "worker"}
 	topo := federatedHookTopology()
@@ -43,30 +46,120 @@ func TestFederatedHookStoresIssueTheCityWideReaderOnce(t *testing.T) {
 		t.Fatalf("the federated work query names no `gc ready` reader: %q", federated)
 	}
 
-	scoped := scopeFederatedHookStores(fiveRigHookStores(), federated, singleStore)
+	stores := fiveRigHookStores()
+	scoped := scopeFederatedHookStores(stores, federated, singleStore)
+	if len(scoped) != 1 {
+		t.Fatalf("a %d-store federated hook tick still fans out to %d legs, want 1: the primary's reader already answers for every leg of the plan, so each extra is a whole extra work-query run for a strictly smaller view",
+			len(stores), len(scoped))
+	}
+	if !sameHookStore(scoped[0], stores[0]) {
+		t.Fatalf("the surviving leg is %q, want the agent's own (primary) store %q", scoped[0].dir, stores[0].dir)
+	}
 	total := 0
 	for _, st := range scoped {
 		total += strings.Count(hookStoreCommand(st, federated), "gc ready")
 	}
 	if total != perQuery {
-		t.Fatalf("a %d-store hook tick issues %d city-wide `gc ready` reads, want %d (one query's worth): the federated reader already covers every leg, so the extra %d re-open every store for the same answer",
-			len(scoped), total, perQuery, total-perQuery)
-	}
-
-	// The extras are scoped, not dropped: the crash-recovery and ephemeral tiers
-	// are still per-store `bd` reads the city-wide reader does not answer, so a
-	// blanket collapse would silently strip rig coverage from crash recovery.
-	for _, st := range scoped[1:] {
-		cmd := hookStoreCommand(st, federated)
-		if !strings.Contains(cmd, `bd list --status in_progress`) {
-			t.Fatalf("federated extra store %q lost the per-store crash-recovery tier: %q", st.dir, cmd)
-		}
-		if !strings.Contains(cmd, `ephemeral=true AND status=in_progress`) {
-			t.Fatalf("federated extra store %q lost the per-store ephemeral tier: %q", st.dir, cmd)
-		}
+		t.Fatalf("a %d-store hook tick issues %d city-wide `gc ready` reads, want %d (one query's worth)", len(stores), total, perQuery)
 	}
 	if got := hookStoreCommand(scoped[0], federated); got != federated {
-		t.Fatalf("the primary store no longer runs the federated query; the city-wide read has to happen somewhere")
+		t.Fatalf("the surviving store no longer runs the federated query; the city-wide read has to happen somewhere")
+	}
+}
+
+// The other half of the collapse, stated as the property it rests on: every tier
+// of the SINGLE-STORE command an extra leg used to run is answered by the
+// primary's federated command.
+//
+// The two tiers this was not always true of are named explicitly, because they
+// are the reason the extras existed. Both are closed now: the crash-recovery
+// tier swapped from `bd list --status in_progress` to `gc ready --status
+// in_progress` (federated), and the ephemeral `bd query` probes are covered
+// because every federated leg is read at beads.FederatedReadTier, which spans
+// the wisp tier. If either regresses to a single-store read, the extras have to
+// come back and this test says so.
+func TestTheFederatedReaderAnswersEveryTierTheExtrasUsedTo(t *testing.T) {
+	a := &config.Agent{Name: "worker"}
+	topo := federatedHookTopology()
+	federated := a.EffectiveWorkQueryFor(topo)
+
+	if strings.Contains(federated, bdListInProgressForTest) {
+		t.Fatalf("the federated work query still runs a SINGLE-STORE crash-recovery read (%q); an extra leg is the only thing that covered the other stores for it, and the fan-out no longer runs one: %q",
+			bdListInProgressForTest, federated)
+	}
+	if !strings.Contains(federated, "gc ready --status in_progress") {
+		t.Fatalf("the federated work query has no federated crash-recovery tier: %q", federated)
+	}
+	// The control: the SINGLE-STORE form does carry the reads this asserts are
+	// gone, so the assertions above are about the federated form and not about a
+	// query that lost its tiers entirely.
+	singleStoreTopo := topo
+	singleStoreTopo.FederatedReady = false
+	if !strings.Contains(a.EffectiveWorkQueryFor(singleStoreTopo), bdListInProgressForTest) {
+		t.Fatal("the single-store work query has no crash-recovery tier either; this test is comparing two empty things")
+	}
+}
+
+// bdListInProgressForTest is the single-store crash-recovery reader, spelled
+// here so the assertion above reads as the string an operator would grep for.
+const bdListInProgressForTest = "bd list --status in_progress"
+
+// TestFederatedClaimTickIssuesOneWorkQueryRun is the latency assertion for
+// ga-4qdfn, stated in the unit the incident is measured in: how many work-query
+// RUNS one `gc hook --claim` performs.
+//
+// On mc a run of the federated work query is several `gc ready` invocations,
+// each paying the whole plan's legs (a remote-postgres city leg, five rig legs,
+// the binding). Before S3 a six-leg city cost six runs to select plus one to
+// re-validate. The plan says the primary's reader answers for every one of those
+// legs, so the relevant leg count is one — and with one leg there is no later
+// store to fall back to, so the re-validation has nothing to do either.
+func TestFederatedClaimTickIssuesOneWorkQueryRun(t *testing.T) {
+	a := &config.Agent{Name: "worker"}
+	topo := federatedHookTopology()
+	singleStoreTopo := topo
+	singleStoreTopo.FederatedReady = false
+	federated := a.EffectiveWorkQueryFor(topo)
+
+	before := fiveRigHookStores()
+	after := scopeFederatedHookStores(before, federated, a.EffectiveWorkQueryFor(singleStoreTopo))
+
+	if got, want := hookClaimReadsPerTick(after), 1; got != want {
+		t.Fatalf("a federated claim tick runs the work query %d times, want %d", got, want)
+	}
+	if got := hookClaimReadsPerTick(before); got <= hookClaimReadsPerTick(after) {
+		t.Fatalf("the un-collapsed fan-out costs %d runs and the collapsed one %d; the measurement is not measuring anything", got, hookClaimReadsPerTick(after))
+	}
+
+	// And the claim really does act on the discovery output rather than paying
+	// for a second read of it.
+	one := after
+	calls := 0
+	run := func(string, string, []string) (string, error) {
+		calls++
+		return `[{"id":"gcg-1","status":"open"}]`, nil
+	}
+	out, store, err := claimStoreWithFallback(federated, one, one[0], one[0], `[{"id":"gcg-1","status":"open"}]`, run)
+	if err != nil {
+		t.Fatalf("claimStoreWithFallback: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("claim-time re-validation ran %d extra work queries on a single-leg city; there is no later store it could fall back to", calls)
+	}
+	if out != `[{"id":"gcg-1","status":"open"}]` || !sameHookStore(store, one[0]) {
+		t.Fatalf("claimStoreWithFallback = (%q, %q), want the discovery output on the one leg", out, store.dir)
+	}
+
+	// The control: with a real second leg the re-validation still happens, so
+	// the skip above is about having nowhere to fall back to and not about
+	// having removed the freshness read.
+	twoLegs := []hookStore{{dir: "city"}, {dir: "riga"}}
+	calls = 0
+	if _, _, err := claimStoreWithFallback("q", twoLegs, twoLegs[0], twoLegs[0], "stale", run); err != nil {
+		t.Fatalf("claimStoreWithFallback (two legs): %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a two-leg claim performed %d re-validation reads, want 1", calls)
 	}
 }
 
@@ -150,7 +243,7 @@ func TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand(t *testing.T) {
 		}
 		return `[]`, nil
 	}
-	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], run); err != nil || store.dir != "riga" {
+	if _, store, err := claimStoreWithFallback("federated query", stores, stores[1], stores[0], "", run); err != nil || store.dir != "riga" {
 		t.Fatalf("claimStoreWithFallback = (%q, %v), want riga", store.dir, err)
 	}
 	if revalidated != "single-store query" {

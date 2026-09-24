@@ -10,15 +10,54 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// classifyWorkQueryFailure inspects a work-query runner error and reports the
+// reason to record, or recordable=false when there is nothing to record.
+//
+// EVERY non-nil error is recordable. A work query that fails is a failed READ,
+// and the defect this widening closes is that a failed read and an idle store
+// were indistinguishable to everything downstream: `gc ready` aborts the whole
+// federated read when any leg errors (ready_federation.go), the generated query
+// propagates that exit, and the hook exited 1 with nothing on the bus — so a
+// storage refusal, a contended SQLite leg or a frontier refusal at the spawn
+// instant looked exactly like a quiet city. Kills and timeouts keep their
+// specific reasons (issue #1496, companion #1497); ordinary non-zero exits, which
+// used to be classified un-recordable because "those already surface on the
+// caller's stderr path", now record too — nothing supervises a worker's stderr.
+func classifyWorkQueryFailure(err error) (reason string, recordable bool) {
+	if err == nil {
+		return "", false
+	}
+	if reason, killed := classifyWorkQueryKill(err); killed {
+		return reason, true
+	}
+	return "work query failed: " + workQueryFailureDetail(err), true
+}
+
+// workQueryFailureDetail renders a bounded single-line form of a query error for
+// the event message. The raw error can carry a whole command line and captured
+// stderr; the event is a signal, not a log sink, so it is trimmed to its first
+// line and capped.
+func workQueryFailureDetail(err error) string {
+	msg := strings.TrimSpace(err.Error())
+	if idx := strings.IndexByte(msg, '\n'); idx >= 0 {
+		msg = strings.TrimSpace(msg[:idx])
+	}
+	const maxDetail = 200
+	if len(msg) > maxDetail {
+		msg = msg[:maxDetail] + "…"
+	}
+	return msg
+}
+
 // classifyWorkQueryKill inspects a work-query runner error and reports
 // whether the subprocess was killed by an external signal or aborted by
 // the runner-imposed timeout, along with a short human-readable reason.
 //
 // A killed or timed-out work query strands the session: the startup
 // nudge produces no output, the pane dies, and nothing names the cause
-// (issue #1496). Ordinary command failures (non-zero exit with output,
-// bad config) are NOT classified as kills — those already surface on the
-// caller's stderr path and do not warrant a lifecycle event.
+// (issue #1496). It is kept separate from classifyWorkQueryFailure because the
+// kill/timeout REASONS are load-bearing for the reconciler's escalation, while
+// the recordability decision is now simply "did the read fail".
 func classifyWorkQueryKill(err error) (reason string, killed bool) {
 	if err == nil {
 		return "", false
@@ -74,15 +113,18 @@ func emitCityWorkQueryFailure(cityPath string, stderr io.Writer, sessionID, temp
 	emitWorkQueryFailure(rec, sessionID, template, command, err)
 }
 
-// emitWorkQueryFailure records a SessionWorkQueryFailed event when a
-// work-query subprocess was killed or timed out, giving the reconciler a
-// named cause to escalate on instead of letting the session die silently
-// into unknown state (issue #1496, companion #1497). Best-effort: a nil
-// recorder is treated as a discard. Returns true when the failure was recorded,
-// false for ordinary errors or when no current session ID is available.
+// emitWorkQueryFailure records a SessionWorkQueryFailed event when a work query
+// FAILED — killed, timed out, or exited non-zero — giving the reconciler a named
+// cause to escalate on instead of letting the session die silently into unknown
+// state (issue #1496, companion #1497). Best-effort: a nil recorder is treated as
+// a discard. Returns true when the failure was recorded, false when there was no
+// error or no current session ID.
+//
+// The payload shape is unchanged; only the reason text distinguishes the
+// widened ordinary-failure case, so no consumer needs a schema change to read it.
 func emitWorkQueryFailure(rec events.Recorder, sessionID, template, _ string, err error) bool {
-	reason, killed := classifyWorkQueryKill(err)
-	if !killed {
+	reason, recordable := classifyWorkQueryFailure(err)
+	if !recordable {
 		return false
 	}
 	sessionID = strings.TrimSpace(sessionID)

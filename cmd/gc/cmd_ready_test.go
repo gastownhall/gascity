@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/pflag"
 )
 
@@ -45,6 +46,55 @@ func mustCreateReadyBead(t *testing.T, store beads.Store, b beads.Bead) beads.Be
 		t.Fatalf("create %q: %v", b.Title, err)
 	}
 	return created
+}
+
+// mustReadyLegs assembles the reader's legs through the production seam, over
+// an explicitly stated binding. The leg list is a Plan(RoutedWork) projection
+// now, so it can fail — but only on a standing storage refusal, which no
+// fixture here stages.
+func mustReadyLegs(t *testing.T, cityName string, cityStore beads.Store, rigStores map[string]beads.Store, binding beads.Store) []readyLeg {
+	t.Helper()
+	legs, err := readyFederationLegsOverBinding(cityName, cityStore, rigStores, binding)
+	if err != nil {
+		t.Fatalf("readyFederationLegsOverBinding: %v", err)
+	}
+	return legs
+}
+
+// TestReadyReaderEscalatesThePlansPartialLegs pins the ONE place this reader
+// overrides the resolver's per-leg policy, and pins that it really is an
+// override.
+//
+// The plan marks a rig leg PartialDegrade — a scope reporting a hole, which the
+// API turns into a Partial 200 naming the rig. A CLI work query has no field for
+// that: its whole output is the array, and a short array is indistinguishable
+// from "no work". So this reader escalates every leg failure to fatal.
+//
+// Asserting the plan's verdict as well as the reader's behavior is what keeps
+// this honest. If the resolver ever made rig legs Fatal, this reader would agree
+// with it by accident and the escalation comment would become a lie nobody
+// notices.
+func TestReadyReaderEscalatesThePlansPartialLegs(t *testing.T) {
+	city := beads.NewMemStore()
+	rig := beads.NewMemStoreFrom(1000, nil, nil)
+	legs := mustReadyLegs(t, "mycity", city, map[string]beads.Store{"alpha": rig}, nil)
+	if len(legs) != 2 {
+		t.Fatalf("got %d legs, want the city and the rig", len(legs))
+	}
+	if legs[1].onError != storeref.PolicyPartialDegrade {
+		t.Fatalf("the rig leg's plan policy is %v, want PartialDegrade — this reader's escalation is only meaningful if there is something to escalate", legs[1].onError)
+	}
+
+	// And the reader fails loud on it anyway.
+	failing := []readyLeg{legs[0], {label: legs[1].label, store: listFailStore{Store: beads.NewMemStore()}, onError: legs[1].onError}}
+	if _, err := readyBeadsForOpts(failing, readyOpts{status: readyStatusInProgress}); err == nil {
+		t.Fatal("a degraded rig leg produced a clean answer; a short array here is indistinguishable from \"no work\"")
+	}
+	// Control: the same call over healthy legs succeeds, so the error above is
+	// the leg failure and not the fixture.
+	if _, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress}); err != nil {
+		t.Fatalf("healthy legs errored: %v", err)
+	}
 }
 
 func readyWireIDs(rows []readyBead) []string {
@@ -316,20 +366,44 @@ func TestReadyEmitsADedicatedWireTypeNotTheDomainBead(t *testing.T) {
 //
 // When beads.Bead gains or loses a JSON field this test goes red. That is the
 // point: the external array follows only when someone says it should.
+//
+// # The one deliberate divergence
+//
+// `blocked_by` is emitted by `gc ready` and is NOT a beads.Bead field, and that
+// was decided rather than drifted into. It is a COMPUTED projection, not a
+// column: the crash-recovery arm (--status in_progress) resolves each row's
+// blocking dependencies through the leg that served the row, because the
+// consumer of that arm — the hook's work query — needs the blocker's STATUS to
+// decide whether a resumed holder's own bead is currently gated, and
+// `dependencies` carries edges without statuses. bd's own `bd ready --json`
+// emits exactly this field in exactly this shape, so adding it makes the
+// drop-in MORE faithful, not less. It stays out of beads.Bead because it is
+// derived per-read, not stored.
 func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
+	// computedReadyWireFields are emitted by gc ready but deliberately absent
+	// from beads.Bead. Every entry needs a stated reason above; the set is small
+	// on purpose.
+	computedReadyWireFields := map[string]bool{"blocked_by": true}
+
 	want := []string{
-		"assignee", "created_at", "defer_until", "dependencies", "description",
-		"ephemeral", "from", "id", "is_blocked", "issue_type", "labels",
-		"metadata", "needs", "no_history", "parent", "priority", "ref",
-		"status", "title", "updated_at",
+		"assignee", "blocked_by", "created_at", "defer_until", "dependencies",
+		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
+		"labels", "metadata", "needs", "no_history", "parent", "priority",
+		"ref", "status", "title", "updated_at",
 	}
 	got := jsonFieldNames(reflect.TypeOf(readyBead{}))
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("readyBead JSON fields = %v, want %v", got, want)
 	}
+	stored := make([]string, 0, len(got))
+	for _, field := range got {
+		if !computedReadyWireFields[field] {
+			stored = append(stored, field)
+		}
+	}
 	domain := jsonFieldNames(reflect.TypeOf(beads.Bead{}))
-	if !reflect.DeepEqual(got, domain) {
-		t.Fatalf("readyBead JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", got, domain)
+	if !reflect.DeepEqual(stored, domain) {
+		t.Fatalf("readyBead's stored JSON fields = %v but beads.Bead publishes %v; the external array's field set diverged from the HTTP Bead shape — decide deliberately whether the wire follows, then update this pin", stored, domain)
 	}
 }
 
@@ -430,7 +504,7 @@ func TestReadyDedupeIsFirstLegWins(t *testing.T) {
 	}
 
 	rows, err := readyBeadsForOpts(
-		readyFederationLegs("mycity", work, nil, graph),
+		mustReadyLegs(t, "mycity", work, nil, graph),
 		readyOpts{},
 	)
 	if err != nil {
@@ -452,7 +526,7 @@ func TestReadyFederationLegOrderMatchesTheAPIContract(t *testing.T) {
 	rigA := splittest.NewWorkStore(t, "ra")
 	graph := splittest.NewClassStore(t, config.BeadClassGraph)
 
-	legs := readyFederationLegs("mycity", city, map[string]beads.Store{
+	legs := mustReadyLegs(t, "mycity", city, map[string]beads.Store{
 		"rig-B":  rigB,
 		"rig-A":  rigA,
 		"mycity": splittest.NewWorkStore(t, "shadow"),
@@ -480,14 +554,14 @@ func TestReadySingleStoreCityFederatesOneLeg(t *testing.T) {
 	graph := splittest.NewClassStore(t, config.BeadClassGraph)
 	step := mustCreateReadyBead(t, graph, beads.Bead{Title: "graph step", Type: "task"})
 
-	legacy, err := readyBeadsForOpts(readyFederationLegs("mycity", city, nil, nil), readyOpts{})
+	legacy, err := readyBeadsForOpts(mustReadyLegs(t, "mycity", city, nil, nil), readyOpts{})
 	if err != nil {
 		t.Fatalf("gc ready: %v", err)
 	}
 	if got := readyWireIDs(legacy); !reflect.DeepEqual(got, []string{work.ID}) {
 		t.Fatalf("single-store ready = %v, want exactly [%s]; a legacy city must not gain a leg", got, work.ID)
 	}
-	split, err := readyBeadsForOpts(readyFederationLegs("mycity", city, nil, graph), readyOpts{})
+	split, err := readyBeadsForOpts(mustReadyLegs(t, "mycity", city, nil, graph), readyOpts{})
 	if err != nil {
 		t.Fatalf("gc ready: %v", err)
 	}
@@ -774,7 +848,7 @@ func TestReadyDefaultOrderIsTheCanonicalReadyOrder(t *testing.T) {
 	seeded = append(seeded, mustCreateReadyBead(t, graph, beads.Bead{Title: "graph urgent", Type: "task", Priority: readyPriority(1)}))
 	seeded = append(seeded, mustCreateReadyBead(t, city, beads.Bead{Title: "city backlog", Type: "task", Priority: readyPriority(3)}))
 
-	rows, err := readyBeadsForOpts(readyFederationLegs("mycity", city, nil, graph), readyOpts{})
+	rows, err := readyBeadsForOpts(mustReadyLegs(t, "mycity", city, nil, graph), readyOpts{})
 	if err != nil {
 		t.Fatalf("gc ready: %v", err)
 	}

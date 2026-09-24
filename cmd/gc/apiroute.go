@@ -35,10 +35,12 @@ var (
 // controller in-process. When the socket is alive, apiClient routes to the
 // standalone HTTP endpoint if the city configures an [api] port, otherwise
 // returns nil so the caller uses its local fallback; when the socket is not
-// alive it returns the supervisor-managed client. Maintenance commands have no
-// local fallback, so they use maintenanceAPIClient, which additionally routes a
-// supervisor-managed city (alive socket, no standalone [api] port) to the
-// supervisor client rather than reporting controller-down. (gascity ga-tp7)
+// alive it returns the supervisor-managed client. Callers whose local fallback
+// is missing or prohibitively expensive use supervisorFallthroughAPIClient
+// instead, which additionally routes a supervisor-managed city (alive socket,
+// no standalone [api] port) to the supervisor client rather than reporting
+// controller-down: maintenance (no local fallback at all) and gc status (local
+// fallback re-opens the bead/dolt store). (gascity ga-tp7, ra-r9hm6v)
 func apiClient(cityPath string) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -61,7 +63,7 @@ func apiClient(cityPath string) *api.Client {
 		// Alive socket: use the standalone HTTP endpoint when configured, else
 		// return nil so the caller takes its local fallback. A supervisor-managed
 		// city (no standalone [api] port) reaches the supervisor client only via
-		// maintenanceAPIClient, which has no local fallback.
+		// supervisorFallthroughAPIClient (maintenance and gc status).
 		return standaloneControllerClient(cityPath)
 	}
 	return apiRouteSupervisorClientHook(cityPath)
@@ -99,6 +101,36 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	return loadedCityName(cfg, cityPath)
 }
 
+// supervisorFallthroughAPIClient resolves an API client the same way apiClient
+// does, but additionally falls through to the supervisor-managed client when
+// the per-city controller socket is alive and the city has no standalone
+// [api] port configured — the common case for a supervisor-managed city.
+// apiClient intentionally stops at nil in that case for general commands
+// (see TestAPIClientRouting), on the assumption that those commands' local
+// fallback is cheap. That assumption doesn't hold for every caller:
+// maintenance commands have no local fallback at all, and `gc status`'s local
+// fallback re-opens the full local bead/dolt store and rescans event
+// archives to rebuild store health — far more expensive than the
+// supervisor's already-cached response (ra-r9hm6v: ~9.5s local CPU vs
+// ~0.35s warm API). Callers whose local path is missing or prohibitively
+// expensive should route through here instead of apiClient directly.
+func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
+	if c := apiClient(cityPath); c != nil {
+		return c, ""
+	}
+	// Honor the GC_NO_API escape hatch: apiClient returns nil under it, and the
+	// alive-hook/supervisor client below never re-check it, so without this guard
+	// an explicit operator opt-out would be silently bypassed here.
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
+		if apiRouteControllerAliveHook(cityPath) != 0 {
+			if c := apiRouteSupervisorClientHook(cityPath); c != nil {
+				return c, ""
+			}
+		}
+	}
+	return nil, apiClientFallbackReason(cityPath)
+}
+
 // apiClientFallbackReason returns a reason code describing why apiClient
 // returned nil for cityPath. Read-path CLI commands call this when the
 // client is nil to emit a route=fallback reason=<code> log line.
@@ -106,7 +138,9 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 // The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
 // (GC_NO_API truthy), "non-loopback-bind" (API bound to non-localhost with
 // mutations disallowed), "controller-down" (everything else — no controller,
-// config missing, API port unset).
+// config missing, API port unset). Note that "non-loopback-bind" is no longer
+// reachable for supervisorFallthroughAPIClient callers, which try the
+// supervisor client before asking for a reason.
 func apiClientFallbackReason(cityPath string) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"

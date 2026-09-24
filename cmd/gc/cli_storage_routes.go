@@ -118,6 +118,15 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	return entry.routes
 }
 
+// cliStorageRoutesLoad declines the load-time revision snapshot. This is a
+// routing read for a one-shot command: nothing downstream ever calls
+// config.Revision() on the result, and building the snapshot content-hashes
+// every file of every pack directory. On maintainer-city that hash alone was
+// 10 s of an 11 s `gc ready` once the bd-env loads were memoized (cherry,
+// 2026-09-23). Same rule as cmd_agent.go and the bd_env.go probe (ga-s3cnmy);
+// TestCLIStorageRoutesDeclineTheRevisionSnapshot pins it.
+var cliStorageRoutesLoad = config.LoadOptions{SkipRevisionSnapshot: true}
+
 // resolveCLIStorageRoutes takes the verdict for one city, exactly once, and
 // turns each of its three arms into routes: nil for a city that relocates
 // nothing, the opened binding for one that has converged, and refusing stores
@@ -144,13 +153,18 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 // scope of its own. Reading where the classes live must not be able to change
 // what the command does.
 func resolveCLIStorageRoutes(cityPath string) *storageRoutes {
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil {
 		return nil
 	}
 	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
 	if err == nil {
-		return routes
+		// The one and only place a class store is given an emit target. A
+		// one-shot command has no live event bus, so without this its writes to
+		// a relocated class land in a store nothing observes; the controller
+		// resolves its routes through openStorageRoutes, never here, so its
+		// side stays exactly as it was. See class_store_emit.go.
+		return routes.withCLIEmission(cityPath)
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
@@ -183,11 +197,17 @@ func cliStorageRoutesEntryFor(cityPath string) *cliStorageRoutesEntry {
 // The memo is detached under the lock before anything is closed, so a second
 // call closes nothing and a call that races the first cannot hand out a closed
 // store: the next resolution starts from an empty memo and opens again.
+//
+// The DERIVED memo goes with it. cliResidencyBindings caches the class-to-store
+// grouping it read out of these routes, so leaving it behind would let the next
+// by-id resolution plan legs over stores this call just closed — the memo one
+// layer up outliving the one it was derived from.
 func closeCLIStorageRoutes() error {
 	cliStorageRoutesMu.Lock()
 	entries := cliStorageRoutesByCity
 	cliStorageRoutesByCity = nil
 	cliStorageRoutesMu.Unlock()
+	resetCLIResidencyBindings()
 
 	var errs []error
 	for _, entry := range entries {
@@ -238,12 +258,12 @@ type standingStorageRefusal struct{ err error }
 func (e standingStorageRefusal) Error() string { return e.err.Error() }
 func (e standingStorageRefusal) Unwrap() error { return e.err }
 
-// isStandingStorageRefusal reports whether err is this build's standing verdict
-// about the city rather than a fault in the read that produced it.
-func isStandingStorageRefusal(err error) bool {
-	var refusal standingStorageRefusal
-	return errors.As(err, &refusal)
-}
+// The predicate over this type is storeref.IsStandingRefusal, which matches on
+// the StandingStorageRefusal() marker (declared in residency_topology.go)
+// instead of on this concrete type. cmd/gc had its own errors.As spelling until
+// the claim route stopped needing one: with the last production caller collapsed
+// onto the resolver, a second predicate could only drift from the one the
+// resolver's leg policy actually consults.
 
 // refusedClassStore is the store a relocated class resolves to on a city this
 // build must not serve: every operation fails with the refusal that says why and

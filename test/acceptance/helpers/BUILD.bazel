@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "helpers",
+    srcs = [
+        "bd_schema_parity.go",
+        "beads_topology.go",
+        "binary.go",
+        "city.go",
+        "claude_state.go",
+        "doc.go",
+        "env.go",
+        "lifecycle.go",
+        "provider_shim.go",
+        "recording_bd.go",
+        "tooling.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/test/acceptance/helpers",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_steveyegge_beads//schema"],
+)
+
+go_test(
+    name = "helpers_test",
+    srcs = [
+        "bd_schema_parity_test.go",
+        "beads_topology_test.go",
+        "binary_test.go",
+        "city_test.go",
+        "claude_state_test.go",
+        "env_test.go",
+        "provider_shim_test.go",
+        "recording_bd_test.go",
+        "testenv_import_test.go",
+        "tooling_test.go",
+    ],
+    embed = [":helpers"],
+    deps = [
+        "//internal/testenv",
+        "@com_github_steveyegge_beads//schema",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

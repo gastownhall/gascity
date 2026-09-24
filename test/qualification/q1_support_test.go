@@ -38,6 +38,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -48,6 +49,9 @@ import (
 // their working directory, and this package lives at test/qualification.
 func q1RepoRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("resolving the module root: %v", err)

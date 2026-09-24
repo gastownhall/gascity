@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -18,19 +21,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// heartbeatMetadataKey is the bead-metadata key freshened by the gc-only
-// `gc bd heartbeat <issue-id>` subcommand. The gas-city-dashboard will read
-// this exact key — with the `_at` suffix — to tell a live worker from a dead
-// one (gastownhall/gascity#1855; reader tracked in dashboard #324). Unrelated
-// benchmark/test code writes the suffixless `gc.last_heartbeat` for a
-// different purpose; do not unify them.
-const heartbeatMetadataKey = beadmeta.LastHeartbeatAtMetadataKey
-
-// bdHeartbeatNow supplies the timestamp stamped by `gc bd heartbeat`. It is a
-// package var so tests can pin it to a fixed instant; the rewrite normalizes
-// the result to UTC, so an injected non-UTC clock still produces a UTC stamp.
-var bdHeartbeatNow = time.Now
-
 // bdSilentFallbackExitCode is the exit code gc bd emits when it detects
 // that bd silently fell back to on-disk auto-import mode (managed Dolt
 // unreachable). Distinct from bd's own exits so operators and CI can
@@ -40,6 +30,14 @@ var bdHeartbeatNow = time.Now
 const bdSilentFallbackExitCode = 4
 
 const bdSilentFallbackUserMessage = "gc bd: managed Dolt unreachable; bd fell back to on-disk auto-import mode. If this command wrote data, that write was NOT persisted. Restart the managed Dolt server (or check connectivity) and retry. (See gastownhall/gascity#2080.)"
+
+// bdDoltStartConflictUserMessage is appended (bd's own output is left
+// intact) when bd's error output suggests running `bd dolt start` to
+// recover from an unreachable managed Dolt server. That command starts a
+// second, unmanaged Dolt server that conflicts with gc's own managed server
+// on the same data directory, so gc bd points at the gc-managed remedy
+// instead. See gastownhall/gascity#1374.
+const bdDoltStartConflictUserMessage = "gc bd: bd suggested \"bd dolt start\" to recover, but that starts a second, unmanaged Dolt server that will conflict with gc's managed server on the same data directory. Run \"gc start\" (or \"gc dolt restart\") to restart the managed Dolt server instead, then retry. (See gastownhall/gascity#1374.)"
 
 // bdStderrScanLimit caps how much of bd's stderr gc retains to scan for the
 // silent-fallback marker. bd emits the marker pair while opening the store —
@@ -104,12 +102,17 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat <issue-id>" subcommand, which rewrites to
-"update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard, and
-"release-if-current <issue-id> <assignee>", which conditionally resets an
-in-progress assignment only when the bead still has that assignee.
+All arguments after "gc bd" are forwarded to bd unchanged, with one
+exception: a "list" that filters on the wisps (ephemeral) tier —
+"--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
+"--include-infra". bd skips that tier on any list without the flag, so those
+filters would otherwise return [] and exit 0 on a ledger full of live
+molecules. Every other list is forwarded as written. "heartbeat
+<issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
+lease and fails loudly when the caller no longer owns it. gc adds one
+subcommand of its own: "release-if-current <issue-id> <assignee>", which
+conditionally resets an in-progress assignment only when the bead still has
+that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -119,7 +122,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd heartbeat my-project-abc     # refresh the claim lease you hold
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -168,7 +171,108 @@ func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]
 	overrides["GC_STORE_SCOPE"] = target.ScopeKind
 	overrides["GC_BEADS_PREFIX"] = target.Prefix
 	applyExportSuppressionEnv(overrides)
+	// bd may invoke gc again through its provider/lifecycle hooks. Pin those
+	// recursive calls to this exact executable rather than inheriting an
+	// ambient GC_BIN or resolving an unrelated gc from PATH.
+	executable, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return nil, err
+	}
+	overrides["GC_BIN"] = executable
 	return mergeRuntimeEnv(os.Environ(), overrides), nil
+}
+
+func resolveBdInvokingGCBinary() (string, error) {
+	executable, err := resolveInvokingExecutable()
+	if err != nil {
+		return "", fmt.Errorf("resolve invoking gc executable: %w", err)
+	}
+	if !filepath.IsAbs(executable) {
+		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
+	}
+	canonical, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("stat invoking gc executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
+	}
+	return canonical, nil
+}
+
+// pinBdGCEnvironment replaces ambient GC_BIN with the physical invoking
+// executable before the beads runner merges the child environment.
+func pinBdGCEnvironment(env map[string]string) error {
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err != nil {
+		return err
+	}
+	env["GC_BIN"] = gcBin
+	return nil
+}
+
+// bestEffortBdGCBinaryWarning fires once per process.
+var bestEffortBdGCBinaryWarning sync.Once
+
+// pinBdGCEnvironmentBestEffort is pinBdGCEnvironment for the legacy managed
+// path, where main never set GC_BIN for gc's own bd invocations at all.
+//
+// The strict resolver refuses when the physical path behind os.Executable() is
+// gone — a Homebrew/Nix upgrade that removed the old store or Cellar directory a
+// still-running supervisor resolved through. Making that refusal fatal for every
+// bd runner turned an upgrade into a supervisor whose session reconciler, store
+// opens, health, recover and its own SIGTERM shutdown all fail until restart,
+// leaving the managed Dolt unstopped. Where GC_BIN is load-bearing — the bd
+// store bridge's hook callbacks, and provider-owned scopes where bd re-invokes
+// gc — the refusal stays; here the pin degrades to main's own fallback chain and
+// says so once.
+func pinBdGCEnvironmentBestEffort(env map[string]string) {
+	if env == nil {
+		return
+	}
+	gcBin, err := resolveBdInvokingGCBinary()
+	if err == nil {
+		env["GC_BIN"] = gcBin
+		return
+	}
+	bestEffortBdGCBinaryWarning.Do(func() {
+		log.Printf("gc: cannot canonicalize the invoking gc executable (%v); bd callbacks will use the ambient GC_BIN or PATH gc until this process restarts", err)
+	})
+	if fallback := bestEffortInvokingGCBinary(); fallback != "" {
+		env["GC_BIN"] = fallback
+	}
+}
+
+// bestEffortInvokingGCBinary reproduces the fallback chain this branch replaced:
+// the absolute path os.Executable() reports, then a gc on PATH, then nothing at
+// all — in which case the caller leaves whatever GC_BIN the environment already
+// carries.
+//
+// Each link has to name a binary that still runs. gc-beads-bd.sh treats any
+// non-empty GC_BIN as authoritative (resolve_gc_helper_bin) and `die`s when the
+// exec fails, so handing it the removed path the strict resolver just rejected
+// turns a recover that would have completed through the script's shell-native
+// fallbacks into one that SIGTERMs the managed Dolt and exits before restarting
+// it. An empty GC_BIN is the better answer than a dead one.
+func bestEffortInvokingGCBinary() string {
+	if executable, err := resolveInvokingExecutable(); err == nil && filepath.IsAbs(executable) && runnableGCBinary(executable) {
+		return executable
+	}
+	if found, err := exec.LookPath("gc"); err == nil && runnableGCBinary(found) {
+		return found
+	}
+	return ""
+}
+
+// runnableGCBinary reports whether path still names an executable file. Stat
+// follows symlinks, so a link whose target an upgrade removed is refused too.
+func runnableGCBinary(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -189,17 +293,16 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 	_, _ = fmt.Fprintf(stderr, "gc bd: warning: ignoring ambient Dolt host/port override for external target: %s\n", strings.Join(drift, ", "))
 }
 
-// rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
-// subcommand into the bd command that performs the write:
-//
-//	update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>
-//
-// Long-running workers call `gc bd heartbeat {{issue}}` periodically so the
-// dashboard can distinguish a live worker from a dead one
-// (gastownhall/gascity#1855). It reuses bd's existing metadata-write path
-// rather than adding a new store method, and leaves the issue id in place so
-// the generic scope resolver still routes the write to the correct rig store.
-// Args that do not begin with "heartbeat" pass through unchanged.
+// rewriteBdHeartbeatArgs validates the `heartbeat <issue-id>` subcommand and
+// forwards it to bd's NATIVE heartbeat, which pushes the claim's
+// lease_expires_at forward and fails loudly when the caller no longer owns
+// the claim (reclaimed lease, closed issue). gc used to rewrite this into
+// `update <issue-id> --set-metadata gc.last_heartbeat_at=<now>` — a write
+// nothing reads — which reported success while leaving the lease untouched,
+// so a worker's claim could go stale mid-task under a green heartbeat
+// (dip-wdt5aq). The id is validated here so a malformed id never reaches
+// bd's prefix-based rig auto-detection. Args that do not begin with
+// "heartbeat" pass through unchanged.
 func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
 		return bdArgs, nil
@@ -212,8 +315,111 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
 		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
-	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
-	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+	return []string{"heartbeat", rest[0]}, nil
+}
+
+// bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
+// whose rig segment is absent from the loaded city configuration. These values
+// are opaque to bd, so gc bd is the common admission boundary for stale and
+// external writers.
+//
+// Actor names without a slash remain compatible: historic dotted identities
+// are provenance, not rig-qualified routes. Both bd metadata spellings are
+// examined so --metadata cannot bypass the --set-metadata guard. Inputs this
+// preflight cannot interpret exactly are refused before bd can mutate state.
+func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, bool) {
+	verb, args := bdflags.SplitGlobalFlags(bdArgs)
+	// bd registers `new` as an alias for `create` (bd create --help: "Aliases:
+	// create, new"), so the alias has to reach the same admission check AND the
+	// same flag manifest. Normalizing here covers both, because those are the
+	// only two things verb is read for. The gate alone would not: bdflags keys
+	// its manifests under the canonical verb only and performs no alias
+	// normalization, so ValueFlags("new") is nil, and an empty manifest steps
+	// over no value — the failure mode globalValueFlags' doc comment calls
+	// load-bearing.
+	if verb == "new" {
+		verb = "create"
+	}
+	if verb != "create" && verb != "update" {
+		return "", false
+	}
+	valueFlags := bdflags.ValueFlags(verb)
+	configuredRigs := make(map[string]struct{}, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		configuredRigs[rig.Name] = struct{}{}
+	}
+
+	validate := func(key, value string) (string, bool) {
+		if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+			return "", false
+		}
+		rig, _, qualified := strings.Cut(value, "/")
+		if !qualified || rig == "" {
+			return "", false
+		}
+		if _, ok := configuredRigs[rig]; ok {
+			return "", false
+		}
+		return fmt.Sprintf("gc bd: refusing %s=%q: rig %q is not configured in this city\n", key, value, rig), true
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		value := ""
+		switch {
+		case arg == "--set-metadata" || arg == "--metadata":
+			if i+1 >= len(args) {
+				return fmt.Sprintf("gc bd: refusing %s without a value before write\n", arg), true
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--set-metadata="):
+			value = strings.TrimPrefix(arg, "--set-metadata=")
+		case strings.HasPrefix(arg, "--metadata="):
+			value = strings.TrimPrefix(arg, "--metadata=")
+		default:
+			if !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+
+		if strings.HasPrefix(arg, "--set-metadata") {
+			key, metadataValue, ok := strings.Cut(value, "=")
+			if !ok || strings.TrimSpace(key) == "" {
+				return fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+			continue
+		}
+
+		metadataJSON := strings.TrimSpace(value)
+		if strings.HasPrefix(metadataJSON, "@") {
+			return fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be validated before write\n", value), true
+		}
+		var metadata map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			return fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
+		}
+		for key, rawValue := range metadata {
+			if key != beadmeta.LeaseOwnerMetadataKey && key != beadmeta.RoutedToMetadataKey {
+				continue
+			}
+			var metadataValue string
+			if err := json.Unmarshal(rawValue, &metadataValue); err != nil {
+				return fmt.Sprintf("gc bd: refusing non-string %s before write\n", key), true
+			}
+			if msg, refused := validate(key, metadataValue); refused {
+				return msg, true
+			}
+		}
+	}
+	return "", false
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
@@ -224,6 +430,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+
+	// A `list` that filters on the wisps tier reaches that tier only with
+	// --include-infra; without it bd answers [] and exit 0 on a ledger full of
+	// molecules. See bd_wisp_tier.go.
+	bdArgs = rewriteBdWispTierArgs(bdArgs)
 
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
@@ -246,6 +457,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if msg, refused := bdRigQualifiedMetadataRefusal(cfg, bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -274,6 +489,28 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// refused travels with the result they are about to trust.
 		fmt.Fprintf(stderr, "gc bd: %s is set; running anyway: %s\n", bdRelocatedClassOverrideEnvVar, msg) //nolint:errcheck // best-effort stderr
 	}
+	// The same split, on the write side. `gc bd create` is a passthrough too, and
+	// bd writes the work ledger only, so a create whose SHAPE belongs to a
+	// relocated class strands the bead in a ledger that class is never read from
+	// — silently, because bd did what it was asked and exited 0. Placement is
+	// impossible here (only argv crosses to the subprocess), so the create is
+	// refused before anything is written and the refusal names the gc-native
+	// command that mints it correctly.
+	//
+	// The read override above deliberately does not reach this arm: it exists
+	// because the read scan classifies ambiguous TEXT and a refused read can be
+	// re-run, while a stranded mint leaves a row under the wrong prefix that no
+	// later read finds and no migration moves.
+	//
+	// It runs before the by-id door rather than after because the two answer
+	// different questions and cannot shadow each other: this arm reads the
+	// prospective bead's CLASS and never an addressed id, so a create that names
+	// a relocated bead in --parent still reaches the ownership refusal, which
+	// names that bead. When both are true the mint is what has to be stopped.
+	if msg, stranded := bdRelocatedClassCreateRefusal(cfg, target.ScopeRoot, bdArgs); stranded {
+		fmt.Fprintf(stderr, "gc bd: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// A by-ID operation whose subject a relocated class owns is answered in
 	// process, from the binding that class is served from, and never handed to
 	// the subprocess — which opens the work workspace and cannot see the bead.
@@ -297,6 +534,26 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
+
+	// Disclose which store answers a read-only passthrough, so a zero-row
+	// result is distinguishable from a true empty (gastownhall/gascity#5170).
+	// resolveBdScopeTarget's priority chain (explicit --rig > explicit --city
+	// > bead-prefix detect > -C/--directory > GC_RIG env > cwd > city)
+	// silently picks a store on every one of those paths but the GC_RIG-
+	// mismatch warning above; the common cwd-auto-detect case reached bd with
+	// no diagnostic at all. Placed after the by-ID and release-if-current
+	// arms above (rather than immediately after resolveBdScopeTarget) so it
+	// names the store that actually serves the request: a class-owned `show`
+	// on a split city is answered in process from the class's own binding by
+	// maybeRouteBdByID, not from target, and disclosing target there would be
+	// wrong for that one read. This is stderr-only and additive — bd's own
+	// stdout (human or --json) is untouched, and it never changes the exit
+	// code, matching the disclosure style #5162/#5167 established for the
+	// sibling relocated-class invariant.
+	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
+		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
+	}
+
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
@@ -319,7 +576,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// than requested) blocks the write. ErrNotFound and store-unavailable are
 	// non-fatal — the write falls through to bd, which will produce its own
 	// error if the bead truly does not exist. This preserves correctness for
-	// legitimate flows (heartbeat metadata writes, silent-fallback paths,
+	// legitimate flows (native heartbeat lease refresh, silent-fallback paths,
 	// ephemeral/wisp rows, projection-lag writes) that proceed even when the
 	// bead isn't yet visible through the read seam.
 	//
@@ -377,12 +634,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
 	// Resolve the same binary every other bd path in the tree resolves for
-	// this scope: a scope bound to a complete storage binding pins the bd
-	// build that speaks that backend, and the passthrough must honor the pin
-	// or it hands the command to an ambient bd that rejects the bound
-	// backend. Keying on the target scope rather than the city keeps a rig
-	// that owns its binding on its pin, and keeps a rig that overrides the
-	// city backend on the ambient bd its runtime env already implies.
+	// this scope: the city scope, any rig that inherits the city backend, and
+	// any scope bound to a complete storage binding all pin the bd build that
+	// speaks that backend, and the passthrough must honor the pin or it hands
+	// the command to an ambient bd that rejects the bound backend. Keying on
+	// the target scope rather than the city keeps a rig that overrides the
+	// city backend, and owns no binding of its own, on the ambient bd its
+	// runtime env already implies.
 	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -422,6 +680,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	if runErr != nil {
 		if traceExit > 0 {
+			if bdOutputSuggestsConflictingDoltStart(stderrScan.String()) &&
+				bdScopeDoltIsGcManaged(cityPath, target.ScopeRoot) {
+				fmt.Fprintln(stderr, bdDoltStartConflictUserMessage) //nolint:errcheck // best-effort stderr
+			}
 			return traceExit
 		}
 		fmt.Fprintf(stderr, "gc bd: %v\n", runErr) //nolint:errcheck // best-effort stderr
@@ -463,8 +725,8 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 }
 
 // bdMutationWriteIDs extracts all positional bead IDs from a bd write-mutation
-// command (update, close, reopen, delete) and reports whether the scan was
-// unambiguous.
+// command (update, close, reopen, delete, heartbeat) and reports whether the
+// scan was unambiguous.
 //
 // Returns:
 //   - ids: all positional (non-flag) tokens after the subcommand; may be empty.
@@ -479,6 +741,9 @@ func invalidBdReleaseIfCurrentArg(value string) bool {
 // "-" and do not contain "=" are treated as potentially value-consuming, which
 // triggers ambiguous=true. Boolean flags (no value) are fine to ignore.
 // The "--" terminator is respected: everything after it is positional.
+// heartbeat is positional-only — rewriteBdHeartbeatArgs has already reduced its
+// argv to a single pre-validated id with no flags, so its flag sets are empty
+// by design and the lone id is scanned as positional.
 //
 // All returned IDs must be verified via BdStore.Get (exact-ID guard) before
 // the mutation is forwarded to the bd subprocess.
@@ -488,14 +753,14 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 	}
 	sub := args[0]
 	switch sub {
-	case "update", "close", "reopen", "delete":
+	case "update", "close", "reopen", "delete", "heartbeat":
 	default:
 		return nil, false, false
 	}
 
 	// valueFlags is the complete set of flags that consume the next argument as
 	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (2026-06-10).
+	// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
 	valueFlags := bdSubcmdValueFlags(sub)
 
 	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
@@ -778,6 +1043,19 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		fmt.Fprintf(stderr, "gc bd: warning: GC_RIG=%q does not name a bound rig in this city; ignoring it and answering from the %s store instead (the same value via --rig would exit 1)\n", gcRigDiscarded, scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
 	return target, nil
+}
+
+// bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose
+// resolved store gets announced on stderr (gastownhall/gascity#5170). Scoped
+// to reads: a write verb's effect is directly observable (the record it
+// touched can be re-read), while a read verb's silence is exactly what makes
+// an empty answer indistinguishable from "no matches in the store that was
+// asked."
+var bdScopeDisclosureVerbs = map[string]bool{
+	"list":   true,
+	"ready":  true,
+	"search": true,
+	"show":   true,
 }
 
 // scopeLabel renders a store target for operator-facing diagnostics, e.g.

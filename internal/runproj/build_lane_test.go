@@ -3,6 +3,7 @@ package runproj
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -56,6 +57,35 @@ func TestBuildRunLaneResolvesBeyondHistoricalCap(t *testing.T) {
 	}
 	if lane.ID != truncated {
 		t.Fatalf("lane.ID = %q, want %q", lane.ID, truncated)
+	}
+}
+
+func TestBuildRunLaneResolvesCompilerFormulaNameMetadata(t *testing.T) {
+	beadList := []beads.Bead{{
+		ID:     "run-constellation",
+		Title:  "Project Constellation creative council",
+		Status: "open",
+		Type:   "molecule",
+		Metadata: map[string]string{
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.KindMetadataKey:            beadmeta.KindRun,
+			beadmeta.FormulaNameMetadataKey:     "socialtv-creative-council",
+			beadmeta.RunTargetMetadataKey:       "rig:instagramtv",
+			beadmeta.RootStoreRefMetadataKey:    "rig:instagramtv",
+			beadmeta.ScopeKindMetadataKey:       "rig",
+			beadmeta.ScopeRefMetadataKey:        "instagramtv",
+		},
+	}}
+
+	lane, ok := BuildRunLane(beadList, "run-constellation")
+	if !ok {
+		t.Fatal("BuildRunLane(run-constellation) ok=false, want a resolvable lane")
+	}
+	if lane.Formula.Status != "known" || lane.Formula.Name != "socialtv-creative-council" {
+		t.Fatalf("formula = %+v, want known socialtv-creative-council", lane.Formula)
+	}
+	if lane.Scope.Status != "available" || lane.Scope.Kind != "rig" || lane.Scope.Ref != "instagramtv" {
+		t.Fatalf("scope = %+v, want available rig:instagramtv", lane.Scope)
 	}
 }
 

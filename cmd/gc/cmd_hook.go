@@ -57,11 +57,12 @@ With --claim: runs the standard startup claim protocol for one work item.
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
 	cmd.Flags().BoolVar(&claim, "claim", false, "atomically claim one routed work item for the current session")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "with --claim, emit a JSON protocol result")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
 	cmd.AddCommand(newHookRunCmd(stdout, stderr))
+	cmd.AddCommand(newHookCurrentCmd(stdout, stderr))
 	return cmd
 }
 
@@ -119,6 +120,15 @@ func cmdHookRun(args []string, opts hookRunOptions, stdin io.Reader, stdout, std
 		return 1
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// Mark the child as a provider CALLBACK lane. gc hook run is the managed
+	// wrapper every rendered provider hook command flows through, and it runs
+	// arbitrary gc argv verbatim — nothing stops `hook --claim` appearing there,
+	// today by operator edit and tomorrow by a new overlay. A callback's stdout
+	// goes to the hook runner, never to a model, so a claim minted in one is
+	// parked the instant it is won; the claim path refuses on this marker (F-A,
+	// hookClaimNonTurnMarker). Every other hook use of a callback lane —
+	// --inject, nudge drain, mail check — is read-only and unaffected.
+	cmd.Env = append(os.Environ(), "GC_HOOK_CALLBACK_LANE=1")
 	// Read the provider's hook stdin FULLY into a buffer before running the
 	// wrapped command, then hand it that buffer. Forwarding the live stdin
 	// (cmd.Stdin = stdin) let the wrapped command exit — on its fast path or on
@@ -287,18 +297,31 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	// Fence a stale/superseded runtime session BEFORE the city-suspension,
-	// agent-resolution, and agent-suspension early returns below. A stale
-	// incarnation in a suspended city, or one whose template was removed from
-	// config (resolveAgentIdentity fails), or whose agent was suspended, would
-	// otherwise hit one of those bare `return 1` paths, and its startup wrapper
-	// would keep retrying the plain failure instead of seeing the terminal
-	// stale-session drain result and exiting. The fence reads the runtime's own
-	// identity from the environment; it is a no-op for a non-session runtime (no
-	// GC_SESSION_ID / GC_INSTANCE_TOKEN) and fails open for an eligible session or a
-	// transient session-store fault, so a healthy worker still falls through to the
+	// Fence a stale/superseded/unregistered runtime session BEFORE the
+	// city-suspension, agent-resolution, and agent-suspension early returns
+	// below. A stale incarnation in a suspended city, or one whose template was
+	// removed from config (resolveAgentIdentity fails), or whose agent was
+	// suspended, would otherwise hit one of those bare `return 1` paths, and its
+	// startup wrapper would keep retrying the plain failure instead of seeing
+	// the terminal drain result and exiting. The fence reads the runtime's own
+	// identity from the environment; it is a no-op for a genuinely non-session
+	// runtime (no GC_TEMPLATE and no GC_SESSION_ID) and fails open for an
+	// eligible session, a session id present with no instance token (the
+	// documented tokenless-runtime compatibility escape hatch), or a transient
+	// session-store fault, so a healthy worker still falls through to the
 	// suspension and config checks below.
 	if opts.Claim {
+		// F-A, at the earliest point that can answer it. tryHookClaim carries the
+		// same fence over the same predicate — it is the seam every ops-level
+		// caller funnels through — but by the time it runs, the federated store
+		// selection has already spent a work query bounded by hookWorkQueryTimeout
+		// (150s), and a provider callback's whole budget is 15s
+		// (defaultHookRunTimeout). Refusing here keeps a callback lane cheap and
+		// makes its refusal something the provider actually receives rather than
+		// something its timeout truncates.
+		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
+			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
+		}
 		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
 			return code
 		}
@@ -421,43 +444,54 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		emitQueryFailure(command, err)
 		return out, err
 	}
+	// The stale-session fence already ran before agent resolution above; this
+	// sessionID feeds only the claim/visibility assignee identity.
+	sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
+	sessionName := strings.TrimSpace(sessionForQuery)
+	alias := strings.TrimSpace(overrides["GC_ALIAS"])
+	assignee := hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
+	// IdentityCandidates governs ADOPTION of already-owned in_progress/open
+	// work (hookClaimExistingAssignment, claimFirstReadyHookAssignment, and
+	// the display path's hookCandidateVisible own-work check); it must be
+	// scoped to this session's OWN runtime identity, never the bare pool
+	// template. A suffixed pool worker resolves config via the GC_TEMPLATE
+	// fallback, so resolvedAgentName == a.QualifiedName() is the bare
+	// template, which is ALSO the [[named_session]] holder's identity —
+	// including it let a suffixed worker adopt the holder's in_progress bead
+	// (ga-80pen8). The bare template stays in RouteTargets, which governs
+	// FRESH claims of UNASSIGNED routed work. The canonical slot / named
+	// holder keep it via `alias` (GC_ALIAS == qualified bare name); only
+	// suffixed workers drop it.
+	identityCandidates := hookClaimIdentityCandidates(
+		assignee,
+		sessionID,
+		sessionName,
+		alias,
+		agentForQuery,
+	)
+	routeTargets := hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"]))
 	if opts.Claim {
-		// The stale-session fence already ran before agent resolution above; this
-		// sessionID feeds only the claim assignee identity.
-		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
-		sessionName := strings.TrimSpace(sessionForQuery)
-		alias := strings.TrimSpace(overrides["GC_ALIAS"])
-		// Write the alias/agent form that read paths query through GC_AGENT.
-		// Session forms remain fallbacks for unaliased workers.
-		assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
 		claimOpts := hookClaimOptions{
-			Assignee: assignee,
-			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingAssignment and
-			// claimFirstReadyHookAssignment); it must be scoped to this session's
-			// OWN runtime identity, never the bare pool template. A
-			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
-			// resolvedAgentName == a.QualifiedName() is the bare template, which is
-			// ALSO the [[named_session]] holder's identity — including it let a
-			// suffixed worker adopt the holder's in_progress bead (ga-80pen8). The
-			// bare template stays in RouteTargets, which governs FRESH claims of
-			// UNASSIGNED routed work. The canonical slot / named holder keep it via
-			// `alias` (GC_ALIAS == qualified bare name); only suffixed workers drop it.
-			IdentityCandidates: hookClaimIdentityCandidates(
-				assignee,
-				sessionID,
-				sessionName,
-				alias,
-				agentForQuery,
-			),
-			RouteTargets: hookClaimRouteTargets(hookClaimPrimaryRouteTarget(&a), resolvedAgentName, strings.TrimSpace(overrides["GC_TEMPLATE"])),
-			Env:          queryEnv,
-			DrainAck:     opts.DrainAck,
-			JSON:         opts.JSON,
+			Assignee:           assignee,
+			SessionID:          sessionID,
+			IdentityCandidates: identityCandidates,
+			RouteTargets:       routeTargets,
+			Env:                queryEnv,
+			DrainAck:           opts.DrainAck,
+			JSON:               opts.JSON,
 		}
 		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
-	return doHook(workQuery, workDir, false, runner, stdout, stderr)
+	// The discovery door is fenced too: a draining seat must not be handed its
+	// preassigned continuation sibling by the packs' post-close `gc hook`.
+	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
+		Env:      queryEnv,
+		DrainAck: opts.DrainAck,
+		JSON:     opts.JSON,
+	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+		Identities:   identityCandidates,
+		RouteTargets: routeTargets,
+	})
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -487,14 +521,39 @@ const (
 
 // fenceHookClaimSession applies the runtime-identity fence that gates
 // gc hook --claim before it runs the work query. It returns (code, handled):
-// handled is true only for a definitively stale session, whose terminal drain
-// result the caller must return as-is. An un-fenceable context (no session id or
-// no instance token), an eligible session, or a transient session-store fault all
-// return handled=false so the normal claim path runs — the fence never turns an
-// infrastructure hiccup or an in-progress start into a false refusal.
+// handled is true for a definitively stale session OR a managed pool runtime
+// with no verifiable session-bead registration (GC_TEMPLATE set, GC_SESSION_ID
+// empty), either of whose terminal drain result the caller must return as-is.
+// A genuinely un-fenceable context (no GC_TEMPLATE and no session id, or a
+// session id present but no instance token), an eligible session, or a
+// transient session-store fault all return handled=false so the normal claim
+// path runs — the fence never turns an infrastructure hiccup or an
+// in-progress start into a false refusal.
 func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool) {
+	if sessionID == "" {
+		// GC_TEMPLATE is the pool-membership signal (set only alongside
+		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
+		// that builds a live runtime's identity environment from its session
+		// bead). A runtime carrying GC_TEMPLATE with no GC_SESSION_ID therefore
+		// did not come through that front door with a durable session bead
+		// intact: a bead-less legacy start (startPreparedStartCandidate's
+		// empty-info.ID branch), a bead lost between mint and launch, or a
+		// runtime that survived a restart without its registration. Refuse the
+		// claim before any work query or mutation rather than let a slot with
+		// no verifiable identity have assignee/routing metadata rewritten onto
+		// it — the exact scenario this fence exists to prevent.
+		//
+		// A genuinely non-session caller (no GC_TEMPLATE either) never carried
+		// pool-membership identity in the first place and keeps falling through
+		// unfenced.
+		if template := strings.TrimSpace(os.Getenv("GC_TEMPLATE")); template != "" {
+			fmt.Fprintf(stderr, "gc hook --claim: refusing unregistered managed session for pool template %q: GC_TEMPLATE is set but GC_SESSION_ID is empty, so no durable session bead can be verified\n", template) //nolint:errcheck
+			return writeHookClaimMissingSessionRegistrationDrain(opts, stdout, stderr), true
+		}
+		return 0, false
+	}
 	instanceToken := strings.TrimSpace(os.Getenv("GC_INSTANCE_TOKEN"))
-	if sessionID == "" || instanceToken == "" {
+	if instanceToken == "" {
 		return 0, false
 	}
 	switch verdict, reason := classifyHookClaimSession(cityPath, cfg, sessionID, instanceToken); verdict {
@@ -648,16 +707,22 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Deliberately NO drain result and NO drain-ack. A failed read is not
+			// an idle store: the controller counted demand for this seat, so
+			// draining here would convert a transport failure into a false idle,
+			// reap the seat, and leave the work for the next tick to rediscover.
+			// Exit non-zero, keep the seat, and let the event above carry the
+			// cause; the idle-claim backstop re-drives the hook.
 			return 1
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, run)
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -692,7 +757,32 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// signal to the shared drain.
 		remaining = removeHookStore(remaining, claimStore)
 	}
-	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, stdout, stderr)
+	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
+// this bounds are transport-shaped: a contended SQLite leg, a store mid-write, a
+// binding whose engine is briefly refusing. Those clear in seconds, and the
+// alternative — exiting 1 and parking a seat the controller minted demand for
+// until the 90s backstop re-drives it — is strictly worse. Emptiness is NOT
+// retried: an empty read is an answer, and a seat that lost the sibling race must
+// drain promptly. Package vars follow hookWorkQueryTimeout's convention so tests
+// drive the loop without sleeping.
+var (
+	hookClaimQueryRetryAttempts = 3
+	hookClaimQueryRetryInterval = 5 * time.Second
+)
+
+// selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
+// the ERROR case only. It returns the first successful selection, or the last
+// error once the budget is spent.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
+	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
+		time.Sleep(hookClaimQueryRetryInterval)
+		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
+	}
+	return out, selected, err
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
@@ -730,6 +820,44 @@ func hookSessionAgentForQuery() string {
 		os.Getenv("GC_AGENT"),
 		os.Getenv("GC_SESSION_NAME"),
 	)
+}
+
+// hookClaimAssigneeIdentity picks the identity a claim is RECORDED under. It is
+// the writer half of the contract every liveness reader already implements, and
+// the order is the whole of it.
+//
+// An unaliased pool spawn has no occupant name in the environment except its
+// session bead id. clearPoolTemplateRuntimeIdentity blanks GC_ALIAS and stamps
+// GC_AGENT with the slot-derived runtime session name, and that name is a CHAIR:
+// it is stable across every session that ever occupies the slot, by design
+// (poolRuntimeSessionName — a bead-ID-scoped runtime name leaked one sandbox per
+// failed start, ga-vcjr9). Recording a claim under it makes every "is the holder
+// still alive?" consumer answer about the chair, so a dead occupant's in_progress
+// bead reads as held by whoever sits there next and is never released, resumed,
+// or replaced. On maintainer-city one such label was the session_name of 24
+// distinct session beads, and the worst of them 66.
+//
+// So the session bead id goes ahead of every session/agent NAME form. Every
+// reader already leads with it — sessionBeadAssigneeIdentities,
+// currentSessionAssigneeIdentities and ComputeAwakeSet all list bead.ID first,
+// directSessionBeadIDCandidates resolves it with a direct Get, and the default
+// work query's own documented order is "$GC_SESSION_ID (bead ID) >
+// $GC_SESSION_NAME > $GC_ALIAS" (config.EffectiveWorkQuery). The writer was the
+// only side reading that list backwards; this changes which of several identities
+// it picks, never what a reader has to understand.
+//
+// alias stays FIRST, and that is what scopes this to unaliased pool workers. A
+// non-empty GC_ALIAS means clearPoolTemplateRuntimeIdentity did not run: the
+// session is a named holder, a namepool member, or an explicit `gc hook <agent>`
+// target, whose alias is a configured identity that a later invocation from a
+// fresh shell — one with no GC_SESSION_ID at all — must still resolve to. Moving
+// the session id ahead of it would strand exactly that adoption.
+//
+// Everything after sessionID is the pre-existing fallback chain, reached only
+// when the environment carries no session bead id (a bare shell, an explicit
+// target outside a session).
+func hookClaimAssigneeIdentity(alias, sessionID, agentForQuery, resolvedAgentName, sessionName string) string {
+	return firstNonEmptyHookValue(alias, sessionID, agentForQuery, resolvedAgentName, sessionName)
 }
 
 func firstNonEmptyHookValue(values ...string) string {
@@ -787,7 +915,15 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // check) and does not enclose this work query. The package-level var lets us
 // lower it again once the probe's round-trip count is reduced and the slow
 // per-rig `bd ready`/`gc ready` paths are optimized.
-var hookWorkQueryTimeout = 60 * time.Second
+//
+// 2026-08-14: raised 60s -> 150s. Measured on a loaded six-rig city: each
+// `gc ready` leg of the default probe costs 10-14s (~4s process start + a
+// 6-leg federated read), and the five sequential reads put the pool-demand
+// payoff call at t=60s exactly — 850+ session.work_query_failed events with
+// every hook starved while `gc ready` run standalone returned the routed
+// rows. 150s covers the measured worst case (~70s) with margin for load;
+// the real cure remains ga-4qdfn (fewer round-trips, faster reader).
+var hookWorkQueryTimeout = 150 * time.Second
 
 // shellWorkQueryWithEnv runs a work query command via sh -c and returns
 // stdout. If env is non-nil it is used as the subprocess environment
@@ -848,11 +984,64 @@ func workQueryEnvForDir(env []string, dir string) []string {
 	return append(out, "PWD="+dir)
 }
 
+// hookVisibility scopes which already-returned work_query candidates doHook
+// shows the caller. Identities match a candidate's OWN assignee
+// (already-claimed work); RouteTargets match an UNASSIGNED candidate's
+// gc.routed_to (freshly routed work). These are kept as two separate lists,
+// not merged into one, because they are not interchangeable - see the
+// IdentityCandidates/RouteTargets split in cmdHookWithOptions (ga-80pen8): a
+// suffixed pool worker's own session identity must never act as a route
+// target for fresh unassigned claims. The zero value disables filtering
+// entirely, matching pre-ga-1xaqgo.2 behavior byte-for-byte.
+type hookVisibility struct {
+	Identities   []string
+	RouteTargets []string
+}
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
 // returns 0.
-func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
+// doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
+// DISCOVERY door. doHook itself stays a pure query-and-print function; this
+// wrapper is where the F-D fence lives for the non-claim path.
+//
+// It exists because F-D on --claim was only half the fence. Every workflows-pack
+// prompt's post-close lifecycle tells an agent to run plain `gc hook` and
+// continue any work sharing its root/continuation group — no --claim, because
+// the continuation sibling was PREASSIGNED to this session at claim time and is
+// already open under its assignee. Discovery listed that sibling for a draining
+// seat exactly as for a healthy one, so the fleet's dominant workflow walked
+// its seats back into multi-hour chains without ever crossing the fence.
+//
+// The refusal reuses the discovery no-work contract (nothing on stdout, exit 1)
+// because the packs ALREADY route that answer to `gc runtime drain-ack` and
+// exit. No prompt changes are needed to make the seat leave; the answer it
+// already knows how to obey is simply now the true one.
+func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, ops hookClaimOps, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
+	// An inject invocation reads nothing and answers nothing, so there is no
+	// work to withhold and no reason to pay for a probe.
+	if inject {
+		return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
+	}
+	ops.applyDefaults()
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
+		pending, err := ops.DrainPending(sessionID)
+		switch {
+		case err != nil:
+			// Fail open, and say so off-pane — same posture and same reasoning as
+			// the claim door: a blind probe must not stop a healthy fleet finding
+			// work, and must not go inert quietly.
+			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
+			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
+		case pending:
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
+		}
+	}
+	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)
+}
+
+func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer, visibility hookVisibility) int {
 	if inject {
 		return 0
 	}
@@ -869,6 +1058,7 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	trimmed := strings.TrimSpace(output)
 	normalized := normalizeWorkQueryOutput(trimmed)
 	normalized = filterUnreadyHookCandidates(normalized, time.Now())
+	normalized = filterForeignHookCandidates(normalized, visibility)
 	hasWork := workQueryHasReadyWork(normalized)
 
 	// Non-inject mode: print normalized, ready-only output. Return 0 only when work exists.
@@ -953,6 +1143,76 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 		return output
 	}
 	return string(reencoded)
+}
+
+// filterForeignHookCandidates drops work_query candidates that belong to a
+// different agent or are routed to a different agent/rig, mirroring the
+// assignee/route eligibility the claim path already enforces
+// (hookCandidateVisible). Plain "gc hook" has no claim step to reject
+// foreign work at, so under native-store schema skew (gc.routed_to's own
+// store-side predicate silently no-ops - ga-lmy6yj) it would otherwise
+// display another agent's in-flight or routed work as if it were this
+// session's own (ga-1xaqgo.2). Fails open at every decode step -
+// unparseable output, non-array output, non-object items, and items that
+// fail to decode as a beads.Bead all pass through unchanged - and is a
+// no-op entirely when visibility carries no identity/route context, since a
+// filter that can silently empty an agent's queue is a worse outage than
+// the over-serving it replaces.
+func filterForeignHookCandidates(output string, visibility hookVisibility) string {
+	if output == "" {
+		return output
+	}
+	if len(visibility.Identities) == 0 && len(visibility.RouteTargets) == 0 {
+		return output
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
+		return output
+	}
+	arr, ok := decoded.([]any)
+	if !ok {
+		return output
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, item := range arr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		candidate, ok := decodeHookCandidateBead(obj)
+		if !ok {
+			filtered = append(filtered, obj)
+			continue
+		}
+		if !hookCandidateVisible(candidate, visibility.Identities, visibility.RouteTargets) {
+			continue
+		}
+		filtered = append(filtered, obj)
+	}
+	reencoded, err := json.Marshal(filtered)
+	if err != nil {
+		return output
+	}
+	return string(reencoded)
+}
+
+// decodeHookCandidateBead best-effort decodes a raw work_query candidate
+// into a beads.Bead so filterForeignHookCandidates can reuse the same
+// assignee/route predicates as gc hook --claim. Roundtrips through JSON
+// rather than a field-by-field map read because beads.Bead.Metadata
+// (StringMap) already carries the bd-CLI type-coercion tolerance that this
+// decode should inherit unchanged.
+func decodeHookCandidateBead(obj map[string]any) (beads.Bead, bool) {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	var candidate beads.Bead
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		return beads.Bead{}, false
+	}
+	return candidate, true
 }
 
 func isFutureDeferredHookCandidate(item map[string]any, now time.Time) bool {

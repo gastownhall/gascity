@@ -37,22 +37,24 @@ package main
 //
 // storeref.ClassCandidates is the tree's by-id resolver, and its answer for a
 // relocated city is [class, work] — the class store first, because it is the
-// sole MINTER of the reserved namespace, then the work store, because minting
-// is not holding. This surface probes exactly that list in exactly that order.
+// reserved namespace's AUTHORITY, then the work store, because authority is not
+// exclusive possession. The class store is not the namespace's only MINTER
+// either: a rig configured with a prefix inside one mints work beads there, and
+// `gc storage migrate` preserved ids in the other direction. Leading is a
+// statement about probe ORDER, never about who could have created the id. This
+// surface probes exactly that list in exactly that order.
 // What differs is only how the work leg is READ: here it is the `bd`
 // subprocess, which is why the leg appears as a fall-through rather than as a
 // beads.Store. The in-process form of the same list, for the one-shot commands
 // that hold two ordinary stores, is by_id_store_route.go.
 //
-// The class leg is probed for EVERY id, not only for ids inside the class
-// namespace, and that is the one place this surface is deliberately STRONGER
-// than the shared resolver rather than merely equal to it. ClassCandidates
-// gates on the namespace before it builds a list (IDInNamespace), and `gc
-// storage migrate` preserves ids — so a bead the migration relocated keeps its
-// HQ/rig-era prefix and the resolver returns nil for exactly the ids that
-// moved. Only a residence probe reaches those, and without it their reads are
-// answered from the work store's retained pre-migration copy, frozen at
-// migration time. See resolve.
+// The class leg is probed for ids outside the class namespace too, not only
+// for ids inside it, because `gc storage migrate` preserves ids — so a bead the
+// migration relocated keeps its HQ/rig-era prefix, and without a residence
+// probe its reads are answered from the work store's retained pre-migration
+// copy, frozen at migration time. That probe is storeref's, not this surface's:
+// resolve runs the shared plan, which keeps the probe for exactly as long as
+// the binding has not been certified free of relics. See resolve.
 //
 // # Three deliberate properties
 //
@@ -60,11 +62,14 @@ package main
 //     (storebinding.GraphStore). They cannot reach a raw bead store through
 //     their parameter, so claim/release CAS lives in the store the contract is
 //     bound to and is never re-implemented as a read-then-write in the CLI.
-//   - A miss is not flattened into a fall-through when the id can only live in
-//     the class store. A reserved-prefix id (gcg-…) is minted by that store and
-//     nowhere else, so its absence is genuine absence and is reported in bd's
-//     own shape. Falling through would print a work-store answer for a bead the
-//     work store never held.
+//   - A binding MISS is a fall-through, for every id. The binding is the
+//     authority for its reserved namespaces, not their only lawful holder: a
+//     rig may be configured with a prefix inside one (config.ValidateRigs
+//     allows it and ReservedPrefixWarnings only advises), and `gc storage
+//     migrate` preserved ids in the other direction. So "the binding does not
+//     hold it" is a statement about the binding, and the ledger the passthrough
+//     is pointed at answers next. Answering absence here instead stranded every
+//     read and every write addressed at such a rig's own beads.
 //   - A resolution failure surfaces. Reading "the binding could not be opened"
 //     as "the bead is not there" is the root-loss shape this whole lane exists
 //     to prevent. On a city this build must not serve, an id only the class
@@ -74,32 +79,76 @@ package main
 //     storage and says nothing about a bead the work ledger still serves. See
 //     resolve.
 //
-// Served here: show, update (fields and metadata, including --claim),
-// release-if-current, and dep list. `gc bd heartbeat` is not — it is rewritten
-// to a metadata update before this hook runs — and neither is the general query
-// surface, which bd_relocated_classes.go refuses on its own terms.
+// Served here: show, update (fields and metadata, including --claim), close,
+// reopen, release-if-current, dep list, and dep tree. `gc bd heartbeat` is not — it
+// forwards to bd's native owner-only lease-refresh verb (commit 80aad8c), a
+// literal spelling parseBdByIDOp does not recognize, and it is no longer
+// rewritten to a metadata update the way it once was. On a city that relocates
+// the owning class a heartbeat of a bead the binding HOLDS is not a
+// fall-through: the ownership gate below (bdArgsAddressedClassIDs) puts the id
+// to the residence walk, and a hit is refused by refuseClassOwnedTarget, which
+// names the routing cause rather than letting the work store answer with bd's
+// not-found. A miss falls through with every other binding miss, so a rig whose
+// prefix shadows the namespace keeps bd's own heartbeat against its own ledger.
+// The general query surface is likewise unserved, and
+// bd_relocated_classes.go refuses it on its own terms.
+//
+// close and reopen are here for the same reason update is, one lifecycle step
+// further on. A class store MINTS ids from its binding workspace's own prefix,
+// so a synthetic it creates with no id — an input convoy, a patrol root, a
+// wisp — carries a WORK prefix while residing only in the binding. Reads found
+// those (the class leg is probed for every id); the close that would retire one
+// was not a by-ID verb at all, so it never opened this door, fell through to a
+// subprocess pointed at the prefix store, and died there with bd's not-found.
+// Every such open bead was a permanent ready-frontier polluter with no
+// supported drain path.
+//
+// A close this door serves does NOT reach the ADR-0009 work-record close gate,
+// which doBd runs later. The coverage boundary and why it is sound are recorded
+// where the gate defines itself, in work_record_gate.go's header.
 //
 // # Ownership is decided before servability
 //
-// An operation that is NOT served but whose subject the class store owns does
-// not fall through either: bd would open the work store, which cannot see the
-// bead, and the command would hang or answer about the wrong workspace. It is
-// refused instead, before the subprocess.
+// An operation that is NOT served but whose subject the class binding HOLDS
+// does not fall through either: bd would open the work store, which cannot see
+// the bead, and the command would hang or answer about the wrong workspace. It
+// is refused instead, before the subprocess.
 //
-// The two questions are answered by different code on purpose, and answering
-// them with one function was a real defect rather than a hypothetical. The
-// served parsers reject every flag they do not implement, so "can this be
-// served" said no to `show --long`, `show --id`, `dep list -t` and the rest of
-// bd's own manifest — and while a rejection meant fall-through, those were
-// precisely the invocations sent to the ledger that cannot answer. Ownership is
-// now decided by bdArgsNameClassOwnedBead, which reads only the argv and knows
-// nothing about what this surface implements.
+// Ownership is one question with one answer: RESIDENCE. A reserved prefix is
+// what decides which ids get ASKED — bdArgsAddressedClassIDs reads them from the
+// argv, so every reserved id is put to the binding even in an invocation the
+// mutation scanner cannot reduce to subjects — and residence is what decides
+// the answer. Reading the prefix as the answer instead was the defect this
+// door carried: the binding is its namespaces' authority, not their only lawful
+// holder, so every id a shadow-prefixed rig minted was refused on a proof that
+// did not hold. The other half of the population runs the same walk from the
+// other end: a MUTATION whose positional ids are unambiguous is probed even
+// though its ids carry a work prefix, because `gc storage migrate` preserved
+// ids and its relics reside in the binding. Without that a work-prefixed class
+// resident got no protection at all — its `--notes` update or its `delete` fell
+// through to a ledger that cannot hold it and died with bd's not-found, which
+// reads as "the bead is gone" rather than "you addressed the wrong store".
 //
-// Ownership is read from an id in an ID POSITION and never from an id-shaped
+// Ownership and servability are answered by different code on purpose, and
+// answering them with one function was a real defect rather than a
+// hypothetical. The served parsers reject every flag they do not implement, so
+// "can this be served" said no to `show --long`, `show --id`, `dep list -t` and
+// the rest of bd's own manifest — and while a rejection meant fall-through,
+// those were precisely the invocations sent to the ledger that cannot answer.
+// Which ids to ask about is now decided by bdArgsAddressedClassIDs, which reads
+// only the argv and knows nothing about what this surface implements.
+//
+// The id asked about is read from an ID POSITION and never from an id-shaped
 // value. A `gc bd list --metadata-field workflow_id=gcg-…` probe quotes a class
 // id rather than addressing one, so this surface declines it — OWNERSHIP is not
-// what is wrong with it. A `--parent gcg-…` names a class bead, and letting the
-// work store answer that returns a silent empty result.
+// what is wrong with it. A `--parent gcg-…` DOES address one, so it is put to
+// the binding — and the binding's answer, not the prefix, is what happens next.
+// A parent the binding holds is refused, because letting the work store answer
+// that returns a silent empty result. A parent it cleanly misses falls through,
+// and bd runs the create against the work ledger, which is the right ledger for
+// the population this door re-routed: a shadow-prefix rig referencing its own
+// bead. An id no ledger holds is bd's own dep validation to reject, not this
+// door's to guess about.
 //
 // Declining is not forwarding. That same selector is refused one pre-flight
 // earlier, by bd_relocated_classes.go, and for a different reason: `list` is a
@@ -114,9 +163,20 @@ package main
 // binding and — on a born-split city — re-proves its invariant with a full work
 // store census. That is once per process, memoized with every other one-shot
 // command's routing, but it is not free, so it is paid only by an invocation
-// that could concern a class-owned bead: a served by-ID form, or an argv that
-// addresses a reserved-prefix id. An ordinary work mutation addresses only work
-// ids and never enters.
+// that could concern a class-owned bead: a served by-ID form, an argv that
+// addresses a reserved-prefix id, or a MUTATION with unambiguous positional
+// ids. An ordinary work READ or SELECTOR never enters; a mutation addressing
+// ids enters exactly once per process.
+//
+// The mutation arm is the widening, and the id shape is why it cannot be
+// narrower. A class store mints from its binding workspace's own prefix and
+// `gc storage migrate` preserves ids, so "gc-123" says nothing about which
+// store holds the row — only a probe does, and skipping it is what sent every
+// unserved mutation of a class resident to the ledger that cannot hold it.
+// Reads and selectors stay outside because they address no subject whose
+// residence could decide anything: a selector QUOTES ids, and a read that this
+// surface serves is already inside. An ambiguous scan stays outside too, for
+// the plainest reason — it yields no ids to probe.
 
 import (
 	"encoding/json"
@@ -153,6 +213,21 @@ const (
 	// every closed blocker, and on a split city it is the operation whose
 	// subprocess never returned.
 	bdByIDDepList bdByIDVerb = "dep-list"
+	// bdByIDDepTree is `gc bd dep tree <id> [--direction=up|down] [--reverse]
+	// [--max-depth=N] [--json]`, the recursive form of the same read.
+	//
+	// It is the one federated read that resolves a whole relocated molecule, and
+	// every status summary asks for exactly that: pr_review.py's
+	// city_dep_subtree walks a root plus its descendants in one call, because
+	// the selector projections (`list`, `ready`, `sql`) cannot see the class at
+	// all. While this was unserved, the ownership gate refused it on every
+	// class-owned root — correctly, since bd would have answered from the ledger
+	// that does not hold the bead — and the pr-review label poller failed on
+	// every tick for every labeled PR (ga-pxppl).
+	//
+	// Serving it asks nothing new of the store: the walk is DepList to a level
+	// and Get for each related bead, which is what dep list already does once.
+	bdByIDDepTree bdByIDVerb = "dep-tree"
 	// bdByIDUpdate is `gc bd update <id>` carrying field and metadata writes.
 	//
 	// It is here because it is the step-completion write the core pack makes on
@@ -163,6 +238,14 @@ const (
 	// work ledger and left the step open in the binding forever: a molecule
 	// that stalls with no error anywhere.
 	bdByIDUpdate bdByIDVerb = "update"
+	// bdByIDClose is `gc bd close <id> [--json]`, and bdByIDReopen its undo.
+	//
+	// They are the drain verbs for a class resident: the row a class store
+	// minted under a work-shaped id has no other way to be retired, because
+	// every prefix-routed lane resolves it against a ledger that never held
+	// it. Only the bare form is served — see parseBdByIDCloseArgs.
+	bdByIDClose  bdByIDVerb = "close"
+	bdByIDReopen bdByIDVerb = "reopen"
 )
 
 // bdByIDDepDirectionUp asks for the beads that depend ON the subject; the
@@ -182,8 +265,11 @@ type bdByIDOp struct {
 	Assignee string
 	// Direction and DepType carry `dep list`'s two selectors. Direction is
 	// always populated for that verb; an empty DepType means every edge type.
+	// Direction is populated for `dep tree` too, which takes the same axis.
 	Direction string
 	DepType   string
+	// MaxDepth is `dep tree`'s safety limit, always populated for that verb.
+	MaxDepth int
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
 	Update beads.UpdateOpts
@@ -207,6 +293,12 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 	case "update":
 		op, _, ok := parseBdByIDUpdateArgs(bdArgs[1:])
 		return op, ok
+	case "close":
+		op, _, ok := parseBdByIDCloseArgs(bdByIDClose, bdArgs[1:])
+		return op, ok
+	case "reopen":
+		op, _, ok := parseBdByIDCloseArgs(bdByIDReopen, bdArgs[1:])
+		return op, ok
 	case "release-if-current":
 		id, assignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs)
 		if err != nil || !ok {
@@ -214,10 +306,16 @@ func parseBdByIDOp(bdArgs []string) (bdByIDOp, bool) {
 		}
 		return bdByIDOp{Verb: bdByIDRelease, ID: id, Assignee: assignee}, true
 	case "dep":
-		if len(bdArgs) < 2 || bdArgs[1] != "list" {
+		if len(bdArgs) < 2 {
 			return bdByIDOp{}, false
 		}
-		return parseBdDepListArgs(bdArgs[2:])
+		switch bdArgs[1] {
+		case "list":
+			return parseBdDepListArgs(bdArgs[2:])
+		case "tree":
+			return parseBdDepTreeArgs(bdArgs[2:])
+		}
+		return bdByIDOp{}, false
 	}
 	return bdByIDOp{}, false
 }
@@ -358,13 +456,69 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 		len(metadata) > 0
 }
 
+// parseBdByIDCloseArgs parses the tail of `gc bd close` and `gc bd reopen`.
+//
+// rejected names the first flag that stopped this from being served, the same
+// way parseBdByIDUpdateArgs does, so a refusal can say WHICH spelling kept the
+// command off this surface.
+//
+// The served form is one bare id plus --json, and that is the whole of what the
+// closed contract can express: GraphStore.Close and GraphStore.Reopen take an
+// id and return an error. bd's -r/--reason/--reason-file/--session carry text
+// the contract has nowhere to put, and --claim-next/--continue/--force/
+// --no-auto/--suggest-next name workflow this arm does not run. Serving any of
+// them by ignoring it would report a command as executed after silently
+// changing what it meant — the partial write this whole surface exists to
+// remove.
+//
+// Several ids stay unrecognized for a different reason: a batch spans stores,
+// so it would need per-id routing with partial-failure semantics bd's exit
+// contract does not express. The refusal path keeps such a batch honest when
+// one of its ids is class-owned; it is never half-applied here.
+func parseBdByIDCloseArgs(verb bdByIDVerb, args []string) (op bdByIDOp, rejected string, ok bool) {
+	op = bdByIDOp{Verb: verb}
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			if op.ID != "" || arg == "" {
+				// A second positional is a batch, not a flag: there is no
+				// spelling to name, and naming the id would read as a claim
+				// about that id rather than about the shape.
+				return bdByIDOp{}, "", false
+			}
+			op.ID = arg
+			continue
+		}
+		if arg == "--json" {
+			op.JSON = true
+			continue
+		}
+		name, _, _ := strings.Cut(arg, "=")
+		return bdByIDOp{}, name, false
+	}
+	if op.ID == "" {
+		return bdByIDOp{}, "", false
+	}
+	return op, "", true
+}
+
 // bdByIDUnservedFlag names the flag that kept an otherwise-routable invocation
 // off this surface, or "" when the shape itself was never one this serves.
 func bdByIDUnservedFlag(bdArgs []string) string {
-	if len(bdArgs) == 0 || bdArgs[0] != "update" {
+	if len(bdArgs) == 0 {
 		return ""
 	}
-	_, rejected, ok := parseBdByIDUpdateArgs(bdArgs[1:])
+	var rejected string
+	var ok bool
+	switch bdArgs[0] {
+	case "update":
+		_, rejected, ok = parseBdByIDUpdateArgs(bdArgs[1:])
+	case "close":
+		_, rejected, ok = parseBdByIDCloseArgs(bdByIDClose, bdArgs[1:])
+	case "reopen":
+		_, rejected, ok = parseBdByIDCloseArgs(bdByIDReopen, bdArgs[1:])
+	default:
+		return ""
+	}
 	if ok {
 		return ""
 	}
@@ -425,6 +579,86 @@ func parseBdDepListArgs(args []string) (bdByIDOp, bool) {
 	return op, true
 }
 
+// bdByIDDepTreeDefaultMaxDepth is bd's own default tree depth (dep.go registers
+// --max-depth with it), carried here so an unflagged walk cuts in the same place
+// on both arms.
+const bdByIDDepTreeDefaultMaxDepth = 50
+
+// parseBdDepTreeArgs parses the tail of `gc bd dep tree`.
+//
+// It serves the flags whose meaning this walk implements — --direction, its
+// deprecated --reverse spelling, --max-depth (with bd's -d short form) and
+// --json — and rejects the rest rather than accepting them as no-ops.
+// --show-all-paths, --status and --format all change what bd prints, so
+// answering them with the plain walk would report a different question as
+// executed; unrecognized here means the ownership gate refuses them loudly on a
+// class-owned id, which is the honest answer until they are implemented.
+//
+// --direction=both is rejected for the same reason and not because it is hard:
+// bd merges two walks for it, and this arm walks one.
+func parseBdDepTreeArgs(args []string) (bdByIDOp, bool) {
+	op := bdByIDOp{Verb: bdByIDDepTree, MaxDepth: bdByIDDepTreeDefaultMaxDepth}
+	reverse := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name, inline, hasInline := strings.Cut(arg, "=")
+		switch name {
+		case "--json":
+			if hasInline {
+				return bdByIDOp{}, false
+			}
+			op.JSON = true
+			continue
+		case "--reverse":
+			if hasInline {
+				return bdByIDOp{}, false
+			}
+			reverse = true
+			continue
+		case "--direction", "--max-depth", "-d":
+			if !hasInline {
+				if i+1 >= len(args) {
+					return bdByIDOp{}, false
+				}
+				i++
+				inline = args[i]
+			}
+			if name == "--direction" {
+				op.Direction = inline
+				continue
+			}
+			depth, err := strconv.Atoi(strings.TrimSpace(inline))
+			if err != nil || depth < 1 {
+				return bdByIDOp{}, false
+			}
+			op.MaxDepth = depth
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return bdByIDOp{}, false
+		}
+		if op.ID != "" || arg == "" {
+			return bdByIDOp{}, false
+		}
+		op.ID = arg
+	}
+	if op.ID == "" {
+		return bdByIDOp{}, false
+	}
+	// bd's own precedence: an explicit --direction wins, and bare --reverse is
+	// the deprecated spelling of --direction=up.
+	if op.Direction == "" {
+		op.Direction = bdByIDDepDirectionDown
+		if reverse {
+			op.Direction = bdByIDDepDirectionUp
+		}
+	}
+	if op.Direction != bdByIDDepDirectionUp && op.Direction != bdByIDDepDirectionDown {
+		return bdByIDOp{}, false
+	}
+	return op, true
+}
+
 // parseBdByIDPositional extracts exactly one positional bead id from args,
 // accepting --json plus the boolean flags named in extra and rejecting
 // everything else. Rejecting unknown flags is what keeps this arm honest: a
@@ -455,19 +689,19 @@ func parseBdByIDPositional(args []string, extra map[string]*bool) (id string, js
 	return id, jsonOut, true
 }
 
-// bdByIDResolution is what the class-ownership walk concluded about one id: the
-// front door of the class that would own it, whether the id can only live there
-// (a reserved-prefix id), and the row itself when it is resident.
+// bdByIDResolution is what the residency walk concluded about one id: the front
+// door of the class that would own it, and the row itself when the binding
+// holds it.
+//
+// There is no "the id's prefix says it is ours" bit. RESIDENCE is the whole
+// answer — a reserved prefix names the authority for a namespace, not its only
+// lawful holder — and a second bit that could disagree with Found is exactly
+// how this door came to report a rig's own bead as absent.
 type bdByIDResolution struct {
-	Graph    storebinding.GraphStore
-	Bead     beads.Bead
-	Found    bool
-	Reserved bool
+	Graph storebinding.GraphStore
+	Bead  beads.Bead
+	Found bool
 }
-
-// Owned reports whether the class store answers for this id — either because
-// the id carries the class's reserved prefix, or because the row is resident.
-func (r bdByIDResolution) Owned() bool { return r.Reserved || r.Found }
 
 // bdByIDClassDoor is the opened class front door serving this city.
 //
@@ -477,8 +711,24 @@ func (r bdByIDResolution) Owned() bool { return r.Reserved || r.Found }
 // reads one database rather than two, and a routed read cannot close a handle
 // another call site is still using.
 type bdByIDClassDoor struct {
-	Graph   storebinding.GraphStore
+	Graph storebinding.GraphStore
+	// Store is the same class binding Graph wraps, kept in its beads.Store shape
+	// so the work-record close gate — which is store-driven, not graph-driven —
+	// can evaluate the resolved class bead this door is about to write. It is a
+	// second view of the one handle the funnel owns, not a second handle: nothing
+	// here is released.
+	Store   beads.Store
 	Binding string
+	// CityPath is what resolve plans over. The residence probe belongs to
+	// storeref, and storeref reaches this city's bindings by path — so the door
+	// carries the path rather than a second derivation of the binding list.
+	//
+	// resolve and the served Graph must read the SAME binding handle. Both come
+	// from the cliResidencyBindings memo today (cliSoleClassBinding for Graph,
+	// cliByIDBindingOwner's topology for resolve), so residence is proven on the
+	// handle the write then lands in. Split those two derivations and a read
+	// could prove residence in one copy while the write goes to another.
+	CityPath string
 }
 
 // bindingName names the binding in operator-facing text.
@@ -519,58 +769,133 @@ func (d bdByIDClassDoor) bindingName() string {
 // stops holding, this door has to resolve per class — the graph store would
 // otherwise be asked for a sessions-class id it does not hold, and would
 // truthfully answer that it is absent.
+//
+// cliSoleClassBinding is how that condition is CHECKED rather than assumed: it
+// reports the city's relocated bindings grouped by store and refuses to name a
+// sole one when there is more than one. Asking the graph class specifically
+// (graphClassBinding) could not tell the two shapes apart.
 func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
-	routes := cliStorageRoutes(cityPath)
-	store, relocated := graphClassBinding(routes)
+	binding, relocated, err := cliSoleClassBinding(cityPath)
+	if err != nil {
+		return bdByIDClassDoor{}, false, fmt.Errorf("resolving the class front door: %w", err)
+	}
 	if !relocated {
 		return bdByIDClassDoor{}, false, nil
 	}
-	graph, err := storebinding.NewBeadsGraphStore(store)
+	graph, err := storebinding.NewBeadsGraphStore(binding.Store)
 	if err != nil {
-		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", routes.binding, err)
+		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", binding.Name, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Binding: routes.binding}, true, nil
+	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name, CityPath: cityPath}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
 //
-// A read failure is an error, never absence. Reading "the binding could not
-// answer" as "the bead is not there" is the root-loss shape this whole lane
-// exists to prevent, and it is the one classification a caller cannot recover
-// from once it has been flattened.
+// The question goes to storeref's by-id plan, not to a Get this door takes
+// itself. There is exactly one implementation of "does this binding hold this
+// id" in the tree that knows about the boot census, and a second answer taken
+// locally would be blind to it — so the answer is asked for where it is known,
+// not recomputed where it isn't. hookClaimClassRoute.holds was the last probe
+// still asking the binding directly; ga-qdt5y.16 collapsed it onto the same
+// plan, over a frame it captures once at construction, so there is no longer a
+// second spelling of this judgement anywhere in cmd/gc.
 //
-// The residence probe is why an id with no reserved prefix is asked about at
-// all: `gc storage migrate` copies the work store's infrastructure slice with
-// its ids PRESERVED, so a converged city holds work-shaped ids in its binding
-// and deciding ownership by prefix alone would send those reads back to the
-// ledger they were moved off.
+// The probe is why an id with no reserved prefix is asked about at all: `gc
+// storage migrate` copies the work store's infrastructure slice with its ids
+// PRESERVED, so a converged city holds work-shaped ids in its binding, and
+// deciding ownership by prefix alone would send those reads back to the ledger
+// they were moved off. The plan keeps the probe for as long as the binding
+// might hold such a relic, retiring it only on the conjunction of a
+// boot-verified "this binding mints only inside its reserved namespaces" and a
+// census, actually taken this process, that found none.
 //
-// The one error that is not a fault is the funnel's standing refusal. It says
-// this city's storage configuration cannot be served, which is a statement
-// about the city and about no particular bead — and a refused city still serves
-// work from its work ledger. So for a work id it establishes nothing and the
-// existing path stands; for an id only the class binding could own it is the
-// answer, and falls through to the fault arm.
+// The census counting CLOSED residents too (ga-qdt5y.19) is load-bearing here,
+// not incidental. Migration never deletes the source, so the work store keeps a
+// frozen pre-migration copy of every relic forever; a verdict that retired the
+// probe when the last relic closed would serve that id from the frozen copy —
+// OPEN, with pre-migration fields, permanently. The door depends on the wider
+// verdict, which is why the two landed together.
+//
+// A read failure is an error, never absence: flattening "the binding could not
+// answer" into "the bead is not there" is the root-loss shape this lane exists
+// to prevent, and it is the one classification a caller cannot recover from.
+// The standing storage refusal is the single error that is not a fault, and the
+// plan splits it by leg — tolerated on the probe, where a refused city still
+// serves work from its work ledger, and surfaced on the authority leg, where a
+// binding that cannot answer for a reserved id is a failure to DECIDE rather
+// than proof of absence.
 func (d bdByIDClassDoor) resolve(id string) (bdByIDResolution, error) {
-	resolution := bdByIDResolution{Graph: d.Graph, Reserved: bdIDIsClassReserved(id)}
-	bead, err := d.Graph.Get(id)
-	switch {
-	case err == nil:
-		resolution.Bead = bead
-		resolution.Found = true
-	case errors.Is(err, beads.ErrNotFound):
-	case isStandingStorageRefusal(err) && !resolution.Reserved:
-	default:
-		return bdByIDResolution{}, fmt.Errorf("reading %q from %s: %w", id, d.bindingName(), err)
+	resolution := bdByIDResolution{Graph: d.Graph}
+	owner, owned, err := cliByIDBindingOwner(d.CityPath, id)
+	if err != nil {
+		return bdByIDResolution{}, d.readFailure(id, err)
 	}
+	if !owned {
+		return resolution, nil
+	}
+	bead, err := beadForOwner(owner, id)
+	if err != nil {
+		return bdByIDResolution{}, d.readFailure(id, err)
+	}
+	resolution.Bead = bead
+	resolution.Found = true
 	return resolution, nil
 }
 
+// readFailure names the binding in the sentence an operator reads.
+//
+// The resolver names a losing leg by its ref token (class:gcg…), which is the
+// right identifier for a plan and the wrong one for a person who configured a
+// binding under a name. The token rides inside as the wrapped cause.
+func (d bdByIDClassDoor) readFailure(id string, err error) error {
+	return fmt.Errorf("reading %q from %s: %w", id, d.bindingName(), err)
+}
+
+// firstResident returns the first id the class binding actually holds, or ""
+// when it holds none of them.
+//
+// It is bounded by construction: the ids come from one mutation argv, which is
+// a handful of tokens, and the probe stops at the first hit. Residence — not
+// the reserved-prefix rule — is the only thing that can decide ownership for
+// these, so a failure to READ is a failure to decide and surfaces as one
+// (resolve's classification, unchanged).
+func (d bdByIDClassDoor) firstResident(ids []string) (string, error) {
+	for _, id := range ids {
+		resolution, err := d.resolve(id)
+		if err != nil {
+			return "", err
+		}
+		if resolution.Found {
+			return id, nil
+		}
+	}
+	return "", nil
+}
+
+// bdByIDMutationSubjects returns the bead ids a write-mutation argv ADDRESSES,
+// or nil when the argv is not a mutation or cannot be scanned into ids.
+//
+// It reads bdMutationWriteIDs, the scanner doBd's exact-ID collision guard
+// already trusts for the same argv, so the two agree on what a mutation
+// addresses rather than each deciding it. An ambiguous scan yields nil: an
+// unrecognized flag may or may not consume the next token, and a guess here
+// would probe residence for a value rather than a subject.
+func bdByIDMutationSubjects(bdArgs []string) []string {
+	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
+	if !ok || ambiguous {
+		return nil
+	}
+	return ids
+}
+
 // bdIDIsClassReserved reports whether id carries a reserved class id prefix.
-// Those prefixes are minted only by the relocated class stores, so such an id
-// existing anywhere else is not a thing bd can answer for.
+// Those namespaces belong to the relocated class stores — whether the store's
+// own sequence minted the id or a subsystem inside it did — so a binding that
+// cannot answer for one is a failure to decide rather than an absence. The
+// prefix decides which ids get ASKED about; residence, never the prefix,
+// decides the answer.
 func bdIDIsClassReserved(id string) bool {
-	for _, prefix := range config.ReservedClassPrefixes() {
+	for _, prefix := range config.AllReservedClassPrefixes() {
 		if prefix != "" && strings.HasPrefix(id, prefix+"-") {
 			return true
 		}
@@ -592,17 +917,17 @@ func bdIDIsClassReserved(id string) bool {
 // refuseRigScopedClassOwnedTarget.
 func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
-	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
-	if !served && !namesClassBead {
+	classIDs := bdArgsAddressedClassIDs(bdArgs)
+	mutationIDs := bdByIDMutationSubjects(bdArgs)
+	if !served && len(classIDs) == 0 && len(mutationIDs) == 0 {
 		// Nothing here can concern a class-owned bead, so the binding is not
 		// opened and the funnel is not entered.
 		//
 		// This is also the cost gate. Entering the funnel resolves a plan and
 		// opens a database, and the born-split arm re-proves its invariant with
-		// a full work-store census; a work mutation that addresses only work
-		// ids must not pay that. A non-reserved positional id on update/close
-		// needs the exact-ID collision guard doBd already applies to it, not
-		// class routing — the class store has no claim on it.
+		// a full work-store census; a read or selector that addresses no
+		// subject must not pay that, and neither must a mutation whose argv
+		// cannot be scanned into ids at all — there would be nothing to probe.
 		return 0, false
 	}
 	door, routed, err := openBdByIDClassFrontDoor(cityPath)
@@ -614,34 +939,97 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return 0, false
 	}
 	if !served {
-		// The invocation addresses a bead only the class binding could own, in
-		// a spelling this surface does not serve. A reserved prefix is proof of
-		// ownership on its own, so no residence probe is needed to know the
-		// work store cannot answer.
-		return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), named, bdByIDUnservedFlag(bdArgs), stderr)
+		return refuseUnservedClassMutation(door, bdArgs, classIDs, mutationIDs, stderr)
 	}
+	return serveBdByIDResolved(door, op, bdArgs, rigName, classDoorRepoDirs(cityPath), stdout, stderr)
+}
 
+// classDoorRepoDirs is the checkout table this door hands its close gate. A
+// binding is a store rather than a checkout, so the city is what a bead the
+// binding merely HOLDS answers to; a bead that names a rig as its owner answers
+// to that rig's checkout instead, which is why the rig table travels with the
+// city path. The table loads the config lazily (cityRigsLoader), so a read this
+// door serves pays for it only when a close actually asks.
+func classDoorRepoDirs(cityPath string) workRecordRepoDirs {
+	return workRecordRepoDirs{cityPath: cityPath, legacy: cityPath, rigs: cityRigsLoader(cityPath)}
+}
+
+// refuseUnservedClassMutation answers a by-ID invocation that addresses a bead
+// the class binding HOLDS in a spelling this surface does not serve. Returning
+// (0, false) means none of the subjects PROBED is resident there — bd is still
+// their truth and the caller's passthrough answers byte-identically, including
+// doBd's own exact-ID collision guard, which this arm must not displace.
+//
+// The candidates are EVERY reserved-prefix id the argv addresses
+// (bdArgsAddressedClassIDs) plus whatever bdMutationWriteIDs could reduce to
+// subjects. Probing every addressed id, not just the first, is what makes a
+// multi-subject `dep add`/`dep remove` order-independent: an argv whose first
+// reserved id is a clean miss and whose LATER id is class-resident is refused on
+// the later id rather than falling through on the first miss. The one spelling
+// still outside this net is the all-work-prefix argv, which carries no reserved
+// id and is no write-mutation verb, so it never opens this door to be probed at
+// all; ga-zvetw tracks that remaining end.
+//
+// Ownership is decided by RESIDENCE for every subject, including one carrying a
+// reserved prefix. The prefix decides which ids are asked about — an argv naming
+// a reserved id is asking about that id whether or not the mutation scanner
+// could reduce the rest to subjects — but it does not decide the answer. The
+// binding is the namespace's authority, not its only lawful holder, so refusing
+// on the prefix alone strands every write to a rig configured with a prefix
+// inside the namespace.
+func refuseUnservedClassMutation(door bdByIDClassDoor, bdArgs, classIDs, mutationIDs []string, stderr io.Writer) (int, bool) {
+	candidates := make([]string, 0, len(classIDs)+len(mutationIDs))
+	candidates = append(candidates, classIDs...)
+	candidates = append(candidates, mutationIDs...)
+	resident, err := door.firstResident(candidates)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1, true
+	}
+	if resident == "" {
+		return 0, false
+	}
+	// The invocation addresses a bead the class binding holds, in a spelling
+	// this surface does not serve. Forwarding it would run the command against
+	// the one ledger that cannot hold the bead.
+	return refuseClassOwnedTarget(door, bdByIDRefusedVerb(bdArgs), resident, bdByIDUnservedFlag(bdArgs), stderr)
+}
+
+// serveBdByIDResolved answers a served by-ID op from the class front door. It
+// resolves the id against the class binding, falls through to the passthrough
+// on any binding miss whatever the id's prefix, refuses the one case this
+// surface must not serve (an explicit --rig work scope on a bead the binding
+// holds), runs the ADR-0009 work-record close gate, and dispatches the verb
+// against the class graph. repoDirs is the checkout table the close gate
+// resolves a closing bead's repository from.
+func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rigName string, repoDirs workRecordRepoDirs, stdout, stderr io.Writer) (int, bool) {
 	resolution, err := door.resolve(op.ID)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1, true
 	}
-	if !resolution.Owned() {
-		// A work-store id the class store has never seen: bd is still its
-		// truth, and the passthrough answers it byte-identically.
-		return 0, false
-	}
 	if !resolution.Found {
-		// Reserved-prefix id with no row: it has nowhere else to live.
+		// The binding does not hold this id: bd is still its truth, and the
+		// passthrough answers it byte-identically. That is the same answer
+		// whatever the id's prefix, because a reserved prefix makes the binding
+		// the namespace's AUTHORITY and not its only lawful holder — a rig
+		// configured with a prefix inside the namespace mints work beads there
+		// (config.ValidateRigs allows it; ReservedPrefixWarnings only advises),
+		// and the migration preserved ids in the other direction.
 		//
-		// This runs BEFORE the --rig refusal below, and the order is the
+		// It runs BEFORE the --rig refusal below, and the order is the
 		// diagnosis. The refusal's whole claim is that the binding owns this
 		// bead and the named rig's work store does not hold it — a sentence
-		// that is false when nothing holds it. A mistyped reserved-prefix id
-		// under --rig is an id error, not a scope error, and blaming the flag
-		// sends the operator to fix the one thing that was not wrong.
-		printBdByIDNotFound(stderr, op.ID)
-		return 1, true
+		// that is false when the binding never answered for it. Blaming the
+		// flag there sends the operator to fix the one thing that was not
+		// wrong, and refuses the one scope that could still resolve the id.
+		//
+		// A miss is not a shrug: only an ANSWER of "absent" reaches here. A
+		// binding that could not answer — unopenable, refusing, or faulting —
+		// left through the error arm above, because the plan carries the
+		// authority leg as PolicyFatal and resolve classifies every non-absence
+		// as a read failure.
+		return 0, false
 	}
 	if rig := strings.TrimSpace(rigName); rig != "" {
 		// The invocation pins a WORK rig scope and names a bead the class
@@ -650,6 +1038,9 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// honoring it sends the read to a ledger that does not hold the bead.
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
+	}
+	if gateBdByIDClassClose(door, op, bdArgs, resolution, repoDirs, stderr) {
+		return 1, true
 	}
 	switch op.Verb {
 	case bdByIDShow:
@@ -660,8 +1051,14 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		return doBdByIDReleaseIfCurrent(resolution.Graph, op.ID, op.Assignee, stdout, stderr), true
 	case bdByIDDepList:
 		return doBdByIDDepList(resolution.Graph, op, stdout, stderr), true
+	case bdByIDDepTree:
+		return doBdByIDDepTree(resolution.Graph, resolution.Bead, op, stdout, stderr), true
 	case bdByIDUpdate:
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+	case bdByIDClose:
+		return doBdByIDClose(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+	case bdByIDReopen:
+		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	}
 	// Unreachable while the verb set and this switch agree, and a refusal
 	// rather than a fall-through because the two disagreeing is exactly the
@@ -669,6 +1066,25 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	// so the passthrough would run a verb this build recognized against the one
 	// ledger that cannot hold the bead.
 	return refuseClassOwnedTarget(door, string(op.Verb), op.ID, "", stderr)
+}
+
+// gateBdByIDClassClose runs the ADR-0009 work-record close gate against the
+// resolved class bead before the door serves a close or a closing update. The
+// class door writes the class copy, so — unlike the fall-through path in
+// cmd_bd.go — the prefix-store gate never saw these closes; this is where the
+// contract is enforced for them. It is a no-op for every non-closing op:
+// evaluateWorkRecordCloseGate consults workRecordCloseTargets, which reports
+// not-a-close for show/claim/release/dep/reopen and for updates that do not set
+// status closed. The resolved bead is handed in as the preFetched value so the
+// gate reuses it rather than re-reading the class store, and door.Store answers
+// any other id the argv might name. Returns true only when the close must be
+// blocked (enforcement on and the work record invalid).
+func gateBdByIDClassClose(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, resolution bdByIDResolution, repoDirs workRecordRepoDirs, stderr io.Writer) bool {
+	if op.Verb != bdByIDClose && op.Verb != bdByIDUpdate {
+		return false
+	}
+	preFetched := map[string]beads.Bead{op.ID: resolution.Bead}
+	return evaluateWorkRecordCloseGate(bdArgs, door.Store, preFetched, repoDirs, workRecordEnforceEnabled(), stderr)
 }
 
 // refuseRigScopedClassOwnedTarget refuses a by-ID invocation that pins a rig
@@ -773,9 +1189,11 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 	return strings.Join(words, " ")
 }
 
-// bdArgsNameClassOwnedBead reports the first reserved-prefix id an invocation
-// ADDRESSES, for any bd subcommand, and is what keeps an unserved spelling from
-// reaching the work ledger.
+// bdArgsAddressedClassIDs returns EVERY reserved-prefix id an invocation
+// ADDRESSES, in argv order, for any bd subcommand, and is what keeps an unserved
+// spelling from reaching the work ledger. Returning all addressed ids — not just
+// the first — is what makes a multi-subject verb's protection independent of the
+// order the subjects were typed (see refuseUnservedClassMutation).
 //
 // It exists because the served parsers are deliberately strict: they reject
 // every flag they do not implement, and a rejection used to mean the command
@@ -794,9 +1212,9 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // takes a bead id. It is merely QUOTED when it is the value of any other flag,
 // and a quoted id decides nothing ABOUT OWNERSHIP: `gc bd list --metadata-field
 // workflow_id=gcg-…` selects work rows by a field they carry, so no bead of the
-// relocated class is being addressed and this walk returns false for it.
+// relocated class is being addressed and this walk collects no id from it.
 //
-// False here does not mean forwarded. The selector dialect guard in
+// An empty result here does not mean forwarded. The selector dialect guard in
 // bd_relocated_classes.go runs first and refuses that same argv on servability
 // — a projection whose predicate names a namespace this ledger holds no row
 // under cannot answer it, and `[]` is a confident wrong answer. What this walk
@@ -816,7 +1234,7 @@ func bdByIDRefusedVerb(bdArgs []string) string {
 // token is treated as addressed. That is the same choice bdRelocatedClassVerb
 // makes and it is bounded the same way, because only a token that actually
 // carries a reserved class prefix can refuse anything.
-func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
+func bdArgsAddressedClassIDs(bdArgs []string) []string {
 	sub, args, resolved := bdByIDSubcommand(bdArgs)
 	valueFlags := bdflags.GlobalValueFlags()
 	boolFlags := bdflags.GlobalBoolFlags()
@@ -833,55 +1251,59 @@ func bdArgsNameClassOwnedBead(bdArgs []string) (string, bool) {
 	undecidable := !resolved
 	positionalOnly := false
 
+	var ids []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case positionalOnly:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		case arg == "--":
 			positionalOnly = true
-			continue
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			name, inline, hasInline := strings.Cut(arg, "=")
-			if hasInline {
-				if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
-					if id, named := bdFirstReservedClassID(inline); named {
-						return id, true
-					}
-				}
-				continue
-			}
-			if boolFlags[name] {
-				continue
-			}
-			if !valueFlags[name] {
-				// Unknown flag: it may or may not consume the next token, so
-				// from here nothing is skipped.
-				undecidable = true
-				continue
-			}
-			if i+1 >= len(args) {
-				continue
-			}
-			i++
-			if bdIDValuedFlags[name] {
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			} else if undecidable {
-				// The flag is known to consume this token, so it is a value —
-				// but an earlier unknown flag may already have shifted the
-				// alignment, so judge it rather than trust the offset.
-				if id, named := bdFirstReservedClassID(args[i]); named {
-					return id, true
-				}
-			}
-			continue
-		}
-		if id, named := bdFirstReservedClassID(arg); named {
-			return id, true
+			var flagIDs []string
+			flagIDs, i, undecidable = bdArgsFlagAddressedIDs(args, i, undecidable, valueFlags, boolFlags)
+			ids = append(ids, flagIDs...)
+		default:
+			ids = append(ids, bdReservedClassIDs(arg)...)
 		}
 	}
-	return "", false
+	return ids
+}
+
+// bdArgsFlagAddressedIDs judges a single flag token args[i] — already known to
+// start with "-" and not be a bare "-" — for the reserved-prefix class ids its
+// value addresses. It returns those ids, the index to resume the argv scan from
+// (advanced past a value token the flag consumed), and whether argv alignment is
+// now undecidable.
+//
+// A bd flag either inlines its value (`--deps=a,b`), consumes the next token
+// (`--deps a,b`), or takes none (a bool). An unknown flag might do any of these,
+// so once one is seen every following offset is undecidable and no later token is
+// skipped; the caller threads that state in and back out.
+func bdArgsFlagAddressedIDs(args []string, i int, undecidable bool, valueFlags, boolFlags map[string]bool) ([]string, int, bool) {
+	name, inline, hasInline := strings.Cut(args[i], "=")
+	var ids []string
+	switch {
+	case hasInline:
+		if bdIDValuedFlags[name] || (undecidable && !boolFlags[name]) {
+			ids = bdReservedClassIDs(inline)
+		}
+	case boolFlags[name]:
+		// A bool flag takes no value; there is nothing to judge.
+	case !valueFlags[name]:
+		// Unknown flag: it may or may not consume the next token, so from here
+		// nothing is skipped.
+		undecidable = true
+	case i+1 < len(args):
+		// A value flag consumes the next token. Judge it when the flag names a
+		// bead, or when an earlier unknown flag may already have shifted the
+		// alignment so the offset cannot be trusted.
+		i++
+		if bdIDValuedFlags[name] || undecidable {
+			ids = bdReservedClassIDs(args[i])
+		}
+	}
+	return ids, i, undecidable
 }
 
 // bdByIDSubcommand locates the bd subcommand in an argv and returns the
@@ -936,17 +1358,21 @@ var bdIDValuedFlags = map[string]bool{
 	"--for": true, "--attach": true,
 }
 
-// bdFirstReservedClassID returns the first reserved-prefix id in a token,
-// splitting the comma lists bd accepts for `--deps` and friends so an id in a
-// later position is not missed.
-func bdFirstReservedClassID(token string) (string, bool) {
+// bdReservedClassIDs returns EVERY reserved-prefix id in a token, splitting the
+// comma lists bd accepts for `--deps`/`--blocked-by`/`--depends-on` and friends.
+// A single value can address more than one bead, and each reserved id is a
+// distinct class-ownership question, so returning only the first would let a
+// later class-resident id fall through on an earlier clean miss — the exact
+// order dependence the by-id door exists to remove, reproduced inside one token.
+func bdReservedClassIDs(token string) []string {
+	var ids []string
 	for _, part := range strings.Split(token, ",") {
 		part = strings.TrimSpace(part)
 		if bdIDIsClassReserved(part) {
-			return part, true
+			ids = append(ids, part)
 		}
 	}
-	return "", false
+	return ids
 }
 
 // bdByIDClaimActor returns the identity a routed claim acquires the bead for.
@@ -1078,6 +1504,126 @@ func doBdByIDDepList(graph storebinding.GraphStore, op bdByIDOp, stdout, stderr 
 	return 0
 }
 
+// bdByIDTreeRow is one node of `bd dep tree --json`: the bead, plus where the
+// walk found it. bd emits a FLAT array in pre-order rather than a nested tree —
+// TreeNode has no children field — and the consumers read it that way, so the
+// shape is kept rather than improved on.
+//
+// TreeParentID is the edge the walk arrived by and is a different fact from the
+// bead's own `parent`, which the embedded record still carries under that name.
+type bdByIDTreeRow struct {
+	beads.Bead
+	Depth          int    `json:"depth"`
+	TreeParentID   string `json:"parent_id"`
+	EdgeFromParent string `json:"edge_from_parent,omitempty"`
+	// Truncated marks a node whose children were cut by --max-depth. bd's own
+	// walker declares the field and never sets it, which reports a silently
+	// shortened subtree as complete; this arm answers it, because a summary that
+	// reads a cut tree as the whole molecule is the wrong-answer class this
+	// surface exists to close.
+	Truncated bool `json:"truncated"`
+	// External marks an edge whose other end is not resident in this class
+	// store, exactly as dep list reports it. Such a node is named but not
+	// walked: crossing to the work store here would be a federated cross-store
+	// read, and dropping the edge would misreport a declared reference.
+	External bool `json:"external,omitempty"`
+}
+
+// doBdByIDDepTree answers the recursive dependency read from the owning class
+// store, walking the same contract dep list reads once.
+//
+// The walk reproduces bd's own semantics deliberately, because the two arms
+// answer the same command and a consumer cannot tell which one served it:
+// pre-order with the root at depth 0, one visit per bead however many paths
+// reach it, `relates-to` edges excluded as loose knowledge-graph links rather
+// than structure, and --max-depth cutting at depth >= max.
+func doBdByIDDepTree(graph storebinding.GraphStore, root beads.Bead, op bdByIDOp, stdout, stderr io.Writer) int {
+	visited := map[string]bool{}
+	rows := []bdByIDTreeRow{}
+
+	// Recursion depth is bounded by op.MaxDepth, which the parser floors at 1.
+	var walk func(bead beads.Bead, depth int, parentID, edge string) error
+	walk = func(bead beads.Bead, depth int, parentID, edge string) error {
+		row := bdByIDTreeRow{Bead: bead, Depth: depth, TreeParentID: parentID, EdgeFromParent: edge}
+		visited[bead.ID] = true
+		deps, err := graph.DepList(bead.ID, op.Direction)
+		if err != nil {
+			return fmt.Errorf("listing %s dependencies of %s: %w", op.Direction, bead.ID, err)
+		}
+		children := make([]beads.Dep, 0, len(deps))
+		for _, dep := range deps {
+			if dep.Type == bdByIDDepTreeLooseEdge {
+				continue
+			}
+			children = append(children, dep)
+		}
+		row.Truncated = len(children) > 0 && depth+1 >= op.MaxDepth
+		rows = append(rows, row)
+		if row.Truncated {
+			return nil
+		}
+		for _, dep := range children {
+			related := dep.DependsOnID
+			if op.Direction == bdByIDDepDirectionUp {
+				related = dep.IssueID
+			}
+			if visited[related] {
+				continue
+			}
+			child, err := graph.Get(related)
+			switch {
+			case err == nil:
+				if err := walk(child, depth+1, bead.ID, dep.Type); err != nil {
+					return err
+				}
+			case errors.Is(err, beads.ErrNotFound):
+				visited[related] = true
+				rows = append(rows, bdByIDTreeRow{
+					Bead:           beads.Bead{ID: related},
+					Depth:          depth + 1,
+					TreeParentID:   bead.ID,
+					EdgeFromParent: dep.Type,
+					External:       true,
+				})
+			default:
+				return fmt.Errorf("reading %s: %w", related, err)
+			}
+		}
+		return nil
+	}
+
+	if err := walk(root, 0, "", ""); err != nil {
+		fmt.Fprintf(stderr, "gc bd dep tree: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if op.JSON {
+		out, err := json.MarshalIndent(rows, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd dep tree: rendering %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprintln(stdout, string(out)) //nolint:errcheck // best-effort stdout
+		return 0
+	}
+	fmt.Fprintf(stderr, "gc bd dep tree: served in process from the class binding\n") //nolint:errcheck // best-effort stderr
+	for _, row := range rows {
+		title := row.Title
+		switch {
+		case row.External:
+			title = "(not resident in this class binding)"
+		case row.Truncated:
+			title += " (children cut by --max-depth)"
+		}
+		fmt.Fprintf(stdout, "%s%s\t%s\t%s\n", strings.Repeat("  ", row.Depth), row.ID, row.Status, title) //nolint:errcheck // best-effort stdout
+	}
+	return 0
+}
+
+// bdByIDDepTreeLooseEdge is the one edge kind bd's tree walker skips: a
+// knowledge-graph link rather than structure, so following it would pull an
+// unrelated bead into a molecule's subtree.
+const bdByIDDepTreeLooseEdge = "relates-to"
+
 // printBdByIDBead renders a routed bead.
 //
 // --json emits a JSON array of issues, which is what bd emits and what the pack
@@ -1183,12 +1729,40 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 	return printBdByIDBead(updated, op.JSON, binding, stdout, stderr)
 }
 
-// printBdByIDNotFound renders genuine absence in bd's own shape so existing
-// parsers see the same signal the passthrough would have produced, and adds the
-// one thing that differs: class stores resolve ids exactly, so a truncated id
-// pasted from a log reads as absent here where bd would have substring-matched
-// it.
-func printBdByIDNotFound(stderr io.Writer, id string) {
-	fmt.Fprintf(stderr, "Error fetching %s: no issue found matching %q\n", id, id)                                                       //nolint:errcheck // best-effort stderr
-	fmt.Fprintf(stderr, "gc bd: %s is a class-store id; class stores resolve ids exactly (no substring match) — pass the full id\n", id) //nolint:errcheck // best-effort stderr
+// doBdByIDClose retires a class-store bead through the closed graph contract.
+//
+// The already-closed answer is the STORE's: the contract's Close carries the
+// canonical no-op semantics, and a "is it closed yet" check here would be a
+// second implementation of a rule the store already has, free to drift from it.
+func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	return doBdByIDLifecycleWrite(graph, op, "close", graph.Close, binding, stdout, stderr)
+}
+
+// doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a
+// drain that can close a class resident but not reopen one is a one-way door.
+func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	return doBdByIDLifecycleWrite(graph, op, "reopen", graph.Reopen, binding, stdout, stderr)
+}
+
+// doBdByIDLifecycleWrite applies a status transition through the closed graph
+// contract, then re-reads and renders what the store now holds.
+//
+// The re-read is doBdByIDUpdate's rule, for doBdByIDUpdate's reason: bd prints
+// the row after a mutation and callers have learned to trust that output, so
+// rendering the request back would report what was asked for rather than what
+// the store now holds. On these two verbs that difference is the whole signal —
+// a binding whose read leg and write leg resolve against different tiers is
+// visible here as an error, and invisible to a caller that only echoed the
+// verb.
+func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb string, write func(string) error, binding string, stdout, stderr io.Writer) int {
+	if err := write(op.ID); err != nil {
+		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	written, err := graph.Get(op.ID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd %s: %s was written and could not be re-read: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return printBdByIDBead(written, op.JSON, binding, stdout, stderr)
 }

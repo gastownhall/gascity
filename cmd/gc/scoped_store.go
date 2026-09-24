@@ -27,7 +27,11 @@ func scopedBdStoreForCity(ctx context.Context, cityPath string) (*beads.BdStore,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
+	if err != nil {
+		return nil, err
+	}
+	return beads.NewBdStore(cityPath, runner), nil
 }
 
 // scopedBdStoreForRig is scopedBdStoreForCity for a rig-scoped store.
@@ -39,7 +43,27 @@ func scopedBdStoreForRig(ctx context.Context, cityPath string, cfg *config.City,
 	if err != nil {
 		return nil, err
 	}
-	return beads.NewBdStore(rigDir, beads.ExecCommandRunnerWithEnvContext(ctx, env)), nil
+	runner, err := beadsCommandRunnerWithContextForHostedCity(ctx, cityPath, env)
+	if err != nil {
+		return nil, err
+	}
+	return beads.NewBdStore(rigDir, runner), nil
+}
+
+func beadsCommandRunnerWithContextForHostedCity(ctx context.Context, cityPath string, env map[string]string) (beads.CommandRunner, error) {
+	if env == nil {
+		env = make(map[string]string)
+	}
+	// Store opens degrade rather than refuse: see pinBdGCEnvironmentBestEffort.
+	pinBdGCEnvironmentBestEffort(env)
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return beads.ExecCommandRunnerWithEnvContextWithoutAmbientBeads(ctx, env), nil
+	}
+	return beads.ExecCommandRunnerWithEnvContext(ctx, env), nil
 }
 
 // bdStoreBacking unwraps store through any CachingStore/beadPolicyStore

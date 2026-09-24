@@ -23,6 +23,7 @@ import (
 // Live-query failures fail closed: the bead stays open until assignment can be
 // re-verified.
 func closeSessionBeadIfUnassigned(
+	cityPath string,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	cfg *config.City,
@@ -34,7 +35,7 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, session, cfg)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
 		return false
@@ -56,6 +57,7 @@ func closeSessionBeadIfUnassigned(
 // sessionFrontDoor and run the extmsg/orphaned-work release cascade). Byte-
 // identical to the raw form for the GCSweep close op.
 func closeSessionInfoIfUnassigned(
+	cityPath string,
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	cfg *config.City,
@@ -67,7 +69,7 @@ func closeSessionInfoIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(store, rigStores, info, cfg)
+	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false

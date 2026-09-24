@@ -14,18 +14,46 @@ import (
 	"time"
 )
 
+// ps deadlines exist to stop a WEDGED ps from stalling a caller forever; they
+// are not latency budgets. That distinction matters because ps cost scales with
+// the whole process table, not with the pids asked about: procps rebuilds its
+// view of /proc before it filters, so `ps -p <pid>` costs the same as `ps -ax`.
+// Measured on a 17k-process host, both take ~1.1s — so the original 1s budget
+// turned a healthy-but-busy machine into "signal: killed" on every probe, which
+// the identity checks then read as "cannot confirm".
+//
+// Linux never pays this: Alive, StartTime, Cmdline and ChildPIDs all read /proc
+// directly for the pid in question and only reach ps where /proc is absent
+// (darwin). The budget below therefore governs the darwin fallback, where a
+// large process table is exactly as likely, so it is sized for one rather than
+// against it. GC_PIDUTIL_PS_TIMEOUT overrides it for constrained hosts.
 const (
-	psZombieTimeout  = 100 * time.Millisecond
-	childEnumTimeout = 1 * time.Second
-	// psStartTimeTimeout bounds the portable start-time probe. Callers sit in a
-	// post-SIGKILL reap loop, so a hung ps must not stall them.
-	psStartTimeTimeout = 1 * time.Second
+	defaultPSTimeout = 10 * time.Second
+	minPSTimeout     = time.Second
 )
 
-// psCmdlineTimeout bounds the portable argv probe. Callers run on reconciler
-// ticks, so a hung ps must not stall them; a timeout yields no argv, which the
-// identity check treats as "cannot confirm" and rejects.
-const psCmdlineTimeout = time.Second
+// psTimeout returns the deadline for a ps probe, honoring
+// GC_PIDUTIL_PS_TIMEOUT and refusing anything below the floor so a
+// misconfiguration cannot reintroduce the truncation this replaced.
+//
+// This is an operator escape hatch in the same family as GC_HOOK_CLAIM_WINDOW
+// (cmd/gc/cmd_hook_claim.go): a Go duration read straight from the environment,
+// where an unparseable or out-of-range value falls back to the default rather
+// than weakening the guard — the direction that stays safe. It is deliberately
+// NOT an internal/rollout gate: a rollout Spec selects between two mechanical
+// code paths and carries a ConfigPath, Expires and VersionAnchor for its
+// graduation, and this knob has none of those. It tunes one permanent bound.
+func psTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("GC_PIDUTIL_PS_TIMEOUT"))
+	if raw == "" {
+		return defaultPSTimeout
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < minPSTimeout {
+		return defaultPSTimeout
+	}
+	return parsed
+}
 
 // Alive reports whether a PID exists and is not a zombie.
 func Alive(pid int) bool {
@@ -41,11 +69,37 @@ func Alive(pid int) bool {
 	if err != nil {
 		return !psReportsZombie(pid)
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) >= 3 && fields[2] == "Z" {
+	state, ok := procStatState(string(data))
+	if ok && state == "Z" {
 		return false
 	}
 	return true
+}
+
+// procStatState returns field 3 (state) from a Linux /proc/<pid>/stat row.
+// Field 2 (comm) may contain spaces and parentheses, so the state is the first
+// token after comm's final closing parenthesis, not the third whitespace token.
+func procStatState(stat string) (string, bool) {
+	lparen := strings.IndexByte(stat, '(')
+	rparen := strings.LastIndexByte(stat, ')')
+	if lparen <= 0 || rparen <= lparen ||
+		!isASCIIWhitespace(stat[lparen-1]) ||
+		rparen+1 >= len(stat) || !isASCIIWhitespace(stat[rparen+1]) {
+		return "", false
+	}
+	parsedPID, err := strconv.Atoi(strings.TrimSpace(stat[:lparen]))
+	if err != nil || parsedPID <= 0 {
+		return "", false
+	}
+	fields := strings.Fields(stat[rparen+1:])
+	if len(fields) == 0 || len(fields[0]) != 1 {
+		return "", false
+	}
+	return fields[0], true
+}
+
+func isASCIIWhitespace(b byte) bool {
+	return b == ' ' || b >= '\t' && b <= '\r'
 }
 
 // StartTime returns a PID's start time — field 22 (starttime, in clock ticks
@@ -210,6 +264,50 @@ func NormalizeArgv(argv []string) []string {
 	return out
 }
 
+// procChildPIDs reads a parent's direct children from
+// /proc/<pid>/task/<tid>/children, which the kernel maintains per thread. The
+// cost is proportional to the pids asked about rather than to the process
+// table, so it does not degrade on a busy host the way ps does — the whole
+// reason the ps path needs a generous deadline.
+//
+// Reports ok=false where /proc is absent (darwin) or the children file is not
+// exposed (CONFIG_PROC_CHILDREN off), so the caller falls back to ps. A parent
+// that genuinely has no children reads as an empty file, which is ok=true with
+// no pids — distinguishable from "cannot answer" only because the task
+// directory itself was readable.
+func procChildPIDs(parent int) ([]int, bool) {
+	taskDir := filepath.Join("/proc", strconv.Itoa(parent), "task")
+	threads, err := os.ReadDir(taskDir)
+	if err != nil {
+		return nil, false
+	}
+
+	var (
+		children []int
+		answered bool
+	)
+	seen := make(map[int]bool)
+	for _, thread := range threads {
+		data, err := os.ReadFile(filepath.Join(taskDir, thread.Name(), "children"))
+		if err != nil {
+			continue
+		}
+		answered = true
+		for _, field := range strings.Fields(string(data)) {
+			pid, err := strconv.Atoi(field)
+			if err != nil || pid <= 0 || seen[pid] {
+				continue
+			}
+			seen[pid] = true
+			children = append(children, pid)
+		}
+	}
+	if !answered {
+		return nil, false
+	}
+	return children, true
+}
+
 // ChildPIDs returns the pids of all live direct child processes of parent,
 // enumerated portably via `ps -axo pid=,ppid=` rather than a /proc walk, so
 // it works on darwin as well as linux. It returns an error when the ps
@@ -225,7 +323,11 @@ func NormalizeArgv(argv []string) []string {
 // The enumeration helper's own pid is excluded below so it can never
 // masquerade as a leaked child.
 func ChildPIDs(parent int) ([]int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), childEnumTimeout)
+	if children, ok := procChildPIDs(parent); ok {
+		return children, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=")
@@ -274,7 +376,7 @@ func ChildPIDs(parent int) ([]int, error) {
 // Linux, and the consequence of a miss is the pre-existing conservative answer
 // rather than a wrong death.
 func psStartTime(pid int) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), psStartTimeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
@@ -294,7 +396,7 @@ func psStartTime(pid int) (string, error) {
 //
 // -ww asks ps for full width, since a truncated argv fails the match on BSD ps.
 func psCmdline(pid int) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), psCmdlineTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "ps", "-ww", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
@@ -309,7 +411,7 @@ func psCmdline(pid int) ([]string, error) {
 }
 
 func psReportsZombie(pid int) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), psZombieTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
 	defer cancel()
 
 	out, err := exec.CommandContext(ctx, "ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()

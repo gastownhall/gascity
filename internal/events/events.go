@@ -32,10 +32,52 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// BeadClaimReleased fires when a claim this process WON is given back
+	// because it could not be delivered to a live consumer: the worker's result
+	// write failed (the provider closed the tool pipe), or the CAS landed after
+	// the invoking turn's claim window was already spent. Both shapes produce an
+	// in_progress bead nobody will ever execute, so the claim is released
+	// compare-and-swap and this event records that it happened. It is the
+	// release dual of BeadClaimRejected: that one reports a claim we did not
+	// get, this one a claim we could not keep.
+	//
+	// COMPENSATION PAIR — read this before treating step lifecycle as monotonic.
+	// A bead.claim_released whose subject already has an execution.step_started
+	// is the second half of a compensating pair, not a step that ran and
+	// finished: the claim path emits step_started at claim time and only then
+	// discovers it cannot deliver the result (or that the CAS landed past its
+	// window), so the release UNDOES a step that never executed. An
+	// event-sourcing consumer — the runs view especially — must treat that pair
+	// as "no attempt happened" rather than leaving the step in-flight forever
+	// waiting for an execution.step_completed that is never coming. The pair is
+	// always same-subject and same-process, and the payload's reason names which
+	// unwind ran.
+	BeadClaimReleased = "bead.claim_released"
+	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
+	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
+	// candidate whose only claim blocker was another worker's stale (lease-
+	// expired) assignee, and then wins the retried claim in the same hook
+	// cycle. Scoped to exactly the one candidate bd reclaim --id targeted —
+	// this is not a sweep. Lets mayor/watchers see the recovery happen instead
+	// of only ever observing the fresh claim with no story for how the prior
+	// assignee's abandoned work moved.
+	HookClaimReclaimedStale = "hook.claim.reclaimed_stale"
+	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
+	// mutation after its invocation window has elapsed — the signature of a
+	// claim command that outlived the agent turn that invoked it (an abandoned
+	// or killed provider tool call). No claim is minted. The payload's
+	// invocation_age_ms and parent_alive let the fleet distinguish honest slow
+	// stores from orphaned claimers reparented to init.
+	ExecutionClaimWindowExpired = "execution.claim_window_expired"
 	// ExecutionWorkAssociated records an authoritative association between a
 	// graph.v2 workflow run and one physical input work bead. Subject carries
 	// the work bead and RunID carries the workflow root.
 	ExecutionWorkAssociated = "execution.work_associated"
+	// ExecutionRunAnchored records an authoritative relation between a graph.v2
+	// workflow run and a source work bead. Subject carries the source bead
+	// and RunID carries the workflow root; it does not replace the physical
+	// launch carried by ExecutionWorkAssociated.
+	ExecutionRunAnchored = "execution.run_anchored"
 	// ExecutionStepDefined records one physical native execution-step
 	// occurrence. Subject carries the physical step bead, RunID the workflow
 	// root, and StepID/DependsOnStepIDs the semantic topology.
@@ -45,6 +87,22 @@ const (
 	// RunID, SessionID, StepID, and DependsOnStepIDs carry its durable identity.
 	ExecutionStepStarted   = "execution.step_started"
 	ExecutionStepCompleted = "execution.step_completed"
+	// ExecutionStepStalled records that a session claimed a step and then never
+	// executed it: the claim-without-execution shape the controller's execution
+	// backstop gave up re-delivering a claim nudge for. Subject carries the work
+	// bead, RunID the workflow root, SessionID the holder. It is a controller
+	// LIVENESS fact, not a graph execution fact — nothing about the step's
+	// topology is asserted, and no projector consumes it.
+	ExecutionStepStalled = "execution.step_stalled"
+	// ExecutionClaimStalled records that a seat had its OWN ready work sitting
+	// open and unclaimed while it was awake and quiet, past the bounded nudges
+	// the controller's claim backstop spent on it. It is the never-claimed
+	// counterpart of ExecutionStepStalled's never-executed claim, and the
+	// remedies differ: nothing here is stranded in_progress, so no drain
+	// follows and the backstop keeps re-nudging. Subject carries the unclaimed
+	// bead, RunID the workflow root, SessionID the seat. A controller LIVENESS
+	// fact, not a graph execution fact; no projector consumes it.
+	ExecutionClaimStalled = "execution.claim_stalled"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -82,12 +140,58 @@ const (
 	// policy (commit-and-push, clear-assignee-and-respawn, or escalate).
 	// See gastownhall/gascity#2293.
 	SessionDrainAckedWithAssignedWork = "session.drain_acked_with_assigned_work"
+	// SessionDrainStopEscalated fires when the reconciler gives up waiting for a
+	// drain-ack stop-pending session to exit on its own and escalates to a
+	// forceful termination. Two arms authorize it, because the two populations
+	// are bounded by different evidence: an AGENT-ACKED session, whose reminder
+	// budget is structurally unspendable, is bounded by time since it entered
+	// stop-pending; every other session is bounded by a spent reminder budget
+	// plus its answer window. Either way, ON THE TICK THAT AUTHORIZED IT the
+	// session held no assigned work, nobody was attached, the pane had been
+	// quiet, and the instance-token fence did not disagree that the runtime was
+	// still the one we meant to stop.
+	//
+	// A fired event means the escalation RAN — not that force landed. It is
+	// emitted once per escalation on EVERY outcome, and the payload reason
+	// carries "<arm>/<outcome>": only the force_terminated outcome means a kill
+	// landed, termination_failed means force was attempted and every
+	// termination call failed, and every other outcome means no force was
+	// applied at all. That includes the outcomes where one of the preconditions
+	// above stopped holding in the meantime — the token fence and the quiet
+	// hold are re-evaluated immediately before the destructive act, so the
+	// tick's answer is not the event's. Alert on the outcome, never on the
+	// event's presence.
+	//
+	// The BEAD IS NOT CLOSED HERE and the pool slot name is therefore not
+	// released by this pass, even when force did land: the close belongs to a
+	// later reconcile tick's own liveness observation, deliberately, because
+	// closing from inside the kill path frees the bead while a live pane may
+	// still hold the runtime name.
+	//
+	// This is the loud half of a deliberately destructive backstop. Its whole
+	// purpose is that a terminal escalation can never silently mask a genuine
+	// drain-ack tail: every kill this pass performs is counted and queryable, so
+	// a rising rate reads as "agents are not exiting on drain-ack" rather than
+	// as quiet success. See ga-rxhu2.
+	SessionDrainStopEscalated = "session.drain_stop_escalated"
 	// SessionStranded fires when a pool slot retains an in-progress work
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
 	// whether to clear-assignee-and-respawn or escalate.
 	SessionStranded = "session.stranded"
+	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
+	// retires a pool-managed session bead that entered drain and never
+	// finalized its drain-ack, once the drain has outlived the retire
+	// deadline, the seat holds no assigned work, and its runtime is
+	// confirmed stopped. The bead close frees the runtime name the pool slot
+	// is pinned to, so the pool can mint the seat again.
+	//
+	// It is a symptom bound, not a cure: every emission is a drain-ack that
+	// never resolved. Count it — a rising rate means the underlying
+	// drain-ack defect is spreading while this bound quietly absorbs it.
+	// See ga-rxhu2.
+	SessionPoolSlotRetiredAtDrainDeadline = "session.pool_slot_retired_at_drain_deadline"
 	// SessionUnknownState fires when the reconciler observes a session bead
 	// whose metadata state it does not recognize. The reconciler skips such
 	// beads (forward-compatible rollback: an older reconciler ignores a newer
@@ -97,18 +201,48 @@ const (
 	// threshold), never as a recovery action — pack-level subscribers or
 	// operators own recovery. See gastownhall/gascity#1497, #2085, #2389.
 	SessionUnknownState = "session.unknown_state"
+	// SessionWakeRefused fires when a durable explicit wake request
+	// (wake_request=explicit) is refused before the session ever reaches a
+	// live runtime — held, quarantined, or asleep past its idle-sleep
+	// window. Distinguishes a policy-suppressed wake from
+	// recordWakeFailure's post-start failure accrual; wake_attempts still
+	// increments (via a direct marker write, not the accrual path) so a
+	// persistent refusal remains visible without risking self-quarantine.
+	// See gastownhall/gascity#5739, ga-fxvdit.
+	SessionWakeRefused = "session.wake_refused"
 	// SessionResetStalled fires when a session reset was committed but
 	// the follow-up wake remains pending past the configured startup
 	// timeout. Operators use the typed payload to correlate the stuck
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
 	// SessionWorkQueryFailed fires when the current managed session's
-	// work-discovery query subprocess is killed by an external signal or
-	// aborted by the runner-imposed timeout before producing output.
+	// work-discovery query FAILED — killed by an external signal, aborted by the
+	// runner-imposed timeout, or exited non-zero — before producing output.
 	// Emission requires the current session ID so the lifecycle payload
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDrainFenceUnavailable fires when a seat's drain-pending probe could
+	// not read its own session row, so the claim fence that stops a draining
+	// seat taking new work failed OPEN for that poll.
+	//
+	// It exists because failing open is silent by design. The same agent-side
+	// store fault also fails open the runtime-identity fence, so a persistent
+	// one — an agent/controller credential-env asymmetry, a permission split in
+	// a hosted pod, a sessions-class binding only the controller can reach —
+	// switches BOTH drain fences off fleet-wide while the reconciler keeps
+	// marking rows draining. Without this event the only trace is stderr inside
+	// agent panes, and nothing off-pane distinguishes "fence acting" from
+	// "fence inert".
+	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
+	// SessionDemandClaimDivergence fires when a seat the controller spawned on
+	// DEMAND evidence drains with no work. It is a diagnostics counter for the
+	// agreement invariant between the two readers — the controller's demand read
+	// and the worker's claim read — and it never influences the drain it reports
+	// on. Two classifications: benign (a sibling legitimately claimed the row
+	// first, which is correct pull, not a defect) and divergence (the row is
+	// still open, unassigned and route-matching, so the readers disagreed).
+	SessionDemandClaimDivergence = "session.demand_claim_divergence"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -120,6 +254,46 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
+	// ControlStalled fires once, when a control bead's bounded semantic-refusal
+	// retry budget expires and the control dispatcher quarantines it. Before
+	// this event the control plane had no control.* vocabulary at all, so a
+	// city whose dispatcher spent 95% of its throughput re-asking a question
+	// the store had already refused was, by construction, invisible on the
+	// event bus: no event, no metric, every health surface green. It is
+	// edge-triggered on the quarantine, not level-triggered on the retry — one
+	// emission per stalled bead under the intended single-control-dispatcher-
+	// per-city topology, never one per attempt. Control beads carry no
+	// claim/lease, so a misconfigured second dispatcher over the same store
+	// could also observe expiry and emit; consumers should tolerate a duplicate
+	// rather than assume a globally exactly-once signal.
+	ControlStalled = "control.stalled"
+	// ControlRootSettleFailed fires when a workflow-finalize control bead is
+	// quarantined but the store then refuses the follow-up close of the
+	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
+	// store has not yet reconciled against the finalizer's own quarantine).
+	// quarantineControlFailureBead always returns nil in this case -- the
+	// finalizer's quarantine is the load-bearing action and must stand -- but
+	// an unclosed root left with no signal reintroduces the dead-root/
+	// hook-claim-leak bug (#2763) the finalizer-quarantine path exists to
+	// close. This event, together with the gc.root_settle_failed* metadata
+	// stamped on the root and a created follow-up bead, is the durable
+	// visibility that replaces the silently-assumed "retried by a later
+	// pass" that never actually existed. Edge-triggered, once per failed
+	// settle attempt; a duplicate is possible under a misconfigured second
+	// dispatcher, same as ControlStalled.
+	ControlRootSettleFailed = "control.root_settle_failed"
+	// ControlDispatcherScopeGap fires once per scope per desired-state build
+	// when open control work is owned by a scope — the city, or one rig — that
+	// configures no control-dispatcher. The reconciler suppresses those rows
+	// from the tick's demand snapshot (routing them to another scope's
+	// dispatcher would park them on a store it cannot read), which is silent by
+	// construction: the work simply never runs. Before this event the gap was
+	// reported only as one stderr line per scope per tick, so a city could
+	// accumulate 600+ identical lines over a day with every health surface
+	// green. The payload carries the count of rows suppressed for that scope in
+	// the build, so the signal is a level-triggered gauge of stuck work rather
+	// than a per-row alert.
+	ControlDispatcherScopeGap = "control.dispatcher_scope_gap"
 	// SupervisorStarted fires once per supervisor startup, after the
 	// instance lock is acquired. Its payload classifies how the previous
 	// supervisor instance exited (clean, crash, or unknown), derived from
@@ -155,11 +329,18 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	// OrderSuppressed reports that an order's open-work gate has held it shut
+	// for a long unbroken run of dispatch checks. The gate is single-flight
+	// machinery, not a failure, so a short streak is normal; a streak that keeps
+	// growing is an order that has stopped running with nothing else to say so.
+	// Rate-bounded at the emit site (see cmd/gc/order_dispatch.go) — a
+	// permanently wedged order cannot turn this into a per-tick stream.
+	OrderSuppressed                 = "order.suppressed"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -260,11 +441,24 @@ const (
 	// binding a proven copy already populated, the second created one for a
 	// city that had nothing to move. Unconverged and Uncheckable are the two
 	// refusals: config and data disagree, or the check that would decide could
-	// not run. A city with no [storage] section emits none of them.
-	StorageBindingConverged   = "storage.binding.converged"
-	StorageBindingGenesis     = "storage.binding.genesis"
-	StorageBindingUnconverged = "storage.binding.unconverged"
-	StorageBindingUncheckable = "storage.binding.uncheckable"
+	// not run.
+	//
+	// NotConfigured is the fifth, and it is a verdict rather than the absence of
+	// one. A city that relocates nothing used to leave the gate having published
+	// nothing at all, and nothing reads the same as a gate that crashed before
+	// deciding or a build too old to have one. A subscriber gating a deploy on
+	// these events has to be able to see "this city has no split" as an answer.
+	//
+	// The multi-word segment is spelled with an underscore because every other
+	// multi-word type in this package is. The internal outcome renders itself as
+	// "not-configured" and that spelling is what travels in the payload's outcome
+	// field, but a payload value is not a type name, and matching it here would
+	// have made this the one hyphen among the whole taxonomy.
+	StorageBindingConverged     = "storage.binding.converged"
+	StorageBindingGenesis       = "storage.binding.genesis"
+	StorageBindingUnconverged   = "storage.binding.unconverged"
+	StorageBindingUncheckable   = "storage.binding.uncheckable"
+	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -276,27 +470,39 @@ var KnownEventTypes = []string{
 	SessionDraining, SessionUndrained, SessionQuarantined,
 	SessionIdleKilled, SessionMaxAgeKilled, SessionSuspended, SessionUpdated,
 	SessionDrainAckedWithAssignedWork,
+	SessionDrainStopEscalated,
 	SessionStranded,
+	SessionPoolSlotRetiredAtDrainDeadline,
 	SessionUnknownState,
+	SessionWakeRefused,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDrainFenceUnavailable,
+	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
-	BeadClaimRejected,
+	BeadClaimRejected, BeadClaimReleased,
+	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
-	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionClaimWindowExpired,
+	ExecutionStepStalled,
+	ExecutionClaimStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
+	ControlStalled,
+	ControlRootSettleFailed,
+	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
@@ -313,6 +519,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
+	StorageBindingNotConfigured,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a
@@ -348,6 +555,23 @@ type Event struct {
 // This sub-interface is used by callers that only need to write events.
 type Recorder interface {
 	Record(e Event)
+}
+
+// AckRecorder is an optional Recorder extension whose RecordAck reports whether
+// the event was durably appended. Record is best-effort and void — a
+// FileRecorder silently drops the event on a cross-process lock timeout or a
+// write failure (e.g. ENOSPC), and Discard drops every event — so a caller that
+// must not take a durable action on the strength of an emit that may have been
+// lost type-asserts to this and treats a recorder that does not implement it
+// (Discard, exec scripts) as "never acknowledged". A nil error means the event
+// reached the log and is therefore readable back by any List/Watch consumer; a
+// non-nil error means it was dropped.
+//
+// The append is not fsynced, so the acknowledgement covers reachability, not
+// stable storage: an OS crash can still lose an acknowledged event.
+type AckRecorder interface {
+	Recorder
+	RecordAck(e Event) error
 }
 
 // Provider is the full interface for event backends. It embeds Recorder

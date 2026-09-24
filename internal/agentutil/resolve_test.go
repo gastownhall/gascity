@@ -288,6 +288,27 @@ func TestNormalizePoolRouteTarget(t *testing.T) {
 	}
 }
 
+// A configured agent whose name happens to end in "-<digits>" must keep its
+// identity even when a same-prefixed unbounded pool exists: the literal agent
+// wins, mirroring ResolveAgent's literal-before-pool-instance precedence.
+func TestNormalizePoolRouteTargetConfiguredAgentWins(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			// Unbounded pool: any numeric suffix would otherwise collapse.
+			{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(-1)},
+			// A distinct configured agent that merely looks slot-suffixed.
+			{Name: "polecat-4090", Dir: "myrig"},
+		},
+	}
+	if got := NormalizePoolRouteTarget(cfg, "myrig/polecat-4090"); got != "myrig/polecat-4090" {
+		t.Errorf("configured agent collapsed: got %q, want %q", got, "myrig/polecat-4090")
+	}
+	// A genuine slot suffix (no agent of that name) still collapses.
+	if got := NormalizePoolRouteTarget(cfg, "myrig/polecat-3"); got != "myrig/polecat" {
+		t.Errorf("slot suffix did not collapse: got %q, want %q", got, "myrig/polecat")
+	}
+}
+
 func TestNormalizePoolRouteTargetNilConfig(t *testing.T) {
 	if got := NormalizePoolRouteTarget(nil, "myrig/polecat-2"); got != "myrig/polecat-2" {
 		t.Errorf("NormalizePoolRouteTarget(nil) = %q, want unchanged", got)

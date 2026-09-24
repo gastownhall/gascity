@@ -1590,6 +1590,77 @@ func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	}
 }
 
+// cooldownEventFallbackOrders returns the single city-level cooldown order the
+// event-fallback dispatcher tests share. Pool and FormulaLayer are set so a due
+// order genuinely materializes beads — otherwise the "cooldown held" assertion
+// below would pass for the wrong reason.
+func cooldownEventFallbackOrders() []orders.Order {
+	return []orders.Order{{
+		Name:         "test-order",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+}
+
+// TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune pins the wiring
+// in memoryOrderDispatcher.dispatch that hands m.ep to
+// orders.LastRunFuncWithEventFallback: with every order-run tracking bead
+// compacted away, a recent order.fired event must still hold the cooldown
+// closed.
+func TestOrderDispatchCooldownHonoursEventFallbackAfterBeadPrune(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order", // city-level order: ScopedName() == Name
+		Ts:      time.Now().Add(-10 * time.Minute),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) != 0 {
+		t.Fatalf("expected no dispatch (event fallback should hold the cooldown), got %d bead(s)", len(all))
+	}
+}
+
+// TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale is the negative
+// half of the test above: same pruned store and same order, but the only
+// order.fired event is older than the interval, so the order must dispatch.
+// Without this, a dispatch broken for any unrelated reason would let the
+// cooldown-held assertion pass vacuously.
+func TestOrderDispatchCooldownDispatchesWhenEventFallbackIsStale(t *testing.T) {
+	store := beads.NewMemStore() // no order-run:test-order bead — pruned
+
+	ep := events.NewFake()
+	ep.Record(events.Event{
+		Type:    events.OrderFired,
+		Subject: "test-order",
+		Ts:      time.Now().Add(-48 * time.Hour),
+	})
+
+	ad := buildOrderDispatcherFromList(cooldownEventFallbackOrders(), store, ep)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if all := trackingBeads(t, store, "order-run:test-order"); len(all) == 0 {
+		t.Fatal("expected dispatch (last order.fired is older than the interval), got no beads")
+	}
+}
+
 type strictOpenWorkListCountingStore struct {
 	beads.Store
 
@@ -1709,15 +1780,24 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders pins the rotation: a
+// budget smaller than the due set must hand every order a turn across
+// consecutive ticks rather than replaying the head of the list.
+//
+// The orders are cooldown, not condition. Condition orders no longer consult
+// the budget at all (see TestDispatchFiresDueConditionOrderOutsideTheRotation-
+// Budget), so building the corpus out of them would make this pass on the
+// first tick and stop measuring the cursor. A 1ms interval against ticks a
+// second apart is the always-due shape on the budgeted path.
 func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	var aa []orders.Order
 	for i := 0; i < 5; i++ {
 		aa = append(aa, orders.Order{
-			Name:    fmt.Sprintf("condition-%d", i),
-			Trigger: "condition",
-			Check:   "true",
-			Exec:    "true",
+			Name:     fmt.Sprintf("cooldown-%d", i),
+			Trigger:  "cooldown",
+			Interval: "1ms",
+			Exec:     "true",
 		})
 	}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
@@ -1729,14 +1809,17 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 	m := ad.(*memoryOrderDispatcher)
 	m.maxDispatchesPerTick = 2
 
-	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// fixed fake 'now' in the past would leave every fired order's cooldown
+	// clock reading negative and never due again.
+	now := time.Now()
 	for i := 0; i < 3; i++ {
 		ad.dispatch(context.Background(), t.TempDir(), now.Add(time.Duration(i)*time.Second))
 		ad.drain(context.Background())
 	}
 
 	for i := 0; i < 5; i++ {
-		label := fmt.Sprintf("order-run:condition-%d", i)
+		label := fmt.Sprintf("order-run:cooldown-%d", i)
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}
@@ -1878,6 +1961,53 @@ func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
 	all = trackingBeads(t, store, "order-run:test-order")
 	if len(all) != 1 {
 		t.Fatalf("order-run beads after second dispatch = %d, want cached cooldown suppression", len(all))
+	}
+}
+
+// TestOrderDispatchDoesNotReparseConfigPerTick is the ga-237xpr regression
+// test: dispatch()'s per-tick store-open must reuse the dispatcher's own
+// cached *config.City instead of re-parsing city.toml (and all pack
+// includes) on every tick for every scope target. Unlike the other dispatch
+// tests in this file, this one drives the REAL storeFn built by
+// newMemoryOrderDispatcher rather than buildOrderDispatcherFromListExec's
+// fixed-store stub, so the dispatcher's cached cfg actually reaches a store
+// open instead of stopping at a stub.
+//
+// Scope, stated exactly, because a test that overstates its coverage stops
+// the next reader from looking: this city declares provider = "file", so it
+// covers the dispatcher -> openStoreAtForCityWithConfig -> OpenFileStore
+// path and nothing else. It does NOT exercise the exec: or native bd store
+// paths. Per-provider coverage of the same config-reuse invariant lives in
+// store_rollout_test.go — TestOpenStoreResultWithConfigSkipsLoad for the
+// file path and TestOpenStoreResultWithConfigSkipsLoad_ExecProvider for the
+// exec: path, which is where the reparse hole actually was.
+func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"file\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "perf-test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
+
+	before := loadCityConfigCalls.Load()
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		ad.dispatch(context.Background(), cityDir, now.Add(time.Duration(i)*time.Millisecond))
+	}
+	ad.drain(context.Background())
+	if grew := loadCityConfigCalls.Load() - before; grew != 0 {
+		t.Fatalf("dispatch() re-parsed city config %d times across 10 ticks; want 0 — every tick's store open must reuse the dispatcher's cached config instead of reloading city.toml from disk", grew)
 	}
 }
 
@@ -4063,6 +4193,124 @@ func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *t
 		if _, err := store.Get(id); err != nil {
 			t.Fatalf("%s should be preserved: %v", id, err)
 		}
+	}
+}
+
+// TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps is the
+// ga-ejwo1q regression: the retention prune deleted an expired CLOSED tracking
+// root without looking at its descendants, leaving live steps rootless. A
+// rootless step is unworkable by construction — it can only fail
+// an out-of-vocabulary failure class and mail an escalation — so the prune manufactured noise
+// out of live work (ga-033u0e).
+//
+// The guard is descendant-state-sensitive, not a blanket "never delete a root":
+// alpha-00 owns an OPEN step and is retained, while alpha-01 owns only a CLOSED
+// step and still prunes on the same sweep.
+func TestSweepClosedOrderTrackingRetentionRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed,
+		beads.Bead{
+			ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+		},
+		beads.Bead{
+			ID: "alpha-01-step", Title: "finished step", Status: "closed", Type: "task",
+			CreatedAt: beadTime, Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-01"},
+		},
+	)
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var (
+		deleted int
+		err     error
+	)
+	logOutput := captureWispGCLog(t, func() {
+		deleted, err = sweepClosedOrderTrackingRetention(store, now, orderTrackingRetentionPolicy{
+			deleteAfterClose: 24 * time.Hour,
+			retainLast:       minClosedOrderTrackingRetained,
+		}, nil)
+	})
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetention: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only; alpha-00 still owns an open step)", deleted)
+	}
+	// A retained root is only actionable if the log says WHICH root: a count
+	// alone leaves the operator to re-derive it from the store.
+	if !strings.Contains(logOutput, "alpha-00") {
+		t.Fatalf("retention log = %q, want the retained root alpha-00 named", logOutput)
+	}
+	if strings.Contains(logOutput, "alpha-01") {
+		t.Fatalf("retention log = %q, names alpha-01, which was pruned, not retained", logOutput)
+	}
+
+	// Assert the ROOT/STEP PAIR, not just the root's survival: the defect is
+	// the step outliving its root, so read the step's own pointer back and
+	// require it to still resolve.
+	step, err := store.Get("alpha-00-step")
+	if err != nil {
+		t.Fatalf("open step must not be deleted: %v", err)
+	}
+	if _, err := store.Get(step.Metadata[beadmeta.RootBeadIDMetadataKey]); err != nil {
+		t.Fatalf("open step left rootless — this is the ga-ejwo1q defect: %v", err)
+	}
+
+	if _, err := store.Get("alpha-01"); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("alpha-01 owns only closed steps and must still prune: err = %v", err)
+	}
+}
+
+func TestSweepClosedOrderTrackingRetentionBoundedRetainsRootsThatStillOwnOpenSteps(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	beadTime := now.Add(-48 * time.Hour)
+	seed := make([]beads.Bead, 0, 14)
+	for i := 0; i < 12; i++ {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("alpha-%02d", i),
+			Title:     "order:alpha",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: beadTime.Add(time.Duration(i) * time.Minute),
+			Labels:    []string{"order-run:alpha", labelOrderTracking},
+		})
+	}
+	seed = append(seed, beads.Bead{
+		ID: "alpha-00-step", Title: "live step", Status: "open", Type: "task",
+		CreatedAt: beadTime, Ephemeral: true,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "alpha-00"},
+	})
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	deleted, err := sweepClosedOrderTrackingRetentionBounded(store, now, orderTrackingRetentionPolicy{
+		deleteAfterClose: 24 * time.Hour,
+		retainLast:       minClosedOrderTrackingRetained,
+	}, nil, 10)
+	if err != nil {
+		t.Fatalf("sweepClosedOrderTrackingRetentionBounded: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (alpha-01 only)", deleted)
+	}
+	if _, err := store.Get("alpha-00"); err != nil {
+		t.Fatalf("alpha-00 owns an open step and must be retained: %v", err)
+	}
+	if _, err := store.Get("alpha-00-step"); err != nil {
+		t.Fatalf("open step must not be stranded: %v", err)
 	}
 }
 
@@ -6427,6 +6675,26 @@ func (s labelFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(query)
 }
 
+// openWorkFailListStore is a store that cannot answer the OPEN-WORK question,
+// whichever read the gate uses to ask it.
+//
+// The gate used to ask with one `order-run:<scoped>` list per order and now asks
+// once per store, unlabeled, through the per-tick index (ga-l7jdg). A fixture
+// pinned to only one of those two spellings stops simulating the outage the
+// moment the other one is the live path, and the order under test quietly
+// dispatches instead of failing closed — which is what this store exists to
+// prevent.
+type openWorkFailListStore struct {
+	beads.Store
+}
+
+func (s openWorkFailListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") || isOrderGateIndexQuery(query) {
+		return nil, fmt.Errorf("list failed for open work")
+	}
+	return s.Store.List(query)
+}
+
 // --- helpers ---
 
 func successfulExec(context.Context, string, string, []string) ([]byte, error) {
@@ -7175,10 +7443,7 @@ func TestOrderDispatchSkipsRigConditionWhenLegacyOpenWorkReadFails(t *testing.T)
 		t.Fatal(err)
 	}
 	rigStore := beads.NewMemStore()
-	legacyStore := labelFailListStore{
-		Store:     beads.NewMemStore(),
-		failLabel: "order-run:rig-digest:rig:frontend",
-	}
+	legacyStore := openWorkFailListStore{Store: beads.NewMemStore()}
 
 	stderr := &bytes.Buffer{}
 	m := &memoryOrderDispatcher{
@@ -7256,6 +7521,10 @@ func TestOrderDispatchConditionUsesScopedEnv(t *testing.T) {
 
 func TestOrderDispatchSkipsRigCooldownWhenLegacyOpenWorkReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
+	// The LAST-RUN read is what fails here, so the fixture fails only the
+	// `order-run:` label query LastRunAcross issues. The gate's own index read
+	// succeeds — that is the point: this test pins the last-run path, and its
+	// sibling above pins the gate path.
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:rig-digest:rig:frontend",
@@ -9332,9 +9601,29 @@ func TestOrderExecEnvRejectsReservedOrderEnvKeys(t *testing.T) {
 	}
 }
 
+// TestOrderExecEnvReservedKeysCoverProjectedEnv catches a key that the exec-env
+// projection emits but nobody added to the reserved guard. Such a key is
+// controller-owned in practice while `[order.env]` can still silently shadow it.
+//
+// The invariant is "reserved, or deliberately overridable" rather than plain
+// "reserved". projectGitHubTokenExecEnv projects the controller's ambient `gh`
+// credentials, and those keys are deliberately kept out of the reserved guard so
+// an order can scope its own token; TestOrderExecEnvGitHubTokenOrderEnvOverrideWins
+// asserts that capability. Reading the exception straight from the production
+// githubTokenExecEnvKeys list keeps the two halves from drifting apart, which is
+// how this guard went stale in the first place: it was written when every
+// projected key really was reserved, and the token projection later added the
+// first projected-but-overridable keys without updating it.
+//
+// Both tokens are pinned with t.Setenv so the projected key set never depends on
+// the ambient environment. Without that pin this test passed in CI, which
+// carries no `gh` token, and failed for every developer and agent authenticated
+// with gh.
 func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GH_TOKEN", "ghs_controller_token")
+	t.Setenv("GITHUB_TOKEN", "github_pat_controller")
 
 	cityDir := t.TempDir()
 	packDir := filepath.Join(cityDir, "packs", "maintenance")
@@ -9353,10 +9642,20 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 		t.Fatalf("orderExecEnvWithError() error = %v", err)
 	}
 
+	overridable := make(map[string]bool, len(githubTokenExecEnvKeys))
+	for _, key := range githubTokenExecEnvKeys {
+		overridable[key] = true
+	}
+
 	var unreserved []string
+	projectedOverridable := 0
 	for _, entry := range envSlice {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
+			continue
+		}
+		if overridable[key] {
+			projectedOverridable++
 			continue
 		}
 		if !isReservedOrderExecEnvKey(key) {
@@ -9365,6 +9664,18 @@ func TestOrderExecEnvReservedKeysCoverProjectedEnv(t *testing.T) {
 	}
 	if len(unreserved) > 0 {
 		t.Fatalf("projected order exec env keys missing from reserved guard: %v", unreserved)
+	}
+	// The exception above is only sound while those keys really are projected.
+	// Assert they were, so that dropping the projection surfaces as a failure
+	// here instead of being absorbed by the allowlist as an empty set.
+	//
+	// Two different mistakes land here. Either the projection stopped emitting a
+	// key it used to emit, or a key joined githubTokenExecEnvKeys without a
+	// matching t.Setenv at the top of this test, so it was never in the ambient
+	// environment to project. The env dump below tells them apart.
+	if projectedOverridable != len(githubTokenExecEnvKeys) {
+		t.Fatalf("projected %d of %d deliberately-overridable keys %v; either the projection dropped one, which the allowlist would otherwise mask, or a key was added to that list without a t.Setenv in this test. env=%v",
+			projectedOverridable, len(githubTokenExecEnvKeys), githubTokenExecEnvKeys, envSlice)
 	}
 }
 
@@ -10130,7 +10441,7 @@ func TestSweepClosedOrderTrackingRetentionAcrossStoresBounded_ZeroLimitDeletesNo
 func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	store := beads.NewMemStore()
 	const storeKey = "city"
-	idx := newOrderDispatchTrackingIndex()
+	idx := newOrderDispatchTrackingIndex(io.Discard)
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
@@ -10272,4 +10583,289 @@ func TestCountClosedOrderTrackingRetentionEligible(t *testing.T) {
 			t.Fatalf("count = %d, want 0 for empty store", count)
 		}
 	})
+}
+
+func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
+	aa := []orders.Order{{
+		Name:         "cap-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "worker",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+
+	// Unset (zero) preserves the historical default of 4.
+	cfgDefault := &config.City{}
+	adDefault := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgDefault, aa, events.Discard, &bytes.Buffer{})
+	mDefault, ok := adDefault.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adDefault)
+	}
+	if mDefault.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+		t.Errorf("default maxDispatchesPerTick = %d, want %d", mDefault.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+	}
+
+	// Configured value of 1 overrides the default.
+	one := 1
+	cfgOne := &config.City{}
+	cfgOne.Orders.MaxDispatchesPerTick = &one
+	adOne := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgOne, aa, events.Discard, &bytes.Buffer{})
+	mOne, ok := adOne.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("expected *memoryOrderDispatcher, got %T", adOne)
+	}
+	if mOne.maxDispatchesPerTick != 1 {
+		t.Errorf("configured maxDispatchesPerTick = %d, want 1", mOne.maxDispatchesPerTick)
+	}
+
+	// Zero or negative values fall back to the default rather than passing
+	// through: inside the dispatch loop a cap <= 0 means UNCAPPED, so honoring
+	// them would silently disable the cap entirely.
+	for _, bad := range []int{0, -3} {
+		v := bad
+		cfgBad := &config.City{}
+		cfgBad.Orders.MaxDispatchesPerTick = &v
+		adBad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgBad, aa, events.Discard, &bytes.Buffer{})
+		mBad, ok := adBad.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("expected *memoryOrderDispatcher, got %T", adBad)
+		}
+		if mBad.maxDispatchesPerTick != defaultMaxOrderDispatchesPerTick {
+			t.Errorf("maxDispatchesPerTick with configured %d = %d, want default %d", bad, mBad.maxDispatchesPerTick, defaultMaxOrderDispatchesPerTick)
+		}
+	}
+}
+
+// A failing exec order recorded only the Go error string — "exit status 1" —
+// while the command's own diagnostic went to the controller log and no further.
+// Live proof: pr-intake-sweep failed 94/94 across three cities for two days and
+// every order.failed event said "exit status 1".
+func TestOrderDispatchExecFailureEventCarriesTheCommandsOutput(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	const diagnostic = "actor evidence is stale: regenerate the canary"
+	aa := []orders.Order{{
+		Name:     "sweep",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "` + diagnostic + `" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	var msg string
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == "sweep" {
+			msg = e.Message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("no order.failed event for sweep; stderr = %q", stderr.String())
+	}
+	if !strings.Contains(msg, diagnostic) {
+		t.Fatalf("order.failed dropped the command's own reason; message = %q", msg)
+	}
+	// The exit status still has to survive alongside it.
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("order.failed lost the exit status; message = %q", msg)
+	}
+}
+
+// The output now rides the event bus into events.jsonl and SSE, so a secret the
+// command echoes must be scrubbed on the way in, exactly as the log path does.
+func TestOrderDispatchExecFailureEventRedactsSecretsInOutput(t *testing.T) {
+	const secret = "ghp_projectedControllerToken0123456789"
+	t.Setenv("GITHUB_TOKEN", secret)
+	t.Setenv("GH_TOKEN", secret)
+
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "leaky",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `printf '%s\n' "$GITHUB_TOKEN" >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && strings.Contains(e.Message, secret) {
+			t.Fatalf("order.failed leaked a projected token onto the event bus: %q", e.Message)
+		}
+	}
+}
+
+// Output is unbounded — a chatty failing order must not push a megabyte of log
+// into every subscriber's event stream.
+func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var stderr bytes.Buffer
+
+	aa := []orders.Order{{
+		Name:     "chatty",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Exec:     `awk 'BEGIN{for(i=0;i<20000;i++) print "noise line " i}' >&2; exit 1`,
+	}}
+
+	m := &memoryOrderDispatcher{
+		aa:      aa,
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		execRun: shellExecRunner,
+		rec:     &rec,
+		stderr:  &stderr,
+		cfg:     &config.City{},
+	}
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
+			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
+		}
+	}
+}
+
+// TestDispatchWispSubstitutesCallerVarsIntoBeadText is the regression guard for
+// #4668: dispatchWisp must thread the caller's runtime vars into
+// molecule.Instantiate so a caller `--var` renders into the instantiated bead
+// TEXT (Title/Description), not just into compile-time control flow. The var
+// carries a non-empty default ("DEFAULT"), so the pre-fix path — which passed
+// an empty molecule.Options and fell back to defaults — rendered "DEFAULT"
+// instead of the caller value. This test fails on exactly that bug.
+func TestDispatchWispSubstitutesCallerVarsIntoBeadText(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "e-var-text.toml"), `
+formula = "e-var-text"
+version = 1
+
+[vars.subject]
+description = "subject to work on"
+default = "DEFAULT"
+
+[[steps]]
+id = "work"
+title = "Work on {{subject}}"
+description = "Handle {{subject}} now."
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{Name: "text-order", Trigger: "manual", Formula: "e-var-text", FormulaLayer: dir}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", map[string]string{"subject": "widgets"})
+
+	// The wisp root is a legacy molecule container; the substituted text lives
+	// on the "work" step bead. Find it by its rendered title prefix.
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	var work *beads.Bead
+	for i := range all {
+		if strings.HasPrefix(all[i].Title, "Work on") {
+			work = &all[i]
+			break
+		}
+	}
+	if work == nil {
+		var titles []string
+		for _, b := range all {
+			titles = append(titles, b.Title)
+		}
+		t.Fatalf("no step bead with title prefix %q created; titles=%v", "Work on", titles)
+	}
+
+	if !strings.Contains(work.Description, "widgets") {
+		t.Fatalf("step description = %q, want it to contain caller var value \"widgets\"", work.Description)
+	}
+	if !strings.Contains(work.Title, "widgets") {
+		t.Fatalf("step title = %q, want it to contain caller var value \"widgets\"", work.Title)
+	}
+	if strings.Contains(work.Description, "DEFAULT") {
+		t.Fatalf("step description = %q still shows the var default; caller --var did not reach molecule.Instantiate (the #4668 bug)", work.Description)
+	}
+	if strings.Contains(work.Description, "{{subject}}") {
+		t.Fatalf("step description = %q left the placeholder unresolved", work.Description)
+	}
+}
+
+// TestDispatchWispResolvesFormulaFromAnyConfiguredLayer is the controller-path
+// regression for #4378: dispatchWisp must resolve an order's formula from every
+// layer the order's scope configures, not just the layer the ORDER FILE was
+// found in. This is the controller/webhook dispatch path — the one the issue was
+// filed against. Pre-fix, searchPaths was []string{a.FormulaLayer}, so an order
+// whose own layer does not ship the formula could never dispatch.
+func TestDispatchWispResolvesFormulaFromAnyConfiguredLayer(t *testing.T) {
+	packFormulaDir := t.TempDir()
+	orderOwnLayer := t.TempDir() // deliberately EMPTY: does not ship the formula
+	writeFile(t, filepath.Join(packFormulaDir, "pack-formula.toml"), `
+formula = "pack-formula"
+version = 1
+
+[[steps]]
+id = "work"
+title = "Do work"
+`)
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:         "cross-layer-order",
+		Trigger:      "manual",
+		Formula:      "pack-formula",
+		FormulaLayer: orderOwnLayer,
+	}
+
+	m := &memoryOrderDispatcher{
+		rec:      events.Discard,
+		stderr:   lockedStderr(&bytes.Buffer{}),
+		cfg:      &config.City{FormulaLayers: config.FormulaLayers{City: []string{packFormulaDir}}},
+		cityName: "test-city",
+	}
+	m.dispatchWisp(context.Background(), store, execStoreTarget{}, a, t.TempDir(), "gc-tracking", nil)
+
+	all, err := store.List(beads.ListQuery{IncludeClosed: true, AllowScan: true})
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	for i := range all {
+		if all[i].Title == "Do work" {
+			return
+		}
+	}
+	var titles []string
+	for _, b := range all {
+		titles = append(titles, b.Title)
+	}
+	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
 }

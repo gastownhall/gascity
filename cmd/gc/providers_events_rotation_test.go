@@ -110,6 +110,29 @@ func TestNewEventsProviderForNameLegacyWrapper(t *testing.T) {
 	}
 }
 
+// TestNewEventsProviderForNameFileFailureReturnsNilProvider locks the contract
+// the caller-side nil guards depend on: a file-backed provider that could not
+// be opened comes back as a nil interface. Returning the concrete
+// *events.FileRecorder instead would box a typed nil into events.Provider, so
+// every `provider == nil` guard would read non-nil for a recorder that was
+// never opened.
+func TestNewEventsProviderForNameFileFailureReturnsNilProvider(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	provider, err := newEventsProviderForName("", filepath.Join(blocker, "events.jsonl"), io.Discard)
+	if err == nil {
+		if provider != nil {
+			provider.Close() //nolint:errcheck // test cleanup
+		}
+		t.Fatal("newEventsProviderForName with an unopenable events path: err = nil, want an error")
+	}
+	if provider != nil {
+		t.Fatalf("provider = %#v, want nil alongside the error", provider)
+	}
+}
+
 func TestOpenCityEventsProviderAppliesRotationConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	t.Setenv("GC_EVENTS", "")

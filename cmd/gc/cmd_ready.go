@@ -73,6 +73,17 @@ type readyBead struct {
 	NoHistory    bool              `json:"no_history,omitempty"`
 	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
 	IsBlocked    *bool             `json:"is_blocked,omitempty"`
+	// BlockedBy carries the row's OPEN-or-not blocking dependencies, in bd's
+	// `bd ready --json` shape. It is populated only on the --status in_progress
+	// arm, which is the crash-recovery read: a resumed holder must be told
+	// whether the bead it still owns is currently gated, and `dependencies`
+	// cannot say — it is a list of edges with no blocker STATUS on them, so a
+	// consumer cannot tell a closed blocker from an open one.
+	//
+	// Every other arm leaves it absent, and absent means "not computed", which
+	// every consumer already reads as not-blocked (fail-open). See
+	// readyBlockedByForRows for why it is not computed on the ready arm.
+	BlockedBy []readyBeadBlocker `json:"blocked_by,omitempty"`
 }
 
 // readyBeadDep is the wire shape of one dependency edge, for the same reason
@@ -83,11 +94,27 @@ type readyBeadDep struct {
 	Type        string `json:"type"`
 }
 
-// toReadyBeads projects domain beads onto the wire shape.
-func toReadyBeads(items []beads.Bead) []readyBead {
+// readyBeadBlocker is one blocking dependency, carrying the field the readiness
+// decision actually needs: the blocker's STATUS.
+//
+// The shape is bd's, not gc's invention — `bd ready --json` emits
+// `blocked_by: [{"id":..., "status":...}]` and the hook's
+// isDepBlockedHookCandidate reads exactly `status` off each element. Emitting a
+// bare id list here (the shape `gc graph --json` uses) would decode without
+// error and be silently ignored, which is worse than omitting the field.
+type readyBeadBlocker struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// toReadyBeads projects domain beads onto the wire shape, attaching each row's
+// blocked_by projection when one was computed.
+func toReadyBeads(items []beads.Bead, blockers map[string][]readyBeadBlocker) []readyBead {
 	out := make([]readyBead, 0, len(items))
 	for _, b := range items {
-		out = append(out, toReadyBead(b))
+		row := toReadyBead(b)
+		row.BlockedBy = blockers[b.ID]
+		out = append(out, row)
 	}
 	return out
 }
@@ -191,6 +218,19 @@ orchestration step runs as are claimable work here whether or not
 			return nil
 		},
 	}
+	registerReadyFlags(cmd, &opts, &includeEphemeral, &jsonOut)
+	return cmd
+}
+
+// registerReadyFlags binds the `gc ready` flag surface onto cmd.
+//
+// It is a function rather than an inline block so the SAME flag surface can be
+// parsed outside the command — specifically by the reader-agreement conformance
+// test, which takes the routed-demand tier straight out of the generated work
+// query, parses it here, and runs the real filterReadyBeads over a row corpus.
+// A test that re-declared these flags would be testing its own copy of the
+// contract, which is the drift this whole lane exists to remove.
+func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, jsonOut *bool) {
 	cmd.Flags().StringVar(&opts.assignee, "assignee", "", "only work assigned to this identity")
 	cmd.Flags().BoolVar(&opts.unassigned, "unassigned", false, "only unassigned work")
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
@@ -205,13 +245,12 @@ orchestration step runs as are claimable work here whether or not
 	// Binding it to a discarded variable is deliberate — a readyOpts field
 	// nothing consults is how a flag ends up looking honored while one leg
 	// quietly narrows (ga-8lyxc).
-	cmd.Flags().BoolVar(&includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
+	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
-	cmd.Flags().BoolVar(&jsonOut, "json", true, "accept --json for bd-ready parity (output is always a JSON array)")
-	return cmd
+	cmd.Flags().BoolVar(jsonOut, "json", true, "accept --json for bd-ready parity (output is always a JSON array)")
 }
 
 func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
@@ -235,12 +274,14 @@ func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	legs := readyFederationLegs(
-		loadedCityName(cfg, cityPath),
-		cityStore,
-		rigStores,
-		relocatedGraphLegStore(cityPath, cityStore),
-	)
+	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+	if err != nil {
+		// A refused city: the plan carries the refusal that names the remedy, and
+		// a work-only answer here is a short array indistinguishable from "no
+		// work" for every work query this reader backs.
+		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	items, err := readyBeadsForOpts(legs, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -277,7 +318,7 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if err != nil {
 		return nil, err
 	}
-	items, err := readReadyCandidates(legs, status)
+	items, owners, err := readReadyCandidates(legs, status)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +327,69 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if opts.limit > 0 && len(items) > opts.limit {
 		items = items[:opts.limit]
 	}
-	return toReadyBeads(items), nil
+	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
+	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
+	// this one dependency read on the one row that matters.
+	blockers, err := readyBlockedByForRows(items, owners)
+	if err != nil {
+		return nil, err
+	}
+	return toReadyBeads(items, blockers), nil
+}
+
+// readyBlockedByForRows resolves each row's blocking dependencies through the
+// leg that SERVED that row.
+//
+// Reading through the serving leg is the whole point. The shell enrichment this
+// replaces resolves blockers with `bd show` in the agent's work directory, which
+// on a split city resolves nothing for a relocated id — and, failing open,
+// serves the candidate as unblocked. That is the correct direction for a resume
+// but it re-serves a gate-blocked step on every tick. A relocated step's
+// blockers live in the same store the step does, so the leg that answered is the
+// leg that can answer this too.
+//
+// owners is empty on every arm but in_progress, which makes this a no-op there.
+// The ready arm needs nothing: the store's own Ready() already applied
+// readiness, so a row it returned is by construction unblocked, and computing
+// blocked_by for it would be one dependency read per row to restate that.
+//
+// A dependency read that FAILS is returned, not swallowed. Reporting a gated
+// bead as unblocked is what re-serves work no worker can advance; the federation
+// is fail-loud for the same reason.
+func readyBlockedByForRows(items []beads.Bead, owners map[string]readyLeg) (map[string][]readyBeadBlocker, error) {
+	if len(owners) == 0 || len(items) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]readyBeadBlocker, len(items))
+	for _, item := range items {
+		leg, ok := owners[item.ID]
+		if !ok || leg.store == nil {
+			continue
+		}
+		deps, err := leg.store.DepList(item.ID, "down")
+		if err != nil {
+			return nil, fmt.Errorf("%s store: listing dependencies of %q: %w", leg.label, item.ID, err)
+		}
+		blockers := make([]readyBeadBlocker, 0, len(deps))
+		for _, dep := range deps {
+			if !beads.IsReadyBlockingDependencyType(dep.Type) {
+				continue
+			}
+			blocker, err := leg.store.Get(dep.DependsOnID)
+			if err != nil {
+				// A blocking edge whose target this leg cannot resolve is a
+				// cross-store dependency, which the split topology forbids
+				// (strict residence) — so it is a real fault, not an absence, and
+				// treating it as "no blocker" would serve a gated bead.
+				return nil, fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.label, dep.DependsOnID, item.ID, err)
+			}
+			blockers = append(blockers, readyBeadBlocker{ID: blocker.ID, Status: blocker.Status})
+		}
+		if len(blockers) > 0 {
+			out[item.ID] = blockers
+		}
+	}
+	return out, nil
 }
 
 // readReadyCandidates reads the merged candidate set from the legs.
@@ -302,18 +405,29 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 // TierBoth and the relocated class leg has no such layer, so the merged answer
 // would be one question asked of the work stores and a narrower one asked of the
 // store that holds the execution DAG. See beads.FederatedReadTier.
-func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, error) {
+// It also reports, for the crash-recovery arm only, which leg served each row,
+// so the blocked_by enrichment can ask the store that actually holds the bead.
+// Ownership is recorded at MERGE time rather than re-probed afterwards: the
+// merge is first-leg-wins, and a co-resident bead that is open in one leg and
+// in_progress in another would resolve to the wrong store under a fresh probe.
+func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[string]readyLeg, error) {
 	if status == "" {
-		return federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+		items, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
+		return items, nil, err
 	}
-	return federateListBeads(legs, beads.ListQuery{
+	query := beads.ListQuery{
 		Status:   status,
 		TierMode: beads.FederatedReadTier,
 		// Only the crash-recovery tier pays for a live read: a claim that
 		// happened seconds ago must be visible, and a cached projection of it is
 		// exactly the stale answer that re-dispatches work already in flight.
 		Live: status == readyStatusInProgress,
-	})
+	}
+	if status != readyStatusInProgress {
+		items, err := federateListBeads(legs, query)
+		return items, nil, err
+	}
+	return federateListBeadsWithOwner(legs, query)
 }
 
 // readyStatusSelector validates --status and returns the status to list, or ""

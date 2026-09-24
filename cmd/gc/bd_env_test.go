@@ -130,6 +130,69 @@ func TestBdCommandRunnerForCityCompleteStorageBindingSkipsManagedRetry(t *testin
 	}
 }
 
+func TestBdContextCommandRunnerForCityPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(fmt.Sprintf("[workspace]\nname = \"bound\"\n[workspace.env]\nBD_BIN = %q\n", bdPath)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBoundCityFixture(t, cityPath)
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := bdCommandRunnerForCity(cityPath)(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("bd context runner: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
+func TestBeadsCommandRunnerWithContextPinsCanonicalGCBinary(t *testing.T) {
+	t.Setenv("GC_BIN", "/tmp/stale-gc")
+	cityPath := t.TempDir()
+	bdPath := filepath.Join(t.TempDir(), "bd")
+	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$GC_BIN\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldResolve := resolveInvokingExecutable
+	resolveInvokingExecutable = func() (string, error) { return gcBin, nil }
+	t.Cleanup(func() { resolveInvokingExecutable = oldResolve })
+	env := map[string]string{"BD_BIN": bdPath}
+	runner, err := beadsCommandRunnerWithContextForHostedCity(context.Background(), cityPath, env)
+	if err != nil {
+		t.Fatalf("context runner: %v", err)
+	}
+	out, err := runner(cityPath, "bd", "status")
+	if err != nil {
+		t.Fatalf("context runner invocation: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("child GC_BIN = %q, want canonical %q", got, want)
+	}
+}
+
 func countBdShimInvocations(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -424,6 +487,25 @@ func TestCityRuntimeProcessEnvStripsAmbientGCDolt(t *testing.T) {
 	}
 }
 
+func TestCityRuntimeProcessEnvCarriesWorkspaceBDBinaryPin(t *testing.T) {
+	cityPath := t.TempDir()
+	pinDir := t.TempDir()
+	pinned := filepath.Join(pinDir, "bd")
+	writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = "+strconv.Quote(pinDir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	env, err := cityRuntimeProcessEnvWithError(cityPath)
+	if err != nil {
+		t.Fatalf("cityRuntimeProcessEnvWithError() error = %v", err)
+	}
+	if got := envEntriesMap(env)["BD_BIN"]; got != pinned {
+		t.Fatalf("BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
 func TestCityRuntimeProcessEnvUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
 	orig := processEnvSnapshotExcludingNativeDoltOpen
 	called := false
@@ -487,6 +569,66 @@ func TestRecoverManagedBDCommandUsesNativeOpenEnvSnapshotGuard(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got == "ambient.example.com" {
 		t.Fatalf("recoverManagedBDCommand inherited unprojected native-open env host %q", got)
+	}
+}
+
+func TestRecoverManagedBDCommandCarriesWorkspaceBDBinaryPin(t *testing.T) {
+	cityPath := t.TempDir()
+	binDir := t.TempDir()
+	pinned := filepath.Join(binDir, "bd")
+	writeExecutable(t, pinned, "#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n[workspace.env]\nPATH = "+strconv.Quote(binDir)+"\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	envFile := filepath.Join(t.TempDir(), "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$BD_BIN\" > \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read captured env: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != pinned {
+		t.Fatalf("recover BD_BIN = %q, want workspace-pinned %q", got, pinned)
+	}
+}
+
+// Recovering the legacy managed server is the path an in-place gc upgrade most
+// needs to keep working: the supervisor that calls it is already running, and an
+// upgrade that removed the directory /proc/self/exe resolved through leaves it
+// unable to canonicalize its own binary. main pinned no GC_BIN here at all, so
+// refusing turned a bounded staleness into a recover that can never run — and
+// with it, a managed Dolt nothing stops on SIGTERM. The pin degrades instead.
+func TestRecoverManagedBDCommandRunsWhenGCBinaryResolutionFails(t *testing.T) {
+	cityPath := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "recover-ran")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+capture+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	original := resolveProviderLifecycleGCBinary
+	resolveProviderLifecycleGCBinary = func() (string, error) { return "", errors.New("unavailable") }
+	t.Cleanup(func() { resolveProviderLifecycleGCBinary = original })
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() = %v, want the recover to run anyway", err)
+	}
+	if _, statErr := os.Stat(capture); statErr != nil {
+		t.Fatalf("recover child never ran: %v", statErr)
 	}
 }
 
@@ -2735,6 +2877,67 @@ dolt.port: 4407
 	}
 	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want rig scoped beads dir", got)
+	}
+}
+
+// The one-shot CLI pool cap belongs to the one-shot wrapper, not to the
+// shared projection: nativeDoltOpenEnvForScopeContext also serves the
+// controller's long-lived stores, which keep the beads library's daemon-sized
+// project pool. These pin both halves on both branches of the projection (the
+// city scope and a rig scope) so a refactor cannot silently widen the cap onto
+// the controller or drop it from the CLI.
+func TestNativeDoltOneShotOpenEnvForScopeCapsPoolOnBothScopes(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: city-db.example.com
+dolt.port: 3307
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(t.TempDir(), "my-rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: myrig
+gc.endpoint_origin: explicit
+gc.endpoint_status: verified
+dolt.host: rig-db.example.com
+dolt.port: 4407
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "my-rig", Path: rigDir}}}
+
+	for _, tc := range []struct {
+		name      string
+		scopeRoot string
+	}{
+		{name: "city scope", scopeRoot: cityDir},
+		{name: "rig scope", scopeRoot: rigDir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capped, err := nativeDoltOneShotOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOneShotOpenEnvForScope: %v", err)
+			}
+			if got := capped["BEADS_DOLT_MAX_CONNS"]; got != "1" {
+				t.Fatalf("one-shot BEADS_DOLT_MAX_CONNS = %q, want 1: a one-shot CLI open must cap the project pool", got)
+			}
+
+			base, err := nativeDoltOpenEnvForScope(cityDir, cfg, tc.scopeRoot)
+			if err != nil {
+				t.Fatalf("nativeDoltOpenEnvForScope: %v", err)
+			}
+			if got, ok := base["BEADS_DOLT_MAX_CONNS"]; ok {
+				t.Fatalf("base BEADS_DOLT_MAX_CONNS = %q (present), want absent: the controller's long-lived stores keep the daemon-sized pool", got)
+			}
+		})
 	}
 }
 
@@ -5636,6 +5839,17 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 		}
 	})
 
+	t.Run("managed city scope resolves the workspace pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		got, err := resolveBdBinaryForScope(cityDir, cityDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, city) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, city) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
 	t.Run("rig overriding the city backend survives a partial city binding", func(t *testing.T) {
 		cityDir, _, ambient := newPinnedCity(t, partial)
 		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
@@ -5672,6 +5886,18 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 		}
 	})
 
+	t.Run("rig inheriting the managed city backend resolves the pin", func(t *testing.T) {
+		cityDir, pinned, _ := newPinnedCity(t, "")
+		rigDir := writeRig(t, cityDir, "inherit", "")
+		got, err := resolveBdBinaryForScope(cityDir, rigDir)
+		if err != nil {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) error = %v", err)
+		}
+		if got != pinned {
+			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want workspace-pinned %q", got, pinned)
+		}
+	})
+
 	t.Run("rig overriding the city backend keeps the ambient bd", func(t *testing.T) {
 		cityDir, _, ambient := newPinnedCity(t, complete)
 		rigDir := writeRig(t, cityDir, "dl", `{"backend":"doltlite"}`)
@@ -5683,4 +5909,12 @@ func TestResolveBdBinaryForScope(t *testing.T) {
 			t.Fatalf("resolveBdBinaryForScope(city, rig) = %q, want ambient %q: a doltlite rig's runtime env carries no BD_BIN", got, ambient)
 		}
 	})
+}
+
+func TestApplyCanonicalDoltTargetEnvUnixSocket(t *testing.T) {
+	env := map[string]string{"GC_DOLT_HOST": "stale", "GC_DOLT_PORT": "3306", "BEADS_DOLT_SERVER_SOCKET": "stale.sock"}
+	applyCanonicalDoltTargetEnv(env, contract.DoltConnectionTarget{Socket: "/tmp/dolt.sock", External: true})
+	if env["BEADS_DOLT_SERVER_SOCKET"] != "/tmp/dolt.sock" || env["GC_DOLT_HOST"] != "" || env["GC_DOLT_PORT"] != "" {
+		t.Fatalf("env = %#v", env)
+	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // writeRoutesJSONL writes a routes.jsonl into scopeDir/.beads/, creating the
@@ -242,27 +243,39 @@ func TestBeadGetSurvivesAShadowingRigOutage(t *testing.T) {
 	}
 }
 
-// TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs pins the limitation the
-// resolver's doc now states instead of the coverage the doc used to claim.
+// TestClassArmStillDoesNotCoverMigratedLegacyIDs pins the limitation of the
+// NAMESPACE rule specifically, which the residence probe does not remove.
 //
 // `gc storage migrate` copies the work store's infrastructure slice with ids
 // PRESERVED and never deletes the source (infra_class_migrate.go). So a
-// relocated bead can carry an HQ-prefixed id — which is OUTSIDE the class
-// namespace, so the class arm never fires for it, and the configured-prefix
-// resolver answers it from the work store's retained copy. The relocated store
-// is not even a candidate.
+// relocated bead can carry an HQ-prefixed id, which is OUTSIDE the class
+// namespace — and the namespace rule declines it, as it must: it answers a
+// question about the NAMESPACE, and a prefix says nothing about residence once
+// ids are preserved across a move.
 //
-// cmd/gc/cmd_bd_by_id.go covers this case the other way, by probing residence
-// for every id rather than routing on the prefix. This path has no equivalent;
-// the assertion exists so the gap cannot be forgotten or silently closed.
-func TestBeadStoresForIDDoesNotCoverMigratedLegacyIDs(t *testing.T) {
+// What no longer follows is that the class store is not a candidate. The plan's
+// residence probe asks it about every id (TestByIDPlanLeadsWithTheResidenceProbe),
+// so the decline is no longer the end of the resolution. Keeping this assertion
+// separate keeps the two claims from being confused for each other.
+func TestClassArmStillDoesNotCoverMigratedLegacyIDs(t *testing.T) {
 	st, graph, city, _ := relocatedGraphRouteState(t)
 	st.cfg.Workspace.Prefix = "mc"
 
-	s := New(st)
-	got := s.beadStoresForID("mc-123")
-	if len(got) != 1 || got[0] != city {
-		t.Fatalf("beadStoresForID(mc-123) = %v (len %d), want only the city work store %p — a legacy-prefixed id is outside the class namespace; graph is %p", got, len(got), city, graph)
+	prefix, ok := config.ReservedClassPrefix(config.BeadClassGraph)
+	if !ok {
+		t.Fatalf("ReservedClassPrefix(graph) returned ok=false; expected a reserved prefix")
+	}
+	if storeref.IDInNamespace("mc-123", prefix) {
+		t.Fatalf("the fixture id mc-123 is inside the %q namespace; it proves nothing about the decline", prefix)
+	}
+	topo := New(st).residencyTopology()
+	if len(topo.Bindings) != 1 {
+		t.Fatalf("topology has %d bindings, want 1 (the relocated graph store %p)", len(topo.Bindings), graph)
+	}
+	for _, p := range topo.Bindings[0].Prefixes {
+		if storeref.IDInNamespace("mc-123", p) {
+			t.Fatalf("the binding's namespace %q claims mc-123; the work store %p would not be the routed answer", p, city)
+		}
 	}
 }
 

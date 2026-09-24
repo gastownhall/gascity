@@ -2,30 +2,49 @@
 // subcommand. It backs both the write-mutation ID guard in cmd/gc/cmd_bd.go
 // and the gc lint check that validates bd invocations embedded in prompt
 // templates, so the two call sites cannot drift apart from each other.
-//
-// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0).
 package bdflags
 
-import "sort"
+import (
+	"sort"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // globalValueFlags are accepted by every bd subcommand and consume the next
 // argument as their value.
+//
+// Completeness is load-bearing, not cosmetic. A caller locating the verb reads
+// the VALUE of an omitted flag as the subcommand — `--profile default create`
+// resolves to "default" — and every guard keyed off the verb then stops firing
+// on an ordinary invocation, with no test failing. Which side of the split a
+// flag lands on matters as much as its presence: a value flag filed as a bool
+// is exactly that bypass. The two are pinned separately by
+// TestGlobalValueFlagsIsComplete and TestGlobalBoolFlagsIsComplete so a
+// misfiled flag fails the build rather than silently disarming a guard.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true,
+	"--actor": true, "--database": true, "--db": true, "-C": true,
+	"--directory": true, "--dolt-auto-commit": true, "--format": true,
+	"--mem-profile": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
+// See globalValueFlags for why the split between the two is load-bearing.
 var globalBoolFlags = map[string]bool{
-	"--global": true, "--ignore-schema-skew": true, "--json": true,
-	"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
-	"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+	"--cpu-profile": true, "--global": true, "--ignore-schema-skew": true,
+	"--json": true, "--no-color": true, "-q": true, "--quiet": true,
+	"--readonly": true, "--sandbox": true, "-v": true, "--verbose": true,
+	"-h": true, "--help": true, "-V": true, "--version": true,
 }
 
 // valueFlagsBySub holds each subcommand's value-consuming flags (beyond the
 // global set), keyed by subcommand: a single word ("update") or, for
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
@@ -37,7 +56,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--id": true, "-l": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
+		"-s": true, "--status": true, "--storage-class": true, "--title": true,
+		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {
@@ -50,6 +70,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--session": true, "--set-labels": true, "--set-metadata": true,
 		"-s": true, "--status": true, "-t": true, "--type": true,
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
+		// The compare-and-set guards. Pinned as well as discovered: help
+		// discovery swallows its own errors, so a bd that is missing, renamed
+		// or slow leaves the pinned table as the only answer, and these two
+		// are the flags whose absence broke fenced dispatch in every rig.
+		"--if-assignee": true, "--if-status": true,
 	},
 	"close": {
 		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
@@ -63,7 +88,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"ready": {
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
 		"--has-metadata-key": true, "-l": true, "--label": true, "--label-any": true,
-		"-n": true, "--limit": true, "--metadata-field": true, "--mol": true,
+		"--label-pattern": true, "--label-regex": true, "-n": true, "--limit": true,
+		"--max-rows": true, "--metadata-field": true, "--mol": true,
 		"--mol-type": true, "--offset": true, "--parent": true, "-p": true,
 		"--priority": true, "-s": true, "--sort": true, "-t": true, "--type": true,
 	},
@@ -72,11 +98,13 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--created-after": true, "--created-before": true, "--defer-after": true,
 		"--defer-before": true, "--desc-contains": true, "--due-after": true,
 		"--due-before": true, "--exclude-label": true, "--exclude-type": true,
-		"--format": true, "--has-metadata-key": true, "--id": true, "-l": true,
+		"--external-contains": true, "--external-ref": true, "--format": true,
+		"--has-metadata-key": true, "--id": true, "-l": true,
 		"--label": true, "--label-any": true, "--label-pattern": true,
-		"--label-regex": true, "-n": true, "--limit": true, "--metadata-field": true,
-		"--mol-type": true, "--notes-contains": true, "--offset": true,
-		"--parent": true, "-p": true, "--priority": true, "--priority-max": true,
+		"--label-regex": true, "-n": true, "--limit": true, "--max-rows": true,
+		"--metadata-field": true, "--mol-type": true, "--notes-contains": true,
+		"--offset": true, "--parent": true, "-p": true, "--priority": true,
+		"--priority-max": true,
 		"--priority-min": true, "--sort": true, "--spec": true, "-s": true,
 		"--status": true, "--title": true, "--title-contains": true, "-t": true,
 		"--type": true, "--updated-after": true, "--updated-before": true,
@@ -112,14 +140,21 @@ var valueFlagsBySub = map[string]map[string]bool{
 
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10). A flag whose
+// help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
+// not in valueFlagsBySub: it never consumes the next argv token, so
+// `bd list --deps all` leaves "all" positional.
 var boolFlagsBySub = map[string]map[string]bool{
 	"create": {
-		"--dry-run": true, "--ephemeral": true, "--force": true, "--no-history": true,
-		"--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
+		"--allow-empty-description": true, "--dry-run": true, "--ephemeral": true,
+		"--force": true, "--no-history": true, "--no-inherit-labels": true,
+		"--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
-		"--history": true, "--no-history": true, "--persistent": true, "--stdin": true,
+		"--force": true, "--history": true, "--no-history": true,
+		"--persistent": true, "--stdin": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
@@ -130,11 +165,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"ready": {
-		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
-		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
+		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
+		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
-		"--all": true, "--deferred": true, "--empty-description": true, "--flat": true,
+		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
+		"--empty-description": true, "--flat": true,
 		"--include-gates": true, "--include-infra": true, "--include-templates": true,
 		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
@@ -142,7 +179,7 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
 	},
 	"show": {
-		"--children": true, "--current": true, "--include-comments": true,
+		"--brief-deps": true, "--children": true, "--current": true, "--include-comments": true,
 		"--include-dependents": true, "--local-time": true, "--long": true,
 		"--refs": true, "--short": true, "--thread": true, "-w": true, "--watch": true,
 	},
@@ -206,6 +243,16 @@ func Known(sub string) bool {
 // ValueFlags returns the set of value-consuming flag names (long and short
 // form) for sub, merged with the global flags shared by every bd
 // subcommand. Returns nil if sub is not a known subcommand key.
+//
+// This is the static, pinned-table lookup: it never shells out to `bd`.
+// Callers that gate whether bd gets invoked at all (the write-mutation ID
+// guard in cmd_bd.go, the by-id door in cmd_bd_by_id.go, the split-city
+// class-projection refusal in bd_relocated_classes.go) depend on that —
+// TestGcBdListRefusesAGraphClassProjectionOnASplitCity asserts bd is never
+// invoked on a refused path, and a live discovery probe here would violate
+// that invariant as a side effect of a flag-name lookup. Use
+// ValueFlagsWithDiscovery for text-analysis contexts (the `gc lint` bd-flag
+// check) that may legitimately shell out.
 func ValueFlags(sub string) map[string]bool {
 	subFlags, ok := valueFlagsBySub[sub]
 	if !ok {
@@ -216,13 +263,174 @@ func ValueFlags(sub string) map[string]bool {
 
 // BoolFlags returns the set of boolean flag names for sub, merged with the
 // global boolean flags shared by every bd subcommand. Returns nil if sub is
-// not a known subcommand key.
+// not a known subcommand key. See ValueFlags: this is the static, pinned-
+// table lookup and never shells out to `bd`.
 func BoolFlags(sub string) map[string]bool {
 	subFlags, ok := boolFlagsBySub[sub]
 	if !ok {
 		return nil
 	}
 	return mergeFlagSets(globalBoolFlags, subFlags)
+}
+
+// ValueFlagsWithDiscovery returns ValueFlags(sub) augmented with flags
+// discovered by shelling out to `bd <sub> --help`, so the flag table can
+// stay current without a manual re-transcription each time bd adds a flag.
+// Discovery failure (bd missing, renamed, slow) silently falls back to the
+// static table, which is why the compare-and-set flags are pinned there
+// too rather than relying on discovery alone.
+//
+// Only for contexts where invoking bd as a side effect is acceptable — the
+// `gc lint` check that validates bd invocations embedded in prompt
+// templates (ScanUnknownFlags) is pure text analysis, not a guard deciding
+// whether to invoke bd, so a live probe there is safe.
+func ValueFlagsWithDiscovery(sub string) map[string]bool {
+	base := ValueFlags(sub)
+	if base == nil {
+		return nil
+	}
+	return mergeFlagSets(base, parseDiscoveredFlags(sub).value)
+}
+
+// BoolFlagsWithDiscovery is BoolFlags augmented with live discovery. See
+// ValueFlagsWithDiscovery.
+func BoolFlagsWithDiscovery(sub string) map[string]bool {
+	base := BoolFlags(sub)
+	if base == nil {
+		return nil
+	}
+	return mergeFlagSets(base, parseDiscoveredFlags(sub).bool)
+}
+
+type discoveredFlags struct {
+	value map[string]bool
+	bool  map[string]bool
+}
+
+var (
+	parseDiscoveredOnce sync.Map
+
+	runBdHelpForSubcommand = func(sub string) ([]byte, error) {
+		parts := strings.Split(sub, " ")
+		args := append(parts, "--help")
+		runner := beads.ExecCommandRunner()
+		return runner(".", "bd", args...)
+	}
+)
+
+func parseDiscoveredFlags(sub string) discoveredFlags {
+	if cached, ok := parseDiscoveredOnce.Load(sub); ok {
+		if parsed, ok := cached.(discoveredFlags); ok {
+			return parsed
+		}
+	}
+
+	parsed := discoveredFlags{
+		value: make(map[string]bool),
+		bool:  make(map[string]bool),
+	}
+
+	if out, err := runBdHelpForSubcommand(sub); err == nil {
+		parseHelpFlagsToSets(string(out), &parsed)
+	}
+
+	parseDiscoveredOnce.Store(sub, parsed)
+	return parsed
+}
+
+// parseHelpFlagsToSets reads cobra-style help output and classifies flags as
+// value-consuming vs. boolean across both local and global flag sections.
+func parseHelpFlagsToSets(helpText string, dst *discoveredFlags) {
+	inFlags := false
+	for _, rawLine := range strings.Split(helpText, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "Flags:"):
+			inFlags = true
+			continue
+		case strings.HasPrefix(line, "Global Flags:"):
+			inFlags = true
+			continue
+		case !strings.HasPrefix(line, "-"):
+			inFlags = false
+			continue
+		}
+
+		if !inFlags {
+			continue
+		}
+
+		tokens := strings.Fields(line)
+		if len(tokens) < 1 {
+			continue
+		}
+
+		var (
+			isValue bool
+			flags   []string
+		)
+
+		for i, token := range tokens {
+			flag := strings.TrimSuffix(token, ",")
+			if !strings.HasPrefix(flag, "-") {
+				if i > 0 && isValueToken(flag) {
+					isValue = true
+				}
+				break
+			}
+			if flag != "-" && flag != "--" {
+				flags = append(flags, flag)
+			}
+		}
+
+		for _, flag := range flags {
+			if isValue {
+				dst.value[flag] = true
+			} else {
+				dst.bool[flag] = true
+			}
+		}
+	}
+}
+
+func isValueToken(token string) bool {
+	t := strings.Trim(token, "[]")
+	t = strings.TrimSuffix(strings.TrimPrefix(t, "<"), ">")
+	if t == "" {
+		return false
+	}
+
+	if strings.ContainsAny(t, "\\") {
+		return false
+	}
+
+	// Type annotations that are not boolean.
+	switch t {
+	case "string", "stringArray", "stringSlice", "duration", "int", "int64", "uint", "uint64", "float64", "float32", "time.Duration", "path", "file", "type", "id", "ids", "args", "name", "keys", "value":
+		return true
+	case "bool", "boolean":
+		return false
+	}
+
+	if strings.Contains(t, "[") || strings.Contains(t, "]") {
+		return true
+	}
+
+	if strings.ContainsRune(token, '<') && strings.ContainsRune(token, '>') {
+		return true
+	}
+
+	for _, r := range t {
+		if unicode.IsUpper(r) {
+			return false
+		}
+	}
+
+	return false
 }
 
 func mergeFlagSets(sets ...map[string]bool) map[string]bool {

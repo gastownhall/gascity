@@ -84,6 +84,9 @@ for tprog in gc bd git; do printf '#!/bin/sh\nexit 127\n' > "$D/bin/$tprog"; chm
 		copyBack = `:` // transcript egress not wired (mutant)
 	}
 
+	failbin := `mkdir -p "$S/failbin"
+for tprog in gc bd git; do printf '#!/bin/sh\nexit 1\n' > "$S/failbin/$tprog"; chmod +x "$S/failbin/$tprog"; done`
+
 	body := fmt.Sprintf(`#!/bin/sh
 S=%q
 op="$1"; name="$2"
@@ -100,6 +103,7 @@ case "$op" in
     %s
     %s
     %s
+    %s
     ;;
   exec)
     cmd=$(cat)
@@ -108,7 +112,12 @@ case "$op" in
     cd "$D/workdir" || exit 1
     # Controlled PATH so the "session" models an isolated sandbox: only the
     # reference-installed tools ($D/bin) + base utils — host gc/bd do not leak.
-    PATH="$D/bin:/usr/bin:/bin" sh -c "$cmd"
+    # $S/failbin sits between $D/bin and /usr/bin holding failing gc/bd/git
+    # stubs: a runtime that installs its toolchain ($D/bin) shadows them, while
+    # one that forgets hits the stubs (not the host's real tools in /usr/bin),
+    # so the tooling probe fails for the right reason even on hosts that ship
+    # gc/bd/git in /usr/bin.
+    PATH="$D/bin:$S/failbin:/usr/bin:/bin" sh -c "$cmd"
     exit $?
     ;;
   stop)
@@ -118,7 +127,7 @@ case "$op" in
   is-running) [ -d "$D" ] && echo true || echo false ;;
   *) exit 2 ;;
 esac
-`, state, capsJSON, materialize, install, inject, wire, copyBack)
+`, state, capsJSON, failbin, materialize, install, inject, wire, copyBack)
 
 	path := filepath.Join(t.TempDir(), "gc-runtime-ref")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {

@@ -22,6 +22,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `agent-pools` | Implemented | Feature shipped before the current template existed |
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
 | `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
+| `beads-proxied-local-default` | Accepted | bd-owned proxied-server store as the fresh-init default on bd >= 1.3.0: topology authority, ownership journal, stop ordering, idle policy |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
 | `runtime-partial-discipline` | Accepted (source-level), follow-ups Proposed | Treat a failed tmux-liveness observation as partial (defer destructive arms) instead of "nothing running"; mirrors storeQueryPartial |
 | `idle-claim-nudge-followups` | Proposed | Widen the stalled-pool-claim backstop key to unassigned pool-routed beads (the case the tmux warm-slot un-gate does not cover) |
@@ -38,3 +39,4 @@ lives in the [Architecture](../architecture/index.md) section.
 | `runtime-provider-packs` | Proposed | Runtime providers as pack-shipped executables speaking a versioned protocol (RPP); agent-provider specs as pack TOML; cloudflare-first PoC |
 | `structured-stream-format` | Accepted / Phase 1 partially implemented | Third session-stream/transcript format emitting typed, full-fidelity structured blocks (tool inputs, structured tool results, thinking, usage) so any consumer renders a rich UI without client-side enrichment |
 | `packv2/` | Historical / rollout ledger | PackV2 engineering design notes moved out of public docs; use user-facing guides and generated reference for current authoring guidance |
+| `abort-scope-retry-attempt-exemption-ordering` | Implemented | Reorders the retry-attempt exemption in `beadOutcomeFailed` ahead of the `gc.outcome=fail` short-circuit so retries are not inert under `gc.on_fail=abort_scope`; converges the three abort-scope decision sites on one predicate; stamps `gc.logical_bead_id` on Attach-created attempt roots so they are recognized as retry attempts at all |

@@ -817,8 +817,14 @@ func (p *Parser) resolveDescriptionFiles(steps []*Step, baseDir string, strict b
 			} else {
 				if len(data) > descriptionFileInlineMaxBytes {
 					step.Description = descriptionFileReferenceDescription(step.DescriptionFile, path, len(data), vars)
+					// Record the resolved path out-of-band so a later
+					// substitution pass over Description (expansion
+					// templates, loop bodies) can recognize this stub and
+					// leave its embedded path untouched (gastownhall/gascity#4860).
+					step.DescriptionFileResolvedPath = path
 				} else {
 					step.Description = string(data)
+					step.DescriptionFileResolvedPath = ""
 				}
 				step.DescriptionFile = "" // consumed; don't serialize
 			}

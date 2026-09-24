@@ -1,7 +1,7 @@
 package storeref
 
 import (
-	"sort"
+	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -101,6 +101,13 @@ type PrefixedStore struct {
 // bead is still answered from the work store's retained pre-migration copy (the
 // migration never deletes its source). Giving that path a residence probe is
 // open work, not a property of this function.
+// # Now an internal helper of the ByID intent
+//
+// The list this returns IS Plan(ByID)'s in-namespace arm, computed by the same
+// code (resolve.go's planByID) over a Topology built from the routing. The
+// exported symbol is kept for the branches in flight; the residency boundary
+// check forbids NEW direct callers, because answering "which store owns this
+// bead" twice is the bug class this whole lane exists to close (#5125/#5127).
 func ClassCandidates(id string, routing ClassRouting) []beads.Store {
 	id = strings.TrimSpace(id)
 	if routing.Class == nil || routing.Class == routing.Work {
@@ -109,45 +116,33 @@ func ClassCandidates(id string, routing ClassRouting) []beads.Store {
 	if !IDInNamespace(id, routing.Prefix) {
 		return nil
 	}
-	candidates := make([]beads.Store, 0, len(routing.Shadows)+2)
-	seen := make(map[beads.Store]bool, len(routing.Shadows)+2)
-	add := func(s beads.Store) {
-		if s == nil || seen[s] {
-			return
-		}
-		seen[s] = true
-		candidates = append(candidates, s)
+	plan, err := planByID(ByID{ID: id}, routing.topology())
+	if err != nil {
+		return nil
 	}
-	add(routing.Class)
-	add(routing.Work)
-	for _, shadow := range shadowsCovering(id, routing.Shadows) {
-		add(shadow)
+	candidates := make([]beads.Store, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		candidates = append(candidates, leg.Leg.Store)
 	}
 	return candidates
 }
 
-// shadowsCovering returns the work stores whose configured prefix also covers
-// id, most specific (longest configured prefix) first so the narrowest declared
-// owner is probed before a broader one. Ties keep input order; two distinct
-// prefixes of equal length cannot both cover the same id, so a tie only happens
-// between duplicate prefixes, which config.ValidateRigs already rejects.
-func shadowsCovering(id string, shadows []PrefixedStore) []beads.Store {
-	matched := make([]PrefixedStore, 0, len(shadows))
-	for _, shadow := range shadows {
-		prefix := strings.TrimSpace(shadow.Prefix)
-		if shadow.Store == nil || !IDInNamespace(id, prefix) {
-			continue
-		}
-		matched = append(matched, PrefixedStore{Prefix: prefix, Store: shadow.Store})
+// topology renders a ClassRouting as the Topology the resolver plans over. The
+// refs are synthetic — this caller discards them — and the shadows are indexed
+// so the resolver's ref ordering preserves the routing's own input order, which
+// is what a tie between two equal-length prefixes falls back to.
+func (r ClassRouting) topology() Topology {
+	t := Topology{
+		Work: Leg{Ref: WorkRef, Store: r.Work},
+		Bindings: []ClassBinding{{
+			Prefixes: []string{r.Prefix},
+			Leg:      Leg{Ref: StoreRef("class:" + strings.TrimSpace(r.Prefix)), Store: r.Class},
+		}},
 	}
-	sort.SliceStable(matched, func(i, j int) bool {
-		return len(matched[i].Prefix) > len(matched[j].Prefix)
-	})
-	stores := make([]beads.Store, 0, len(matched))
-	for _, m := range matched {
-		stores = append(stores, m.Store)
+	for i, shadow := range r.Shadows {
+		t.Rigs = append(t.Rigs, Leg{Ref: StoreRef(fmt.Sprintf("shadow:%04d", i)), Store: shadow.Store, Prefix: shadow.Prefix})
 	}
-	return stores
+	return t
 }
 
 // IDInNamespace reports whether id falls under prefix's id namespace: a bare

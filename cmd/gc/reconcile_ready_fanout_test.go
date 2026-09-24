@@ -87,7 +87,7 @@ func TestReadyDemandCacheCollapsesReadyFanout(t *testing.T) {
 // MemStore and CachingStore-over-MemStore, which filter the assignee entirely
 // client-side. The wisp-bearing production stores (NativeDoltStore, BdStore)
 // apply the assignee predicate server-side on BOTH the issue and wisp legs — the
-// pinned beads@v1.1.0 readyWorkWispIssueFilter carries filter.Assignee into the
+// pinned beads@v1.3.0-rc.2 readyWorkWispIssueFilter carries filter.Assignee into the
 // wisp filter, emitting `assignee = ?` for the wisp table — so filtering an
 // unfiltered snapshot by assignee is exact for them too (see the readyDemandCache
 // doc in build_desired_state.go). That server-side path is not exercised here
@@ -250,12 +250,12 @@ func TestCollectAssignedWorkBeadsCachedMatchesUncached(t *testing.T) {
 
 	uncachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	uncachedSnap := seed(uncachedStore)
-	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores(&config.City{}, uncachedStore, nil, nil, uncachedSnap)
+	wantBeads, _, _, wantReady, wantPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, uncachedStore, nil, nil, uncachedSnap)
 
 	cachedStore := &readyQueryRecordingStore{MemStore: beads.NewMemStore()}
 	cachedSnap := seed(cachedStore)
 	cache := newReadyDemandCache()
-	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores(&config.City{}, cachedStore, nil, nil, cachedSnap, cache)
+	gotBeads, _, _, gotReady, gotPartial := collectAssignedWorkBeadsWithStores("", &config.City{}, cachedStore, nil, nil, cachedSnap, cache)
 
 	if wantPartial != gotPartial {
 		t.Fatalf("partial mismatch: uncached=%v cached=%v", wantPartial, gotPartial)

@@ -555,6 +555,112 @@ name = "beta"
 	}
 }
 
+func TestLoadWithIncludes_WildcardPatchDeferredForImplicitAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.llama]
+base = "builtin:claude"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[rigs]]
+name = "rig-b"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+provider = "llama"
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if a.Provider != "llama" {
+			t.Fatalf("agent %q provider = %q, want llama", a.QualifiedName(), a.Provider)
+		}
+	}
+	if matched != 3 {
+		t.Fatalf("matched = %d, want 3 implicit agents", matched)
+	}
+}
+
+func TestLoadWithIncludes_WildcardPatchMixedExplicitAndImplicit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[providers.custom]
+base = "builtin:claude"
+
+[[agent]]
+name = "claude"
+provider = "custom"
+
+[[rigs]]
+name = "rig-a"
+path = "."
+
+[[patches.agent]]
+name = "claude"
+rig = "*"
+suspended = true
+`)
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	matched := 0
+	for _, a := range cfg.Agents {
+		if a.Name != "claude" {
+			continue
+		}
+		matched++
+		if !a.Suspended {
+			t.Fatalf("agent %q should be suspended", a.QualifiedName())
+		}
+	}
+	if matched != 2 {
+		t.Fatalf("matched = %d, want 2", matched)
+	}
+}
+
 func TestLoadWithIncludes_RecursiveIncludeFails(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -2472,8 +2578,8 @@ provider = "kiro"
 	if rp.ResumeFlag != "--resume" {
 		t.Errorf("ResumeFlag = %q, want --resume (inherited from claude)", rp.ResumeFlag)
 	}
-	if rp.SessionIDFlag != "" {
-		t.Errorf("SessionIDFlag = %q, want empty (inherited from modern claude)", rp.SessionIDFlag)
+	if rp.SessionIDFlag != "--session-id" {
+		t.Errorf("SessionIDFlag = %q, want --session-id (inherited from claude)", rp.SessionIDFlag)
 	}
 	if !rp.SupportsHooks {
 		t.Error("SupportsHooks = false, want true (inherited from claude)")

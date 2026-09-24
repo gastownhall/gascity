@@ -204,20 +204,44 @@ func beginSessionDrainInfo(
 	return true
 }
 
+// executionStalledDrainReason drains a pool seat that claimed work and then
+// never executed it, after the execution backstop spent its bounded nudges
+// (execution_backstop.go).
+//
+// It is NOT cancelable, by any of the three cancel lenses, and that is the whole
+// point of having its own reason. The session it drains is — by construction —
+// alive, awake, and holding an in_progress claim, which is exactly the shape
+// every keep-alive guard is built to protect: the assigned-work cancel would
+// cancel it on the same claim that justified it, and the plain cancel would
+// cancel it the moment any wake reason reappeared. A cancelable drain here is
+// not a drain at all; the session stays wedged holding work no one else can
+// take, which is the failure this whole lane exists to end.
+//
+// Convergence chain once it fires: tracked drain -> deferred interrupt -> stop ->
+// session bead closed -> the claim released by the dead-assignee reopen lane ->
+// the row is demand again -> a fresh seat claims it.
+const executionStalledDrainReason = "execution-stalled"
+
 func drainReasonCancelable(reason string) bool {
-	return reason != "config-drift" && reason != "orphaned" && reason != "suspended"
+	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
+		reason != executionStalledDrainReason
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended"
+	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
 }
 
 const (
-	reconcilerDrainAckSourceKey     = "GC_DRAIN_ACK_SOURCE"
-	reconcilerDrainAckSourceValue   = "reconciler"
-	drainAckSourceAgentValue        = "agent"
-	reconcilerDrainAckReasonKey     = "GC_DRAIN_REASON"
-	reconcilerDrainAckGenerationKey = "GC_DRAIN_GENERATION"
+	reconcilerDrainAckSourceKey   = "GC_DRAIN_ACK_SOURCE"
+	reconcilerDrainAckSourceValue = "reconciler"
+	drainAckSourceAgentValue      = "agent"
+	// drainAckRequesterInstanceTokenKey binds an agent acknowledgement to the
+	// incarnation that wrote it. Pane environment is per-CHAIR state and pool
+	// chairs are recycled under the same name, so without this an ack outlives
+	// its author and the next occupant inherits it.
+	drainAckRequesterInstanceTokenKey = "GC_DRAIN_ACK_REQUESTER_INSTANCE_TOKEN"
+	reconcilerDrainAckReasonKey       = "GC_DRAIN_REASON"
+	reconcilerDrainAckGenerationKey   = "GC_DRAIN_GENERATION"
 )
 
 func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainState) error {
@@ -247,7 +271,16 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 		return fmt.Errorf("session provider is nil")
 	}
 	var errs []error
-	for _, key := range []string{"GC_DRAIN_ACK", reconcilerDrainAckSourceKey, reconcilerDrainAckReasonKey, reconcilerDrainAckGenerationKey} {
+	for _, key := range []string{
+		"GC_DRAIN_ACK",
+		reconcilerDrainAckSourceKey,
+		// Cleared with the source it belongs to: a requester stamp that outlives
+		// its acknowledgement is residue waiting for a later source to make it
+		// look like evidence.
+		drainAckRequesterInstanceTokenKey,
+		reconcilerDrainAckReasonKey,
+		reconcilerDrainAckGenerationKey,
+	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
 			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
@@ -545,7 +578,12 @@ func advanceSessionDrainsWithSessionsTraced(
 		// Check if process exited.
 		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 		if err != nil {
-			running = false
+			if trace != nil {
+				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+					"liveness_error": err.Error(),
+				})
+			}
+			continue
 		}
 		if !running {
 			// Process exited — drain complete.
@@ -664,7 +702,12 @@ func advanceSessionDrainsWithSessionsTraced(
 			// before marking metadata as asleep.
 			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
 			if err != nil {
-				running = false
+				if trace != nil {
+					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
+						"liveness_error": err.Error(),
+					})
+				}
+				continue
 			}
 			if !running {
 				completeDrain(info, sessFront, ds, clk)

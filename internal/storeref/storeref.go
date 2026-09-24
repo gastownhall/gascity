@@ -42,11 +42,22 @@ import (
 // name. Unknown, legacy-bare, and incomplete refs return ok=false so callers
 // can apply an explicit compatibility fallback rather than mistaking them for
 // the city store.
+//
+// A "class:<token>" binding ref is CITY scope. A binding serves the whole
+// city's relocated classes and belongs to no rig, so it answers exactly as
+// "city:<name>" does — which is also what it answered before the census named
+// it as a leg of its own, when the reconciler's leading arm WAS the binding and
+// recorded it under the city ref. Reporting it scope-less instead would make
+// every binding-resident row invisible to the scope comparisons
+// (rootStoreRefMatchesCandidate and its siblings): the census would gain the
+// leg and lose the rows in the same commit.
 func ScopeRigContext(storeRef string) (rigContext string, ok bool) {
 	storeRef = strings.TrimSpace(storeRef)
 	switch {
 	case strings.HasPrefix(storeRef, "city:"):
 		return "", strings.TrimSpace(strings.TrimPrefix(storeRef, "city:")) != ""
+	case strings.HasPrefix(storeRef, classRefPrefix):
+		return "", strings.TrimSpace(strings.TrimPrefix(storeRef, classRefPrefix)) != ""
 	case strings.HasPrefix(storeRef, "rig:"):
 		rigContext = strings.TrimSpace(strings.TrimPrefix(storeRef, "rig:"))
 		return rigContext, rigContext != ""
@@ -55,11 +66,47 @@ func ScopeRigContext(storeRef string) (rigContext string, ok bool) {
 	}
 }
 
+// IsClassRef reports whether a store-ref names a relocated class binding. It is
+// the predicate the scope-vocabulary normalizers outside this package key on,
+// so "class:" appears as a literal in exactly one file.
+func IsClassRef(storeRef string) bool {
+	storeRef = strings.TrimSpace(storeRef)
+	return strings.HasPrefix(storeRef, classRefPrefix) &&
+		strings.TrimSpace(strings.TrimPrefix(storeRef, classRefPrefix)) != ""
+}
+
 // HasIDPrefix is the optional accessor a store implements to declare the id
 // prefix it mints (SQLiteStore, BdStore, CachingStore implement it; the bd/Dolt
 // work store reports its configured prefix or "").
 type HasIDPrefix interface {
 	IDPrefix() string
+}
+
+// MintsInsideNamespace reports whether store declares a mint prefix that is one
+// of prefixes — the boot-time check a topology constructor sets
+// ClassBinding.MintsReserved from.
+//
+// It is a comparison of declarations, not a read: the store names the namespace
+// it mints into and the binding names the namespaces it claims, and when they
+// agree a bead this binding creates from now on is recognizable from its id
+// alone. A store that declares nothing has verified nothing and reports false,
+// which is the conservative answer — a false mint bit only keeps the residence
+// probe, while a wrong true one retires it over beads it cannot recognize.
+func MintsInsideNamespace(store beads.Store, prefixes []string) bool {
+	declaring, ok := store.(HasIDPrefix)
+	if !ok {
+		return false
+	}
+	minted := strings.TrimSpace(declaring.IDPrefix())
+	if minted == "" {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if strings.TrimSpace(prefix) == minted {
+			return true
+		}
+	}
+	return false
 }
 
 // PrefixOwner returns the store whose IDPrefix() owns id's namespace
@@ -86,7 +133,27 @@ func PrefixOwner(id string, stores []beads.Store) beads.Store {
 	return nil
 }
 
-// Resolve federates a point read: a bead lives in exactly one store, so it tries
+// Resolve federates a point read over a bare store LIST.
+//
+// # Superseded: do not add callers
+//
+// It has no callers outside this package's own tests. Every by-id read in the
+// tree now plans ByID over a Topology and executes it with ResolveOwnerRow,
+// which is not a stylistic preference: the PrefixOwner step below routes on the
+// id's OWN prefix, ahead of whatever order the caller assembled its list in, and
+// `gc storage migrate` copies-and-retains while PRESERVING ids. So for every
+// infrastructure bead minted before a cutover — which keeps its work-era prefix
+// — this function returns the work store and the caller reads the frozen
+// pre-migration row, successfully, with status and revision as of the cutover
+// and no error to notice (ga-cu12x). A plan has no such fast path: the binding
+// leads for an id inside its reserved namespace and every unretired binding is
+// probed ahead of work for an id inside none.
+//
+// It survives as the executor the plan's contract is compared against
+// (the leg-order and hard-failure rows in this package's tests) and because
+// deleting it would delete that comparison.
+//
+// The mechanics: a bead lives in exactly one store, so it tries
 // the prefix owner first (the cheap, fork-free path) and falls back to probing
 // every store in turn, returning the first hit. It preserves the first hard
 // (non-ErrNotFound) read failure seen across the owner probe and the fallback

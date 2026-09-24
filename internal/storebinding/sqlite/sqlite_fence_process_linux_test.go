@@ -46,6 +46,21 @@ const (
 	sqliteFenceChildRollbackCrash  = "rollback-crash"
 )
 
+// sqliteFenceHangBudget bounds the two pure hang detectors below ((*sqliteFenceChild).line
+// and .wait) — no assertion depends on how long either takes, so this is a hang detector, not
+// a latency assertion, and raising it does not slow a passing run because both waits return the
+// instant their condition is met. testutil.ExecRaceTimeout (10s) is a floor, not a target
+// (TESTING.md "Floors, ceilings, and inputs"): each child re-execs the 169 MB test binary and
+// must clear Go runtime + package init, flag parse and test enumeration, openGraphSource (SQLite
+// open + schema), a store.Create INSERT, and a WAL fsync before printing its ready line, across
+// 44 child spawn sites and 43 boundary subtests. Measured latency stayed under 3.02s even at 48
+// concurrent children; a >10s gate observation coincided with concurrent Go link steps at ~2.3 GB
+// RSS each and swap at 30/39 GB used, i.e. concurrency plus memory pressure, not pure CPU
+// starvation. Mirrors the precedent in cmd/gc/hangbudget_test.go (hangBudget = 6 *
+// testutil.GoroutineRaceTimeout); 6x ExecRaceTimeout is 60s, well under the 20m gate package
+// timeout.
+const sqliteFenceHangBudget = 6 * testutil.ExecRaceTimeout
+
 // TestSQLiteFenceHelperProcess is entered only by the real-process fence
 // composition test below. The parent and source never share SQLite descriptors.
 func TestSQLiteFenceHelperProcess(t *testing.T) {
@@ -1139,7 +1154,7 @@ func (c *sqliteFenceChild) line(t *testing.T) string {
 			ok   bool
 		}{line: c.stdout.Text(), ok: ok}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteFenceHangBudget)
 	defer cancel()
 	select {
 	case result := <-lines:
@@ -1148,7 +1163,7 @@ func (c *sqliteFenceChild) line(t *testing.T) string {
 		}
 		return result.line
 	case <-ctx.Done():
-		t.Fatalf("timed out waiting for SQLite child protocol line after %s", testutil.ExecRaceTimeout)
+		t.Fatalf("timed out waiting for SQLite child protocol line after %s", sqliteFenceHangBudget)
 		return ""
 	}
 }
@@ -1191,14 +1206,14 @@ func (c *sqliteFenceChild) wait(t *testing.T) error {
 	}
 	waited := make(chan error, 1)
 	go func() { waited <- c.cmd.Wait() }()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteFenceHangBudget)
 	defer cancel()
 	select {
 	case err := <-waited:
 		c.finished = true
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("timed out after %s", testutil.ExecRaceTimeout)
+		return fmt.Errorf("timed out after %s", sqliteFenceHangBudget)
 	}
 }
 
