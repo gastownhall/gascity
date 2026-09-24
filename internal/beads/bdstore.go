@@ -1170,6 +1170,17 @@ func isBdNotFound(err error) bool {
 		strings.Contains(msg, "no issues found")
 }
 
+// isBdNoIssueMatch reports whether err is bd's own "no issue(s) found"
+// answer, the narrow subset of isBdNotFound that proves a lookup matched
+// nothing rather than failed.
+func isBdNoIssueMatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no issue found") || strings.Contains(msg, "no issues found")
+}
+
 // isBdOperationUnsupported reports whether err is bd telling us a backend
 // does not implement the attempted operation at all (e.g. the Postgres
 // backend's "IssueRelations" gap behind `bd dep list`, ga-7i7ts) as opposed
@@ -1395,12 +1406,16 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
 			wisps, queryErr := s.getEphemeralByID(id)
-			if queryErr == nil {
-				for _, b := range wisps {
-					if b.ID == id {
-						return b, nil
-					}
+			for _, b := range wisps {
+				if b.ID == id {
+					return b, nil
 				}
+			}
+			if queryErr != nil {
+				// The issues tier missed but the wisp tier could not be read,
+				// so absence is unproven; callers treat ErrNotFound as a
+				// definitive answer.
+				return Bead{}, fmt.Errorf("getting bead %q: querying wisp tier: %w", id, queryErr)
 			}
 		}
 		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
@@ -1924,46 +1939,17 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 // WaitForParentProjection blocks until bd's parent-child listing projection
 // reflects a successful reparent from oldParentID to newParentID for id.
 func (s *BdStore) WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
-	return s.waitForParentProjection(ctx, id, oldParentID, newParentID)
+	return awaitParentProjection(ctx, parentProjectionReads{get: s.Get, matches: s.parentProjectionMatches}, id, oldParentID, newParentID)
 }
 
-func (s *BdStore) waitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error {
-	ticker := time.NewTicker(bdParentProjectionPollInterval)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		current, err := s.Get(id)
-		if err == nil {
-			switch current.ParentID {
-			case newParentID:
-				matches, matchErr := s.parentProjectionMatches(id, oldParentID, newParentID)
-				if matchErr == nil && matches {
-					return nil
-				}
-				lastErr = matchErr
-			case oldParentID:
-				lastErr = nil
-			default:
-				return fmt.Errorf("updating bead %q: %w", id, ErrParentProjectionSuperseded)
-			}
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w (last check error: %w)", id, oldParentID, newParentID, ctx.Err(), lastErr)
-			}
-			return fmt.Errorf("updating bead %q: waiting for parent projection from %q to %q: %w", id, oldParentID, newParentID, ctx.Err())
-		case <-ticker.C:
-		}
+func (s *BdStore) parentProjectionMatches(ctx context.Context, id, oldParentID, newParentID string, ephemeral bool) (bool, error) {
+	tier := TierIssues
+	if ephemeral {
+		// An ephemeral child lives in the wisp tier, which bd list never returns.
+		tier = TierBoth
 	}
-}
-
-func (s *BdStore) parentProjectionMatches(id, oldParentID, newParentID string) (bool, error) {
 	if oldParentID != "" {
-		oldChildren, err := s.List(ListQuery{ParentID: oldParentID})
+		oldChildren, err := s.List(ListQuery{ParentID: oldParentID, TierMode: tier, IncludeClosed: true})
 		if err != nil {
 			return false, fmt.Errorf("listing old parent %q children: %w", oldParentID, err)
 		}
@@ -1971,8 +1957,11 @@ func (s *BdStore) parentProjectionMatches(id, oldParentID, newParentID string) (
 			return false, nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("%w: %w", errParentProjectionCutShort, err)
+	}
 	if newParentID != "" {
-		newChildren, err := s.List(ListQuery{ParentID: newParentID})
+		newChildren, err := s.List(ListQuery{ParentID: newParentID, TierMode: tier, IncludeClosed: true})
 		if err != nil {
 			return false, fmt.Errorf("listing new parent %q children: %w", newParentID, err)
 		}
@@ -3002,9 +2991,14 @@ func isWispQueryableID(id string) bool {
 func (s *BdStore) getEphemeralByID(id string) ([]Bead, error) {
 	clause := "ephemeral=true AND id=" + id
 	args := []string{"query", "--json", clause, "--all", "--limit", "1"}
-	out, err := s.runner(s.dir, "bd", args...)
+	// Get surfaces this query's errors, so retry transient connection
+	// failures like the bd show that precedes it.
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
-		if isBdQueryUnsupported(err) {
+		// bd answering "no issue found" is a definitive miss. Match it only
+		// here, on the command's own failure: a parse error below embeds raw
+		// output, which can contain that text without meaning it.
+		if isBdQueryUnsupported(err) || isBdNoIssueMatch(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("bd query (wisp by id): %w", err)

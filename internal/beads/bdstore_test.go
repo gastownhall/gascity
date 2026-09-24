@@ -513,6 +513,79 @@ func TestBdStoreGetCLINotFound(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetWispTierFailureIsNotNotFound(t *testing.T) {
+	// bd show misses (the bead may be a wisp), then the wisp-tier lookup
+	// itself fails. Absence is unproven, so Get must not report ErrNotFound.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: dial tcp 127.0.0.1:3307: connection refused")
+	}
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Get("gc-1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want the wisp-tier failure, not ErrNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error = %v, want it to carry the wisp-tier failure", err)
+	}
+}
+
+func TestBdStoreGetWispTierSchemaErrorIsNotNotFound(t *testing.T) {
+	// "not found" in a failure message is not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return nil, fmt.Errorf("exit status 1: Error 1146: table wisps not found")
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with an unreadable wisp table = %v, want the query failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetMalformedWispTierOutputIsNotNotFound(t *testing.T) {
+	// Truncated output that happens to contain bd's no-match wording is a
+	// parse failure, not bd reporting a missing bead.
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		return []byte(`[{"id":"gc-1","title":"no issue found","status":"open"`), nil
+	}
+	_, err := beads.NewBdStore("/city", runner).Get("gc-1")
+	if err == nil || errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Get with malformed wisp-tier output = %v, want the parse failure, not ErrNotFound", err)
+	}
+}
+
+func TestBdStoreGetRetriesTransientWispTierFailure(t *testing.T) {
+	queries := 0
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		if args[0] == "show" {
+			return nil, fmt.Errorf("exit status 1: Error fetching gc-1: no issue found matching \"gc-1\"")
+		}
+		queries++
+		if queries == 1 {
+			return nil, fmt.Errorf("exit status 1: invalid connection")
+		}
+		return []byte(`[{"id":"gc-1","title":"wisp","status":"open","issue_type":"task","ephemeral":true}]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.Get("gc-1")
+	if err != nil {
+		t.Fatalf("Get after one transient wisp-tier failure: %v", err)
+	}
+	if got.ID != "gc-1" || queries != 2 {
+		t.Fatalf("Get = %+v after %d wisp queries, want gc-1 after a retry", got, queries)
+	}
+}
+
 func TestBdStoreGetBadJSON(t *testing.T) {
 	runner := func(_, _ string, _ ...string) ([]byte, error) {
 		return []byte(`not json`), nil
@@ -1276,7 +1349,7 @@ func TestBdStoreWaitForParentProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			parentListCalls++
 			if parentListCalls == 1 {
 				return []byte(`[]`), nil
@@ -1314,7 +1387,7 @@ func TestBdStoreWaitForParentRemovalProjection(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-parent":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-parent":
 			oldParentListCalls++
 			if oldParentListCalls == 1 {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-parent"}]`), nil
@@ -1338,9 +1411,9 @@ func TestBdStoreWaitForParentProjectionDetectsSupersededParent(t *testing.T) {
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		cmd := strings.Join(args, " ")
 		switch cmd {
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			return []byte(`[]`), nil
 		case "show --json bd-child":
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-other"}]`), nil
@@ -1374,12 +1447,12 @@ func TestBdStoreWaitForParentProjectionGetsBeforeListing(t *testing.T) {
 				return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-old"}]`), nil
 			}
 			return []byte(`[{"id":"bd-child","title":"child","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z","parent":"bd-new"}]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-old":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-old":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
 			return []byte(`[]`), nil
-		case "list --json --include-infra --include-gates --limit 0 --parent bd-new":
+		case "list --json --all --include-infra --include-gates --limit 0 --parent bd-new":
 			if showCalls < 2 {
 				listedBeforeCurrentParentChanged = true
 			}
