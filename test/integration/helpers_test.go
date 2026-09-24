@@ -197,12 +197,16 @@ func waitForManagedDoltCityReady(env []string, cityDir string, timeout time.Dura
 				return lastOut, nil
 			}
 		} else if isProviderOwnedProxiedDoltCity(cityDir) {
+			// Callers such as bdDolt pass env already carrying appendManagedDoltEndpointEnv hints; those must not reach the portless probe.
 			probeEnv := filterEnvMany(env,
 				"GC_CITY",
 				"GC_CITY_PATH",
 				"GC_CITY_ROOT",
 				"GC_CITY_RUNTIME_DIR",
+				"GC_DOLT_HOST",
 				"GC_DOLT_PORT",
+				"BEADS_DOLT_SERVER_HOST",
+				"BEADS_DOLT_SERVER_PORT",
 			)
 			probeEnv = append(probeEnv,
 				"GC_CITY="+cityDir,
@@ -275,8 +279,8 @@ func TestWaitForManagedDoltCityReady_ProxiedModeProbesWithoutPortHint(t *testing
 
 	fakeBD := filepath.Join(t.TempDir(), "bd")
 	script := "#!/bin/sh\n" +
-		"if [ -n \"$GC_DOLT_PORT\" ] || [ -n \"$BEADS_DOLT_SERVER_PORT\" ]; then\n" +
-		"  echo 'unexpected port hint injected' >&2\n" +
+		"if [ -n \"$GC_DOLT_HOST\" ] || [ -n \"$GC_DOLT_PORT\" ] || [ -n \"$BEADS_DOLT_SERVER_HOST\" ] || [ -n \"$BEADS_DOLT_SERVER_PORT\" ]; then\n" +
+		"  echo 'unexpected endpoint hint injected' >&2\n" +
 		"  exit 1\n" +
 		"fi\n" +
 		"echo '[]'\n"
@@ -300,6 +304,57 @@ func TestWaitForManagedDoltCityReady_ProxiedModeProbesWithoutPortHint(t *testing
 	}
 	if elapsed >= 5*time.Second {
 		t.Errorf("waitForManagedDoltCityReady() took %s, want well under the 5s timeout (portless probe branch likely never fired)", elapsed)
+	}
+}
+
+// TestWaitForManagedDoltCityReady_ProxiedModeStripsInheritedEndpointHints
+// covers callers such as bdDolt whose env already carries managed-Dolt
+// endpoint hints: the portless probe must strip every host/port hint so bd
+// resolves the proxied endpoint itself instead of a stale one.
+func TestWaitForManagedDoltCityReady_ProxiedModeStripsInheritedEndpointHints(t *testing.T) {
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	metadata := `{"backend":"dolt","dolt_mode":"proxied-server"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+
+	fakeBD := filepath.Join(t.TempDir(), "bd")
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$GC_DOLT_HOST\" ] || [ -n \"$GC_DOLT_PORT\" ] || [ -n \"$BEADS_DOLT_SERVER_HOST\" ] || [ -n \"$BEADS_DOLT_SERVER_PORT\" ]; then\n" +
+		"  echo 'unexpected endpoint hint injected' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"echo '[]'\n"
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd script: %v", err)
+	}
+
+	prevBDBinary := bdBinary
+	bdBinary = fakeBD
+	t.Cleanup(func() { bdBinary = prevBDBinary })
+
+	env := []string{
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=1",
+		"BEADS_DOLT_SERVER_HOST=127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT=1",
+	}
+	start := time.Now()
+	out, err := waitForManagedDoltCityReady(env, cityDir, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("waitForManagedDoltCityReady() error = %v, out = %q", err, out)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Errorf("waitForManagedDoltCityReady() out = %q, want []", out)
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("waitForManagedDoltCityReady() took %s, want well under the 5s timeout (inherited endpoint hints likely reached the probe)", elapsed)
 	}
 }
 
