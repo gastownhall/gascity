@@ -52,6 +52,7 @@ go_test(
         "detail_order_fixes_test.go",
         "detail_parity_test.go",
         "detail_scope_test.go",
+        "detail_sessionlink_retired_test.go",
         "detail_sessionlink_test.go",
         "detail_snapshot_test.go",
         "detail_terminal_clamp_test.go",
@@ -76,4 +77,16 @@ go_test(
         "//internal/events",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

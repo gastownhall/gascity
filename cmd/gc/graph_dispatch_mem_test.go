@@ -23,13 +23,9 @@ import (
 
 func builtinFormulaDir(t *testing.T) string {
 	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	// Built-in formulas now live in the core bootstrap pack. cwd is cmd/gc,
-	// so walk up to the repo root and into the core pack's formulas dir.
-	return filepath.Join(cwd, "..", "..", "internal", "bootstrap", "packs", "core", "formulas")
+	// Built-in formulas now live in the core bootstrap pack; resolve the
+	// repo root from the caller (bazel runfiles cwd is not the package dir).
+	return filepath.Join(gcRepoRootFromEnv(), "internal", "bootstrap", "packs", "core", "formulas")
 }
 
 func buildMemGraphWorkflowConfig(t *testing.T) *config.City {

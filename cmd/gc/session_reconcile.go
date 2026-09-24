@@ -33,10 +33,12 @@ type wakeEvaluation struct {
 	Reasons []WakeReason
 	// Reason mirrors AwakeDecision.Reason on the ComputeAwakeSet bridge path.
 	// It is only actionable when Reasons contains the matching effective wake.
-	Reason           string
-	Policy           resolvedSessionSleepPolicy
-	ConfigSuppressed bool
-	HasAssignedWork  bool
+	Reason              string
+	Policy              resolvedSessionSleepPolicy
+	ConfigSuppressed    bool
+	HasAssignedWork     bool
+	AssignedWorkBeadID  string
+	AssignedWorkClaimed bool
 }
 
 const (
@@ -624,6 +626,29 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 	if clk != nil {
 		now = clk.Now().UTC()
 	}
+	return sessFront.ApplyPatchInfo(info, providerTerminalErrorPatch(now, reason, false))
+}
+
+// markProviderTerminalErrorBeforePendingCreateRollback records the terminal
+// provider diagnostics without changing the pending-create lease. The rollback
+// fence must still observe that lease so it can atomically stamp failed-create
+// and close the row after runtime teardown succeeds.
+func markProviderTerminalErrorBeforePendingCreateRollback(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, reason string) (sessionpkg.Info, error) {
+	if sessFront == nil {
+		return info, nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return info, nil
+	}
+	now := time.Now().UTC()
+	if clk != nil {
+		now = clk.Now().UTC()
+	}
+	return sessFront.ApplyPatchInfo(info, providerTerminalErrorPatch(now, reason, true))
+}
+
+func providerTerminalErrorPatch(now time.Time, reason string, preservePendingCreate bool) map[string]string {
 	batch := map[string]string{
 		"state":                                 string(sessionpkg.StateAsleep),
 		"sleep_reason":                          string(sessionpkg.SleepReasonProviderTerminalError),
@@ -636,7 +661,12 @@ func markProviderTerminalError(info sessionpkg.Info, sessFront *sessionpkg.Store
 		sessionProviderTerminalErrorMetadataKey: reason,
 		sessionProviderTerminalErrorAtKey:       now.Format(time.RFC3339),
 	}
-	return sessFront.ApplyPatchInfo(info, batch)
+	if preservePendingCreate {
+		delete(batch, "state")
+		delete(batch, "pending_create_claim")
+		delete(batch, "pending_create_started_at")
+	}
+	return batch
 }
 
 // sessionHasProviderTerminalErrorInfo reads the typed health/terminal-error

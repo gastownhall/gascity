@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // State represents the runtime state of a chat session.
@@ -359,9 +360,22 @@ type Info struct {
 	// reads it BOTH via strconv.Atoi (numeric threshold) AND as == "" / == "0"
 	// (clear/first-increment gates), so the mirror keeps the raw string.
 	ChurnCount string // churn_count (raw)
+	// IdleRespawnAttempts is the RAW idle_respawn_attempts metadata. The
+	// reconciler bounds idle-respawn retries for one assigned bead with it.
+	IdleRespawnAttempts string // idle_respawn_attempts (raw)
+	// IdleRespawnBeadID identifies the assigned bead the retry count belongs to.
+	IdleRespawnBeadID string // idle_respawn_bead_id (raw)
 	// WakeMode is the RAW wake_mode metadata. The wake and drain-finalize paths
 	// branch on an exact == "fresh" compare.
 	WakeMode string // wake_mode (raw)
+	// DrainAt is the RAW drain_at metadata (RFC3339 or empty): the durable
+	// instant BeginDrainPatch stamped when the session entered drain. It
+	// survives the draining → drained transition (AcknowledgeDrainPatch does
+	// not clear it), so it is the only persistent clock for how long a seat has
+	// been in drain — the in-memory drainTracker resets on every controller
+	// restart. The pool-slot retire deadline parses it; an empty or
+	// unparseable value fails closed (no forced retirement).
+	DrainAt string // drain_at (raw RFC3339)
 	// SleepIntent is the RAW sleep_intent metadata. The sleep-intent branch reads
 	// it as != "" and == "idle-stop-pending".
 	SleepIntent string // sleep_intent (raw)
@@ -721,6 +735,15 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 			continue
 		}
 		if cityPath != "" && pathutil.NormalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		// A root carrying this session's identity may be city infrastructure
+		// that merely inherited it: a managed Dolt scope watchdog or bd's
+		// db-proxy-child started from this session's shell. Terminating it
+		// signals its process group and takes the city's Dolt server down
+		// (#6316), so a same-session restart must never reach it.
+		if proctable.IsCityInfrastructureRoot(live.PID) {
+			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		if err := scanner.TerminateRuntime(live); err != nil {
@@ -1517,6 +1540,15 @@ func (m *Manager) Kill(id string) error {
 // BeginDrain transitions a session to the draining state. The caller is
 // responsible for signaling the runtime process to finish its work.
 // Idempotent: returns nil if the session is already draining.
+//
+// Population warning for a new caller: this stamps drain_at (BeginDrainPatch),
+// and drain_at is the durable clock cmd/gc's poolSlotDrainRetireDeadline bound
+// reads to decide that a pool seat's drain has outlived its deadline and its
+// runtime may be killed and its bead force-retired. That bound's safety
+// argument currently rests on drain_at being stamped only by the controller's
+// drain-ack path — this exported entry point has no production caller today —
+// so wiring an operator-facing drain here widens the bound's population.
+// Re-read cmd/gc/session_pool_drain_deadline.go before adding one.
 func (m *Manager) BeginDrain(id, reason string) error {
 	return withSessionMutationLock(id, func() error {
 		cmdLegal, err := m.checkTransition(id, CmdDrain, StateDraining)

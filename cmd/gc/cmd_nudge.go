@@ -561,12 +561,12 @@ func doNudgeDrop(cityPath string, ids []string, jsonOutput bool, stdout, stderr 
 	// reported as dropped.
 	dropped := make(map[string]bool, len(droppable))
 	if len(droppable) > 0 {
-		store, err := openNudgeBeadStoreErr(cityPath)
+		store, opened, err := openNudgeBeadStoreOwned(cityPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 		deadLettered, err := recordQueuedNudgeFailureDetailed(cityPath, store, droppable, errNudgeManualDrop, now)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge drop: %v\n", err) //nolint:errcheck
@@ -2309,8 +2309,8 @@ func liveNudgeFenceSessionIDsForCity(cityPath string) map[string]struct{} {
 // census was unavailable; callers must fail closed and leave mismatched
 // SessionID items pending.
 func loadLiveNudgeFenceSessionIDsFromCity(cityPath string) map[string]struct{} {
-	store := openNudgeBeadStore(cityPath)
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	if store.Store == nil {
 		return nil
 	}
@@ -2399,14 +2399,20 @@ func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge, liveSes
 // main pool + a SHOW DATABASES init probe) every 2s. See
 // TestNudgePollHelpersSkipDoltOpenOnEmptyQueue.
 //
-// It owns the handle it opens and closes exactly that handle (and only if it
-// opened one), preserving the closeBeadStoreHandle ownership contract the
-// …WithStore variants model.
+// It closes exactly the handle it opened, and only if it opened one,
+// preserving the closeBeadStoreHandle ownership contract the …WithStore
+// variants model. "The handle it opened" is not "the store it holds": once the
+// NUDGES class relocates, the store is the storage routes' process-shared
+// engine, which this frame holds but must never close (openOwnedNudgeBeadStore).
 type nudgeMaintenanceStore struct {
 	cityPath string
 	opened   bool
 	store    beads.NudgesStore
-	front    *nudgequeue.Store
+	// handle is what ensureOpen actually opened, which is not always
+	// store.Store: see openOwnedNudgeBeadStore. close releases this and
+	// nothing else.
+	handle beads.Store
+	front  *nudgequeue.Store
 }
 
 // frontForState returns the front-door handle to use for the maintenance passes
@@ -2428,7 +2434,7 @@ func (m *nudgeMaintenanceStore) frontForState(state *nudgeQueueState) *nudgequeu
 func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 	if !m.opened {
 		m.opened = true
-		m.store = openNudgeBeadStore(m.cityPath)
+		m.store, m.handle = openOwnedNudgeBeadStore(m.cityPath)
 		if m.store.Store != nil {
 			m.front = nudgeFrontDoor(m.store)
 		}
@@ -2436,13 +2442,14 @@ func (m *nudgeMaintenanceStore) ensureOpen() beads.NudgesStore {
 	return m.store
 }
 
-// close releases the store this frame opened (if any). It never touches a
-// caller-passed store because this type only ever holds a store it opened.
+// close releases the handle this frame opened (if any). It never touches a
+// caller-passed store because this type only ever opens its own, and never the
+// storage routes' shared engine, which it may hold but does not own.
 func (m *nudgeMaintenanceStore) close() error {
 	if !m.opened {
 		return nil
 	}
-	return closeBeadStoreHandle(m.store.Store)
+	return closeBeadStoreHandle(m.handle)
 }
 
 // nudgeQueueHasWork reports whether the queue holds any item a maintenance pass
@@ -2711,12 +2718,13 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 
 func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
 	ownStore := false
+	var opened beads.Store
 	if store.Store == nil {
-		store = openNudgeBeadStore(cityPath)
+		store, opened = openOwnedNudgeBeadStore(cityPath)
 		ownStore = true
 	}
 	if ownStore {
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	}
 	var front *nudgequeue.Store
 	if store.Store != nil {
@@ -2934,12 +2942,13 @@ func recordQueuedNudgeFailureDetailed(cityPath string, store beads.NudgesStore, 
 		return nil, nil
 	}
 	ownStore := false
+	var opened beads.Store
 	if store.Store == nil {
-		store = openNudgeBeadStore(cityPath)
+		store, opened = openOwnedNudgeBeadStore(cityPath)
 		ownStore = true
 	}
 	if ownStore {
-		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
+		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	}
 	var front *nudgequeue.Store
 	if store.Store != nil {

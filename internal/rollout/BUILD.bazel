@@ -18,7 +18,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/rollout",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/rollout/gate"],
+    deps = [
+        "//internal/config",
+        "//internal/rollout/gate",
+    ],
 )
 
 go_test(
@@ -35,6 +38,35 @@ go_test(
         "resolve_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        ":gate_srcs",
+        "//:deps.env",
+        "//:go.mod",
+    ],
     embed = [":rollout"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+filegroup(
+    name = "gate_srcs",
+    srcs = ["//internal/rollout/gate:gate.go"],
+    visibility = ["//visibility:public"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )

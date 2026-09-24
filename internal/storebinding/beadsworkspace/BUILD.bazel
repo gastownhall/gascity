@@ -10,6 +10,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/shellquote",
         "//internal/storebinding",
@@ -22,12 +23,29 @@ go_test(
         "provider_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":beadsworkspace"],
     deps = [
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/shellquote",
         "//internal/storebinding",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
 )
